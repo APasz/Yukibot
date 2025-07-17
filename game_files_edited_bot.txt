@@ -1,0 +1,13 @@
+minecraft
+    server.properties
+        enable-rcon=true
+        rcon.port=25576
+        rcon.password=teslator550
+
+factorio
+
+sevendays
+    startserver
+        exec ...
+    serverconfig
+        --userdata location > {WD}/userdata

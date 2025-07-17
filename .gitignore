@@ -1,0 +1,13 @@
+_*.txt
+discord_names.json
+test.py
+users.json
+apps.json
+
+logs/
+.venv
+__p*
+dev_apps
+opt/
+
+.env*

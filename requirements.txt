@@ -1,0 +1,14 @@
+aiofiles
+aiohttp
+factorio-rcon-py
+hikari-lightbulb~=3.0.2
+hikari[speedups]~=2.3.5
+psutil
+pydantic
+python-dateutil
+python-dotenv
+requests
+tenorgrabber
+uvloop
+anyio
+emoji

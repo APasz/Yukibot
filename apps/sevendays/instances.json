@@ -1,0 +1,16 @@
+{
+    "alpha": {
+        "friendly_name": "7D2D-1",
+        "directory": "{APPS}/sevendays1",
+        "mods_dir": "{WD}/Mods",
+        "server_log_file": "{WD}/server_stdout.log",
+        "port": 26900
+    },
+    "beta": {
+        "friendly_name": "7D2D-2",
+        "directory": "{APPS}/sevendays2",
+        "mods_dir": "{WD}/Mods",
+        "server_log_file": "{WD}/server_stdout.log",
+        "port": 26900
+    }
+}

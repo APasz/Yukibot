@@ -1,0 +1,3 @@
+V2;
+The major change in Yukibot's design is a focus on modularity; to make apps/games be more self-contained with a much larger and defined separation between apps, app management, and Discord (Hikari/Lightbulb)
+In this way each app subclasses and adds-on/replaces any specific functionality as needed thus giving the bot a standardised way of interacting with them

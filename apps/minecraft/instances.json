@@ -1,0 +1,14 @@
+{
+    "survival": {
+        "friendly_name": "MineSurvival",
+        "directory": "{APPS}/mc_survival",
+        "mods_dir": "{WD}/mods",
+        "port": 25565
+    },
+    "creative": {
+        "friendly_name": "MineCreative",
+        "directory": "{APPS}/mc_creative",
+        "mods_dir": "{WD}/mods",
+        "port": 25565
+    }
+}

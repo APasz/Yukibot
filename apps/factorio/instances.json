@@ -1,0 +1,9 @@
+{
+    "alpha": {
+        "friendly_name": "Factorio",
+        "directory": "{APPS}/factorio",
+        "mods_dir": "{WD}/mods",
+        "server_log_file": "{WD}/factorio-current.log",
+        "port": 34197
+    }
+}
