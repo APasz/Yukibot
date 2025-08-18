@@ -8,6 +8,8 @@ import re
 
 import hikari
 
+from _security import Power_Level
+from apps._settings import App_Settings, Setting, Setting_Label
 from config import Activity_Manager
 from _discord import App_Bound, DC_Bound, DC_Relay
 from apps._app import AM_Receiver, App
@@ -42,14 +44,60 @@ class Mod_MC(Mod):
         await self._handle_drop(src, atomic)
 
 
+class Minecraft_Settings(App_Settings):
+    def __init__(self, pointer: Path) -> None:
+        options = [
+            Setting(str, Setting_Label.max_player, "max-players", [], validator=str.isnumeric),
+            Setting(str, Setting_Label.motd, "motd", []),
+            Setting(
+                str,
+                Setting_Label.difficulty,
+                "difficulty",
+                [],
+                choices=["peaceful", "easy", "normal", "hard"],
+                power_level=Power_Level.user,
+            ),
+            Setting(str, Setting_Label.password, "ServerPassword", [], power_level=Power_Level.sudo),
+        ]
+        super().__init__(pointer, options)
+
+    def load(self):
+        data = self.pointer.read_text(config.STR_ENCODE)
+        if not data:
+            raise ValueError("config must not be empty")
+
+        lines = data.split("\n")
+        for line in lines:
+            for opt in self.options:
+                if line.startswith(opt.key):
+                    arg, val = [x.strip() for x in line.split("=", 1)]
+                    opt.update(val)
+
+    def save(self):
+        data = self.pointer.read_text(config.STR_ENCODE)
+        if not data:
+            raise ValueError("config must not be empty")
+
+        lines = data.split("\n")
+        for idx, line in enumerate(lines):
+            for opt in self.options:
+                if line.startswith(opt.key):
+                    arg, val = [x.strip() for x in line.split("=", 1)]
+                    lines[idx] = f"{arg}={opt.value}"
+
+        string = "\n".join(lines)
+        self.pointer.write_text(string, config.STR_ENCODE)
+        return data
+
+
 class Minecraft(App):
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.proc_name = "java"
-        self.proc_cmd = ["java", "nogui"]
-        self.server_settings = cfg.directory.absolute() / "server.properties"
+        self.proc_cmd = [self.proc_name, "nogui"]
+        file_settings = cfg.directory.absolute() / "server.properties"
         self.cmd_start = cfg.cmd_start or ["bash", "run.sh"]
         self.process = None
-        super().__init__(bot, am, cfg, Mod_MC)
+        super().__init__(bot, am, cfg, Minecraft_Settings(file_settings), Mod_MC)
 
         self._relay = RconClient(self.check_running, 25576)
         self._tail: Tailer | None = None

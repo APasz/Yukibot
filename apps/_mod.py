@@ -89,7 +89,7 @@ class Mod_Manager:
 
     def __new__(cls, app_cfg: App_Config, *args, **kwargs):
         if not app_cfg.mods_dir:
-            raise KeyError("App's mod_dir not set")
+            raise KeyError("App mod_dir not set")
         key = app_cfg.mods_dir.resolve()
         log.debug(f"Mod_Manager.__new__: {'reusing' if key in cls._instances else 'creating'} instance for {key}")
         if key in cls._instances:
@@ -109,7 +109,7 @@ class Mod_Manager:
             return
         self._initialised = True
         if not app_cfg.mods_dir:
-            raise KeyError("App's mod_dir not set")
+            raise KeyError("App mod_dir not set")
         self.folder = app_cfg.mods_dir.resolve()
         if not self.folder.exists():
             log.debug(f"{app_cfg.name} mods folder missing")

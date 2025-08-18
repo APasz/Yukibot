@@ -11,6 +11,7 @@ import hikari
 import psutil
 
 
+from apps._settings import App_Settings, Settings_Manager
 from config import Activity_Manager
 from apps._updater import Update_Manager
 import config
@@ -42,7 +43,7 @@ class App:
     dir_log: Path
     server_log: Path | None
     mods: Mod_Manager | None = None
-    settings = None
+    settings: Settings_Manager | None
     saves = None
     updater: Update_Manager | None = None
     process: subprocess.Popen | None = None
@@ -53,10 +54,11 @@ class App:
     name_cache = config.Name_Cache()
     am_recevier: "AM_Receiver | None" = None
     cmd_start: list[str]
+    cmd_cwd: Path | None = None
+    shell: bool = False
     _stderr_task = None
     _running: bool = False
     chat_channel: hikari.Snowflake | None = None
-    server_settings: Path
     activity_manager: Activity_Manager
     providers: list[config.Activity_Provider]
 
@@ -65,6 +67,7 @@ class App:
         bot: hikari.GatewayBot,
         activity_manager: Activity_Manager,
         cfg: App_Config,
+        stg: App_Settings | None = None,
         mod_cls: type[Mod] | None = None,
         modcf_cls: type[Mod_Config] | None = None,
     ):
@@ -84,17 +87,22 @@ class App:
         self.dir_log.mkdir(exist_ok=True, parents=True)
         self.file_stdout = self.dir_log.joinpath("stdout.log")
         self.file_errout = self.dir_log.joinpath("errout.log")
+
         if mod_cls:
             if modcf_cls:
                 self.mods = Mod_Manager(cfg, mod_cls, modcf_cls)
             else:
                 self.mods = Mod_Manager(cfg, mod_cls)
-        self.settings = None  # TODO Settings_Manager
+        if stg:
+            self.settings = Settings_Manager(cfg, stg)
+        else:
+            self.settings = None
         self.saves = None  # TODO Save_Manager
         self.activity_manager = activity_manager
+
         self.providers = []
 
-        log.debug(f"{__name__} | {self.cmd_start=}")
+        log.debug(f"{__name__} | {self.cmd_start=} @ {self.cmd_cwd=}")
 
     async def post_init(self):
         if self.mods:
@@ -135,13 +143,14 @@ class App:
         try:
             self.process = subprocess.Popen(
                 self.cmd_start,
-                cwd=self.directory,
+                cwd=self.cmd_cwd or self.directory,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.PIPE,
                 start_new_session=True,
                 text=True,
                 encoding=config.STR_ENCODE,
+                shell=self.shell,
             )
             self._stderr_task = asyncio.create_task(self._tee(self.process.stderr, self.file_errout, "STDERR"))
         except Exception:
@@ -197,12 +206,16 @@ class App:
                 cmdline_strs = [arg.lower() for arg in cmdline]
 
                 if self.proc_name in name and all(
-                    any(cmd_part in arg for arg in cmdline_strs) for cmd_part in self.proc_cmd
+                    cmd_part in arg for arg in cmdline_strs for cmd_part in self.proc_cmd
                 ):
                     log.info(f"Force-stopping stray process: {proc.info}")
                     proc.terminate()
                     proc.wait(timeout=10)
                     os.kill(proc.info["pid"], signal.SIGKILL)
+
+                    await asyncio.sleep(0.5)
+
+                subprocess.run(["pkill", "-f", self.proc_name])
 
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
@@ -217,7 +230,7 @@ class App:
             house = f"{self.directory.name}[{self.scope}]"
         else:
             house = self.scope
-        return f"<App {self.name} @ {self.cfg.port} in {house} | {self.cfg.enabled_txt}>"
+        return f"<App {self.name} @ {house} | {self.cfg.enabled_txt}>"
 
     def __repr__(self) -> str:
         return self.__str__()

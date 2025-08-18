@@ -18,16 +18,6 @@ class Resolutator(metaclass=config.Singleton):
             raise ValueError("bot must be passed")
         self.bot = bot
 
-    @overload
-    async def user(
-        self, ident: hikari.Snowflakeish, guild_id: hikari.Snowflakeish | None = None, *, silent: Literal[True]
-    ) -> hikari.Member | hikari.User | hikari.NotFoundError | None: ...
-
-    @overload
-    async def user(
-        self, ident: hikari.Snowflakeish, guild_id: hikari.Snowflakeish | None = None, *, silent: Literal[False] = ...
-    ) -> hikari.Member | hikari.User | None: ...
-
     @staticmethod
     def snow_check(
         snow_type: str, snow: hikari.Snowflakeish | list[hikari.Snowflakeish] | dict[object, hikari.Snowflakeish]
@@ -167,6 +157,51 @@ class Resolutator(metaclass=config.Singleton):
                 except Exception as xcp:
                     log.exception("FETCH; %s: %s", xcp, chan_id)
             return chan
+
+        if isinstance(ident, dict):
+            return {key: await get(e) for key, e in ident.items()}  # type: ignore
+        elif isinstance(ident, list):
+            return [await get(e) for e in ident]  # type: ignore
+        return await get(ident)
+
+    @overload
+    async def message(
+        self, ident: hikari.Snowflakeish, chan_ident: hikari.Snowflakeish | None
+    ) -> hikari.Message | None: ...
+
+    @overload
+    async def message(
+        self, ident: list[hikari.Snowflakeish], chan_ident: hikari.Snowflakeish | None
+    ) -> list[hikari.Message | None] | None: ...
+
+    @overload
+    async def message(
+        self, ident: dict[object, hikari.Snowflakeish], chan_ident: hikari.Snowflakeish | None
+    ) -> dict[object, hikari.Message | None] | None: ...
+
+    async def message(self, ident, chan_ident=None):
+        """Attempts to resolve ident to a Message object
+
+        Args;
+            ident: ID/s for the message
+            chan_ident: ID for the channel the message resides in, required for fetching when message not in cache
+
+        Returns;
+            Message object else None if error
+        """
+        if not self.snow_check("message_id", ident):
+            return None
+
+        async def get(mess_id):
+            mess = self.bot.cache.get_message(mess_id)
+            if not mess and chan_ident:
+                try:
+                    if not config.SILENT_DEBUG:
+                        log.debug("message.FETCH: %s", mess_id)
+                    mess = await self.bot.rest.fetch_message(chan_ident, mess_id)
+                except Exception as xcp:
+                    log.exception("FETCH; %s: %s", xcp, mess_id)
+            return mess
 
         if isinstance(ident, dict):
             return {key: await get(e) for key, e in ident.items()}  # type: ignore

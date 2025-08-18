@@ -1,3 +1,9 @@
+beammp
+
+ets
+    bin/linux_x64/server_launch.sh
+        export XDG_DATA_HOME={WD}/home_data/
+
 minecraft
     server.properties
         enable-rcon=true
@@ -11,3 +17,5 @@ sevendays
         exec ...
     serverconfig
         --userdata location > {WD}/userdata
+
+

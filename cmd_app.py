@@ -6,6 +6,7 @@ import lightbulb
 from _discord import Distils
 from _file import File_Utils
 from _manager import App_Manager, ac_all_apps, ac_enabled_apps
+from _security import Access_Control
 from _sys import Stats_System
 from _utils import Utilities
 
@@ -29,8 +30,8 @@ class CMD_AppEnd(
     hooks=[lightbulb.prefab.sliding_window(15, 1, "global")],
 ):
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 1)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.user)
         await ctx.defer()
         log.info(f"App.End: {ctx.user.display_name}")
 
@@ -54,8 +55,8 @@ class CMD_AppStart(
     app = lightbulb.string("app", "Which app to start", autocomplete=ac_enabled_apps)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 1)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.user)
         await ctx.defer()
         log.info(f"App.Start; {self.app}: {ctx.user.display_name}")
 
@@ -78,8 +79,8 @@ class CMD_AppToggle(
     app = lightbulb.string("app", "Which app to toggle", autocomplete=ac_toggle_apps)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 2)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, distils: Distils, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.sudo)
         log.info(f"App.Toggle; {self.app}: {ctx.user.display_name}")
 
         tog, name = distils.cat_name(self.app, ({"enabled", "disabled"}, manager.apps.keys()))
@@ -99,8 +100,15 @@ class CMD_AppDownload(
     app = lightbulb.string("app", "Which app to download", autocomplete=ac_all_apps)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, utils: Utilities, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 2)
+    async def invoke(
+        self,
+        ctx: lightbulb.Context,
+        acl: Access_Control,
+        utils: Utilities,
+        distils: Distils,
+        manager: App_Manager,
+    ):
+        await acl.perm_check(ctx.user.id, acl.LvL.sudo)
         await ctx.defer()
         log.info(f"App.Download; {self.app}: {ctx.user.display_name}")
 

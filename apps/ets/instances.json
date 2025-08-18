@@ -1,0 +1,8 @@
+{
+    "alpha": {
+        "friendly_name": "ETS2",
+        "directory": "{APPS}/ets",
+        "server_log_file": "{WD}/home_data/Euro Truck Simulator 2/server.log.txt",
+        "port": 27015
+    }
+}

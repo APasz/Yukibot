@@ -20,7 +20,6 @@ class App_Config(BaseModel):
     settings_pointer: Path | None = None
     server_log_file: Path | None = None
     address: str = config.public_ip()
-    port: int
     scope: str
     chat_channel: str | None = None
     chat_ignore_symbol: str = config.CHAT_IGNORE

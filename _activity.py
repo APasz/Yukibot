@@ -64,6 +64,8 @@ class Activity_Manager(config.Activity_Manager):
         return sorted(self.providers.values(), key=lambda obj: obj.prio)
 
     async def update(self):
+        if config.IS_RESTARTING:
+            return
         now = datetime.now(timezone.utc)
         if now - self.last_update < timedelta(seconds=2):
             self.fail_count += 1

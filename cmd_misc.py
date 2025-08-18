@@ -7,6 +7,7 @@ import aiohttp
 import hikari
 import lightbulb
 
+from _security import Access_Control
 import _sys
 import config
 from _discord import Distils
@@ -75,8 +76,8 @@ class CMD_MiscCurrency(
             return None
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         await ctx.defer()
         log.info(f"Misc.Currency: {ctx.user.display_name} | Cache={self._quote_cache}")
 
@@ -127,8 +128,8 @@ class CMD_MiscLog(
     app = lightbulb.string("app", "What to get logs for", autocomplete=ac_app_logs)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 1)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, distils: Distils, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.user)
         log.info(f"Misc.Log; {self.app}: {ctx.user.display_name}")
 
         if self.app.lower() == "system":
@@ -151,8 +152,8 @@ class CMD_MiscRestart(
     sys = lightbulb.boolean("sys", "sys", default=False)
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, bot: hikari.GatewayBot, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 2)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, bot: hikari.GatewayBot, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.sudo)
         await ctx.defer()
         log.critical(f"Misc.Restart; sys={self.sys}: {ctx.user.display_name}")
         restart_type = "system" if self.sys else "bot"
@@ -165,7 +166,7 @@ class CMD_STDDrink(
     name="standard_drink",
     description="Convert between standard drinks",
 ):
-    value = lightbulb.integer("value", "Value")
+    value = lightbulb.number("value", "Value")
     from_unit = lightbulb.string(
         "from", "unit to convert from", choices=[lightbulb.Choice(p, p) for p in config.STD_DRINK_GRAMS.keys()]
     )
@@ -174,8 +175,8 @@ class CMD_STDDrink(
     )
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         log.info(f"Misc.STDDrink; value={self.value} {self.from_unit} > {self.to_unit}: {ctx.user.display_name}")
 
         try:

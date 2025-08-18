@@ -1,0 +1,9 @@
+{
+    "alpha": {
+        "friendly_name": "ETS2",
+        "directory": "{APPS}/",
+        "mods_dir": "{WD}/mods",
+        "server_log_file": "{WD}/Server.log",
+        "port": 0
+    }
+}

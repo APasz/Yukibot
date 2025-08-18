@@ -187,14 +187,14 @@ class Tailer:
                 elif self.reader:
                     line = await asyncio.to_thread(self.reader.readline)
 
-                if not line:
-                    if not config.SILENT_DEBUG:
-                        log.debug(f"Falsey Line: {line}")
+                if line is None:
                     await asyncio.sleep(0.1)
                     if self.breader and getattr(self.breader, "closed", False):
                         self.breader = None
-                    elif self.reader and getattr(self.reader, "closed", False):
+                    if self.reader and getattr(self.reader, "closed", False):
                         self.reader = None
+                    continue
+                elif not line:
                     continue
 
                 line = line.strip(" \r\n\t")

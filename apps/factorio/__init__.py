@@ -8,6 +8,8 @@ import tarfile
 import aiohttp
 import hikari
 
+from _security import Power_Level
+from apps._settings import App_Settings, Setting, Setting_Label
 from config import Activity_Manager
 from apps._updater import Update_Manager
 import config
@@ -30,18 +32,52 @@ class Mod_Factorio(Mod):
         await self._handle_drop(src, atomic)
 
 
+class Factorio_Settings(App_Settings):
+    def __init__(self, pointer: Path) -> None:
+        options = [
+            Setting(str, Setting_Label.serv_name, "name", []),
+            Setting(str, Setting_Label.serv_desc, "description", []),
+            Setting(int, Setting_Label.max_player, "max_players", []),
+            Setting(
+                bool, Setting_Label.visibility, "public", ["visibility"], choices={"Public": "true", "Private": "false"}
+            ),
+            Setting(str, Setting_Label.password, "game_password", [], power_level=Power_Level.sudo),
+        ]
+        super().__init__(pointer, options)
+
+    def load(self):
+        data = json.loads(self.pointer.read_text(config.STR_ENCODE))
+        if not isinstance(data, dict):
+            raise ValueError(f"config must be dict not `{type(data)}`")
+
+        for opt in self.options:
+            opt.get(data)
+
+    def save(self):
+        data = json.loads(self.pointer.read_text(config.STR_ENCODE))
+        if not isinstance(data, dict):
+            raise ValueError(f"config must be dict not `{type(data)}`")
+
+        for opt in self.options:
+            opt.set(data)
+
+        string = json.dumps(data, indent=4)
+        self.pointer.write_text(string, config.STR_ENCODE)
+        return data
+
+
 class Factorio(App):
     _instance = None
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.proc_name = "factorio"
-        self.proc_cmd = ["factorio", "--start-server"]
-        self.server_settings = cfg.directory.absolute() / "data" / "server-settings.json"
+        self.proc_cmd = [self.proc_name, "--start-server"]
+        file_settings = cfg.directory.absolute() / "data" / "server-settings.json"
         self.cmd_start = cfg.cmd_start or [
             "bin/x64/factorio",
             "--start-server-load-latest",
             "--server-settings",
-            f"{self.server_settings}",
+            f"{file_settings}",
             "--rcon-port",
             "27015",
             "--rcon-password",
@@ -52,7 +88,7 @@ class Factorio(App):
         chat_channel = config.env_opt("FACTORIO_CHAT_CHANNEL")
         if chat_channel:
             cfg.chat_channel = chat_channel
-        super().__init__(bot, am, cfg, Mod_Factorio)
+        super().__init__(bot, am, cfg, Factorio_Settings(file_settings), Mod_Factorio)
         self.act_err_threshold = 100
         self._lock = self.directory / ".lock"
 
@@ -67,7 +103,7 @@ class Factorio(App):
 
         try:
             settings: dict[str, str | int | bool | list[str] | dict[str, str | int | bool]] = json.loads(
-                self.server_settings.read_text(config.STR_ENCODE)
+                file_settings.read_text(config.STR_ENCODE)
             )
             if serv_name := settings.get("name"):
                 self.cfg.provider_alt_text = str(serv_name)

@@ -118,9 +118,11 @@ class App_Manager(metaclass=config.Singleton):
         else:
             app = self.get(name)
         name = app.name
-        await self.end()
         if not app.cfg.enabled:
             raise LookupError("App Not Enabled")
+        await self.end()
+        if app.settings:
+            app.settings.app.save()
         await app.start()
         self.current = name
 
@@ -218,10 +220,10 @@ class Provider_Process(Activity_Provider):
             log.debug(f"Provider_Process: {self.manager.current}")
         if app := self.manager.get_current:
             if app.check_running:
-                if app.cfg.provider_alt_text:
+                if name := (app.cfg.provider_alt_text or (app.settings and app.settings.app.server_name)):
                     if self._counter == 3:
                         self._counter = 0
-                        return f"<{app.cfg.provider_alt_text}>"
+                        return f"<{name.strip(' \'"_-:;<>')}>"
                     self._counter += 1
                 return app.friendly
             elif not self.silent:

@@ -80,6 +80,8 @@ DIR_OPT = Path(env_req("DIR_OPT"))  # nginx setup only opt/bot
 "/opt/yukibot"
 DIR_UPLOAD = DIR_OPT / "uploads"
 "{opt}/uploads"
+DIR_DOWNLOADS = DIR_OPT / "downloads"
+"{opt}/downloads"
 DIR_ZIPS = DIR_OPT / "zips"
 "{opt}/zips"
 DIR_CWD = Path().parent
@@ -158,16 +160,10 @@ log.info(
 
 
 if not FILE_USERS.exists():
-    FILE_USERS.write_text(json.dumps({"SUDOERS": [], "USERS": []}, indent=4), STR_ENCODE)
+    FILE_USERS.write_text(json.dumps({"sudo": [], "user": []}, indent=4), STR_ENCODE)
 
 
-user_data: dict[str, set] = json.loads(FILE_USERS.read_text(STR_ENCODE))
-
-SUDOERS: set[int] = set(user_data.get("SUDOERS", set()))
-"Users with privileges to install/remove mods, and restart the bot/system"
-USERS: set[int] = set(user_data.get("USERS", set())) | SUDOERS
-"Users which are restricted to start/stop commands"
-GUESTS = True
+GUESTS_ALLOWED = True
 "If unrecognised users should be allowed to use use the unrestricted commands"
 
 
@@ -422,5 +418,7 @@ class Activity_Manager(Protocol):
     def deregister(self, provider: Activity_Provider):
         return
 
+
+IS_RESTARTING = False
 
 # AiviA APasz

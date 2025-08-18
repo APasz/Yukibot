@@ -1,3 +1,10 @@
+V2.1
+Added: Support for BeamMP
+Added: Support for ETS2 ...as lackluster as their dedicated server makes it
+Added: Settings_Manager along with associated App_Settings, Setting, etc classes to allow for editing of app configuration
+Added: _security with Access_Control and Power_Level classes. These make things related to permission more streamlined and robust
+Added: Will now append "...Done!" to the message sent when restarting the bot
+
 V2;
 The major change in Yukibot's design is a focus on modularity; to make apps/games be more self-contained with a much larger and defined separation between apps, app management, and Discord (Hikari/Lightbulb)
 In this way each app subclasses and adds-on/replaces any specific functionality as needed thus giving the bot a standardised way of interacting with them

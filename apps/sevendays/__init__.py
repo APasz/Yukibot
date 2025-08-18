@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 
 import hikari
 
+from apps._settings import App_Settings, Setting, Setting_Label
 from config import Activity_Manager
 from _discord import App_Bound, DC_Bound, DC_Relay
 from _file import File_Utils
@@ -32,14 +33,66 @@ class Mod_7D2D(Mod):
         await self._handle_extr(src, atomic)
 
 
+class SevenDays_Settings(App_Settings):
+    def __init__(self, pointer: Path) -> None:
+        options = [
+            Setting(str, Setting_Label.serv_name, "ServerName", []),
+            Setting(str, Setting_Label.max_player, "ServerMaxPlayerCount", [], validator=str.isnumeric),
+            Setting(str, Setting_Label.password, "ServerPassword", [], power_level=2),
+            Setting(str, Setting_Label.visibility, "ServerVisibility", [], choices={"Public": "2", "Private": "0"}),
+            Setting(
+                str,
+                Setting_Label.difficulty,
+                "GameDifficulty",
+                [],
+                choices={
+                    "Scavenger": "0",
+                    "Adventurer": "1",
+                    "Nomad": "2",
+                    "Warrior": "3",
+                    "Survivalist": "4",
+                    "Insane": "5",
+                },
+                power_level=2,
+            ),
+        ]
+        super().__init__(pointer, options)
+
+    def load(self):
+        data = ET.parse(self.pointer).getroot().findall("property")
+        if not isinstance(data, list):
+            raise ValueError(f"config must be list not `{type(data)}`")
+
+        for element in data:
+            for opt in self.options:
+                if element.attrib.get("name") == opt.key:
+                    opt.update(element.attrib["value"])
+
+    def save(self):
+        tree = ET.parse(self.pointer)
+        root = tree.getroot()
+        data = root.findall("property")
+        if not isinstance(data, list):
+            raise ValueError(f"config must be list not `{type(data)}`")
+
+        for element in data:
+            for opt in self.options:
+                if element.attrib.get("name") == opt.key:
+                    element.attrib["value"] = str(opt.value)
+
+        tree.write(self.pointer, encoding=config.STR_ENCODE)
+        return data
+
+
 class SevenDays(App):
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
-        self.proc_name = "7daystodie"
+        self.proc_name = "7DaysToDie"
         self.proc_cmd = ["7DaysToDieServer", "-nographics"]
-        self.server_settings = cfg.directory.absolute() / "serverconfig.xml"
-        self.cmd_start = cfg.cmd_start or ["bash", "startserver.sh", f"-configfile={self.server_settings.name}"]
+
         self.process = None
-        super().__init__(bot, am, cfg, Mod_7D2D)
+        file_settings = cfg.directory.absolute() / "serverconfig.xml"
+        self.cmd_start = cfg.cmd_start or ["bash", "startserver.sh", f"-configfile={file_settings.name}"]
+        super().__init__(bot, am, cfg, SevenDays_Settings(file_settings), Mod_7D2D)
         self.act_err_threshold = 100
 
         self._relay = TelnetClient(self.check_running, 8081)
@@ -49,21 +102,6 @@ class SevenDays(App):
         self._players = Players(self)
         self._activities = Activities(self)
         self._matchers = Matchers(self)
-
-        try:
-            server_name = next(
-                (
-                    p.attrib["value"]
-                    for p in ET.parse(self.server_settings).getroot().findall("property")
-                    if p.attrib.get("name") == "ServerName"
-                ),
-                None,
-            )
-
-            if server_name:
-                self.cfg.provider_alt_text = server_name
-        except Exception:
-            log.exception(f"{__name__} Read Settings")
 
         log.debug(f"{__name__}.Created")
 

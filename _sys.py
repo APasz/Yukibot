@@ -85,7 +85,9 @@ class Stats_System(metaclass=Singleton):
         self.disk.update()
 
 
-async def restart(ctx: lightbulb.Context, bot: hikari.GatewayBot, manager: App_Manager, restart_type: str):
+async def restart(
+    ctx: lightbulb.Context | hikari.Message, bot: hikari.GatewayBot, manager: App_Manager, restart_type: str
+):
     restart_type = restart_type.strip().lower()
     restart_sys = True if restart_type == "system" else False
 
@@ -93,6 +95,8 @@ async def restart(ctx: lightbulb.Context, bot: hikari.GatewayBot, manager: App_M
         await manager.end()
     except Exception:
         log.warning("Manager shutdown failed", exc_info=True)
+
+    config.IS_RESTARTING = True
 
     if me := bot.get_me():
         bot_name = me.display_name
@@ -104,7 +108,10 @@ async def restart(ctx: lightbulb.Context, bot: hikari.GatewayBot, manager: App_M
         status=hikari.Status.DO_NOT_DISTURB,
     )
 
-    await ctx.respond(f"{bot_name} restarting {restart_type}")
+    mess_id = await ctx.respond(f"{bot_name} restarting {restart_type}")
+    if isinstance(mess_id, hikari.Message):
+        mess_id = mess_id.id
+    Path("restart_message_id").write_text(f"{ctx.channel_id}:{str(mess_id)}")
     await asyncio.sleep(0.1)
 
     try:

@@ -1,7 +1,7 @@
 aiofiles
 aiohttp
 factorio-rcon-py
-hikari-lightbulb~=3.0.2
+hikari-lightbulb~=3.1.2
 hikari[speedups]~=2.3.5
 psutil
 pydantic
@@ -12,3 +12,4 @@ tenorgrabber
 uvloop
 anyio
 emoji
+tomli_w

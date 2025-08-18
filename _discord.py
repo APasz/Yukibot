@@ -19,7 +19,7 @@ from _resolator import Resolutator
 import config
 from _file import File_Utils
 from _utils import Utilities
-from config import GUESTS, SUDOERS, USERS, Name_Cache, Singleton
+from config import Name_Cache, Singleton
 
 from typing import Protocol, TYPE_CHECKING
 import emoji
@@ -113,33 +113,6 @@ class Distils:
         size = sum([File_Utils.pointer_size(s) for s in files])
         msg = f"`{base_name}` {Utilities.humanise_bytes(size)} expires {expire}\n" + "\n".join(links)
         await ctx.respond(msg)
-
-    @staticmethod
-    async def perm_check(user_id: hikari.Snowflakeish, power_level: int = 0):
-        """limit usage of commands by checking user permissions based on power_level
-
-        Args;
-            ctx: context to respond to if check fail
-            power_level: 2 == sudo, 1 == user, 0 == guest
-
-        Raises;
-            PermissionError: If user lacks sufficient power_level
-        """
-        txt = None
-        if power_level < 0 or power_level > 2:
-            txt = "invalid"
-
-        elif power_level == 2 and user_id not in SUDOERS:
-            txt = "sudo"
-
-        elif power_level >= 1 and user_id not in USERS:
-            txt = "user"
-
-        elif power_level >= 0 and not GUESTS:
-            txt = "guest restricted"
-
-        if txt:
-            raise PermissionError(f"Insufficent {power_level=} | {txt}")
 
     @staticmethod
     def cat_name(
@@ -266,7 +239,7 @@ class Message:
             raise ValueError(f"Content must be str, not {type(content)}")
 
         self.player = player
-        if not isinstance(player, (str, int, hikari.UndefinedType, hikari.Snowflakeish)):
+        if not isinstance(player, (str, int, hikari.UndefinedType, hikari.Snowflake)):
             raise ValueError(f"Player must be str | int | UNDEFINED, not {type(player)}")
 
         self.urls: set[URLish] = set()

@@ -1,0 +1,9 @@
+{
+    "alpha": {
+        "friendly_name": "BeamMP",
+        "directory": "{APPS}/beammp",
+        "mods_dir": "{WD}/Resources/Client",
+        "server_log_file": "{WD}/Server.log",
+        "port": 30814
+    }
+}

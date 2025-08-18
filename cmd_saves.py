@@ -2,8 +2,8 @@ import logging
 
 import lightbulb
 
-from _discord import Distils
 from _manager import App_Manager
+from _security import Access_Control
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +24,8 @@ class CMD_SavesDownload(
     app = lightbulb.string("app", "What to get save for", autocomplete=ac_app_configs)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 1)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control):
+        await acl.perm_check(ctx.user.id, acl.LvL.user)
         log.info(f"Save.Download; {self.app}: {ctx.user.display_name}")
         raise NotImplementedError
 

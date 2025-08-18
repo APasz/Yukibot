@@ -9,6 +9,7 @@ import lightbulb
 from _discord import Distils
 from _file import File_Utils
 from _manager import App_Manager
+from _security import Access_Control
 from _utils import Utilities
 
 log = logging.getLogger(__name__)
@@ -84,8 +85,8 @@ class CMD_ModList(
     state = lightbulb.boolean("state", "Show only Enabled=True, Disabled=False, All=Unset", default=None)
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, utils: Utilities, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, utils: Utilities, acl: Access_Control, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         log.info(f"Modding.List; {self.app}: {ctx.user.display_name}")
 
         app = manager.get(self.app)
@@ -125,8 +126,8 @@ class CMD_ModAdd(
     atomic = lightbulb.boolean("atomic", "delete existing beforehand | default=True", default=True)
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 1)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.user)
         await ctx.defer()
         log.info(f"Modding.Add; {self.app}: {ctx.user.display_name}")
 
@@ -168,8 +169,8 @@ class CMD_ModRemove(
     mod9 = lightbulb.string("mod9", "Mod to remove", autocomplete=ac_all_mods, default=None)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 1)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, distils: Distils, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.user)
         await ctx.defer()
         log.info(f"Modding.Remove; {self.app}: {ctx.user.display_name}")
 
@@ -184,7 +185,7 @@ class CMD_ModRemove(
             try:
                 mod = mm.get(file)
                 if mod.is_coremod(True):
-                    await distils.perm_check(ctx.user.id, 2)
+                    await acl.perm_check(ctx.user.id, acl.LvL.sudo)
                 if await mod.uninstall():
                     removed.append(mod.friendly)
             except Exception as xcp:
@@ -219,8 +220,8 @@ class CMD_ModDown(
     mod9 = lightbulb.string("mod9", "Mod to download or all if not pass", autocomplete=ac_enabled, default=None)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, distils: Distils, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         await ctx.defer()
         log.info(f"Modding.Download; {self.app}: {ctx.user.display_name}")
 
@@ -249,8 +250,8 @@ class CMD_ModToggle(
     mod = lightbulb.string("mod", "Mod to toggle", autocomplete=ac_all_mods)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, distils: Distils, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         await ctx.defer()
         log.info(f"Modding.Toggle; {self.app} | {self.mod}: {ctx.user.display_name}")
 
@@ -272,8 +273,8 @@ class CMD_ModRefresh(
     hooks=[lightbulb.prefab.sliding_window(5, 2, "global")],
 ):
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 1)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.user)
         await ctx.defer()
         log.info(f"Modding.Refresh: {ctx.user.display_name}")
 
@@ -298,8 +299,8 @@ class CMD_ModCoremod(
     mod = lightbulb.string("mod", "Mod to coremod toggle", autocomplete=ac_all_mods)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, manager: App_Manager):
-        await distils.perm_check(ctx.user.id, 2)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, manager: App_Manager):
+        await acl.perm_check(ctx.user.id, acl.LvL.sudo)
         await ctx.defer()
         log.info(f"Modding.Coremod: {ctx.user.display_name}")
 

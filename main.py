@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 import os
+from pathlib import Path
 import sys
 from datetime import datetime, timedelta
 import traceback
@@ -10,6 +11,7 @@ import hikari
 import lightbulb
 import uvloop
 
+import _sys
 import config
 from _activity import Activity_Manager, Provider_CPU, Provider_DISK, Provider_RAM
 from _discord import DC_Relay, Distils, Resolutator
@@ -17,11 +19,12 @@ from _file import File_Utils
 from _manager import App_Manager, Provider_Player, Provider_Process
 from _sys import Stats_System
 from _utils import File_Cleaner, Utilities
+from _security import Access_Control
 from cmd_alias import group_alias
 from cmd_app import group_app
 from cmd_misc import group_misc
 from cmd_mod import group_mod
-from cmd_saves import group_saves
+from cmd_saves import group_saves  # noqa: F401
 from cmd_settings import group_settings
 from cmd_update import group_update
 from config import Activity_Provider, Name_Cache
@@ -58,12 +61,15 @@ def main():
         client: lightbulb.Client = lightbulb.client_from_app(bot)
 
     utilities = Utilities()
+    resolutator = Resolutator(bot)
     registry = client.di.registry_for(lightbulb.di.Contexts.DEFAULT)
+    acl = Access_Control()
+    registry.register_value(Access_Control, acl)
     registry.register_value(hikari.GatewayBot, bot)
     registry.register_value(lightbulb.Client, client)
     registry.register_value(App_Manager, app_manager)
     registry.register_value(Distils, Distils())
-    registry.register_value(Resolutator, Resolutator(bot))
+    registry.register_value(Resolutator, resolutator)
     dc_relay = DC_Relay(bot)
     registry.register_value(DC_Relay, dc_relay)
     registry.register_value(Utilities, utilities)
@@ -77,7 +83,7 @@ def main():
     client.register(group_mod)
     client.register(group_misc)
     # client.register(group_saves)
-    # client.register(group_settings)
+    client.register(group_settings)
     client.register(group_update)
 
     @client.error_handler
@@ -197,6 +203,14 @@ def main():
             except Exception:
                 log.exception("STARTED MESSAGE")
 
+        rmid_file = Path("restart_message_id")
+        if rmid_file.exists():
+            chan_id, mess_id = rmid_file.read_text().strip().split(":")
+            rmid_file.unlink()
+            mess = await resolutator.message(int(mess_id), int(chan_id))
+            if mess:
+                await mess.edit(f"{mess.content or ''} ...Done! :D")
+
     @bot.listen(hikari.StartedEvent)
     async def after_started(event: hikari.StartedEvent):
         global auto_app
@@ -251,6 +265,19 @@ def main():
             name_cache.set_names(event.member or event.author)  # type: ignore
         else:
             name_cache.set_names(event.author)
+
+    @bot.listen(hikari.MessageCreateEvent)
+    async def _failsafe_restart(event: hikari.MessageCreateEvent | hikari.GuildMessageCreateEvent):
+        if not event.content:
+            return
+        if event.author.is_bot:
+            return
+        if "restart_system" not in event.content or "restart_bot" not in event.content:
+            return
+        if acl.perm_check(event.author_id, acl.LvL.sudo):
+            await _sys.restart(
+                event.message, bot, app_manager, "system" if "restart_system" in event.content else "bot"
+            )
 
     bot.run()
 

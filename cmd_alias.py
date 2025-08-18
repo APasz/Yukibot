@@ -4,6 +4,7 @@ import hikari
 import lightbulb
 from hikari import Embed
 
+from _security import Access_Control
 from _discord import Distils, Resolutator
 from _manager import App_Manager
 from config import Name_Cache
@@ -44,11 +45,11 @@ class CMD_AliasSet(
     user = lightbulb.string("user", "Other user", autocomplete=ac_all_ids, default=None)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, namesCache: Name_Cache):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, namesCache: Name_Cache):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         user_id = ctx.user.id
         if self.user:
-            await distils.perm_check(ctx.user.id, 2)
+            await acl.perm_check(ctx.user.id, acl.LvL.sudo)
             user_id = namesCache.resolve_to_id(self.user)
             if not user_id:
                 raise KeyError("User Not Found")
@@ -70,11 +71,11 @@ class CMD_AliasAdd(
     user = lightbulb.string("user", "Other user", autocomplete=ac_all_ids, default=None)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, namesCache: Name_Cache):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, namesCache: Name_Cache):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         user_id = ctx.user.id
         if self.user:
-            await distils.perm_check(ctx.user.id, 2)
+            await acl.perm_check(ctx.user.id, acl.LvL.sudo)
             user_id = namesCache.resolve_to_id(self.user)
             if not user_id:
                 raise KeyError("User Not Found")
@@ -96,11 +97,11 @@ class CMD_AliasRemove(
     user = lightbulb.string("user", "Other user", autocomplete=ac_all_ids, default=None)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, distils: Distils, namesCache: Name_Cache):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, distils: Distils, namesCache: Name_Cache):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         user_id = ctx.user.id
         if self.user:
-            await distils.perm_check(ctx.user.id, 2)
+            await acl.perm_check(ctx.user.id, acl.LvL.sudo)
             user_id = namesCache.resolve_to_id(self.user)
             if not user_id:
                 raise KeyError("User Not Found")
@@ -127,14 +128,8 @@ class CMD_AliasList(
     user = lightbulb.string("user", "Other user", autocomplete=ac_all_ids, default=None)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(
-        self,
-        ctx: lightbulb.Context,
-        distils: Distils,
-        namesCache: Name_Cache,
-        reso: Resolutator,
-    ):
-        await distils.perm_check(ctx.user.id, 0)
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, namesCache: Name_Cache, reso: Resolutator):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
         log.info(f"Alias.List: {ctx.user.display_name} > {self.user}")
 
         user_id = namesCache.resolve_to_id(self.user) if self.user else ctx.user.id
