@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import random
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,7 @@ class CMD_MiscCurrency(
     description="Convert currency, e.g. 10aud",
     hooks=[lightbulb.prefab.sliding_window(len(config.SUPPORTED_CURRENCY) * 2, 1, "global")],
 ):
-    value = lightbulb.string("value", "Amount and currency, e.g. '10AUD' or 'AUD 10'")
+    value = lightbulb.string("value", "Amount and currency '10AUD' 'AUD 10' '10+20%aud' 'Aud 10-3'")
     to = lightbulb.string(
         "to",
         "Currency to convert to",
@@ -126,17 +127,100 @@ class CMD_MiscCurrency(
         except InvalidOperation:
             return None
 
+    _PERCENT_EXPR = re.compile(
+        r"""
+        ^\s*
+        (?P<base>[0-9][0-9.,]*)
+        \s*(?P<op>[+-])\s*
+        (?P<pct>[0-9][0-9.,]*)
+        \s*%
+        \s*$
+        """,
+        re.VERBOSE,
+    )
+    _SIMPLE_EXPR = re.compile(
+        r"""
+        ^\s*
+        (?P<a>[0-9][0-9.,]*)
+        \s*(?P<op>[+-])\s*
+        (?P<b>[0-9][0-9.,]*)
+        \s*$
+        """,
+        re.VERBOSE,
+    )
+
     @classmethod
-    def number(cls, string: str) -> tuple[Decimal | None, str | None]:
-        amount = cls._parse_decimal(string.replace(" ", "").replace("_", "").replace("+", "").replace("-", ""))
+    def _parse_amount(cls, expr: str) -> tuple[Decimal | None, str | None]:
+        """
+        Parse either:
+        - plain number: '480', '10.5', '1,234.56'
+        - percent expression: '480-12%', '480 + 10%', '480-12.5%'
+        - simple arithmetic: '480-12', '480 + 12'
+
+        Returns: (amount, expression_string or None)
+        """
+        if not expr:
+            return None, None
+
+        expr = expr.strip()
+
+        match = cls._PERCENT_EXPR.match(expr)
+        if match:
+            base = cls._parse_decimal(match.group("base"))
+            pct = cls._parse_decimal(match.group("pct"))
+            if base is None or pct is None:
+                return None, None
+
+            frac = pct / Decimal("100")
+            if match.group("op") == "+":
+                amount = base * (Decimal("1") + frac)
+            else:
+                amount = base * (Decimal("1") - frac)
+
+            expr_str = f"{match.group('base')}{match.group('op')}{match.group('pct')}%"
+            return amount, expr_str
+
+        simple = cls._SIMPLE_EXPR.match(expr)
+        if simple:
+            a = cls._parse_decimal(simple.group("a"))
+            b = cls._parse_decimal(simple.group("b"))
+            if a is None or b is None:
+                return None, None
+
+            if simple.group("op") == "+":
+                amount = a + b
+            else:
+                amount = a - b
+
+            expr_str = f"{simple.group('a')}{simple.group('op')}{simple.group('b')}"
+            return amount, expr_str
+
+        cleaned = expr.replace(" ", "").replace("_", "")
+        for ch in "+-%":
+            cleaned = cleaned.replace(ch, "")
+
+        amount = cls._parse_decimal(cleaned)
         if amount is None:
             return None, None
 
-        token = "".join(ch for ch in string if not (ch.isdigit() or ch in ".,"))
+        return amount, None
+
+    @classmethod
+    def number(cls, string: str) -> tuple[Decimal | None, str | None, str | None]:
+        s = string.strip()
+
+        letters = "".join(ch for ch in s if ch.isalpha())
+        token = letters.upper() if letters else None
+
+        expr_for_parse = re.sub(r"[A-Za-z]", " ", s)
+
+        amount, expr_str = cls._parse_amount(expr_for_parse)
+        if amount is None:
+            return None, token, None
+
         if token:
-            print(f" Number: {amount=} | {token=!r}")
-            return amount, token.upper().strip()
-        return None, None
+            print(f" Number: {amount=} | {token=!r} | expr={expr_str!r}")
+        return amount, token, expr_str
 
     @lightbulb.invoke
     async def invoke(self, ctx: lightbulb.Context, acl: Access_Control):
@@ -144,7 +228,7 @@ class CMD_MiscCurrency(
         await ctx.defer()
         log.info(f"Misc.Currency: {ctx.user.display_name} | Cache={self._quote_cache}")
 
-        amount, token = self.number(self.value)
+        amount, token, expr_str = self.number(self.value)
         if not amount:
             raise _errors.Missing("Number")
         if not token:
@@ -173,9 +257,12 @@ class CMD_MiscCurrency(
 
         lines = [f"{t.name}: {_fmt(v)}" for t, v in conversions.items()]
 
-        await ctx.respond(
-            f"**{amount:,.3f} {src.name.upper()}** converts to:\n" + "\n".join(sorted(lines, key=str.upper))
-        )
+        if expr_str:
+            header = f"**{amount:,.3f} {src.name.upper()}** ({expr_str}) converts to:\n"
+        else:
+            header = f"**{amount:,.3f} {src.name.upper()}** converts to:\n"
+
+        await ctx.respond(header + "\n".join(sorted(lines, key=str.upper)))
 
 
 @group_misc.register
