@@ -1,13 +1,19 @@
 {
     "survival": {
         "friendly_name": "MineSurvival",
-        "directory": "{APPS}/mc_survival",
+        "directory": "{APPS}/mc",
         "mods_dir": "{WD}/mods",
         "port": 25565
     },
     "creative": {
         "friendly_name": "MineCreative",
         "directory": "{APPS}/mc_creative",
+        "mods_dir": "{WD}/mods",
+        "port": 25565
+    },
+    "all_fabric": {
+        "friendly_name": "AllTheFabric",
+        "directory": "{APPS}/allfabric",
         "mods_dir": "{WD}/mods",
         "port": 25565
     }

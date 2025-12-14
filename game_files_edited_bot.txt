@@ -2,7 +2,9 @@ beammp
 
 ets
     bin/linux_x64/server_launch.sh
+        #! /bin/sh
         export XDG_DATA_HOME={WD}/home_data/
+        LD_LIBRARY_PATH='$ORIGIN/../../linux64' ./eurotrucks2_server
 
 minecraft
     server.properties

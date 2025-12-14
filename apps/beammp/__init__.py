@@ -142,7 +142,7 @@ class BeamMP(App):
 
         self._tail: Tailer | None = None
         self._tail_machers = set()
-        self.am_recevier = Receiver(self)
+        self.am_receiver = Receiver(self)
         self._players = Players(self)
         self._matchers = Matchers(self)
 

@@ -86,7 +86,11 @@ class Stats_System(metaclass=Singleton):
 
 
 async def restart(
-    ctx: lightbulb.Context | hikari.Message, bot: hikari.GatewayBot, manager: App_Manager, restart_type: str
+    ctx: lightbulb.Context | hikari.Message,
+    bot: hikari.GatewayBot,
+    manager: App_Manager,
+    restart_type: str,
+    silent: bool = False,
 ):
     restart_type = restart_type.strip().lower()
     restart_sys = True if restart_type == "system" else False
@@ -103,16 +107,19 @@ async def restart(
     else:
         bot_name = config.NAME
 
-    await bot.update_presence(
-        activity=hikari.Activity(name=f"!!! Restarting {restart_type}", type=hikari.ActivityType.CUSTOM),
-        status=hikari.Status.DO_NOT_DISTURB,
-    )
+    if silent:
+        Path("silent_restart").touch()
+    else:
+        await bot.update_presence(
+            activity=hikari.Activity(name=f"!!! Restarting {restart_type}", type=hikari.ActivityType.CUSTOM),
+            status=hikari.Status.DO_NOT_DISTURB,
+        )
 
-    mess_id = await ctx.respond(f"{bot_name} restarting {restart_type}")
-    if isinstance(mess_id, hikari.Message):
-        mess_id = mess_id.id
-    Path("restart_message_id").write_text(f"{ctx.channel_id}:{str(mess_id)}")
-    await asyncio.sleep(0.1)
+        mess_id = await ctx.respond(f"{bot_name} restarting {restart_type}")
+        if isinstance(mess_id, hikari.Message):
+            mess_id = mess_id.id
+        Path("restart_message_id").write_text(f"{ctx.channel_id}:{str(mess_id)}")
+        await asyncio.sleep(0.1)
 
     try:
         if restart_sys:

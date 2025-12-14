@@ -1,3 +1,4 @@
+import enum
 import json
 import logging
 import logging.config
@@ -14,16 +15,35 @@ import hikari
 import requests
 from pydantic import BaseModel, Field
 
-NAME = "Yukibot"
-UPLOAD_CLEAR_HOURS = 36
-DISCORD_UPLOAD_LIMIT = 10  # in MiB
-SUPPORTED_CURRENCY = ["AUD", "CHF", "EUR", "GBP", "HUF", "USD"]
-STD_DRINK_GRAMS = {"AU": 10, "UK": 8, "CH": 12, "FI": 12, "HU": 17, "US": 14}
-PUBLIC_IP_ADDR = "https://api.ipify.org"
-EXCHANGE_RATE_ADDR = "https://api.exchangerate.host/convert"
-FILE_USERS = Path("users.json")
-DISCORD_NAMES = Path("discord_names.json")
-CHAT_IGNORE = "!"
+NAME: str = "Yukibot"
+UPLOAD_CLEAR_HOURS: int = 36
+DISCORD_UPLOAD_LIMIT: int = 10  # in MiB
+
+
+class Currency(enum.StrEnum):
+    AUD = enum.auto()
+    CHF = enum.auto()
+    EUR = enum.auto()
+    GBP = enum.auto()
+    HUF = enum.auto()
+    USD = enum.auto()
+
+
+SUPPORTED_CURRENCY: dict[Currency, set[str]] = {
+    Currency.AUD: {"A$", "$A", "AU$", "$AU", "AUD$", "$AUD", "AUD"},
+    Currency.CHF: {"CHF", "SFR", "FR"},
+    Currency.EUR: {"€", "EURO", "EUR"},
+    Currency.GBP: {"£", "GBP"},
+    Currency.HUF: {"Ft", "HUF"},
+    Currency.USD: {"US$", "$US", "$USD", "USD$", "$", "USD"},
+}
+
+STD_DRINK_GRAMS: dict[str, int] = {"AU": 10, "UK": 8, "CH": 12, "FI": 12, "HU": 17, "US": 14}
+PUBLIC_IP_ADDR: str = "https://api.ipify.org"
+EXCHANGE_RATE_ADDR: str = "https://api.exchangerate.host/convert"
+FILE_USERS: Path = Path("users.json")
+DISCORD_NAMES: Path = Path("discord_names.json")
+CHAT_IGNORE: str = "!"
 
 
 # user config end
@@ -36,7 +56,9 @@ if os.name == "nt":
 dotenv.load_dotenv()
 
 
-def env_req(var: str) -> str:
+def env_req(var: str, force_reload: bool = False) -> str:
+    if force_reload:
+        dotenv.load_dotenv()
     env = os.getenv(var)
     if not env:
         raise ValueError(f"{var} must be set")
@@ -61,7 +83,23 @@ else:
 
 DISCORD_UPLOAD_LIMIT = DISCORD_UPLOAD_LIMIT * 1024 * 1024
 "total byte size limit for uploads to discord"
-SUPPORTED_CURRENCY = [c.upper() for c in SUPPORTED_CURRENCY]
+
+
+def checksort_currencies(currencies: dict[Currency, set[str]]) -> dict[str, Currency]:
+    """Build alias->code map with uppercase normalisation and collision warning."""
+    mapping: dict[str, Currency] = {}
+    for cur, syms in currencies.items():
+        for sym in syms:
+            key = sym.strip().upper()
+            if key in mapping and mapping[key] != cur:
+                print(f"Currency Collision: {sym}@{cur} > {mapping[key]}")
+                continue
+            mapping[key] = cur
+    return mapping
+
+
+CURRENCY_MAP = checksort_currencies(SUPPORTED_CURRENCY)
+
 UPLOAD_CLEAR_TIME = timedelta(hours=UPLOAD_CLEAR_HOURS)
 TENOR_ADDR = "tenor.com/view"
 ENABLED_FILE = Path("enabled_apps.json")
@@ -72,7 +110,7 @@ def public_ip(url: str = PUBLIC_IP_ADDR):
     return requests.get(url).text
 
 
-PUBLIC_URL_BASE = f"http://{public_ip()}/uploads/"  # 139.99.45.183
+PUBLIC_URL_BASE = f"http://{public_ip()}/uploads/"
 DIR_LOG = Path("logs")
 DIR_TMP = Path(env_req("DIR_TMP"))
 "/tmp/yukibot"
@@ -125,7 +163,7 @@ logging.config.dictConfig(
         },
         "root": {
             "level": root_lvl,
-            "handlers": ["file"],
+            "handlers": ["file", "console"],
         },
         "loggers": {
             "system": {

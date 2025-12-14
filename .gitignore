@@ -1,8 +1,9 @@
 _*.txt
 discord_names.json
-test.py
+test*
 users.json
 apps.json
+data/*
 
 logs/
 .venv
@@ -11,3 +12,12 @@ dev_apps
 opt/
 
 .env*
+
+# testing
+_bridge2.py
+.gitignore
+_ts_bridge.py
+online.json
+online.py
+se_ticks
+wagons.json

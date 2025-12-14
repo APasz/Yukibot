@@ -1,8 +1,8 @@
 aiofiles
 aiohttp
 factorio-rcon-py
-hikari-lightbulb~=3.1.2
-hikari[speedups]~=2.3.5
+hikari-lightbulb~=3.2.2
+hikari[speedups]~=2.5.0
 psutil
 pydantic
 python-dateutil
@@ -13,3 +13,5 @@ uvloop
 anyio
 emoji
 tomli_w
+aioftp
+regex

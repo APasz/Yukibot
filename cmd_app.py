@@ -3,6 +3,7 @@ import logging
 
 import lightbulb
 
+import _errors
 from _discord import Distils
 from _file import File_Utils
 from _manager import App_Manager, ac_all_apps, ac_enabled_apps
@@ -13,9 +14,6 @@ from _utils import Utilities
 log = logging.getLogger(__name__)
 
 group_app = lightbulb.Group("app", "App Management")  # type: ignore
-
-
-class NotEnoughDisk(Exception): ...
 
 
 async def ac_toggle_apps(ctx: lightbulb.AutocompleteContext, manager: App_Manager):
@@ -117,7 +115,7 @@ class CMD_AppDownload(
         pad_size = round(size + (size / 100 * 10))
         space = Stats_System().disk.usage.free
         if space < pad_size:
-            raise NotEnoughDisk(f"{utils.humanise_bytes(space)} < {utils.humanise_bytes(pad_size)}")
+            raise _errors.NotEnoughDisk(f"{utils.humanise_bytes(space)} < {utils.humanise_bytes(pad_size)}")
         await distils.respond_files(ctx, [app.directory], display_name=app.friendly, force_download=True)
 
 

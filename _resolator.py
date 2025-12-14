@@ -1,7 +1,7 @@
 import logging
-from pathlib import Path
 import re
-from typing import Literal, overload
+from pathlib import Path
+from typing import overload
 
 import hikari
 
@@ -49,19 +49,9 @@ class Resolutator(metaclass=config.Singleton):
         log.warning("Invalid; unknown: %s %s[%s]", snow_type, snow, type(snow))
         return False
 
-    @overload
-    async def user(
-        self, ident: hikari.Snowflakeish, guild_id: hikari.Snowflakeish | None = None, *, silent: bool = True
-    ) -> hikari.UndefinedOr[hikari.Member | hikari.User]: ...
-
-    @overload
     async def user(
         self, ident: hikari.Snowflakeish, guild_id: hikari.Snowflakeish | None = None, *, silent: bool = False
-    ) -> hikari.Member | hikari.User | None: ...
-
-    async def user(
-        self, ident: hikari.Snowflakeish, guild_id: hikari.Snowflakeish | None = None, *, silent: bool = False
-    ):
+    ) -> hikari.Member | hikari.User | None:
         if guild_id:
             user = self.bot.cache.get_member(guild_id, ident)
         else:
@@ -78,7 +68,7 @@ class Resolutator(metaclass=config.Singleton):
                     log.warning("FETCH; %s: Retrying without guild_id", xcp)
                     return await self.user(ident)
                 if silent:
-                    return hikari.UNDEFINED
+                    return None
                 else:
                     raise xcp
             except Exception as xcp:

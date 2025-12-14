@@ -2,10 +2,10 @@ import asyncio
 import inspect
 import logging
 import os
-from pathlib import Path
 import sys
-from datetime import datetime, timedelta
 import traceback
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import hikari
 import lightbulb
@@ -17,9 +17,9 @@ from _activity import Activity_Manager, Provider_CPU, Provider_DISK, Provider_RA
 from _discord import DC_Relay, Distils, Resolutator
 from _file import File_Utils
 from _manager import App_Manager, Provider_Player, Provider_Process
+from _security import Access_Control
 from _sys import Stats_System
 from _utils import File_Cleaner, Utilities
-from _security import Access_Control
 from cmd_alias import group_alias
 from cmd_app import group_app
 from cmd_misc import group_misc
@@ -50,13 +50,16 @@ def main():
 
     bot = hikari.GatewayBot(
         token=config.env_req("BOT_TOKEN"),
-        intents=hikari.Intents.ALL_UNPRIVILEGED | hikari.Intents.ALL_MESSAGES | hikari.Intents.MESSAGE_CONTENT,
+        intents=hikari.Intents.ALL_UNPRIVILEGED | hikari.Intents.ALL_PRIVILEGED,
     )
     app_manager = App_Manager()
     name_cache = Name_Cache()
 
     if deg := config.env_opt("DISCORD_DEV_GUILD"):
-        client: lightbulb.Client = lightbulb.client_from_app(bot, default_enabled_guilds=[hikari.Snowflake(deg)])
+        log.info(f"DEG|DEV: {deg}")
+        client: lightbulb.Client = lightbulb.client_from_app(
+            bot,
+        )
     else:
         client: lightbulb.Client = lightbulb.client_from_app(bot)
 
@@ -85,6 +88,14 @@ def main():
     # client.register(group_saves)
     client.register(group_settings)
     client.register(group_update)
+
+    # from _space_engineers import SpaceEngineers
+
+    # se_app = SpaceEngineers(bot, resolutator)
+    # SE not needed
+    from online import Online
+
+    Online(bot, client, resolutator, utilities)
 
     @client.error_handler
     async def error_handler(epf: lightbulb.exceptions.ExecutionPipelineFailedException, ctx: lightbulb.Context) -> bool:
@@ -192,7 +203,8 @@ def main():
             starting_xcp.append(str(xcp))
             raise xcp
 
-        if config.STARTED_CHANNEL:
+        silent = Path("silent_restart")
+        if config.STARTED_CHANNEL and not silent.exists():
             txt = ["Started: DEBUG" if config.IS_DEBUG else "Started"]
             if auto_app:
                 txt.append(f"\tAuto-Launching: {auto_app.friendly}")
@@ -202,6 +214,7 @@ def main():
                 await bot.rest.create_message(config.STARTED_CHANNEL, "\n".join(txt), flags=flags)
             except Exception:
                 log.exception("STARTED MESSAGE")
+        silent.unlink(missing_ok=True)
 
         rmid_file = Path("restart_message_id")
         if rmid_file.exists():
@@ -210,6 +223,8 @@ def main():
             mess = await resolutator.message(int(mess_id), int(chan_id))
             if mess:
                 await mess.edit(f"{mess.content or ''} ...Done! :D")
+
+        # await se_app.setup()
 
     @bot.listen(hikari.StartedEvent)
     async def after_started(event: hikari.StartedEvent):
@@ -275,6 +290,7 @@ def main():
         if "restart_system" not in event.content or "restart_bot" not in event.content:
             return
         if acl.perm_check(event.author_id, acl.LvL.sudo):
+            await event.message.respond("Yes sir 🫡")
             await _sys.restart(
                 event.message, bot, app_manager, "system" if "restart_system" in event.content else "bot"
             )

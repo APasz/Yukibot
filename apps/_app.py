@@ -11,6 +11,7 @@ import hikari
 import psutil
 
 
+import _errors
 from apps._settings import App_Settings, Settings_Manager
 from config import Activity_Manager
 from apps._updater import Update_Manager
@@ -23,12 +24,11 @@ from typing import IO, Protocol, TYPE_CHECKING
 if TYPE_CHECKING:
     from _discord import App_Bound
 
+log = logging.getLogger(__name__)
+
 
 class AM_Receiver(Protocol):
     async def send(self, payload: App_Bound) -> None: ...
-
-
-log = logging.getLogger(__name__)
 
 
 class App:
@@ -52,7 +52,7 @@ class App:
     act_err_counts: dict[str, int] = {}
     act_err_threshold = 25
     name_cache = config.Name_Cache()
-    am_recevier: "AM_Receiver | None" = None
+    am_receiver: "AM_Receiver | None" = None
     cmd_start: list[str]
     cmd_cwd: Path | None = None
     shell: bool = False
@@ -114,7 +114,7 @@ class App:
         if self.mods:
             return self.mods
         else:
-            raise RuntimeError(f"{self.friendly} has no Mod_Manager")
+            raise _errors.UnsupportedModManager(self.friendly)
 
     @abstractmethod
     async def start(self) -> bool:

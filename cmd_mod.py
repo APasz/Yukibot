@@ -1,7 +1,7 @@
 import asyncio
 import logging
-from typing import Type, TypeVar
 from pathlib import Path
+from typing import TypeVar
 
 import hikari
 import lightbulb
@@ -24,41 +24,47 @@ async def ac_mod_apps(ctx: lightbulb.AutocompleteContext, manager: App_Manager):
 async def ac_all_mods(ctx: lightbulb.AutocompleteContext, manager: App_Manager):
     app = ctx.get_option("app")
     if not app or (app and not app.value):
-        return []
+        await ctx.respond([])
+        return
     if not isinstance(app.value, str):
         raise ValueError(f"app must be str not {type(app.value)}")
     app = manager.get(app.value)
     if not app.mods:
-        return []
+        await ctx.respond([])
+        return
 
     await Distils.ac_focused_mutate(
         ctx,
         {m.name: m.cfg.enabled for m in app.mods.list_mods()},
-        lambda k, v: f"{'Enabled' if v else 'Disabled'}: {k}",
+        lambda k, v: (f"{'Enabled' if v else 'Disabled'}: {k}", f"{'Enabled' if v else 'Disabled'}: {k}"),
     )
 
 
 async def ac_enabled(ctx: lightbulb.AutocompleteContext, manager: App_Manager):
     app = ctx.get_option("app")
     if not app or (app and not app.value):
-        return []
+        await ctx.respond([])
+        return
     if not isinstance(app.value, str):
         raise ValueError(f"app must be str not {type(app.value)}")
     app = manager.get(app.value)
     if not app.mods:
-        return []
+        await ctx.respond([])
+        return
     await Distils.ac_focused_static(ctx, [m.name for m in app.mods.list_mods() if m.cfg.enabled])
 
 
 async def ac_disabled(ctx: lightbulb.AutocompleteContext, manager: App_Manager):
     app = ctx.get_option("app")
     if not app or (app and not app.value):
-        return []
+        await ctx.respond([])
+        return
     if not isinstance(app.value, str):
         raise ValueError(f"app must be str not {type(app.value)}")
     app = manager.get(app.value)
     if not app.mods:
-        return []
+        await ctx.respond([])
+        return
     await Distils.ac_focused_static(ctx, [m.name for m in app.mods.list_mods() if not m.cfg.enabled])
 
 
@@ -69,7 +75,7 @@ async def file_ops(
     target: object,
     arg: str = "mod",
     limit: int = 10,
-    anno: Type[T] = str,
+    anno: type[T] = str,
 ) -> set[T]:
     return {value for i in range(limit) if isinstance((value := getattr(target, f"{arg}{i}", None)), anno)}
 
@@ -288,7 +294,7 @@ class CMD_ModRefresh(
         await ctx.respond(f"Mod indexes refreshed for;\n\t{'\t\n'.join(refreshed)}")
 
 
-@group_mod.register
+# @group_mod.register
 class CMD_ModCoremod(
     lightbulb.SlashCommand,
     name="coremod",

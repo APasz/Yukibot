@@ -98,7 +98,7 @@ class SevenDays(App):
         self._relay = TelnetClient(self.check_running, 8081)
         self._tail: Tailer | None = None
         self._tail_matchers = set()
-        self.am_recevier = Receiver(self)
+        self.am_receiver = Receiver(self)
         self._players = Players(self)
         self._activities = Activities(self)
         self._matchers = Matchers(self)

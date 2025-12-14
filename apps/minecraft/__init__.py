@@ -103,7 +103,7 @@ class Minecraft(App):
         self._tail: Tailer | None = None
         self._tail_machers = set()
         self._players = Players(self)
-        self.am_recevier = Receiver(self)
+        self.am_receiver = Receiver(self)
         self._activities = Activities(self)
         self._matchers = Matchers(self)
 

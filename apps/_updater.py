@@ -7,10 +7,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from apps._app import App
 
+import _errors
+
 log = logging.getLogger(__name__)
-
-
-class UnsupportedUpdate(Exception): ...
 
 
 class Update_Manager:
@@ -33,10 +32,11 @@ class Update_Manager:
 
     async def base(self) -> str | None:
         if not self.can_base:
-            raise UnsupportedUpdate("Base updating not supported")
+            raise _errors.UnsupportedUpdate("Base updating not supported")
 
     async def mods(self) -> list[str] | None:
         if not self.can_mods:
-            raise UnsupportedUpdate("Mod updating not supported")
+            raise _errors.UnsupportedUpdate("Mod updating not supported")
+
 
 # AiviA APasz

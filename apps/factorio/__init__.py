@@ -2,24 +2,24 @@ import asyncio
 import json
 import logging
 import re
-from pathlib import Path
 import tarfile
+from pathlib import Path
 
 import aiohttp
 import hikari
 
-from _security import Power_Level
-from apps._settings import App_Settings, Setting, Setting_Label
-from config import Activity_Manager
-from apps._updater import Update_Manager
 import config
 from _discord import App_Bound, DC_Bound, DC_Relay
 from _file import File_Utils
+from _security import Power_Level
 from apps._app import AM_Receiver, App
 from apps._config import App_Config, Mod_Config
 from apps._mod import Mod
 from apps._rcon import RconClient
+from apps._settings import App_Settings, Setting, Setting_Label
 from apps._tailer import Tailer
+from apps._updater import Update_Manager
+from config import Activity_Manager
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class Factorio(App):
         self._tail: Tailer | None = None
         self._tail_machers = set()
         self._players = Players(self)
-        self.am_recevier = Receiver(self)
+        self.am_receiver = Receiver(self)
         self._matchers = Matchers(self)
 
         try:

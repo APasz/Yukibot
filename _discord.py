@@ -153,14 +153,19 @@ class Distils:
         if not isinstance(ctx.focused.value, str):
             raise ValueError(f"String go with strings, not {type(ctx.focused.value)}")
         foc_val = ctx.focused.value.lower()
-        await ctx.respond([e for e in to_send if foc_val in e.lower()][:25])
+        await ctx.respond([hikari.impl.AutocompleteChoiceBuilder(e, e) for e in to_send if foc_val in e.lower()][:25])
 
     @staticmethod
-    async def ac_focused_mutate(ctx: lightbulb.AutocompleteContext, to_send: dict[str, object], caller: Callable):
+    async def ac_focused_mutate(
+        ctx: lightbulb.AutocompleteContext,
+        to_send: dict[str, object],
+        caller: Callable[[str, object], tuple[str, str | int | float]],
+    ):
         if not isinstance(ctx.focused.value, str):
             raise ValueError(f"String go with strings, not {type(ctx.focused.value)}")
         foc_val = ctx.focused.value.lower()
-        await ctx.respond([caller(k, v) for k, v in to_send.items() if foc_val in k.lower()][:25])
+        acb = hikari.impl.AutocompleteChoiceBuilder
+        await ctx.respond([acb(*caller(k, v)) for k, v in to_send.items() if foc_val in k.lower()][:25])
 
 
 class Generics(Enum):
@@ -370,6 +375,7 @@ class DC_Relay(metaclass=Singleton):
     queue: deque[DC_Bound] = deque()
     _channel_objects: dict[hikari.Snowflakeish, hikari.TextableChannel] = {}
     _chat_channels: dict[hikari.Snowflakeish, set["App"]] = {}
+    _special_channels: dict[hikari.Snowflakeish, set[tuple[str, Callable]]] = {}
     "channel: Apps"
     names = Name_Cache()
 
@@ -439,7 +445,7 @@ class DC_Relay(metaclass=Singleton):
             embs.append(emb)
         return embs
 
-    async def _send_dc(self, message: DC_Bound):
+    async def _send_dc(self, message: DC_Bound | Message):
         if not isinstance(message, DC_Bound):
             raise ValueError(f"Invalid DC_Message: {message}")
         log.info(f"App -> DC: {message} | {message.content}")
@@ -524,10 +530,13 @@ class DC_Relay(metaclass=Singleton):
         if message.enrich_task:
             await message.enrich_task
         for app in self._chat_channels[ctx.channel_id]:
-            log.debug(f"{app} | {app._running} | {bool(app.am_recevier)}")
-            if app._running and app.am_recevier:
+            log.debug(f"{app} | {app._running} | {bool(app.am_receiver)}")
+            if app._running and app.am_receiver:
                 message.app = app
-                await app.am_recevier.send(message)
+                await app.am_receiver.send(message)
+        for app_name, send_func in self._special_channels[ctx.channel_id]:
+            log.debug(f"{app_name} | {send_func} | {bool(send_func)}")
+            await send_func(message)
 
 
 # AiviA APasz

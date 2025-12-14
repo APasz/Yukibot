@@ -1,12 +1,12 @@
-from collections.abc import Callable
+import calendar
 import inspect
 import logging
 import math
 import re
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, overload
-
 
 from dateutil.relativedelta import relativedelta
 
@@ -152,41 +152,131 @@ class Utilities:
 
         return f"{size}{magnitude}{power}{unit}"
 
-    @staticmethod
-    def parse_time(string: str) -> datetime | None:
-        """Parse timestamp or human time into datetime object
+    @classmethod
+    def parse_time(cls, string: str, tz: timezone = timezone.utc) -> datetime | None:
+        """
+        Parse a timestamp or a human-friendly duration into a UTC datetime.
 
-        Args;
-            string: Timestamp (1641591242) or human-readable (2h, 3h45m, 20m)
-
-        Returns;
-            datetime object or None if there was error or no match
+        Accepted inputs (optional leading + or -):
+          1) UNIX epoch seconds: "1641591242", "+1641591242", "-31536000"
+             (commas/underscores allowed: "1,641,591,242", "1_641_591_242")
+          2) Duration tokens (order-free, case-insensitive):
+               y  years, mo months, w weeks, d days, h hours, m minutes, s seconds
+             Examples: "2h", "3h45m", "1y4m", "2y3mo5d9m", "10m30s", "1w2d"
+          3) Colon durations (no unit letters):
+               HH:MM | HH:MM:SS | DD:HH:MM:SS | WW:DD:HH:MM:SS
+             Examples: "2:30", "1:02:03", "3:12:00:00", "-2:03:12:00:00"
         """
         if not isinstance(string, str):
             raise ValueError(f"string must be of type str not: {type(string)}")
 
+        s_raw = string.strip()
+        # allow visual separators in any form
+        string = s_raw.replace(",", "").replace("_", "")
+        if not string:
+            return None
+
+        # peel an optional leading sign for relative handling
+
+        sign = 1
+        if string[0] == "+":
+            string = string[1:]
+        elif string[0] == "-":
+            sign = -1
+            string = string[1:]
+
+        now = datetime.now(tz)
+
         if string.isnumeric():
-            if len(string) > 11:
-                log.warning("string unreasonably long: %s", string)
+            return datetime.fromtimestamp(int(string), tz=tz)
+
+        # 2) Colon durations (no letters)
+        if ":" in string and not re.search(r"[a-zA-Z]", string):
+            parts = string.split(":")
+            if not all(p.isdigit() for p in parts):
+                log.warning("Invalid colon duration: %s", s_raw)
                 return None
-            return datetime.fromtimestamp(int(string), timezone.utc)
 
-        pattern = r"((?P<hours>\d+)h)?((?P<minutes>\d+)m)?"
-        match = re.fullmatch(pattern, string.strip())
-        if not match:
-            log.warning("No matches were found: %s", string)
+            values = list(map(int, parts))
+            weeks = days = hours = minutes = seconds = 0
+
+            if len(values) == 2:  # HH:MM
+                hours, minutes = values
+            elif len(values) == 3:  # HH:MM:SS
+                hours, minutes, seconds = values
+            elif len(values) == 4:  # DD:HH:MM:SS
+                days, hours, minutes, seconds = values
+            elif len(values) == 5:  # WW:DD:HH:MM:SS
+                weeks, days, hours, minutes, seconds = values
+            else:
+                log.warning("Unsupported colon format: %s", s_raw)
+                return None
+
+            if weeks == days == hours == minutes == seconds == 0:
+                log.warning("All zero duration in colon format: %s", s_raw)
+                return None
+
+            td = timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
+            td = td if sign > 0 else -td
+            log.debug("Successful parse of %s > %s", s_raw, td)
+            return now + td
+
+        # 3) Tokenized durations with units (y, mo, w, d, h, m, s)
+        t = re.sub(r"\s+", "", string.lower())
+        if not re.fullmatch(r"(?:(?:\d+)(?:y|mo|w|d|h|m|s))+", t):
+            log.warning("No matches were found: %s", s_raw)
             return None
 
-        hours = int(match.group("hours") or 0)
-        minutes = int(match.group("minutes") or 0)
+        years = months = weeks = days = hours = minutes = seconds = 0
+        for m in re.finditer(r"(\d+)(y|mo|w|d|h|m|s)", t):
+            val = int(m.group(1))
+            unit = m.group(2)
+            if unit == "y":
+                years += val
+            elif unit == "mo":
+                months += val
+            elif unit == "w":
+                weeks += val
+            elif unit == "d":
+                days += val
+            elif unit == "h":
+                hours += val
+            elif unit == "m":
+                minutes += val
+            elif unit == "s":
+                seconds += val
 
-        if hours == 0 and minutes == 0:
-            log.warning("hours and minutes 0")
+        if years == months == weeks == days == hours == minutes == seconds == 0:
+            log.warning("All components zero: %s", s_raw)
             return None
 
-        td = timedelta(hours=hours, minutes=minutes)
-        log.debug("Successful parse of %s > %s", string, td)
-        return datetime.now(timezone.utc) + td
+        dt = cls._add_years_months(now, years=sign * years, months=sign * months)
+        td = timedelta(
+            weeks=sign * weeks, days=sign * days, hours=sign * hours, minutes=sign * minutes, seconds=sign * seconds
+        )
+
+        log.debug(
+            "Successful parse of %s > years=%d, months=%d, weeks=%d, td=%s, sign=%s",
+            s_raw,
+            years,
+            months,
+            weeks,
+            td,
+            "+" if sign > 0 else "-",
+        )
+        return dt + td
+
+    @staticmethod
+    def _add_years_months(dt: datetime, *, years: int = 0, months: int = 0) -> datetime:
+        """Add years/months with calendar rules; clamp day to end-of-month."""
+        if years == 0 and months == 0:
+            return dt
+        total_months = (dt.year * 12 + (dt.month - 1)) + years * 12 + months
+        new_year, new_month0 = divmod(total_months, 12)
+        new_month = new_month0 + 1
+        last_day = calendar.monthrange(new_year, new_month)[1]
+        new_day = min(dt.day, last_day)
+        return dt.replace(year=new_year, month=new_month, day=new_day)
 
     @staticmethod
     def format_rdelta(delta: relativedelta) -> str:
@@ -267,7 +357,7 @@ class Utilities:
         try:
             result = func()
         except Exception:
-            return False  # Or True, or re-raise, depending on how tolerant you want to be
+            return False
         return inspect.isawaitable(result)
 
 

@@ -1,6 +1,6 @@
-from enum import IntEnum
 import json
 import logging
+from enum import IntEnum
 from pathlib import Path
 from typing import NoReturn, overload
 
@@ -91,9 +91,10 @@ class Access_Control:
         return self._roles.get(int(user_id), Power_Level.guest)
 
     def can(self, user_id: int, required: Power_Level) -> bool:
-        if required == Power_Level.guest and not self._guests_enabled:
+        usr_lvl = self.level_of(user_id)
+        if not self._guests_enabled and usr_lvl == Power_Level.guest:
             return False
-        return self.level_of(user_id) >= required
+        return usr_lvl >= required
 
     @overload
     async def perm_check(self, user_id: int, required: Power_Level, *, silent: bool = False) -> NoReturn: ...
