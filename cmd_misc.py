@@ -1055,8 +1055,8 @@ class CMD_TimeFormat(
     output = lightbulb.string(
         "format",
         "Which format to use",
-        choices=[lightbulb.Choice(name, val) for name, val in formats.items()],
-        default="Short Date/Time",
+        choices=lightbulb.utils.to_choices(formats.keys()),
+        default="Short Date / Short Time",
     )
     rounding = lightbulb.string(
         "round",
@@ -1147,7 +1147,7 @@ class CMD_TimeFormat(
         tz = timezone.utc
 
         ts = utils.parse_time(self.time, tz=tz)
-        if not ts:
+        if ts is None:
             raise ValueError("Unknown time input")
 
         rounded = self._round_wallclock(ts, self.rounding)
