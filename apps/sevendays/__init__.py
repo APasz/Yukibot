@@ -1,26 +1,24 @@
 import ast
 import asyncio
-from datetime import datetime
 import logging
-from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
+from datetime import datetime
+from pathlib import Path
 
 import hikari
 
-from apps._settings import App_Settings, Setting, Setting_Label
-from config import Activity_Manager
+import config
 from _discord import App_Bound, DC_Bound, DC_Relay
 from _file import File_Utils
+from _security import Power_Level
 from apps._app import AM_Receiver, App
 from apps._config import App_Config, Mod_Config
 from apps._mod import Mod
-
+from apps._settings import App_Settings, Setting, Setting_Label
 from apps._tailer import Tailer
 from apps._telnet import TelnetClient
-
-import config
-
+from config import Activity_Manager
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +36,7 @@ class SevenDays_Settings(App_Settings):
         options = [
             Setting(str, Setting_Label.serv_name, "ServerName", []),
             Setting(str, Setting_Label.max_player, "ServerMaxPlayerCount", [], validator=str.isnumeric),
-            Setting(str, Setting_Label.password, "ServerPassword", [], power_level=2),
+            Setting(str, Setting_Label.password, "ServerPassword", [], power_level=Power_Level.sudo),
             Setting(str, Setting_Label.visibility, "ServerVisibility", [], choices={"Public": "2", "Private": "0"}),
             Setting(
                 str,
@@ -53,7 +51,7 @@ class SevenDays_Settings(App_Settings):
                     "Survivalist": "4",
                     "Insane": "5",
                 },
-                power_level=2,
+                power_level=Power_Level.sudo,
             ),
         ]
         super().__init__(pointer, options)
