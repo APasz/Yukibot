@@ -11,6 +11,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from pathlib import Path
 from time import time
 from typing import Any
@@ -30,6 +31,124 @@ from _utils import Utilities
 log = logging.getLogger(__name__)
 
 group_misc = lightbulb.Group("misc", "Misc comands")  # type: ignore
+
+class TZ_LOCS(StrEnum):
+    MELBOURNE = "Australia/Melbourne"
+    LONDON = "Europe/London"
+    ZURICH = "Europe/Zurich"
+    HELSINKI = "Europe/Helsinki"
+
+
+USER_TZ = {
+    375547210760454145: TZ_LOCS.MELBOURNE,
+    1286408555615883275: TZ_LOCS.LONDON,
+    365865021215080448: TZ_LOCS.ZURICH,
+    1238890673709781017: TZ_LOCS.HELSINKI,
+    966684377985732618: TZ_LOCS.LONDON,
+    1340971786942025781: TZ_LOCS.MELBOURNE,
+    792857784508219404: TZ_LOCS.MELBOURNE,
+    1449629470615928872: TZ_LOCS.MELBOURNE,
+}
+
+COMMON_OFFSET_LOCATIONS = {
+    "UTC-12:00": "Baker Island",
+    "UTC-11:00": "Pago Pago",
+    "UTC-10:00": "Honolulu",
+    "UTC-09:30": "Marquesas",
+    "UTC-09:00": "Anchorage",
+    "UTC-08:00": "Los Angeles",
+    "UTC-07:00": "Denver",
+    "UTC-06:00": "Chicago",
+    "UTC-05:00": "New York",
+    "UTC-04:00": "Halifax",
+    "UTC-03:30": "St Johns",
+    "UTC-03:00": "Buenos Aires",
+    "UTC-02:00": "South Georgia",
+    "UTC-01:00": "Azores",
+    "UTC+00:00": "UTC",
+    "UTC+01:00": "Berlin",
+    "UTC+02:00": "Cairo",
+    "UTC+03:00": "Riyadh",
+    "UTC+03:30": "Tehran",
+    "UTC+04:00": "Dubai",
+    "UTC+04:30": "Kabul",
+    "UTC+05:00": "Karachi",
+    "UTC+05:30": "New Delhi",
+    "UTC+05:45": "Kathmandu",
+    "UTC+06:00": "Dhaka",
+    "UTC+06:30": "Yangon",
+    "UTC+07:00": "Bangkok",
+    "UTC+08:00": "Singapore",
+    "UTC+08:45": "Eucla",
+    "UTC+09:00": "Tokyo",
+    "UTC+09:30": "Adelaide",
+    "UTC+10:00": "Sydney",
+    "UTC+10:30": "Lord Howe",
+    "UTC+11:00": "Noumea",
+    "UTC+12:00": "Auckland",
+    "UTC+12:45": "Chatham",
+    "UTC+13:00": "Apia",
+    "UTC+14:00": "Kiritimati",
+}
+
+
+def _user_tz_name(user_id: hikari.Snowflakeish) -> str | None:
+    tz_loc = USER_TZ.get(int(user_id))
+    return str(tz_loc) if tz_loc else None
+
+
+def _tz_offset_label(tz_name: str) -> str:
+    tz = Utilities.parse_timezone(tz_name)
+    if tz is None:
+        return "+00:00"
+
+    offset = datetime.now(tz).utcoffset() or timedelta()
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    minutes = abs(total_minutes)
+    hours, mins = divmod(minutes, 60)
+    return f"{sign}{hours:02d}:{mins:02d}"
+
+
+def _tz_location_label(tz_name: str) -> str:
+    if tz_name.startswith("UTC"):
+        return COMMON_OFFSET_LOCATIONS.get(tz_name, "")
+    return tz_name.rsplit("/", 1)[-1].replace("_", " ")
+
+
+def _format_tz_label(tz_name: str) -> str:
+    offset = _tz_offset_label(tz_name)
+    location = _tz_location_label(tz_name)
+    return f"{offset} {location}".strip()
+
+
+def _build_timezone_offsets() -> list[str]:
+    offsets: list[str] = ["UTC"]
+    for total_minutes in range(-(12 * 60), (14 * 60) + 1, 15):
+        sign = "+" if total_minutes >= 0 else "-"
+        minutes = abs(total_minutes)
+        hours, mins = divmod(minutes, 60)
+        offsets.append(f"UTC{sign}{hours:02d}:{mins:02d}")
+    return offsets
+
+
+TIMEZONE_OFFSETS = _build_timezone_offsets()
+
+
+async def ac_timezones(ctx: lightbulb.AutocompleteContext):
+    choices: dict[str, object] = {}
+    user_tz = _user_tz_name(ctx.interaction.user.id)
+    special = sorted({str(tz_loc) for tz_loc in USER_TZ.values()})
+
+    if user_tz and user_tz in special:
+        special = [user_tz] + [tz_name for tz_name in special if tz_name != user_tz]
+
+    for tz_name in special:
+        choices[_format_tz_label(tz_name)] = tz_name
+    for offset in TIMEZONE_OFFSETS:
+        choices[_format_tz_label(offset)] = offset
+
+    await Distils.ac_focused_mutate(ctx, choices, lambda k, v: (k, str(v)))
 
 
 @group_misc.register
@@ -1048,15 +1167,21 @@ class CMD_TimeFormat(
 
     time = lightbulb.string(
         "time",
-        "2h, 3h45m, 1y4m, 2y3mo5d9m, 1w2d, 2:30 | 1:02:03, 2:03:12:00:00 | Epoch seconds. Supports + - , _",
+        "Relative, epoch, ISO, DMY, or zone time+date (e.g. 2h, 07/02/26 01:00)",
         min_length=1,
-        max_length=32,  # give room for '2:03:12:00:00' etc.
+        max_length=96,
+    )
+    zone = lightbulb.string(
+        "timezone",
+        "Timezone for inputs without tz. Supports UTC offsets or IANA names (e.g. Europe/London)",
+        autocomplete=ac_timezones,  # type: ignore
+        default=None,
     )
     output = lightbulb.string(
         "format",
         "Which format to use",
-        choices=lightbulb.utils.to_choices(formats.keys()),
-        default="Short Date / Short Time",
+        choices=[lightbulb.Choice(name, val) for name, val in formats.items()],
+        default=formats["Short Date / Short Time"],
     )
     rounding = lightbulb.string(
         "round",
@@ -1136,15 +1261,18 @@ class CMD_TimeFormat(
     async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, utils: Utilities):
         await acl.perm_check(ctx.user.id, acl.LvL.guest)
         log.info(
-            "Misc.TimeFormat; time=%s round=%s fmt=%s user=%s",
+            "Misc.TimeFormat; time=%s tz=%s round=%s fmt=%s user=%s",
             self.time,
+            self.zone,
             self.rounding,
             self.output,
             ctx.user.display_name,
         )
 
-        # Use the same tz you wired into parse_time; swap tz if you track per-user prefs.
-        tz = timezone.utc
+        zone_raw = self.zone or _user_tz_name(ctx.user.id) or "UTC"
+        tz = utils.parse_timezone(zone_raw)
+        if tz is None:
+            raise ValueError(f"Unknown timezone: {zone_raw}")
 
         ts = utils.parse_time(self.time, tz=tz)
         if ts is None:
@@ -1153,7 +1281,7 @@ class CMD_TimeFormat(
         rounded = self._round_wallclock(ts, self.rounding)
         rounded_utc = rounded.astimezone(timezone.utc)
         epoch = int(rounded_utc.timestamp())
-        txt = self.formats[self.output].format(epoch)
+        txt = self.output.format(epoch)
         await ctx.respond(txt)
 
 

@@ -4,9 +4,10 @@ import logging
 import math
 import re
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, overload
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from dateutil.relativedelta import relativedelta
 
@@ -59,6 +60,27 @@ class Utilities:
     "Collection of various functions that do little things"
 
     MAGNITUDES = "BKMGTPEZY"
+    _TZ_OFFSET_RE = re.compile(r"^(?:(?:UTC|GMT)\s*)?(?P<sign>[+-])(?P<h>\d{1,2})(?::?(?P<m>\d{2}))?$", re.IGNORECASE)
+    _CLOCK_RE = re.compile(
+        r"^(?P<h>\d{1,2}):(?P<m>\d{2})(?::(?P<s>\d{2}))?(?P<tz>Z|[+-]\d{1,2}:?\d{2})?$",
+        re.IGNORECASE,
+    )
+    _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    _DMY_DATE_RE = re.compile(r"^(?P<d>\d{1,2})/(?P<m>\d{1,2})/(?P<y>\d{2}|\d{4})$")
+    _DMY_DATETIME_RE = re.compile(
+        (
+            r"^(?P<d>\d{1,2})/(?P<m>\d{1,2})/(?P<y>\d{2}|\d{4})\s+"
+            r"(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<s>\d{2}))?(?P<tz>Z|[+-]\d{1,2}:?\d{2})?$"
+        ),
+        re.IGNORECASE,
+    )
+    _IANA_ZONES = available_timezones()
+    _TZ_ALIASES = {
+        "MELBOURNE": "Australia/Melbourne",
+        "LONDON": "Europe/London",
+        "ZURICH": "Europe/Zurich",
+        "HELSINKI": "Europe/Helsinki",
+    }
 
     @staticmethod
     def bytes_magnitude(byte_num: int, use_iec: bool, magnitude: str, precision: int = 3) -> float:
@@ -153,11 +175,16 @@ class Utilities:
         return f"{size}{magnitude}{power}{unit}"
 
     @classmethod
-    def parse_time(cls, string: str, tz: timezone = timezone.utc) -> datetime | None:
+    def parse_time(cls, string: str, tz: tzinfo = timezone.utc) -> datetime | None:
         """
-        Parse a timestamp or a human-friendly duration into a UTC datetime.
+        Parse a timestamp, absolute datetime, or a human-friendly duration into a tz-aware datetime.
 
         Accepted inputs (optional leading + or -):
+          0) Absolute datetime:
+               - ISO date/time: "2026-02-06T14:30:00+10:00", "2026-02-06 14:30", "2026-02-06T14:30Z"
+               - D/M/Y date/time: "07/02/26 01:00", "07/02/2026 01:00:30+11:00"
+               - "[zone] [time] [date]": "UTC+10:00 14:30 2026-02-06"
+               - "[time-with-tz] [date]": "14:30+10:00 2026-02-06"
           1) UNIX epoch seconds: "1641591242", "+1641591242", "-31536000"
              (commas/underscores allowed: "1,641,591,242", "1_641_591_242")
           2) Duration tokens (order-free, case-insensitive):
@@ -171,10 +198,15 @@ class Utilities:
             raise ValueError(f"string must be of type str not: {type(string)}")
 
         s_raw = string.strip()
+        if not s_raw:
+            return None
+
+        # Absolute forms are checked first to avoid clashing with relative syntax.
+        if absolute := cls.parse_absolute_time(s_raw, tz=tz):
+            return absolute
+
         # allow visual separators in any form
         string = s_raw.replace(",", "").replace("_", "")
-        if not string:
-            return None
 
         # peel an optional leading sign for relative handling
 
@@ -265,6 +297,191 @@ class Utilities:
             "+" if sign > 0 else "-",
         )
         return dt + td
+
+    @classmethod
+    def parse_timezone(cls, value: str) -> tzinfo | None:
+        if not isinstance(value, str):
+            return None
+
+        raw = value.strip()
+        if not raw:
+            return None
+        up = raw.upper()
+
+        if up in {"UTC", "Z", "GMT"}:
+            return timezone.utc
+
+        # Common city aliases / friendly labels.
+        if up in cls._TZ_ALIASES:
+            try:
+                return ZoneInfo(cls._TZ_ALIASES[up])
+            except ZoneInfoNotFoundError:
+                pass
+
+        m = cls._TZ_OFFSET_RE.fullmatch(up)
+        if m:
+            sign = -1 if m.group("sign") == "-" else 1
+            hours = int(m.group("h"))
+            minutes = int(m.group("m") or "0")
+
+            if minutes >= 60:
+                return None
+            if sign < 0 and (hours > 12 or (hours == 12 and minutes > 0)):
+                return None
+            if sign > 0 and (hours > 14 or (hours == 14 and minutes > 0)):
+                return None
+
+            return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+        # Try exact IANA zone.
+        try:
+            return ZoneInfo(raw)
+        except ZoneInfoNotFoundError:
+            pass
+
+        # If a city-like token was provided (e.g. "Melbourne"), match zone suffix.
+        city_token = re.sub(r"[\s\-]+", "_", raw).casefold()
+        if "/" not in city_token:
+            matches = sorted(z for z in cls._IANA_ZONES if z.rsplit("/", 1)[-1].casefold() == city_token)
+            if matches:
+                try:
+                    return ZoneInfo(matches[0])
+                except ZoneInfoNotFoundError:
+                    return None
+
+        return None
+
+    @classmethod
+    def _parse_clock_token(
+        cls,
+        token: str,
+        *,
+        default_tz: tzinfo,
+        require_tz: bool = False,
+    ) -> tuple[int, int, int, tzinfo] | None:
+        m = cls._CLOCK_RE.fullmatch(token.strip())
+        if not m:
+            return None
+
+        h = int(m.group("h"))
+        mi = int(m.group("m"))
+        sec = int(m.group("s") or "0")
+        if h >= 24 or mi >= 60 or sec >= 60:
+            return None
+
+        tz_token = m.group("tz")
+        if require_tz and not tz_token:
+            return None
+
+        if not tz_token:
+            tz_info = default_tz
+        elif tz_token.upper() == "Z":
+            tz_info = timezone.utc
+        else:
+            tz_info = cls.parse_timezone(tz_token)
+            if tz_info is None:
+                return None
+
+        return (h, mi, sec, tz_info)
+
+    @classmethod
+    def parse_absolute_time(cls, value: str, tz: tzinfo = timezone.utc) -> datetime | None:
+        s = value.strip()
+        if not s:
+            return None
+
+        # DD/MM/YY HH:MM[:SS][tz] or DD/MM/YYYY HH:MM[:SS][tz]
+        dmy_dt = cls._DMY_DATETIME_RE.fullmatch(s)
+        if dmy_dt:
+            day = int(dmy_dt.group("d"))
+            month = int(dmy_dt.group("m"))
+            year_raw = dmy_dt.group("y")
+            year = 2000 + int(year_raw) if len(year_raw) == 2 else int(year_raw)
+            hour = int(dmy_dt.group("h"))
+            minute = int(dmy_dt.group("mi"))
+            second = int(dmy_dt.group("s") or "0")
+
+            if hour >= 24 or minute >= 60 or second >= 60:
+                return None
+
+            tz_token = dmy_dt.group("tz")
+            if not tz_token:
+                tz_info = tz
+            elif tz_token.upper() == "Z":
+                tz_info = timezone.utc
+            else:
+                tz_info = cls.parse_timezone(tz_token)
+                if tz_info is None:
+                    return None
+
+            try:
+                return datetime(year, month, day, hour, minute, second, tzinfo=tz_info)
+            except ValueError:
+                return None
+
+        # DD/MM/YY or DD/MM/YYYY (defaults to midnight in supplied tz)
+        dmy = cls._DMY_DATE_RE.fullmatch(s)
+        if dmy:
+            day = int(dmy.group("d"))
+            month = int(dmy.group("m"))
+            year_raw = dmy.group("y")
+            year = 2000 + int(year_raw) if len(year_raw) == 2 else int(year_raw)
+            try:
+                return datetime(year, month, day, 0, 0, 0, tzinfo=tz)
+            except ValueError:
+                return None
+
+        parts = s.split()
+
+        # [zone] [time] [date]
+        if len(parts) == 3 and cls._ISO_DATE_RE.fullmatch(parts[2]):
+            zone = cls.parse_timezone(parts[0])
+            if zone:
+                clock = cls._parse_clock_token(parts[1], default_tz=zone)
+                if clock:
+                    h, mi, sec, tz_info = clock
+                    try:
+                        date_part = datetime.fromisoformat(parts[2])
+                    except ValueError:
+                        return None
+                    return datetime(
+                        date_part.year,
+                        date_part.month,
+                        date_part.day,
+                        h,
+                        mi,
+                        sec,
+                        tzinfo=tz_info,
+                    )
+
+        # [time-with-tz] [date]
+        if len(parts) == 2 and cls._ISO_DATE_RE.fullmatch(parts[1]):
+            clock = cls._parse_clock_token(parts[0], default_tz=tz, require_tz=True)
+            if clock:
+                h, mi, sec, tz_info = clock
+                try:
+                    date_part = datetime.fromisoformat(parts[1])
+                except ValueError:
+                    return None
+                return datetime(
+                    date_part.year,
+                    date_part.month,
+                    date_part.day,
+                    h,
+                    mi,
+                    sec,
+                    tzinfo=tz_info,
+                )
+
+        # ISO datetime/date. If tz missing, apply the supplied default tz.
+        iso = s
+        if iso.endswith(("Z", "z")):
+            iso = iso[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(iso)
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=tz)
 
     @staticmethod
     def _add_years_months(dt: datetime, *, years: int = 0, months: int = 0) -> datetime:
