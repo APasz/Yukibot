@@ -1110,6 +1110,22 @@ def _target_from_ctx(ctx: lightbulb.AutocompleteContext) -> hikari.Snowflake | N
     return _extract_user_id(getattr(option, "value", option))
 
 
+async def _ctx_defer(ctx: lightbulb.Context):
+    await ctx.defer(ephemeral=ctx.guild_id is not None)
+
+
+async def _ctx_respond(
+    ctx: lightbulb.Context,
+    content: hikari.UndefinedOr[object] = hikari.UNDEFINED,
+    *,
+    ephemeral: bool | None = None,
+    attachment: hikari.UndefinedOr[hikari.Resourceish] = hikari.UNDEFINED,
+):
+    if ephemeral is None:
+        ephemeral = ctx.guild_id is not None
+    await ctx.respond(content, ephemeral=ephemeral, attachment=attachment)
+
+
 def _rule_summary(rule: WatchRule) -> str:
     status_txt = ", ".join(sorted(rule.types)) if rule.types else "(none)"
     activity_txt = ", ".join(sorted(rule.activities)) if rule.activities else "(none)"
@@ -1215,17 +1231,17 @@ class CMD_OnlineAdd(
             changes.append(f"silent: {self.silent}")
 
         if not any([self.status_type, self.activity, self.game, self.silent is not None]):
-            await ctx.respond(f"Watching {target_name} with default filters")
+            await _ctx_respond(ctx, f"Watching {target_name} with default filters")
             return
 
         if not changes and not created:
-            await ctx.respond(f"No changes for {target_name}")
+            await _ctx_respond(ctx, f"No changes for {target_name}")
             return
         if not changes and created:
-            await ctx.respond(f"Watching {target_name} with default filters")
+            await _ctx_respond(ctx, f"Watching {target_name} with default filters")
             return
 
-        await ctx.respond(f"Updated watch for {target_name}\n" + "\n".join(f"- {line}" for line in changes))
+        await _ctx_respond(ctx, f"Updated watch for {target_name}\n" + "\n".join(f"- {line}" for line in changes))
 
 
 @group_online.register
@@ -1254,11 +1270,11 @@ class CMD_OnlineRemove(
 
         rule = tracker.get_rule(watcher_id, target_id)
         if not rule:
-            await ctx.respond(f"No watch config found for {target_name}")
+            await _ctx_respond(ctx, f"No watch config found for {target_name}")
             return
 
         if not any([self.status_type, self.activity, self.game]):
-            await ctx.respond("No filters passed. Use `/online unwatch` to clear all config for this user.")
+            await _ctx_respond(ctx, "No filters passed. Use `/online unwatch` to clear all config for this user.")
             return
 
         changes: list[str] = []
@@ -1272,10 +1288,10 @@ class CMD_OnlineRemove(
                 changes.append(result)
 
         if not changes:
-            await ctx.respond(f"No matching filters were set for {target_name}")
+            await _ctx_respond(ctx, f"No matching filters were set for {target_name}")
             return
 
-        await ctx.respond(f"Updated watch for {target_name}\n" + "\n".join(f"- {line}" for line in changes))
+        await _ctx_respond(ctx, f"Updated watch for {target_name}\n" + "\n".join(f"- {line}" for line in changes))
 
 
 @group_online.register
@@ -1322,7 +1338,7 @@ class CMD_OnlineUnwatch(
             else:
                 lines.append("You are no longer ignored by online tracking")
 
-        await ctx.respond("\n".join(lines))
+        await _ctx_respond(ctx, "\n".join(lines))
 
 
 @group_online.register
@@ -1347,7 +1363,7 @@ class CMD_OnlineDrink(
         action, rule = tracker.toggle_drink_game(ctx.user.id, self.game, self.mode)
         game_name = tracker._display_game(ctx.user.id, tracker._norm_game(self.game))
 
-        await ctx.respond(f"Drink reminder {action}: {game_name}\n{_drink_summary(tracker, ctx.user.id, rule)}")
+        await _ctx_respond(ctx, f"Drink reminder {action}: {game_name}\n{_drink_summary(tracker, ctx.user.id, rule)}")
 
 
 @group_online.register
@@ -1372,7 +1388,7 @@ class CMD_OnlineList(
         if self.file:
             if self.user:
                 raise ValueError("`user` can't be used with `file` import")
-            await ctx.defer()
+            await _ctx_defer(ctx)
             path = await File_Utils.download_temp(self.file)
             try:
                 payload = json.loads(path.read_text(config.STR_ENCODE))
@@ -1381,7 +1397,8 @@ class CMD_OnlineList(
             if not isinstance(payload, dict):
                 raise ValueError("Invalid JSON file: top-level object expected")
             result = tracker.apply_user_config(watcher_id, payload)
-            await ctx.respond(
+            await _ctx_respond(
+                ctx,
                 "Online config updated from file\n"
                 f"- watches: {result['watches']}\n"
                 f"- drink games: {result['drink_games']}\n"
@@ -1406,7 +1423,7 @@ class CMD_OnlineList(
             filename = "online_config.json"
             msg = "Online config export. Edit and upload with `/online list file:<attachment>` to apply."
         payload = json.dumps(exported, indent=4, sort_keys=False).encode(config.STR_ENCODE)
-        await ctx.respond(msg, attachment=hikari.Bytes(payload, filename))
+        await _ctx_respond(ctx, msg, attachment=hikari.Bytes(payload, filename))
 
 
 # AiviA APasz
