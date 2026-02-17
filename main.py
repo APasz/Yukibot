@@ -9,7 +9,6 @@ from pathlib import Path
 
 import hikari
 import lightbulb
-import uvloop
 
 import _sys
 import config
@@ -28,12 +27,17 @@ from cmd_saves import group_saves  # noqa: F401
 from cmd_settings import group_settings
 from cmd_update import group_update
 from config import Activity_Provider, Name_Cache
+from online import Online_Tracker, group_online
 
 log = logging.getLogger("system")
 
-
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-
+if os.name != "nt":
+    try:
+        import uvloop
+    except ImportError:
+        log.info("uvloop not available; using default asyncio loop")
+    else:
+        uvloop.install()
 
 activities: list[type[Activity_Provider]] = [
     Provider_RAM,
@@ -54,6 +58,7 @@ def main():
     )
     app_manager = App_Manager()
     name_cache = Name_Cache()
+    online_tracker = Online_Tracker()
 
     if deg := config.env_opt("DISCORD_DEV_GUILD"):
         log.info(f"DEG|DEV: {deg}")
@@ -78,6 +83,7 @@ def main():
     registry.register_value(Utilities, utilities)
     registry.register_value(File_Utils, File_Utils())
     registry.register_value(Name_Cache, name_cache)
+    registry.register_value(Online_Tracker, online_tracker)
     registry.register_value(Stats_System, Stats_System())
     registry.register_value(File_Cleaner, File_Cleaner())
 
@@ -85,17 +91,10 @@ def main():
     client.register(group_alias)
     client.register(group_mod)
     client.register(group_misc)
+    client.register(group_online)
     # client.register(group_saves)
     client.register(group_settings)
     client.register(group_update)
-
-    # from _space_engineers import SpaceEngineers
-
-    # se_app = SpaceEngineers(bot, resolutator)
-    # SE not needed
-    from online import Online
-
-    Online(bot, client, resolutator, utilities)
 
     @client.error_handler
     async def error_handler(epf: lightbulb.exceptions.ExecutionPipelineFailedException, ctx: lightbulb.Context) -> bool:
@@ -184,12 +183,17 @@ def main():
                 td = timedelta(seconds=1)
             cleaner.clear(set(folder.iterdir()), td)
 
+    @client.task(lightbulb.uniformtrigger(minutes=5, wait_first=False), max_failures=100)
+    async def task_online_drink_reminders(tracker: Online_Tracker):
+        await tracker.send_drink_reminders(bot)
+
     auto_app = None  # noqa: F841
 
     @bot.listen(hikari.StartedEvent)
     async def on_started(event: hikari.StartedEvent):
         log.info("Started")
         # await client.sync_application_commands()
+        online_tracker.set_ready_delay(8)
 
         global auto_app
         auto_app = None
@@ -280,6 +284,10 @@ def main():
             name_cache.set_names(event.member or event.author)  # type: ignore
         else:
             name_cache.set_names(event.author)
+
+    @bot.listen(hikari.PresenceUpdateEvent)
+    async def _on_presence_update(event: hikari.PresenceUpdateEvent):
+        await online_tracker.on_presence_update(event, bot)
 
     @bot.listen(hikari.MessageCreateEvent)
     async def _failsafe_restart(event: hikari.MessageCreateEvent | hikari.GuildMessageCreateEvent):

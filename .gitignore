@@ -17,7 +17,6 @@ opt/
 _bridge2.py
 .gitignore
 _ts_bridge.py
-online.json
-online.py
 se_ticks
 wagons.json
+online_watch.json
