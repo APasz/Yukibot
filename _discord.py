@@ -1,28 +1,26 @@
 from __future__ import annotations
+
 import asyncio
+import logging
+import re
 from collections import deque
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from enum import Enum
-import logging
-from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
-import re
+from typing import TYPE_CHECKING, Protocol
 
 import aiohttp
+import emoji
 import hikari
 import lightbulb
-
 from TenorGrabber import tenorgrabber
-
-from _resolator import Resolutator
 
 import config
 from _file import File_Utils
+from _resolator import Resolutator
 from _utils import Utilities
 from config import Name_Cache, Singleton
-
-from typing import Protocol, TYPE_CHECKING
-import emoji
 
 if TYPE_CHECKING:
     from apps._app import App
@@ -267,7 +265,7 @@ class Message:
 
     @property
     def content_demojised(self) -> str:
-        return emoji.demojize(self.content)
+        return emoji.demojise(self.content)
 
     async def find_urls(self):
         if self.is_generic:

@@ -1,11 +1,11 @@
 import asyncio
-from collections.abc import Awaitable, Callable
 import inspect
-from io import TextIOWrapper
 import logging
-from pathlib import Path
-from typing import IO, TextIO, BinaryIO
 from asyncio import StreamReader
+from collections.abc import Awaitable, Callable
+from io import TextIOWrapper
+from pathlib import Path
+from typing import IO, BinaryIO, TextIO
 
 import config
 
@@ -47,9 +47,9 @@ class Tailer:
         pointer: Path | StreamReader | TextIO | BinaryIO | IO,
         output: Path | None = None,
     ):
-        if getattr(self, "_initialized", False):
+        if getattr(self, "_initialised", False):
             return
-        self._initialized = True
+        self._initialised = True
 
         if not callable(app_alive):
             raise TypeError("Tailer.app_alive must be a callable that returns a bool | Awaitable[bool] | Event")

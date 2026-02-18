@@ -1,8 +1,8 @@
-from abc import abstractmethod
 import asyncio
 import hashlib
 import json
 import logging
+from abc import abstractmethod
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -189,7 +189,7 @@ class Mod_Manager:
                     self._lookup[trans.lower()] = base
                     self._lookup[trans.upper()] = base
                     self._lookup[trans.title()] = base
-                    self._lookup[trans.capitalize()] = base
+                    self._lookup[trans.capitalise()] = base
                     self._lookup[trans.casefold()] = base
                     self._lookup[trans.swapcase()] = base
 

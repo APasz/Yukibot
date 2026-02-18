@@ -249,7 +249,8 @@ def main():
         log.info("Ending")
         print("Ending")
         await app_manager.end()
-        if not config.STARTED_CHANNEL:
+        is_silent_restart = config.IS_RESTARTING and Path("silent_restart").exists()
+        if not config.STARTED_CHANNEL or is_silent_restart:
             return
         rd = utilities.create_rdelta(start_time, datetime.now())
         txt = f"Shutting Down; uptime: {utilities.format_rdelta(rd)}"

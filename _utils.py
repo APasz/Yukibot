@@ -163,7 +163,7 @@ class Utilities:
         elif not isinstance(magnitude, str):
             raise ValueError(f"Magnitude must be a str, got {type(magnitude)}")
         elif magnitude.upper() not in Utilities.MAGNITUDES:
-            raise ValueError(f"Unrecognized magnitude: {magnitude}")
+            raise ValueError(f"Unrecognised magnitude: {magnitude}")
 
         size = Utilities.bytes_magnitude(byte_num, use_iec, magnitude, precision)
         if precision == 0:
@@ -253,7 +253,7 @@ class Utilities:
             log.debug("Successful parse of %s > %s", s_raw, td)
             return now + td
 
-        # 3) Tokenized durations with units (y, mo, w, d, h, m, s)
+        # 3) Tokenised durations with units (y, mo, w, d, h, m, s)
         t = re.sub(r"\s+", "", string.lower())
         if not re.fullmatch(r"(?:(?:\d+)(?:y|mo|w|d|h|m|s))+", t):
             log.warning("No matches were found: %s", s_raw)

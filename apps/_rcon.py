@@ -1,12 +1,13 @@
 import asyncio
-from collections.abc import Callable
 import logging
 import traceback
+from collections.abc import Callable
 from typing import overload
-from factorio_rcon import AsyncRCONClient, RCONConnectError, RCONSendError
-from config import Name_Cache
-import config
 
+from factorio_rcon import AsyncRCONClient, RCONConnectError, RCONSendError
+
+import config
+from config import Name_Cache
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +40,9 @@ class RconClient:
         host: str = "localhost",
         max_attempts: int = 30,
     ):
-        if getattr(self, "_initialized", False):
+        if getattr(self, "_initialised", False):
             return
-        self._initialized = True
+        self._initialised = True
         self.app_alive = app_alive
 
         self._names = Name_Cache()

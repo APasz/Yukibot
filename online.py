@@ -37,7 +37,7 @@ STATUS_TYPES = (
 )
 STATUS_TYPES_SET = set(STATUS_TYPES)
 
-ACTIVITY_TYPES = ("games", "music", "streaming", "custom", "other")
+ACTIVITY_TYPES = ("games", "music", "streaming", "other")
 ACTIVITY_TYPES_SET = set(ACTIVITY_TYPES)
 ONLINE_STATUSES = {"online", "idle", "dnd"}
 DRINK_MODES = {"include", "exclude"}
@@ -108,9 +108,9 @@ UNKNOWN_PLATFORM_EMOJI = "❔"
 # Activity/game names to ignore globally (case-insensitive exact match).
 IGNORED_ACTIVITY_NAMES = {
     "wordle",
+    "vroid studio",
 }
 
-# Default Discord user IDs to ignore globally.
 IGNORED_USER_IDS: set[hikari.Snowflake] = set()
 
 
@@ -173,7 +173,7 @@ class WatchRule(BaseModel):
         return data
 
     @classmethod
-    def from_json(cls, raw: dict[str, object]) -> "WatchRule":
+    def from_json(cls, raw: dict[str, object]) -> WatchRule:
         return cls.model_validate(raw if isinstance(raw, dict) else {})
 
 
@@ -230,6 +230,7 @@ class PresenceSnapshot:
     platforms: dict[str, str]
     activities: dict[tuple[str, str], str]
     game_starts: dict[str, datetime | None]
+    ignored_activities: set[str]
 
 
 class Online_Tracker(metaclass=config.Singleton):
@@ -245,6 +246,7 @@ class Online_Tracker(metaclass=config.Singleton):
         self._last_drink_ping: dict[hikari.Snowflake, datetime] = {}
         self._next_drink_ping_at: dict[hikari.Snowflake, datetime] = {}
         self._game_sessions: dict[hikari.Snowflake, dict[str, datetime]] = {}
+        self._suppressed_game_stops: dict[hikari.Snowflake, set[str]] = {}
         self._snapshots: dict[hikari.Snowflake, PresenceSnapshot] = {}
         self._dm_channels: dict[hikari.Snowflake, hikari.Snowflake] = {}
         self._dm_backoff_until: dict[hikari.Snowflake, datetime] = {}
@@ -839,13 +841,13 @@ class Online_Tracker(metaclass=config.Singleton):
             return "music"
         if "streaming" in name:
             return "streaming"
-        if "custom" in name:
-            return "custom"
         return "other"
 
     def _snapshot_from_presence(self, presence: hikari.MemberPresence | None) -> PresenceSnapshot:
         if not presence:
-            return PresenceSnapshot(status="offline", platforms={}, activities={}, game_starts={})
+            return PresenceSnapshot(
+                status="offline", platforms={}, activities={}, game_starts={}, ignored_activities=set()
+            )
 
         status = self._status_name(getattr(presence, "visible_status", None) or getattr(presence, "status", None))
 
@@ -862,6 +864,7 @@ class Online_Tracker(metaclass=config.Singleton):
 
         activities: dict[tuple[str, str], str] = {}
         game_starts: dict[str, datetime | None] = {}
+        ignored_activities: set[str] = set()
         for activity in list(getattr(presence, "activities", []) or []):
             raw_name = (
                 getattr(activity, "name", None)
@@ -873,13 +876,20 @@ class Online_Tracker(metaclass=config.Singleton):
             activity_name = raw_name.strip()
             kind = self._activity_kind(activity)
             if self._is_ignored_activity(kind, activity_name):
+                ignored_activities.add(activity_name.casefold())
                 continue
             key = activity_name.casefold()
             activities[(kind, key)] = activity_name
             if kind == "games":
                 game_starts[key] = self._activity_start_at(activity)
 
-        return PresenceSnapshot(status=status, platforms=platforms, activities=activities, game_starts=game_starts)
+        return PresenceSnapshot(
+            status=status,
+            platforms=platforms,
+            activities=activities,
+            game_starts=game_starts,
+            ignored_activities=ignored_activities,
+        )
 
     def _record_seen_games(self, user_id: hikari.Snowflake, snapshot: PresenceSnapshot):
         changed = False
@@ -925,6 +935,54 @@ class Online_Tracker(metaclass=config.Singleton):
         )
 
         return status_changes, activity_changes
+
+    def _stabilise_activity_changes(
+        self,
+        user_id: hikari.Snowflake,
+        new_snapshot: PresenceSnapshot,
+        changes: list[ActivityChange],
+    ) -> list[ActivityChange]:
+        if not changes and not self._suppressed_game_stops.get(user_id):
+            return changes
+
+        suppressed = self._suppressed_game_stops.setdefault(user_id, set())
+        visible_games = {key for (kind, key) in new_snapshot.activities.keys() if kind == "games"}
+        stable: list[ActivityChange] = []
+
+        for change in changes:
+            if change.kind != "games":
+                stable.append(change)
+                continue
+
+            game_key = change.name.casefold()
+            if change.action == "started":
+                if game_key in suppressed:
+                    suppressed.discard(game_key)
+                    continue
+                stable.append(change)
+                continue
+
+            if change.action != "stopped":
+                stable.append(change)
+                continue
+
+            if new_snapshot.status != "offline" and new_snapshot.ignored_activities:
+                suppressed.add(game_key)
+                continue
+
+            suppressed.discard(game_key)
+            stable.append(change)
+
+        if suppressed and (new_snapshot.status == "offline" or not new_snapshot.ignored_activities):
+            to_confirm = sorted(suppressed - visible_games)
+            for game_key in to_confirm:
+                stable.append(ActivityChange("stopped", "games", self._display_game(user_id, game_key)))
+                suppressed.discard(game_key)
+
+        if not suppressed:
+            self._suppressed_game_stops.pop(user_id, None)
+
+        return stable
 
     def _watchers_for_target(self, target_id: hikari.Snowflake) -> list[tuple[hikari.Snowflake, WatchRule]]:
         if self.is_ignored_user(target_id):
@@ -997,7 +1055,6 @@ class Online_Tracker(metaclass=config.Singleton):
         now = datetime.now(timezone.utc)
         payload = "\n".join(lines)
 
-        # Guard against duplicate event fanout (e.g. same presence update across multiple guild contexts)
         stamp_key = (user_id, f"{int(silent)}:{payload}")
         previous = self._recent_notifications.get(stamp_key)
         if previous and (now - previous) < timedelta(seconds=3):
@@ -1022,7 +1079,6 @@ class Online_Tracker(metaclass=config.Singleton):
             )
             self._recent_notifications[stamp_key] = now
         except hikari.NotFoundError:
-            # stale DM cache, refresh once
             self._dm_channels.pop(user_id, None)
             channel_id = await self._resolve_dm_channel(bot, user_id)
             await bot.rest.create_message(
@@ -1065,6 +1121,7 @@ class Online_Tracker(metaclass=config.Singleton):
             return
 
         status_changes, activity_changes = self._diff(old_snapshot, new_snapshot)
+        activity_changes = self._stabilise_activity_changes(user_id, new_snapshot, activity_changes)
         if not status_changes and not activity_changes:
             return
 

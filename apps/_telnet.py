@@ -1,9 +1,8 @@
-from collections.abc import Callable, Sequence
-import logging
 import asyncio
+import logging
+from collections.abc import Callable, Sequence
 
 import config
-
 
 log = logging.getLogger(__name__)
 
@@ -29,9 +28,9 @@ class TelnetClient:
         prefix: str = "",
         suffix: str = "\n",
     ):
-        if getattr(self, "_initialized", False):
+        if getattr(self, "_initialised", False):
             return
-        self._initialized = True
+        self._initialised = True
 
         self.app_alive = app_alive
         self._host = host

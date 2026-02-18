@@ -9,9 +9,8 @@ from typing import Any
 import hikari
 import lightbulb
 
-
-from _discord import DC_Relay
 import config
+from _discord import DC_Relay
 from apps._app import App, App_Config
 from config import Activity_Manager, Activity_Provider
 
@@ -101,7 +100,7 @@ class App_Manager(metaclass=config.Singleton):
                 self._lookup[trans.lower()] = base
                 self._lookup[trans.upper()] = base
                 self._lookup[trans.title()] = base
-                self._lookup[trans.capitalize()] = base
+                self._lookup[trans.capitalise()] = base
                 self._lookup[trans.casefold()] = base
                 self._lookup[trans.swapcase()] = base
 

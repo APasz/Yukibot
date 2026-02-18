@@ -1,21 +1,21 @@
 import asyncio
 import logging
-from pathlib import Path
 import re
-import tomllib
 import zipfile
-import tomli_w
+from pathlib import Path
 
 import hikari
+import tomli_w
+import tomllib
 
-from _discord import AM_Receiver, App_Bound, DC_Bound, DC_Relay
-from apps._settings import App_Settings, Setting, Setting_Label
-from apps._tailer import Tailer
-from config import Activity_Manager
 import config
+from _discord import AM_Receiver, App_Bound, DC_Bound, DC_Relay
 from apps._app import App
 from apps._config import App_Config, Mod_Config
 from apps._mod import Mod
+from apps._settings import App_Settings, Setting, Setting_Label
+from apps._tailer import Tailer
+from config import Activity_Manager
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class BeamMP_Settings(App_Settings):
             "levels/italy/info.json",
         }
 
-        def normalize_member(p: str) -> str | None:
+        def normalise_member(p: str) -> str | None:
             p = p.lstrip("/").lower()
             if not (p.startswith("levels/") and p.endswith("/info.json")):
                 return None
@@ -63,7 +63,7 @@ class BeamMP_Settings(App_Settings):
                 try:
                     with zipfile.ZipFile(file, "r") as zf:
                         for name in zf.namelist():
-                            norm = normalize_member(name)
+                            norm = normalise_member(name)
                             if norm:
                                 found.add(norm)
                 except zipfile.BadZipFile:
