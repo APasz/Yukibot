@@ -265,7 +265,7 @@ class Message:
 
     @property
     def content_demojised(self) -> str:
-        return emoji.demojise(self.content)
+        return emoji.demojize(self.content)
 
     async def find_urls(self):
         if self.is_generic:

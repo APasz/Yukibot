@@ -109,6 +109,7 @@ async def restart(
 
     if silent:
         Path("silent_restart").touch()
+        await ctx.respond(f"Restarting {restart_type}", flags=hikari.MessageFlag.EPHEMERAL)
     else:
         await bot.update_presence(
             activity=hikari.Activity(name=f"!!! Restarting {restart_type}", type=hikari.ActivityType.CUSTOM),

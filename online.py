@@ -380,7 +380,8 @@ class Online_Tracker(metaclass=config.Singleton):
 
     @classmethod
     def _is_ignored_activity(cls, kind: str, name: str) -> bool:
-        del kind  # reserved for future per-kind ignore tuning
+        if kind != "games" and name.strip().casefold() == "custom status":
+            return True
         return cls._is_ignored_activity_name(name)
 
     def is_ignored_user(self, user_id: hikari.Snowflake) -> bool:

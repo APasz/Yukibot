@@ -189,7 +189,7 @@ class Mod_Manager:
                     self._lookup[trans.lower()] = base
                     self._lookup[trans.upper()] = base
                     self._lookup[trans.title()] = base
-                    self._lookup[trans.capitalise()] = base
+                    self._lookup[trans.capitalize()] = base
                     self._lookup[trans.casefold()] = base
                     self._lookup[trans.swapcase()] = base
 
