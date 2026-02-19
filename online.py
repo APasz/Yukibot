@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -40,6 +41,13 @@ STATUS_TYPES_SET = set(STATUS_TYPES)
 ACTIVITY_TYPES = ("games", "music", "streaming", "other")
 ACTIVITY_TYPES_SET = set(ACTIVITY_TYPES)
 ONLINE_STATUSES = {"online", "idle", "dnd"}
+NICKNAME_MODES = ("online", "offline", "idle", "dnd")
+NICKNAME_MODES_SET = set(NICKNAME_MODES)
+NICKNAME_PLATFORMS = ("all", "desktop", "mobile", "web")
+NICKNAME_PLATFORM_SET = set(NICKNAME_PLATFORMS)
+NICKNAME_PLATFORM_PRIORITY = ("mobile", "desktop", "web")
+NICKNAME_CHANGE_DELAY = timedelta(seconds=35)
+NICKNAME_RETRY_DELAY = timedelta(seconds=90)
 DRINK_MODES = {"include", "exclude"}
 DRINK_REMINDER_INTERVAL = timedelta(minutes=45)
 DRINK_REMINDER_JITTER_MAX = timedelta(minutes=5)
@@ -62,7 +70,7 @@ DRINK_REMINDERS = (
     "Be plant",
     "Go be good and water yourself",
     "Sweetheart drink something :3",
-    "Hydration check: drink some water.",
+    "Hydration check: drink some water",
     "You've been playing for {duration} it's water break time. Have a sip",
     "Quick reminder; {duration}: stay hydrated",
     "Hydrate up {duration}. You can spare 10 seconds",
@@ -125,6 +133,8 @@ class WatchRule(BaseModel):
     "casefold game names"
     silent: bool = True
     "Whether notifications should suppress push/ping delivery"
+    silent_rules: list[dict[str, object]] = Field(default_factory=list)
+    "Per-notification silent overrides; each item may include status_type, activity, or game"
 
     @field_validator("types", mode="before")
     @classmethod
@@ -165,11 +175,67 @@ class WatchRule(BaseModel):
             return {str(v).strip().casefold() for v in value if str(v).strip()}
         return set()
 
+    @field_validator("silent_rules", mode="before")
+    @classmethod
+    def _validate_silent_rules(cls, value: object):
+        if value is None:
+            return []
+        if not isinstance(value, (list, tuple, set)):
+            return []
+
+        merged: dict[tuple[str | None, str | None, str | None], bool] = {}
+        for entry in value:
+            if not isinstance(entry, dict):
+                continue
+
+            status_raw = entry.get("status_type")
+            activity_raw = entry.get("activity")
+            game_raw = entry.get("game")
+            silent_raw = entry.get("silent", True)
+
+            status_type = str(status_raw).strip().lower() if status_raw is not None else ""
+            activity = str(activity_raw).strip().lower() if activity_raw is not None else ""
+            game = str(game_raw).strip().casefold() if game_raw is not None else ""
+
+            if status_type and status_type not in STATUS_TYPES_SET:
+                continue
+            if activity and activity not in ACTIVITY_TYPES_SET:
+                continue
+            if activity and game:
+                continue
+
+            status = status_type or None
+            act = activity or None
+            gm = game or None
+            if status is None and act is None and gm is None:
+                continue
+            merged[(status, act, gm)] = bool(silent_raw)
+
+        normalised: list[dict[str, object]] = []
+        for (status, act, gm), is_silent in merged.items():
+            row: dict[str, object] = {"silent": is_silent}
+            if status is not None:
+                row["status_type"] = status
+            if act is not None:
+                row["activity"] = act
+            if gm is not None:
+                row["game"] = gm
+            normalised.append(row)
+        return normalised
+
     def to_json(self) -> dict[str, object]:
         data = self.model_dump(mode="json")
         data["types"] = sorted(self.types)
         data["activities"] = sorted(self.activities)
         data["games"] = sorted(self.games)
+        data["silent_rules"] = sorted(
+            self.silent_rules,
+            key=lambda entry: (
+                str(entry.get("status_type", "")),
+                str(entry.get("activity", "")),
+                str(entry.get("game", "")),
+            ),
+        )
         return data
 
     @classmethod
@@ -243,6 +309,12 @@ class Online_Tracker(metaclass=config.Singleton):
         self._seen_games_cf: dict[str, str] = {}
         self.seen_games_by_user: dict[hikari.Snowflake, dict[str, str]] = {}
         self.drink_rules: dict[hikari.Snowflake, DrinkRule] = {}
+        self.nick_rules: dict[hikari.Snowflake, dict[str, dict[str, str]]] = {}
+        self._nick_managed_users: set[hikari.Snowflake] = set()
+        self._nick_pending: dict[hikari.Snowflake, str | None] = {}
+        self._nick_worker_tasks: dict[hikari.Snowflake, asyncio.Task[None]] = {}
+        self._nick_last_change: dict[hikari.Snowflake, datetime] = {}
+        self._nick_backoff_until: dict[hikari.Snowflake, datetime] = {}
         self._last_drink_ping: dict[hikari.Snowflake, datetime] = {}
         self._next_drink_ping_at: dict[hikari.Snowflake, datetime] = {}
         self._game_sessions: dict[hikari.Snowflake, dict[str, datetime]] = {}
@@ -274,6 +346,8 @@ class Online_Tracker(metaclass=config.Singleton):
             self._seen_games_cf = {}
             self.seen_games_by_user = {}
             self.drink_rules = {}
+            self.nick_rules = {}
+            self._nick_managed_users = set()
             self._dump()
             return
 
@@ -354,6 +428,32 @@ class Online_Tracker(metaclass=config.Singleton):
             loaded_drink[hikari.Snowflake(user_id)] = DrinkRule.from_json(entry)
         self.drink_rules = loaded_drink
 
+        nick_raw = raw.get("nicknames", {}) if isinstance(raw, dict) else {}
+        if not isinstance(nick_raw, dict):
+            nick_raw = {}
+        loaded_nick: dict[hikari.Snowflake, dict[str, dict[str, str]]] = {}
+        for user_id, mode_map in nick_raw.items():
+            if not str(user_id).isdigit() or not isinstance(mode_map, dict):
+                continue
+            uid = hikari.Snowflake(user_id)
+            parsed_modes: dict[str, dict[str, str]] = {}
+            for mode, raw_platforms in mode_map.items():
+                mode_key = str(mode).strip().lower()
+                if mode_key not in NICKNAME_MODES_SET or not isinstance(raw_platforms, dict):
+                    continue
+                parsed_platforms: dict[str, str] = {}
+                for platform, nick in raw_platforms.items():
+                    platform_key = str(platform).strip().lower()
+                    nick_text = str(nick).strip()
+                    if platform_key in NICKNAME_PLATFORM_SET and 0 < len(nick_text) <= 32:
+                        parsed_platforms[platform_key] = nick_text
+                if parsed_platforms:
+                    parsed_modes[mode_key] = parsed_platforms
+            if parsed_modes:
+                loaded_nick[uid] = parsed_modes
+        self.nick_rules = loaded_nick
+        self._nick_managed_users = set(loaded_nick.keys())
+
     def _dump(self):
         serial = {
             "watchers": {
@@ -367,6 +467,13 @@ class Online_Tracker(metaclass=config.Singleton):
                 for user_id, games in self.seen_games_by_user.items()
             },
             "drink": {str(user_id): rule.to_json() for user_id, rule in self.drink_rules.items()},
+            "nicknames": {
+                str(user_id): {
+                    mode: {platform: nick for platform, nick in sorted(platforms.items(), key=lambda kv: kv[0])}
+                    for mode, platforms in sorted(mode_map.items(), key=lambda kv: kv[0])
+                }
+                for user_id, mode_map in sorted(self.nick_rules.items(), key=lambda kv: int(kv[0]))
+            },
         }
         self.pointer.write_text(json.dumps(serial, sort_keys=True, indent=4), config.STR_ENCODE)
 
@@ -464,6 +571,180 @@ class Online_Tracker(metaclass=config.Singleton):
         self._dump()
         return True
 
+    @staticmethod
+    def _silent_selector_label(status_type: str | None, activity: str | None, game: str | None) -> str:
+        parts: list[str] = []
+        if status_type:
+            parts.append(f"type:{status_type}")
+        if activity:
+            parts.append(f"activity:{activity}")
+        if game:
+            parts.append(f"game:{game}")
+        return " + ".join(parts) if parts else "default"
+
+    @staticmethod
+    def _silent_rules_to_map(rule: WatchRule) -> dict[tuple[str | None, str | None, str | None], bool]:
+        mapped: dict[tuple[str | None, str | None, str | None], bool] = {}
+        for entry in rule.silent_rules:
+            if not isinstance(entry, dict):
+                continue
+            status_raw = entry.get("status_type")
+            activity_raw = entry.get("activity")
+            game_raw = entry.get("game")
+            silent_raw = entry.get("silent", True)
+            status_type = str(status_raw).strip().lower() if status_raw is not None else ""
+            activity = str(activity_raw).strip().lower() if activity_raw is not None else ""
+            game = str(game_raw).strip().casefold() if game_raw is not None else ""
+            if status_type and status_type not in STATUS_TYPES_SET:
+                continue
+            if activity and activity not in ACTIVITY_TYPES_SET:
+                continue
+            if activity and game:
+                continue
+            status = status_type or None
+            act = activity or None
+            gm = game or None
+            if status is None and act is None and gm is None:
+                continue
+            mapped[(status, act, gm)] = bool(silent_raw)
+        return mapped
+
+    @staticmethod
+    def _silent_rules_from_map(
+        mapped: dict[tuple[str | None, str | None, str | None], bool],
+    ) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for (status_type, activity, game), is_silent in sorted(
+            mapped.items(),
+            key=lambda item: (
+                str(item[0][0] or ""),
+                str(item[0][1] or ""),
+                str(item[0][2] or ""),
+            ),
+        ):
+            row: dict[str, object] = {"silent": is_silent}
+            if status_type:
+                row["status_type"] = status_type
+            if activity:
+                row["activity"] = activity
+            if game:
+                row["game"] = game
+            rows.append(row)
+        return rows
+
+    def set_rule_silent_filtered(
+        self,
+        watcher_id: hikari.Snowflake,
+        target_id: hikari.Snowflake,
+        *,
+        status_type: str | None = None,
+        activity: str | None = None,
+        game: str | None = None,
+        silent: bool,
+    ) -> list[str]:
+        rule, _ = self.ensure_rule(watcher_id, target_id)
+        selectors: list[tuple[str | None, str | None, str | None]] = []
+
+        status_norm: str | None = None
+        activity_norm: str | None = None
+        game_norm: str | None = None
+        if status_type:
+            status_norm = status_type.strip().lower()
+            if status_norm not in STATUS_TYPES_SET:
+                raise ValueError(f"Unknown type: {status_type}")
+        if activity:
+            activity_norm = activity.strip().lower()
+            if activity_norm not in ACTIVITY_TYPES_SET:
+                raise ValueError(f"Unknown activity: {activity}")
+        if game:
+            game_norm = self._norm_game(game)
+            if not game_norm:
+                raise ValueError("game can't be empty")
+            if self._is_ignored_activity_name(game_norm):
+                raise ValueError(f"Game is ignored: {game}")
+
+        if status_norm:
+            if game_norm:
+                selectors.append((status_norm, None, game_norm))
+            if activity_norm:
+                selectors.append((status_norm, activity_norm, None))
+            if not game_norm and not activity_norm:
+                selectors.append((status_norm, None, None))
+        else:
+            if game_norm:
+                selectors.append((None, None, game_norm))
+            if activity_norm:
+                selectors.append((None, activity_norm, None))
+
+        if not selectors:
+            return []
+
+        mapped = self._silent_rules_to_map(rule)
+        changes: list[str] = []
+        for selector in selectors:
+            if mapped.get(selector) == silent:
+                continue
+            mapped[selector] = silent
+            changes.append(f"silent rule {self._silent_selector_label(*selector)} -> {silent}")
+        if not changes:
+            return []
+
+        rule.silent_rules = self._silent_rules_from_map(mapped)
+        self._dump()
+        return changes
+
+    @staticmethod
+    def _resolve_silent_candidates(
+        overrides: dict[tuple[str | None, str | None, str | None], bool],
+        candidates: list[tuple[str | None, str | None, str | None]],
+    ) -> bool | None:
+        matched = [overrides[candidate] for candidate in candidates if candidate in overrides]
+        if not matched:
+            return None
+        # If same-specificity rules conflict, prefer non-silent.
+        return all(matched)
+
+    def resolve_notification_silent(
+        self,
+        rule: WatchRule,
+        *,
+        status_types: list[str] | None = None,
+        activity_kind: str | None = None,
+        game_name: str | None = None,
+    ) -> bool:
+        overrides = self._silent_rules_to_map(rule)
+        if not overrides:
+            return rule.silent
+
+        status_list = [s for s in (status_types or []) if s in STATUS_TYPES_SET]
+        game_key = game_name.casefold() if game_name else None
+        kind = activity_kind if activity_kind in ACTIVITY_TYPES_SET else None
+
+        level3: list[tuple[str | None, str | None, str | None]] = []
+        if status_list and game_key:
+            level3.extend((status, None, game_key) for status in status_list)
+        if status_list and kind:
+            level3.extend((status, kind, None) for status in status_list)
+        resolved = self._resolve_silent_candidates(overrides, level3)
+        if resolved is not None:
+            return resolved
+
+        level2 = [(status, None, None) for status in status_list]
+        resolved = self._resolve_silent_candidates(overrides, level2)  # pyright: ignore[reportArgumentType]
+        if resolved is not None:
+            return resolved
+
+        level1: list[tuple[str | None, str | None, str | None]] = []
+        if game_key:
+            level1.append((None, None, game_key))
+        if kind:
+            level1.append((None, kind, None))
+        resolved = self._resolve_silent_candidates(overrides, level1)
+        if resolved is not None:
+            return resolved
+
+        return rule.silent
+
     def export_user_config(
         self,
         watcher_id: hikari.Snowflake,
@@ -482,11 +763,20 @@ class Online_Tracker(metaclass=config.Singleton):
                     "games_mode": rule.games_mode,
                     "games": sorted([g for g in rule.games if not self._is_ignored_activity_name(g)]),
                     "silent": rule.silent,
+                    "silent_rules": rule.silent_rules,
                 }
             )
 
         drink = self.get_drink_rule(watcher_id) or DrinkRule()
         drink_games = sorted([g for g in drink.games if not self._is_ignored_activity_name(g)])
+        nick_entries = [
+            {
+                "nick": nick,
+                "mode": mode,
+                "platform": platform,
+            }
+            for mode, platform, nick in self.list_nickname_entries(watcher_id)
+        ]
 
         return {
             "description": "Edit and re-upload this file with /online list file:<attachment> to replace your config",
@@ -495,17 +785,25 @@ class Online_Tracker(metaclass=config.Singleton):
                 "activities": list(ACTIVITY_TYPES),
                 "games_mode": ["all", "include", "exclude"],
                 "silent": "true|false (default true: suppress push notifications)",
+                "silent_rules[]": {
+                    "status_type": "optional, one of types",
+                    "activity": "optional, one of activities",
+                    "game": "optional, case-insensitive game name",
+                    "silent": "true|false",
+                },
                 "drink.mode": ["include", "exclude"],
+                "nicknames.mode": list(NICKNAME_MODES),
+                "nicknames.platform": list(NICKNAME_PLATFORMS),
             },
             "ignored": {
                 "activity_or_game_names": sorted(IGNORED_ACTIVITY_NAMES),
                 "users": [str(uid) for uid in sorted(self.ignored_user_ids)],
             },
             "notes": [
-                "watches is per target user.",
+                "watches is per target user",
                 "Fields omitted in each watch entry fall back to defaults",
                 "If games_mode is all, games list is ignored",
-                "Uploading replaces your watch/drink config in one go",
+                "Uploading replaces your watch/drink/nickname config in one go",
             ],
             "user_editable": "Only values below this line are looked at by the bot",
             "watches": entries,
@@ -513,6 +811,7 @@ class Online_Tracker(metaclass=config.Singleton):
                 "mode": drink.mode,
                 "games": drink_games,
             },
+            "nicknames": nick_entries,
         }
 
     def apply_user_config(self, watcher_id: hikari.Snowflake, payload: dict[str, object] | Any) -> dict[str, int]:
@@ -522,6 +821,9 @@ class Online_Tracker(metaclass=config.Singleton):
         watches = payload.get("watches", [])
         if not isinstance(watches, list):
             raise ValueError("watches must be a list")
+        nicknames = payload.get("nicknames", [])
+        if not isinstance(nicknames, list):
+            raise ValueError("nicknames must be a list")
 
         replaced: dict[hikari.Snowflake, WatchRule] = {}
         skipped_ignored_users = 0
@@ -554,10 +856,31 @@ class Online_Tracker(metaclass=config.Singleton):
         else:
             self.drink_rules.pop(watcher_id, None)
 
+        replaced_nicks: dict[str, dict[str, str]] = {}
+        for entry in nicknames:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                nick = self._norm_nick_text(str(entry.get("nick", "")))
+                mode = self._norm_nick_mode(str(entry.get("mode", "")))
+                raw_platform = entry.get("platform") if "platform" in entry else None
+                platform = self._norm_nick_platform(str(raw_platform) if raw_platform is not None else None)
+                if mode == "offline" and platform != "all":
+                    continue
+            except ValueError:
+                continue
+            replaced_nicks.setdefault(mode, {})[platform] = nick
+
+        if replaced_nicks:
+            self.nick_rules[watcher_id] = replaced_nicks
+        else:
+            self.nick_rules.pop(watcher_id, None)
+
         self._dump()
         return {
             "watches": len(replaced),
             "drink_games": len(self.drink_rules.get(watcher_id, DrinkRule()).games),
+            "nicknames": sum(len(platforms) for platforms in self.nick_rules.get(watcher_id, {}).values()),
             "skipped_ignored_users": skipped_ignored_users,
         }
 
@@ -618,6 +941,340 @@ class Online_Tracker(metaclass=config.Singleton):
         if jitter_seconds <= 0:
             return self.drink_interval
         return timedelta(seconds=max(60, base_seconds + random.randint(-jitter_seconds, jitter_seconds)))
+
+    @staticmethod
+    def _norm_nick_mode(mode: str) -> str:
+        value = mode.strip().lower()
+        if value not in NICKNAME_MODES_SET:
+            raise ValueError(f"mode must be one of: {', '.join(NICKNAME_MODES)}")
+        return value
+
+    @staticmethod
+    def _norm_nick_platform(platform: str | None, *, allow_all: bool = True) -> str:
+        if not platform:
+            return "all"
+        value = platform.strip().lower()
+        valid = NICKNAME_PLATFORM_SET if allow_all else set(PLATFORMS)
+        if value not in valid:
+            allowed = ", ".join(NICKNAME_PLATFORMS if allow_all else PLATFORMS)
+            raise ValueError(f"platform must be one of: {allowed}")
+        return value
+
+    @staticmethod
+    def _norm_nick_text(nick: str) -> str:
+        value = nick.strip()
+        if not value:
+            raise ValueError("nick can't be empty")
+        if len(value) > 32:
+            raise ValueError("nick can't be longer than 32 characters")
+        return value
+
+    def set_nick_rule(self, user_id: hikari.Snowflake, nick: str, mode: str, platform: str | None = None) -> bool:
+        mode_key = self._norm_nick_mode(mode)
+        platform_key = self._norm_nick_platform(platform)
+        nick_text = self._norm_nick_text(nick)
+        if mode_key == "offline" and platform_key != "all":
+            raise ValueError("offline nick rules only support platform=all")
+
+        mode_map = self.nick_rules.setdefault(user_id, {})
+        platform_map = mode_map.setdefault(mode_key, {})
+        if platform_map.get(platform_key) == nick_text:
+            return False
+        platform_map[platform_key] = nick_text
+        self._dump()
+        return True
+
+    def clear_nick_rule(self, user_id: hikari.Snowflake, nick: str, mode: str, platform: str | None = None) -> bool:
+        mode_key = self._norm_nick_mode(mode)
+        platform_key = self._norm_nick_platform(platform)
+        if mode_key == "offline" and platform_key != "all":
+            raise ValueError("offline nick rules only support platform=all")
+
+        mode_map = self.nick_rules.get(user_id)
+        if not mode_map:
+            return False
+        platform_map = mode_map.get(mode_key)
+        if not platform_map:
+            return False
+
+        current = platform_map.get(platform_key)
+        if not current:
+            return False
+        if current.casefold() != self._norm_nick_text(nick).casefold():
+            return False
+
+        platform_map.pop(platform_key, None)
+        if not platform_map:
+            mode_map.pop(mode_key, None)
+        if not mode_map:
+            self.nick_rules.pop(user_id, None)
+        self._dump()
+        return True
+
+    def list_nickname_values(self, user_id: hikari.Snowflake) -> list[str]:
+        mode_map = self.nick_rules.get(user_id, {})
+        values = {nick for platform_map in mode_map.values() for nick in platform_map.values()}
+        return sorted(values, key=str.casefold)
+
+    def list_nickname_modes(self, user_id: hikari.Snowflake, nick: str | None = None) -> list[str]:
+        mode_map = self.nick_rules.get(user_id, {})
+        if not nick:
+            return [mode for mode in NICKNAME_MODES if mode in mode_map]
+        nick_cf = nick.strip().casefold()
+        return [
+            mode
+            for mode in NICKNAME_MODES
+            if mode in mode_map and any(value.casefold() == nick_cf for value in mode_map[mode].values())
+        ]
+
+    def list_nickname_platforms(
+        self,
+        user_id: hikari.Snowflake,
+        mode: str | None = None,
+        nick: str | None = None,
+    ) -> list[str]:
+        if not mode:
+            return []
+        mode_key = mode.strip().lower()
+        if mode_key not in NICKNAME_MODES_SET:
+            return []
+        platform_map = self.nick_rules.get(user_id, {}).get(mode_key, {})
+        if not nick:
+            return [platform for platform in NICKNAME_PLATFORMS if platform in platform_map]
+        nick_cf = nick.strip().casefold()
+        return [
+            platform
+            for platform in NICKNAME_PLATFORMS
+            if platform in platform_map and platform_map[platform].casefold() == nick_cf
+        ]
+
+    def list_nickname_entries(self, user_id: hikari.Snowflake) -> list[tuple[str, str, str]]:
+        entries: list[tuple[str, str, str]] = []
+        mode_map = self.nick_rules.get(user_id, {})
+        for mode in NICKNAME_MODES:
+            platform_map = mode_map.get(mode, {})
+            if not platform_map:
+                continue
+            for platform in NICKNAME_PLATFORMS:
+                if nick := platform_map.get(platform):
+                    entries.append((mode, platform, nick))
+        return entries
+
+    @staticmethod
+    def _fmt_nick_clear_label(nick: str, mode: str, platforms: list[str]) -> str:
+        return f"{nick} ({mode})[{','.join(platforms)}]"
+
+    def list_nickname_clear_options(self, user_id: hikari.Snowflake) -> list[tuple[str, str]]:
+        mode_map = self.nick_rules.get(user_id, {})
+        grouped: dict[tuple[str, str], tuple[str, list[str]]] = {}
+        for mode in NICKNAME_MODES:
+            platform_map = mode_map.get(mode, {})
+            if not platform_map:
+                continue
+            for platform in NICKNAME_PLATFORMS:
+                nick = platform_map.get(platform)
+                if not nick:
+                    continue
+                key = (mode, nick.casefold())
+                if key not in grouped:
+                    grouped[key] = (nick, [])
+                grouped[key][1].append(platform)
+
+        out: list[tuple[str, str]] = []
+        for mode in NICKNAME_MODES:
+            for (entry_mode, _), (nick, platforms) in sorted(
+                grouped.items(), key=lambda kv: (kv[1][0].casefold(), kv[0][0])
+            ):
+                if entry_mode != mode:
+                    continue
+                label = self._fmt_nick_clear_label(nick, entry_mode, platforms)
+                token = json.dumps(
+                    {"m": entry_mode, "n": nick, "p": platforms},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                out.append((label, token))
+        return out
+
+    @classmethod
+    def _parse_nick_clear_token(cls, token: str) -> tuple[str, str, list[str]]:
+        try:
+            raw = json.loads(token)
+        except Exception as xcp:
+            raise ValueError("invalid nick_clear option") from xcp
+        if not isinstance(raw, dict):
+            raise ValueError("invalid nick_clear option")
+
+        mode = cls._norm_nick_mode(str(raw.get("m", "")))
+        nick = cls._norm_nick_text(str(raw.get("n", "")))
+
+        platforms_raw = raw.get("p", [])
+        if not isinstance(platforms_raw, list):
+            raise ValueError("invalid nick_clear option")
+
+        platforms: list[str] = []
+        for platform in platforms_raw:
+            platform_key = cls._norm_nick_platform(str(platform))
+            if platform_key not in platforms:
+                platforms.append(platform_key)
+
+        if not platforms:
+            platforms = ["all"]
+        return mode, nick, platforms
+
+    def describe_nick_clear_token(self, token: str) -> str:
+        mode, nick, platforms = self._parse_nick_clear_token(token)
+        return self._fmt_nick_clear_label(nick, mode, platforms)
+
+    def clear_nick_by_token(self, user_id: hikari.Snowflake, token: str) -> int:
+        mode, nick, platforms = self._parse_nick_clear_token(token)
+        mode_map = self.nick_rules.get(user_id)
+        if not mode_map:
+            return 0
+        platform_map = mode_map.get(mode)
+        if not platform_map:
+            return 0
+
+        nick_cf = nick.casefold()
+        removed = 0
+        for platform in platforms:
+            current = platform_map.get(platform)
+            if current and current.casefold() == nick_cf:
+                platform_map.pop(platform, None)
+                removed += 1
+
+        if removed <= 0:
+            return 0
+
+        if not platform_map:
+            mode_map.pop(mode, None)
+        if not mode_map:
+            self.nick_rules.pop(user_id, None)
+        self._dump()
+        return removed
+
+    def _desired_nickname_for_snapshot(self, user_id: hikari.Snowflake, snapshot: PresenceSnapshot) -> str | None:
+        mode_map = self.nick_rules.get(user_id)
+        if not mode_map:
+            return None
+        mode = snapshot.status if snapshot.status in NICKNAME_MODES_SET else "offline"
+        platform_map = mode_map.get(mode, {})
+        if not platform_map:
+            return None
+
+        if mode != "offline":
+            for platform in NICKNAME_PLATFORM_PRIORITY:
+                if snapshot.platforms.get(platform) == mode and (nick := platform_map.get(platform)):
+                    return nick
+        return platform_map.get("all")
+
+    def _queue_nickname_update(self, user_id: hikari.Snowflake, desired_nick: str | None, bot: hikari.GatewayBot):
+        self._nick_pending[user_id] = desired_nick
+        worker = self._nick_worker_tasks.get(user_id)
+        if worker and not worker.done():
+            return
+        self._nick_worker_tasks[user_id] = asyncio.create_task(self._nick_worker(bot, user_id))
+
+    def _maybe_queue_nickname_for_snapshot(
+        self,
+        user_id: hikari.Snowflake,
+        snapshot: PresenceSnapshot,
+        bot: hikari.GatewayBot,
+        *,
+        force_clear: bool = False,
+    ) -> bool:
+        has_rules = bool(self.nick_rules.get(user_id))
+        if not has_rules and not force_clear and user_id not in self._nick_managed_users:
+            return False
+        desired = self._desired_nickname_for_snapshot(user_id, snapshot) if has_rules else None
+        self._queue_nickname_update(user_id, desired, bot)
+        return True
+
+    async def refresh_nickname(self, user_id: hikari.Snowflake, bot: hikari.GatewayBot, *, force_clear: bool = False):
+        if snapshot := self._snapshots.get(user_id):
+            self._maybe_queue_nickname_for_snapshot(user_id, snapshot, bot, force_clear=force_clear)
+
+    async def _nick_worker(self, bot: hikari.GatewayBot, user_id: hikari.Snowflake):
+        try:
+            while user_id in self._nick_pending:
+                now = datetime.now(timezone.utc)
+                if now < self.ready_at:
+                    await asyncio.sleep(max(0.2, (self.ready_at - now).total_seconds()))
+                    continue
+
+                if blocked_until := self._nick_backoff_until.get(user_id):
+                    if blocked_until > now:
+                        await asyncio.sleep(max(0.2, (blocked_until - now).total_seconds()))
+                        continue
+                    self._nick_backoff_until.pop(user_id, None)
+
+                if changed_at := self._nick_last_change.get(user_id):
+                    wait_seconds = (changed_at + NICKNAME_CHANGE_DELAY - now).total_seconds()
+                    if wait_seconds > 0:
+                        await asyncio.sleep(wait_seconds)
+                        continue
+
+                target = self._nick_pending.get(user_id)
+                if target is None and user_id not in self._nick_managed_users and not self.nick_rules.get(user_id):
+                    self._nick_pending.pop(user_id, None)
+                    break
+
+                resolved = await self._apply_nickname(bot, user_id, target)
+                if self._nick_pending.get(user_id) != target:
+                    continue
+                if resolved:
+                    self._nick_pending.pop(user_id, None)
+        finally:
+            self._nick_worker_tasks.pop(user_id, None)
+
+    async def _apply_nickname(
+        self,
+        bot: hikari.GatewayBot,
+        user_id: hikari.Snowflake,
+        desired_nick: str | None,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        target = desired_nick.strip() if isinstance(desired_nick, str) else None
+        target = target or None
+
+        try:
+            member = bot.cache.get_member(config.DISCORD_GUILD, user_id)
+            if member is None:
+                member = await bot.rest.fetch_member(config.DISCORD_GUILD, user_id)
+        except hikari.NotFoundError:
+            self._nick_managed_users.discard(user_id)
+            return True
+        except Exception as xcp:
+            self._nick_backoff_until[user_id] = now + NICKNAME_RETRY_DELAY
+            log.warning(f"Nickname member lookup failed for {user_id}: {xcp}")
+            return False
+
+        if member.nickname == target:
+            if target is None:
+                self._nick_managed_users.discard(user_id)
+            else:
+                self._nick_managed_users.add(user_id)
+            return True
+
+        try:
+            await bot.rest.edit_member(config.DISCORD_GUILD, user_id, nickname=target)
+            self._nick_last_change[user_id] = now
+            self._nick_backoff_until.pop(user_id, None)
+            if target is None:
+                self._nick_managed_users.discard(user_id)
+            else:
+                self._nick_managed_users.add(user_id)
+            return True
+        except hikari.ForbiddenError:
+            log.warning(f"Nickname update forbidden for {user_id} in guild {config.DISCORD_GUILD}")
+            return True
+        except hikari.BadRequestError as xcp:
+            log.warning(f"Nickname update rejected for {user_id}: {xcp}")
+            return True
+        except Exception:
+            self._nick_backoff_until[user_id] = now + NICKNAME_RETRY_DELAY
+            log.exception(f"Nickname update failed for {user_id}")
+            return False
 
     async def send_drink_reminders(self, bot: hikari.GatewayBot):
         if datetime.now(timezone.utc) < self.ready_at:
@@ -1009,13 +1666,26 @@ class Online_Tracker(metaclass=config.Singleton):
         return PLATFORM_EMOJI.get(platform.lower(), UNKNOWN_PLATFORM_EMOJI)
 
     @staticmethod
-    def _preferred_platform(snapshot: PresenceSnapshot) -> str | None:
+    def _platform_emojis(snapshot: PresenceSnapshot) -> str:
+        active = [platform for platform in PLATFORMS if snapshot.platforms.get(platform) in ONLINE_STATUSES]
+        if active:
+            return "".join(PLATFORM_EMOJI.get(platform, UNKNOWN_PLATFORM_EMOJI) for platform in active)
+        known = [platform for platform in PLATFORMS if platform in snapshot.platforms]
+        if known:
+            return "".join(PLATFORM_EMOJI.get(platform, UNKNOWN_PLATFORM_EMOJI) for platform in known)
+        return UNKNOWN_PLATFORM_EMOJI
+
+    @staticmethod
+    def _snapshot_status_types(snapshot: PresenceSnapshot) -> list[str]:
+        if snapshot.status == "offline":
+            return ["offline"]
+        keys: list[str] = []
         for platform in PLATFORMS:
-            if snapshot.platforms.get(platform) in ONLINE_STATUSES:
-                return platform
-        if snapshot.platforms:
-            return next(iter(snapshot.platforms.keys()))
-        return None
+            status = snapshot.platforms.get(platform)
+            key = f"{status}-{platform}" if status else ""
+            if key in STATUS_TYPES_SET:
+                keys.append(key)
+        return keys
 
     @staticmethod
     def _game_allowed(rule: WatchRule, game_name: str) -> bool:
@@ -1026,22 +1696,26 @@ class Online_Tracker(metaclass=config.Singleton):
             return game_key in rule.games
         return game_key not in rule.games
 
-    def _fmt_status(self, target_id: hikari.Snowflake, change: StatusChange) -> str:
+    def _fmt_status(self, target_id: hikari.Snowflake, change: StatusChange, snapshot: PresenceSnapshot) -> str:
+        del snapshot
         if change.key == "offline":
             status = "offline"
-            platform = None
+            platform_icon = UNKNOWN_PLATFORM_EMOJI
+            label = status
         else:
             status, platform = change.key.split("-", 1)
-        return f"{self._status_emoji(status)} {self._platform_emoji(platform)} <@{target_id}> {status}"
+            platform_icon = self._platform_emoji(platform)
+            label = f"{status}-{platform}"
+        return f"{self._status_emoji(status)} {platform_icon} <@{target_id}> {label}"
 
     def _fmt_activity(self, target_id: hikari.Snowflake, change: ActivityChange, snapshot: PresenceSnapshot) -> str:
         status = snapshot.status
-        platform = self._preferred_platform(snapshot)
+        platform = self._platform_emojis(snapshot)
         if change.kind == "games":
             detail = f"{change.action}:{change.name}"
         else:
             detail = f"{change.action}:{change.kind}:{change.name}"
-        return f"{self._status_emoji(status)} {self._platform_emoji(platform)} <@{target_id}> {detail}"
+        return f"{self._status_emoji(status)} {platform} <@{target_id}> {detail}"
 
     async def _resolve_dm_channel(self, bot: hikari.GatewayBot, user_id: hikari.Snowflake) -> hikari.Snowflake:
         if channel_id := self._dm_channels.get(user_id):
@@ -1117,6 +1791,7 @@ class Online_Tracker(metaclass=config.Singleton):
         self._snapshots[user_id] = new_snapshot
         self._update_game_sessions(user_id, new_snapshot, now)
         self._record_seen_games(user_id, new_snapshot)
+        self._maybe_queue_nickname_for_snapshot(user_id, new_snapshot, bot)
 
         if not old_snapshot or now < self.ready_at:
             return
@@ -1131,18 +1806,36 @@ class Online_Tracker(metaclass=config.Singleton):
             return
 
         for watcher_id, rule in watchers:
-            lines: list[str] = []
+            silent_lines: list[str] = []
+            loud_lines: list[str] = []
+            activity_status_types = self._snapshot_status_types(new_snapshot)
             for status_change in status_changes:
                 if status_change.key in rule.types:
-                    lines.append(self._fmt_status(user_id, status_change))
+                    line = self._fmt_status(user_id, status_change, new_snapshot)
+                    if self.resolve_notification_silent(rule, status_types=[status_change.key]):
+                        silent_lines.append(line)
+                    else:
+                        loud_lines.append(line)
             for activity_change in activity_changes:
                 if activity_change.kind not in rule.activities:
                     continue
                 if activity_change.kind == "games" and not self._game_allowed(rule, activity_change.name):
                     continue
-                lines.append(self._fmt_activity(user_id, activity_change, new_snapshot))
-            if lines:
-                await self._notify(bot, watcher_id, lines, silent=rule.silent)
+                line = self._fmt_activity(user_id, activity_change, new_snapshot)
+                silent = self.resolve_notification_silent(
+                    rule,
+                    status_types=activity_status_types,
+                    activity_kind=activity_change.kind,
+                    game_name=activity_change.name if activity_change.kind == "games" else None,
+                )
+                if silent:
+                    silent_lines.append(line)
+                else:
+                    loud_lines.append(line)
+            if silent_lines:
+                await self._notify(bot, watcher_id, silent_lines, silent=True)
+            if loud_lines:
+                await self._notify(bot, watcher_id, loud_lines, silent=False)
 
 
 def _extract_user_id(value: object | None) -> hikari.Snowflake | None:
@@ -1193,13 +1886,28 @@ def _rule_summary(rule: WatchRule) -> str:
         games_txt = f"{rule.games_mode} (empty)"
     else:
         games_txt = f"{rule.games_mode}: {', '.join(sorted(rule.games))}"
-    return f"types: {status_txt}\nactivities: {activity_txt}\ngames: {games_txt}\nsilent: {rule.silent}"
+    silent_rules = len(rule.silent_rules)
+    return (
+        f"types: {status_txt}\n"
+        f"activities: {activity_txt}\n"
+        f"games: {games_txt}\n"
+        f"default_silent: {rule.silent}\n"
+        f"silent_rules: {silent_rules}"
+    )
 
 
 def _drink_summary(tracker: Online_Tracker, user_id: hikari.Snowflake, rule: DrinkRule) -> str:
     games = sorted([tracker._display_game(user_id, game) for game in rule.games], key=str.casefold)
     games_txt = ", ".join(games) if games else "(none)"
     return f"mode: {rule.mode}\ngames: {games_txt}"
+
+
+def _nickname_summary(tracker: Online_Tracker, user_id: hikari.Snowflake) -> str:
+    entries = tracker.list_nickname_entries(user_id)
+    if not entries:
+        return "nickname rules: (none)"
+    lines = [f"{mode}/{platform} -> {nick}" for mode, platform, nick in entries]
+    return "nickname rules:\n" + "\n".join(f"- {line}" for line in lines)
 
 
 async def ac_type_add(ctx: lightbulb.AutocompleteContext):
@@ -1245,6 +1953,15 @@ async def ac_drink_games(ctx: lightbulb.AutocompleteContext, tracker: Online_Tra
     await Distils.ac_focused_static(ctx, tracker.list_games_for_user(ctx.interaction.user.id))
 
 
+async def ac_nick_clear_entry(ctx: lightbulb.AutocompleteContext, tracker: Online_Tracker):
+    if not isinstance(ctx.focused.value, str):
+        raise ValueError(f"String go with strings, not {type(ctx.focused.value)}")
+    foc_val = ctx.focused.value.lower()
+    acb = hikari.impl.AutocompleteChoiceBuilder
+    options = tracker.list_nickname_clear_options(ctx.interaction.user.id)
+    await ctx.respond([acb(label, token) for label, token in options if foc_val in label.lower()][:25])
+
+
 @group_online.register
 class CMD_OnlineAdd(
     lightbulb.SlashCommand,
@@ -1258,7 +1975,7 @@ class CMD_OnlineAdd(
     activity = lightbulb.string("activity", "Activity filter", autocomplete=ac_activity_add, default=None)  # type: ignore
     silent = lightbulb.boolean(
         "silent",
-        "Suppress push notifications for this watch target (default=true)",
+        "Default silence. With type/activity/game this sets a silent selector, not watch filters",
         default=None,
     )
 
@@ -1276,17 +1993,33 @@ class CMD_OnlineAdd(
 
         _, created = tracker.ensure_rule(watcher_id, target_id)
         changes: list[str] = []
+        scoped_silent = self.silent is not None and any([self.status_type, self.activity, self.game])
 
-        if self.status_type and tracker.add_type(watcher_id, target_id, self.status_type):
-            changes.append(f"added type: {self.status_type}")
-        if self.activity and tracker.add_activity(watcher_id, target_id, self.activity):
-            changes.append(f"added activity: {self.activity}")
-        if self.game:
-            result = tracker.add_game(watcher_id, target_id, self.game)
-            if result != "no change":
-                changes.append(result)
-        if self.silent is not None and tracker.set_rule_silent(watcher_id, target_id, self.silent):
-            changes.append(f"silent: {self.silent}")
+        # When `silent` is provided with selectors, those selectors are treated as
+        # silent-rule matchers, not watch-filter edits.
+        if not scoped_silent:
+            if self.status_type and tracker.add_type(watcher_id, target_id, self.status_type):
+                changes.append(f"added type: {self.status_type}")
+            if self.activity and tracker.add_activity(watcher_id, target_id, self.activity):
+                changes.append(f"added activity: {self.activity}")
+            if self.game:
+                result = tracker.add_game(watcher_id, target_id, self.game)
+                if result != "no change":
+                    changes.append(result)
+        if self.silent is not None:
+            if scoped_silent:
+                changes.extend(
+                    tracker.set_rule_silent_filtered(
+                        watcher_id,
+                        target_id,
+                        status_type=self.status_type,
+                        activity=self.activity,
+                        game=self.game,
+                        silent=self.silent,
+                    )
+                )
+            elif tracker.set_rule_silent(watcher_id, target_id, self.silent):
+                changes.append(f"default silent: {self.silent}")
 
         if not any([self.status_type, self.activity, self.game, self.silent is not None]):
             await _ctx_respond(ctx, f"Watching {target_name} with default filters")
@@ -1332,7 +2065,7 @@ class CMD_OnlineRemove(
             return
 
         if not any([self.status_type, self.activity, self.game]):
-            await _ctx_respond(ctx, "No filters passed. Use `/online unwatch` to clear all config for this user.")
+            await _ctx_respond(ctx, "No filters passed. Use `/online unwatch` to clear all config for this user")
             return
 
         changes: list[str] = []
@@ -1425,6 +2158,91 @@ class CMD_OnlineDrink(
 
 
 @group_online.register
+class CMD_OnlineNickname(
+    lightbulb.SlashCommand,
+    name="nickname",
+    description="Set an auto-nickname rule from your presence mode",
+    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
+):
+    nick = lightbulb.string("nick", "Nickname to use in the configured guild")  # type: ignore
+    mode = lightbulb.string(
+        "mode",
+        "Presence mode",
+        choices=[
+            lightbulb.Choice("online", "online"),
+            lightbulb.Choice("offline", "offline"),
+            lightbulb.Choice("idle", "idle"),
+            lightbulb.Choice("dnd", "dnd"),
+        ],
+    )
+    platform = lightbulb.string(
+        "platform",
+        "Optional platform override (omit for all platforms)",
+        choices=[
+            lightbulb.Choice("desktop", "desktop"),
+            lightbulb.Choice("mobile", "mobile"),
+            lightbulb.Choice("web", "web"),
+        ],
+        default=None,
+    )
+
+    @lightbulb.invoke
+    async def invoke(
+        self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker, bot: hikari.GatewayBot
+    ):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
+        changed = tracker.set_nick_rule(ctx.user.id, self.nick, self.mode, self.platform)
+        await tracker.refresh_nickname(ctx.user.id, bot)
+
+        platform = self.platform or "all"
+        if changed:
+            await _ctx_respond(
+                ctx,
+                f"Saved nickname rule: {self.mode}/{platform} -> {self.nick}\n"
+                f"{_nickname_summary(tracker, ctx.user.id)}\n"
+                f"Changes are throttled to about {int(NICKNAME_CHANGE_DELAY.total_seconds())}s per update",
+            )
+            return
+
+        await _ctx_respond(
+            ctx,
+            f"No change: {self.mode}/{platform} already points to `{self.nick}`\n{_nickname_summary(tracker, ctx.user.id)}",
+        )
+
+
+@group_online.register
+class CMD_OnlineNickClear(
+    lightbulb.SlashCommand,
+    name="nick_clear",
+    description="Clear an auto-nickname rule",
+    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
+):
+    entry = lightbulb.string("entry", "Nickname rule: <nick> (<state>)[<platforms>]", autocomplete=ac_nick_clear_entry)  # type: ignore
+
+    @lightbulb.invoke
+    async def invoke(
+        self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker, bot: hikari.GatewayBot
+    ):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
+        selected = tracker.describe_nick_clear_token(self.entry)
+        removed = tracker.clear_nick_by_token(ctx.user.id, self.entry)
+        await tracker.refresh_nickname(ctx.user.id, bot, force_clear=not tracker.nick_rules.get(ctx.user.id))
+
+        if not removed:
+            await _ctx_respond(
+                ctx,
+                f"No matching nickname rule found for `{selected}`\n{_nickname_summary(tracker, ctx.user.id)}",
+            )
+            return
+
+        await _ctx_respond(
+            ctx,
+            f"Removed `{selected}` ({removed} entr{'y' if removed == 1 else 'ies'})\n"
+            f"{_nickname_summary(tracker, ctx.user.id)}",
+        )
+
+
+@group_online.register
 class CMD_OnlineList(
     lightbulb.SlashCommand,
     name="list",
@@ -1460,7 +2278,8 @@ class CMD_OnlineList(
                 "Online config updated from file\n"
                 f"- watches: {result['watches']}\n"
                 f"- drink games: {result['drink_games']}\n"
-                f"- skipped ignored users: {result['skipped_ignored_users']}"
+                f"- nicknames: {result['nicknames']}\n"
+                f"- skipped ignored users: {result['skipped_ignored_users']}",
             )
             return
 
@@ -1479,7 +2298,7 @@ class CMD_OnlineList(
             msg = f"Online config export for {target_name}"
         else:
             filename = "online_config.json"
-            msg = "Online config export. Edit and upload with `/online list file:<attachment>` to apply."
+            msg = "Online config export. Edit and upload with `/online list file:<attachment>` to apply"
         payload = json.dumps(exported, indent=4, sort_keys=False).encode(config.STR_ENCODE)
         await _ctx_respond(ctx, msg, attachment=hikari.Bytes(payload, filename))
 
