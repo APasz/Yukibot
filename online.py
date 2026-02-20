@@ -9,15 +9,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import config
 import hikari
 import lightbulb
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-import config
 from _discord import Distils
 from _file import File_Utils
 from _security import Access_Control
 from config import Name_Cache
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +116,7 @@ UNKNOWN_PLATFORM_EMOJI = "❔"
 IGNORED_ACTIVITY_NAMES = {
     "wordle",
     "vroid studio",
+    "vtube studio",
 }
 
 IGNORED_USER_IDS: set[hikari.Snowflake] = set()
