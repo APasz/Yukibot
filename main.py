@@ -26,6 +26,7 @@ from cmd_mod import group_mod
 from cmd_saves import group_saves  # noqa: F401
 from cmd_settings import group_settings
 from cmd_update import group_update
+from cmd_voice import VoiceTTSService, group_voice
 from config import Activity_Provider, Name_Cache
 from online import Online_Tracker, group_online
 
@@ -60,7 +61,7 @@ def main():
     name_cache = Name_Cache()
     online_tracker = Online_Tracker()
 
-    if deg := config.env_opt("DISCORD_DEV_GUILD"):
+    if deg := config.env_opt("INDEV"):
         log.info(f"DEG|DEV: {deg}")
         client: lightbulb.Client = lightbulb.client_from_app(
             bot,
@@ -79,7 +80,9 @@ def main():
     registry.register_value(Distils, Distils())
     registry.register_value(Resolutator, resolutator)
     dc_relay = DC_Relay(bot)
+    voice_tts = VoiceTTSService(bot)
     registry.register_value(DC_Relay, dc_relay)
+    registry.register_value(VoiceTTSService, voice_tts)
     registry.register_value(Utilities, utilities)
     registry.register_value(File_Utils, File_Utils())
     registry.register_value(Name_Cache, name_cache)
@@ -95,6 +98,7 @@ def main():
     # client.register(group_saves)
     client.register(group_settings)
     client.register(group_update)
+    client.register(group_voice)
 
     @client.error_handler
     async def error_handler(epf: lightbulb.exceptions.ExecutionPipelineFailedException, ctx: lightbulb.Context) -> bool:
@@ -131,8 +135,10 @@ def main():
             await app_manager.post_init(bot, am)
 
             await dc_relay.setup()
+            await voice_tts.setup()
             bot.subscribe(hikari.MessageCreateEvent, dc_relay.on_dcdm_message)  # type: ignore
             bot.subscribe(hikari.GuildMessageCreateEvent, dc_relay.on_gddm_message)  # type: ignore
+            bot.subscribe(hikari.GuildMessageCreateEvent, voice_tts.on_message)  # type: ignore
         except Exception as xcp:
             starting_xcp.append(str(xcp))
             raise xcp
@@ -248,6 +254,7 @@ def main():
     async def on_stopping(event: hikari.StoppingEvent):
         log.info("Ending")
         print("Ending")
+        await voice_tts.close()
         await app_manager.end()
         is_silent_restart = config.IS_RESTARTING and Path("silent_restart").exists()
         if not config.STARTED_CHANNEL or is_silent_restart:

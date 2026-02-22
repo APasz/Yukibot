@@ -81,6 +81,22 @@ if not chan:
 else:
     STARTED_CHANNEL = hikari.Snowflake(chan)
 
+chan = env_opt("VOICE_CHANNEL")
+VOICE_CHANNEL: hikari.Snowflakeish | None
+if not chan:
+    VOICE_CHANNEL = None
+else:
+    VOICE_CHANNEL = hikari.Snowflake(chan)
+
+chan = env_opt("TTS_CHANNEL")
+TTS_CHANNEL: hikari.Snowflakeish | None
+if not chan:
+    TTS_CHANNEL = None
+else:
+    TTS_CHANNEL = hikari.Snowflake(chan)
+
+TTS_VOICE = env_opt("TTS_VOICE") or "en-gb-x-rp"
+
 DISCORD_UPLOAD_LIMIT = DISCORD_UPLOAD_LIMIT * 1024 * 1024
 "total byte size limit for uploads to discord"
 
@@ -430,7 +446,7 @@ class Name_Cache(metaclass=Singleton):
         return updated, mentions
 
 
-INDEV = bool(env_opt("DISCORD_DEV_GUILD"))
+INDEV = bool(env_opt("INDEV"))
 
 AC_XCP = LookupError("Invalid input. Please use the autocomplete to select")
 "convience var for xcp to raise when using autocomplete options"
