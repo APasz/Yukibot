@@ -95,7 +95,12 @@ if not chan:
 else:
     TTS_CHANNEL = hikari.Snowflake(chan)
 
+TTS_ENGINE = (env_opt("TTS_ENGINE") or "auto").lower()
 TTS_VOICE = env_opt("TTS_VOICE") or "en-gb-x-rp"
+TTS_VARIANT = env_opt("TTS_VARIANT")
+TTS_PIPER_MODEL = env_opt("TTS_PIPER_MODEL")
+TTS_PIPER_CONFIG = env_opt("TTS_PIPER_CONFIG")
+TTS_PIPER_DATA_DIR = env_opt("TTS_PIPER_DATA_DIR")
 
 DISCORD_UPLOAD_LIMIT = DISCORD_UPLOAD_LIMIT * 1024 * 1024
 "total byte size limit for uploads to discord"

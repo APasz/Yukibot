@@ -97,7 +97,7 @@ class Activity_Manager(config.Activity_Manager):
         if not self.silent:
             log.debug(f"New activity: {statuses}")
         try:
-            await self.bot.update_presence(activity=hikari.Activity(name=new_state, type=hikari.ActivityType.CUSTOM))
+            await self.bot.update_presence(activity=hikari.Activity(name=new_state, type=hikari.ActivityType.CUSTOM))  # pyright: ignore[reportCallIssue] # why is pyright constantly complaining about this lol
         except Exception as xcp:
             log.exception(f"BotPresence: {xcp}")
 

@@ -16,3 +16,5 @@ emoji
 tomli_w
 aioftp
 regex
+piper-tts
+pathvalidate

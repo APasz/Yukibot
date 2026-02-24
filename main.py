@@ -139,6 +139,7 @@ def main():
             bot.subscribe(hikari.MessageCreateEvent, dc_relay.on_dcdm_message)  # type: ignore
             bot.subscribe(hikari.GuildMessageCreateEvent, dc_relay.on_gddm_message)  # type: ignore
             bot.subscribe(hikari.GuildMessageCreateEvent, voice_tts.on_message)  # type: ignore
+            bot.subscribe(hikari.VoiceStateUpdateEvent, voice_tts.on_voice_state_update)  # type: ignore
         except Exception as xcp:
             starting_xcp.append(str(xcp))
             raise xcp
