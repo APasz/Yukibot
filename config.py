@@ -245,6 +245,7 @@ class UserNames(BaseModel):
     names: set[str] = Field(default_factory=set)
     nicknames: set[str] = Field(default_factory=set)
     games: dict[str, tuple[str, str | None]] = Field(default_factory=dict)
+    platform_ids: dict[str, str] = Field(default_factory=dict)
 
 
 class Name_Cache(metaclass=Singleton):
@@ -252,6 +253,7 @@ class Name_Cache(metaclass=Singleton):
         self.pointer = DISCORD_NAMES
         self.by_id: dict[int, UserNames] = {}
         self.by_alias: dict[str, int] = {}
+        self.by_platform_id: dict[str, dict[str, int]] = {}
         self._read()
 
     def _read(self):
@@ -316,6 +318,110 @@ class Name_Cache(metaclass=Singleton):
         user = self.by_id.setdefault(user_id, UserNames())
         user.games[scope.lower()] = (alias, None)
         self._dump()
+
+    @staticmethod
+    def _norm_platform_key(platform: object | None) -> str:
+        value = str(platform).strip().lower() if platform is not None else ""
+        if not value:
+            raise ValueError("platform can't be empty")
+        return value
+
+    @staticmethod
+    def _norm_platform_id(platform_id: object | None) -> str | None:
+        if platform_id is None:
+            return None
+        value = str(platform_id).strip()
+        if not value:
+            return None
+        return value
+
+    @staticmethod
+    def _norm_steam_id(steam_id: object | None) -> str | None:
+        if steam_id is None:
+            return None
+        value = str(steam_id).strip()
+        if not value:
+            return None
+        if not value.isdigit():
+            raise ValueError("steam_id must be numeric")
+        return value
+
+    def set_platform_id(self, user_id: int, platform: object, platform_id: object | None) -> bool:
+        platform_key = self._norm_platform_key(platform)
+        if platform_key == "steam":
+            value = self._norm_steam_id(platform_id)
+        else:
+            value = self._norm_platform_id(platform_id)
+        user = self.by_id.setdefault(user_id, UserNames())
+        current = self._norm_platform_id(user.platform_ids.get(platform_key))
+        if current == value:
+            return False
+
+        if value is None:
+            user.platform_ids.pop(platform_key, None)
+        else:
+            user.platform_ids[platform_key] = value
+
+        self._rebuild_aliases()
+        self._dump()
+        return True
+
+    def get_platform_id(self, user_id: int, platform: object) -> str | None:
+        try:
+            platform_key = self._norm_platform_key(platform)
+        except ValueError:
+            return None
+
+        user = self.by_id.get(user_id)
+        if not user:
+            return None
+
+        value = self._norm_platform_id(user.platform_ids.get(platform_key))
+        if value is not None and platform_key == "steam":
+            try:
+                value = self._norm_steam_id(value)
+            except ValueError:
+                value = None
+        return value
+
+    def resolve_platform_to_id(self, platform: object, platform_id: object | None) -> int | None:
+        try:
+            platform_key = self._norm_platform_key(platform)
+        except ValueError:
+            return None
+        if platform_key == "steam":
+            try:
+                value = self._norm_steam_id(platform_id)
+            except ValueError:
+                return None
+        else:
+            value = self._norm_platform_id(platform_id)
+        if not value:
+            return None
+        return self.by_platform_id.get(platform_key, {}).get(value)
+
+    def list_platform_ids(self, user_id: int) -> dict[str, str]:
+        user = self.by_id.get(user_id)
+        if not user:
+            return {}
+
+        out: dict[str, str] = {}
+        for platform, raw_id in user.platform_ids.items():
+            try:
+                platform_key = self._norm_platform_key(platform)
+            except ValueError:
+                continue
+            if platform_key == "steam":
+                try:
+                    value = self._norm_steam_id(raw_id)
+                except ValueError:
+                    continue
+            else:
+                value = self._norm_platform_id(raw_id)
+            if value:
+                out[platform_key] = value
+
+        return dict(sorted(out.items()))
 
     def set_game_uuid(self, user_id: int, scope: str, uuid: str):
         existing = self.by_id.get(user_id, UserNames()).games.get(scope, (None, None))
@@ -425,9 +531,24 @@ class Name_Cache(metaclass=Singleton):
 
     def _rebuild_aliases(self):
         self.by_alias.clear()
+        self.by_platform_id.clear()
         for uid, entry in self.by_id.items():
             for name in entry.names | entry.nicknames:
                 self.by_alias[name.lower()] = uid
+            for platform, raw_id in entry.platform_ids.items():
+                try:
+                    platform_key = self._norm_platform_key(platform)
+                except ValueError:
+                    continue
+                if platform_key == "steam":
+                    try:
+                        value = self._norm_steam_id(raw_id)
+                    except ValueError:
+                        continue
+                else:
+                    value = self._norm_platform_id(raw_id)
+                if value:
+                    self.by_platform_id.setdefault(platform_key, {})[value] = uid
 
     def parse_mentions(self, text: str, replace: bool = True) -> tuple[str, set[int]]:
         """

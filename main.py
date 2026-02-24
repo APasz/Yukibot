@@ -296,7 +296,7 @@ def main():
 
     @bot.listen(hikari.PresenceUpdateEvent)
     async def _on_presence_update(event: hikari.PresenceUpdateEvent):
-        await online_tracker.on_presence_update(event, bot)
+        await online_tracker.on_presence_update(event, bot, name_cache)
 
     @bot.listen(hikari.MessageCreateEvent)
     async def _failsafe_restart(event: hikari.MessageCreateEvent | hikari.GuildMessageCreateEvent):

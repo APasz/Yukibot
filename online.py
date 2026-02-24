@@ -9,14 +9,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import config
 import hikari
 import lightbulb
+from modmux import Muxer, Provider, SteamCreds
+from modmux.modmux_errors import ModMuxError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+
+import config
 from _discord import Distils
 from _file import File_Utils
 from _security import Access_Control
 from config import Name_Cache
-from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +53,11 @@ NICKNAME_RETRY_DELAY = timedelta(seconds=90)
 DRINK_MODES = {"include", "exclude"}
 DRINK_REMINDER_INTERVAL = timedelta(minutes=45)
 DRINK_REMINDER_JITTER_MAX = timedelta(minutes=5)
+STEAM_LOOKUP_CACHE_TTL = timedelta(seconds=20)
+STEAM_LOOKUP_BACKOFF = timedelta(minutes=2)
+STEAM_LOOKUP_TIMEOUT = 4.0
+ACCOUNT_ID_PLATFORMS = ("steam",)
+ACCOUNT_ID_PLATFORM_SET = set(ACCOUNT_ID_PLATFORMS)
 DRINK_REMINDERS = (
     "Hydration check: drink some water",
     "Water break time. Have a sip",
@@ -326,6 +334,9 @@ class Online_Tracker(metaclass=config.Singleton):
         self._next_recent_cleanup = datetime.now(timezone.utc)
         self.ready_at = datetime.now(timezone.utc) + timedelta(seconds=10)
         self.drink_interval = DRINK_REMINDER_INTERVAL
+        self._steam_api_key = SecretStr((config.env_opt("STEAM_WEB_API_KEY") or "").strip())
+        self._steam_lookup_cache: dict[str, tuple[datetime, str | None]] = {}
+        self._steam_lookup_backoff_until: dict[str, datetime] = {}
         self._read()
 
     def set_ready_delay(self, seconds: int = 10):
@@ -1642,6 +1653,107 @@ class Online_Tracker(metaclass=config.Singleton):
 
         return stable
 
+    @staticmethod
+    def _steam_game_from_raw(raw: dict[str, object]) -> str | None:
+        game = raw.get("gameextrainfo")
+        if isinstance(game, str):
+            text = game.strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _norm_game_match_text(name: str) -> str:
+        return "".join(ch for ch in name.casefold() if ch.isalnum())
+
+    @classmethod
+    def _steam_game_matches(cls, discord_game: str, steam_game: str) -> bool:
+        if discord_game.casefold() == steam_game.casefold():
+            return True
+
+        left = cls._norm_game_match_text(discord_game)
+        right = cls._norm_game_match_text(steam_game)
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+
+        shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+        return len(shorter) >= 6 and shorter in longer
+
+    async def _steam_current_game(self, steam_id: str, now: datetime) -> str | None:
+        if not self._steam_api_key:
+            return None
+
+        cached = self._steam_lookup_cache.get(steam_id)
+        cached_game = cached[1] if cached is not None else None
+        cache_fresh = cached is not None and (now - cached[0]) <= STEAM_LOOKUP_CACHE_TTL
+        if cache_fresh:
+            return cached_game
+
+        if blocked_until := self._steam_lookup_backoff_until.get(steam_id):
+            if now < blocked_until:
+                return cached_game if cache_fresh else None
+            self._steam_lookup_backoff_until.pop(steam_id, None)
+
+        try:
+            async with Muxer(creds=[SteamCreds(api_key=self._steam_api_key)]) as mux:
+                author = await asyncio.wait_for(mux.get_user(Provider.STEAM, steam_id), timeout=STEAM_LOOKUP_TIMEOUT)
+            game_name = self._steam_game_from_raw(author.raw if isinstance(author.raw, dict) else {})
+            self._steam_lookup_cache[steam_id] = (now, game_name)
+            return game_name
+        except (ModMuxError, asyncio.TimeoutError) as xcp:
+            self._steam_lookup_backoff_until[steam_id] = now + STEAM_LOOKUP_BACKOFF
+            log.debug(f"Steam presence lookup failed for {steam_id}: {xcp}")
+            return cached_game if cache_fresh else None
+        except Exception:
+            self._steam_lookup_backoff_until[steam_id] = now + STEAM_LOOKUP_BACKOFF
+            log.exception(f"Steam presence lookup crashed for {steam_id}")
+            return cached_game if cache_fresh else None
+
+    async def _reconcile_game_stops_with_steam(
+        self,
+        user_id: hikari.Snowflake,
+        snapshot: PresenceSnapshot,
+        changes: list[ActivityChange],
+        names: Name_Cache | None,
+    ) -> list[ActivityChange]:
+        if not changes or snapshot.status == "offline" or not names:
+            return changes
+
+        stopped_games = [change for change in changes if change.kind == "games" and change.action == "stopped"]
+        if not stopped_games:
+            return changes
+
+        steam_id = names.get_platform_id(int(user_id), "steam")
+        if not steam_id:
+            return changes
+
+        steam_game = await self._steam_current_game(steam_id, datetime.now(timezone.utc))
+        if not steam_game:
+            return changes
+
+        filtered: list[ActivityChange] = []
+        suppressed: list[str] = []
+        for change in changes:
+            if (
+                change.kind == "games"
+                and change.action == "stopped"
+                and self._steam_game_matches(change.name, steam_game)
+            ):
+                suppressed.append(change.name)
+                continue
+            filtered.append(change)
+
+        if suppressed:
+            log.debug(
+                "Suppressed Discord game stop for %s via Steam(%s): %s",
+                user_id,
+                steam_id,
+                ", ".join(suppressed),
+            )
+        return filtered
+
     def _watchers_for_target(self, target_id: hikari.Snowflake) -> list[tuple[hikari.Snowflake, WatchRule]]:
         if self.is_ignored_user(target_id):
             return []
@@ -1774,7 +1886,12 @@ class Online_Tracker(metaclass=config.Singleton):
         except Exception:
             log.exception(f"Online_Tracker notify failed for {user_id}")
 
-    async def on_presence_update(self, event: hikari.PresenceUpdateEvent, bot: hikari.GatewayBot):
+    async def on_presence_update(
+        self,
+        event: hikari.PresenceUpdateEvent,
+        bot: hikari.GatewayBot,
+        names: Name_Cache | None = None,
+    ):
         new_presence = event.presence
         user_id = new_presence.user_id
         if self.is_ignored_user(user_id):
@@ -1804,6 +1921,13 @@ class Online_Tracker(metaclass=config.Singleton):
         watchers = self._watchers_for_target(user_id)
         if not watchers:
             return
+
+        if activity_changes:
+            activity_changes = await self._reconcile_game_stops_with_steam(
+                user_id, new_snapshot, activity_changes, names
+            )
+            if not status_changes and not activity_changes:
+                return
 
         for watcher_id, rule in watchers:
             silent_lines: list[str] = []
@@ -1910,6 +2034,13 @@ def _nickname_summary(tracker: Online_Tracker, user_id: hikari.Snowflake) -> str
     return "nickname rules:\n" + "\n".join(f"- {line}" for line in lines)
 
 
+def _platform_id_summary(names: Name_Cache, user_id: hikari.Snowflake) -> str:
+    rows = names.list_platform_ids(int(user_id))
+    if not rows:
+        return "platform ids: (none)"
+    return "platform ids:\n" + "\n".join(f"- {platform}: {platform_id}" for platform, platform_id in rows.items())
+
+
 async def ac_type_add(ctx: lightbulb.AutocompleteContext):
     await Distils.ac_focused_static(ctx, STATUS_TYPES)
 
@@ -1960,6 +2091,10 @@ async def ac_nick_clear_entry(ctx: lightbulb.AutocompleteContext, tracker: Onlin
     acb = hikari.impl.AutocompleteChoiceBuilder
     options = tracker.list_nickname_clear_options(ctx.interaction.user.id)
     await ctx.respond([acb(label, token) for label, token in options if foc_val in label.lower()][:25])
+
+
+async def ac_platform_ids(ctx: lightbulb.AutocompleteContext):
+    await Distils.ac_focused_static(ctx, ACCOUNT_ID_PLATFORMS)
 
 
 @group_online.register
@@ -2155,6 +2290,96 @@ class CMD_OnlineDrink(
         game_name = tracker._display_game(ctx.user.id, tracker._norm_game(self.game))
 
         await _ctx_respond(ctx, f"Drink reminder {action}: {game_name}\n{_drink_summary(tracker, ctx.user.id, rule)}")
+
+
+@group_online.register
+class CMD_OnlineAccount(
+    lightbulb.SlashCommand,
+    name="account",
+    description="Manage external platform account IDs",
+    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
+):
+    platform = lightbulb.string(
+        "platform", "Platform id namespace (omit to list all)", autocomplete=ac_platform_ids, default=None
+    )  # type: ignore
+    platform_id = lightbulb.string("id", "Platform account id (omit to show current mapping)", default=None)  # type: ignore
+    clear = lightbulb.boolean("clear", "Clear the stored mapping for this platform", default=False)
+    user = lightbulb.user("user", "Optional target user (sudo only)", default=None)  # type: ignore
+
+    @lightbulb.invoke
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, names: Name_Cache):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
+
+        target_id = _extract_user_id(self.user) if self.user else ctx.user.id
+        if target_id is None:
+            raise ValueError("Invalid target user")
+        if self.user and target_id != ctx.user.id:
+            await acl.perm_check(ctx.user.id, acl.LvL.sudo)
+
+        target_name = await names.best_known(target_id, f"<@{target_id}>")
+
+        if self.clear and self.platform_id is not None:
+            raise ValueError("Use either `clear:true` or `id`, not both")
+
+        platform = str(self.platform).strip().lower() if self.platform else ""
+        if not platform:
+            if self.clear or self.platform_id is not None:
+                raise ValueError("`platform` is required when using `id` or `clear`")
+            await _ctx_respond(ctx, f"External ids for {target_name}\n{_platform_id_summary(names, target_id)}")
+            return
+        if platform not in ACCOUNT_ID_PLATFORM_SET:
+            raise ValueError(f"Unknown platform: {platform}")
+
+        def _set_id(value: object | None) -> bool:
+            return names.set_platform_id(int(target_id), platform, value)
+
+        def _get_id() -> str | None:
+            return names.get_platform_id(int(target_id), platform)
+
+        if self.clear:
+            changed = _set_id(None)
+            if changed:
+                await _ctx_respond(
+                    ctx,
+                    f"Cleared `{platform}` id for {target_name}\n{_platform_id_summary(names, target_id)}",
+                )
+            else:
+                await _ctx_respond(
+                    ctx,
+                    f"No `{platform}` id set for {target_name}\n{_platform_id_summary(names, target_id)}",
+                )
+            return
+
+        if self.platform_id is None:
+            current = _get_id()
+            if current:
+                await _ctx_respond(
+                    ctx,
+                    f"`{platform}` id for {target_name}: `{current}`\n{_platform_id_summary(names, target_id)}",
+                )
+            else:
+                await _ctx_respond(
+                    ctx,
+                    f"No `{platform}` id set for {target_name}\n{_platform_id_summary(names, target_id)}",
+                )
+            return
+
+        changed = _set_id(self.platform_id)
+        current = _get_id()
+        if changed and current:
+            await _ctx_respond(
+                ctx,
+                f"Set `{platform}` id for {target_name}: `{current}`\n{_platform_id_summary(names, target_id)}",
+            )
+            return
+        if current:
+            await _ctx_respond(
+                ctx,
+                f"No change: `{platform}` id for {target_name} is already `{current}`\n"
+                f"{_platform_id_summary(names, target_id)}",
+            )
+            return
+        raise RuntimeError(f"Failed to set `{platform}` id for {target_name}")
 
 
 @group_online.register

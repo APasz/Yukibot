@@ -18,3 +18,4 @@ aioftp
 regex
 piper-tts
 pathvalidate
+modmux
