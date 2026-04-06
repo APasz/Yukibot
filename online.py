@@ -304,6 +304,7 @@ class PresenceSnapshot:
     platforms: dict[str, str]
     activities: dict[tuple[str, str], str]
     game_starts: dict[str, datetime | None]
+    ignored_games: set[str]
     ignored_activities: set[str]
 
 
@@ -491,6 +492,28 @@ class Online_Tracker(metaclass=config.Singleton):
     @staticmethod
     def _norm_game(name: str) -> str:
         return name.strip().casefold()
+
+    @staticmethod
+    def _norm_status_type(type_name: str) -> str:
+        value = type_name.strip().lower()
+        if value not in STATUS_TYPES_SET:
+            raise ValueError(f"Unknown type: {type_name}")
+        return value
+
+    @staticmethod
+    def _norm_activity_name(activity: str) -> str:
+        value = activity.strip().lower()
+        if value not in ACTIVITY_TYPES_SET:
+            raise ValueError(f"Unknown activity: {activity}")
+        return value
+
+    def _norm_filter_game(self, game: str) -> str:
+        game_key = self._norm_game(game)
+        if not game_key:
+            raise ValueError("game can't be empty")
+        if self._is_ignored_activity_name(game_key):
+            raise ValueError(f"Game is ignored: {game}")
+        return game_key
 
     @staticmethod
     def _is_ignored_activity_name(name: str) -> bool:
@@ -918,11 +941,7 @@ class Online_Tracker(metaclass=config.Singleton):
         game: str,
         mode: str | None = None,
     ) -> tuple[str, DrinkRule]:
-        game_key = self._norm_game(game)
-        if not game_key:
-            raise ValueError("game can't be empty")
-        if self._is_ignored_activity_name(game_key):
-            raise ValueError(f"Game is ignored: {game}")
+        game_key = self._norm_filter_game(game)
 
         rule = self.drink_rules.get(user_id, DrinkRule())
         if mode is not None:
@@ -1204,6 +1223,9 @@ class Online_Tracker(metaclass=config.Singleton):
     async def refresh_nickname(self, user_id: hikari.Snowflake, bot: hikari.GatewayBot, *, force_clear: bool = False):
         if snapshot := self._snapshots.get(user_id):
             self._maybe_queue_nickname_for_snapshot(user_id, snapshot, bot, force_clear=force_clear)
+            return
+        if force_clear or (user_id in self._nick_managed_users and not self.nick_rules.get(user_id)):
+            self._queue_nickname_update(user_id, None, bot)
 
     async def _nick_worker(self, bot: hikari.GatewayBot, user_id: hikari.Snowflake):
         try:
@@ -1323,9 +1345,7 @@ class Online_Tracker(metaclass=config.Singleton):
             self._next_drink_ping_at[user_id] = now + self._next_drink_delay()
 
     def add_type(self, watcher_id: hikari.Snowflake, target_id: hikari.Snowflake, type_name: str) -> bool:
-        value = type_name.strip().lower()
-        if value not in STATUS_TYPES_SET:
-            raise ValueError(f"Unknown type: {type_name}")
+        value = self._norm_status_type(type_name)
         rule, _ = self.ensure_rule(watcher_id, target_id)
         if value in rule.types:
             return False
@@ -1334,9 +1354,7 @@ class Online_Tracker(metaclass=config.Singleton):
         return True
 
     def remove_type(self, watcher_id: hikari.Snowflake, target_id: hikari.Snowflake, type_name: str) -> bool:
-        value = type_name.strip().lower()
-        if value not in STATUS_TYPES_SET:
-            raise ValueError(f"Unknown type: {type_name}")
+        value = self._norm_status_type(type_name)
         rule = self.get_rule(watcher_id, target_id)
         if not rule or value not in rule.types:
             return False
@@ -1345,9 +1363,7 @@ class Online_Tracker(metaclass=config.Singleton):
         return True
 
     def add_activity(self, watcher_id: hikari.Snowflake, target_id: hikari.Snowflake, activity: str) -> bool:
-        value = activity.strip().lower()
-        if value not in ACTIVITY_TYPES_SET:
-            raise ValueError(f"Unknown activity: {activity}")
+        value = self._norm_activity_name(activity)
         rule, _ = self.ensure_rule(watcher_id, target_id)
         if value in rule.activities:
             return False
@@ -1356,9 +1372,7 @@ class Online_Tracker(metaclass=config.Singleton):
         return True
 
     def remove_activity(self, watcher_id: hikari.Snowflake, target_id: hikari.Snowflake, activity: str) -> bool:
-        value = activity.strip().lower()
-        if value not in ACTIVITY_TYPES_SET:
-            raise ValueError(f"Unknown activity: {activity}")
+        value = self._norm_activity_name(activity)
         rule = self.get_rule(watcher_id, target_id)
         if not rule or value not in rule.activities:
             return False
@@ -1367,11 +1381,7 @@ class Online_Tracker(metaclass=config.Singleton):
         return True
 
     def add_game(self, watcher_id: hikari.Snowflake, target_id: hikari.Snowflake, game: str) -> str:
-        game_key = self._norm_game(game)
-        if not game_key:
-            raise ValueError("game can't be empty")
-        if self._is_ignored_activity_name(game_key):
-            raise ValueError(f"Game is ignored: {game}")
+        game_key = self._norm_filter_game(game)
         rule, _ = self.ensure_rule(watcher_id, target_id)
         if rule.games_mode == "all":
             rule.games_mode = "include"
@@ -1393,11 +1403,7 @@ class Online_Tracker(metaclass=config.Singleton):
         return f"removed game exclusion: {game}"
 
     def remove_game(self, watcher_id: hikari.Snowflake, target_id: hikari.Snowflake, game: str) -> str:
-        game_key = self._norm_game(game)
-        if not game_key:
-            raise ValueError("game can't be empty")
-        if self._is_ignored_activity_name(game_key):
-            raise ValueError(f"Game is ignored: {game}")
+        game_key = self._norm_filter_game(game)
         rule = self.get_rule(watcher_id, target_id)
         if not rule:
             return "no watch config"
@@ -1515,7 +1521,12 @@ class Online_Tracker(metaclass=config.Singleton):
     def _snapshot_from_presence(self, presence: hikari.MemberPresence | None) -> PresenceSnapshot:
         if not presence:
             return PresenceSnapshot(
-                status="offline", platforms={}, activities={}, game_starts={}, ignored_activities=set()
+                status="offline",
+                platforms={},
+                activities={},
+                game_starts={},
+                ignored_games=set(),
+                ignored_activities=set(),
             )
 
         status = self._status_name(getattr(presence, "visible_status", None) or getattr(presence, "status", None))
@@ -1533,6 +1544,7 @@ class Online_Tracker(metaclass=config.Singleton):
 
         activities: dict[tuple[str, str], str] = {}
         game_starts: dict[str, datetime | None] = {}
+        ignored_games: set[str] = set()
         ignored_activities: set[str] = set()
         for activity in list(getattr(presence, "activities", []) or []):
             raw_name = (
@@ -1545,7 +1557,10 @@ class Online_Tracker(metaclass=config.Singleton):
             activity_name = raw_name.strip()
             kind = self._activity_kind(activity)
             if self._is_ignored_activity(kind, activity_name):
-                ignored_activities.add(activity_name.casefold())
+                key = activity_name.casefold()
+                ignored_activities.add(key)
+                if kind == "games":
+                    ignored_games.add(key)
                 continue
             key = activity_name.casefold()
             activities[(kind, key)] = activity_name
@@ -1557,6 +1572,7 @@ class Online_Tracker(metaclass=config.Singleton):
             platforms=platforms,
             activities=activities,
             game_starts=game_starts,
+            ignored_games=ignored_games,
             ignored_activities=ignored_activities,
         )
 
@@ -1635,14 +1651,14 @@ class Online_Tracker(metaclass=config.Singleton):
                 stable.append(change)
                 continue
 
-            if new_snapshot.status != "offline" and new_snapshot.ignored_activities:
+            if new_snapshot.status != "offline" and new_snapshot.ignored_games:
                 suppressed.add(game_key)
                 continue
 
             suppressed.discard(game_key)
             stable.append(change)
 
-        if suppressed and (new_snapshot.status == "offline" or not new_snapshot.ignored_activities):
+        if suppressed and (new_snapshot.status == "offline" or not new_snapshot.ignored_games):
             to_confirm = sorted(suppressed - visible_games)
             for game_key in to_confirm:
                 stable.append(ActivityChange("stopped", "games", self._display_game(user_id, game_key)))
@@ -2115,7 +2131,13 @@ class CMD_OnlineAdd(
     )
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker, names: Name_Cache):
+    async def invoke(
+        self,
+        ctx: lightbulb.Context,
+        acl: Access_Control,
+        tracker: Online_Tracker,
+        names: Name_Cache,
+    ):
         await acl.perm_check(ctx.user.id, acl.LvL.guest)
         target_id = _extract_user_id(self.user)
         if target_id is None:
@@ -2126,9 +2148,22 @@ class CMD_OnlineAdd(
         watcher_id = ctx.user.id
         target_name = await names.best_known(target_id, f"<@{target_id}>")
 
-        _, created = tracker.ensure_rule(watcher_id, target_id)
-        changes: list[str] = []
         scoped_silent = self.silent is not None and any([self.status_type, self.activity, self.game])
+        created = tracker.get_rule(watcher_id, target_id) is None
+
+        if self.status_type:
+            tracker._norm_status_type(self.status_type)
+        if self.activity:
+            tracker._norm_activity_name(self.activity)
+        if self.game:
+            tracker._norm_filter_game(self.game)
+
+        if not any([self.status_type, self.activity, self.game, self.silent is not None]):
+            tracker.ensure_rule(watcher_id, target_id)
+            await _ctx_respond(ctx, f"Watching {target_name} with default filters")
+            return
+
+        changes: list[str] = []
 
         # When `silent` is provided with selectors, those selectors are treated as
         # silent-rule matchers, not watch-filter edits.
@@ -2156,10 +2191,6 @@ class CMD_OnlineAdd(
             elif tracker.set_rule_silent(watcher_id, target_id, self.silent):
                 changes.append(f"default silent: {self.silent}")
 
-        if not any([self.status_type, self.activity, self.game, self.silent is not None]):
-            await _ctx_respond(ctx, f"Watching {target_name} with default filters")
-            return
-
         if not changes and not created:
             await _ctx_respond(ctx, f"No changes for {target_name}")
             return
@@ -2183,7 +2214,14 @@ class CMD_OnlineRemove(
     activity = lightbulb.string("activity", "Activity filter", autocomplete=ac_activity_remove, default=None)  # type: ignore
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker, names: Name_Cache):
+    async def invoke(
+        self,
+        ctx: lightbulb.Context,
+        acl: Access_Control,
+        tracker: Online_Tracker,
+        names: Name_Cache,
+        bot: hikari.GatewayBot,
+    ):
         await acl.perm_check(ctx.user.id, acl.LvL.guest)
         target_id = _extract_user_id(self.user)
         if target_id is None:
@@ -2482,7 +2520,14 @@ class CMD_OnlineList(
     )
 
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker, names: Name_Cache):
+    async def invoke(
+        self,
+        ctx: lightbulb.Context,
+        acl: Access_Control,
+        tracker: Online_Tracker,
+        names: Name_Cache,
+        bot: hikari.GatewayBot,
+    ):
         await acl.perm_check(ctx.user.id, acl.LvL.guest)
         watcher_id = ctx.user.id
 
@@ -2498,6 +2543,7 @@ class CMD_OnlineList(
             if not isinstance(payload, dict):
                 raise ValueError("Invalid JSON file: top-level object expected")
             result = tracker.apply_user_config(watcher_id, payload)
+            await tracker.refresh_nickname(watcher_id, bot, force_clear=not tracker.nick_rules.get(watcher_id))
             await _ctx_respond(
                 ctx,
                 "Online config updated from file\n"

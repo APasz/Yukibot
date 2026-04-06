@@ -289,7 +289,7 @@ def main():
 
     @bot.listen(hikari.MessageCreateEvent)
     async def _add_names(event: hikari.MessageCreateEvent | hikari.GuildMessageCreateEvent):
-        if hasattr(event, "memeber"):
+        if hasattr(event, "member"):
             name_cache.set_names(event.member or event.author)  # type: ignore
         else:
             name_cache.set_names(event.author)

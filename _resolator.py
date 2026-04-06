@@ -22,9 +22,9 @@ class Resolutator(metaclass=config.Singleton):
     def snow_check(
         snow_type: str, snow: hikari.Snowflakeish | list[hikari.Snowflakeish] | dict[object, hikari.Snowflakeish]
     ) -> bool:
-        valid_types = (
+        valid_types: tuple[type[object], ...] = (
+            int,
             hikari.Snowflake,
-            hikari.Snowflakeish,
             hikari.PartialUser,
             hikari.PartialChannel,
             hikari.PartialGuild,
