@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import enum
 import inspect
+import io
 import json
 import logging
 import re
 import shutil
+import wave
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, cast
+from typing import Any, Awaitable, Callable, Iterable, cast
 from urllib.parse import quote, unquote, urlparse
 
 import emoji
@@ -17,6 +21,7 @@ import hikari
 import hikariwave
 import lightbulb
 import requests
+from lightbulb import Choice
 
 import config
 from _security import Access_Control
@@ -27,6 +32,7 @@ group_voice = lightbulb.Group("voice", "Voice commands and TTS")  # type: ignore
 
 VOICE_USERS_FILE = Path("voice_users.json")
 VOICE_CORRECTIONS_FILE = Path("voice_corrections.json")
+VOICE_TARGET_LABELS_FILE = Path("voice_target_labels.json")
 DISCORD_CUSTOM_EMOJI_RE = re.compile(r"<a?:(\w+):\d+>")
 URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 EMOJI_TAG_RE = re.compile(r":[a-z0-9_+\-]+:", re.IGNORECASE)
@@ -126,17 +132,254 @@ def _patch_hikariwave_udp_discovery_timeout():
     log.warning("Applied hikari-wave UDP discovery timeout workaround")
 
 
+def _patch_hikariwave_player_idle_queue_race():
+    """Restart queued playback if hikari-wave leaves audio queued on an idle player."""
+    try:
+        from hikariwave.audio.player import AudioPlaybackState, AudioPlayer
+        from hikariwave.internal.result import Result
+    except Exception as xcp:
+        log.warning(f"TTS workaround skipped: couldn't import hikariwave audio player module: {xcp}")
+        return
+
+    add_queue_name = "add_queue"
+    add_queue_bulk_name = "add_queue_bulk"
+    add_queue_obj = getattr(AudioPlayer, add_queue_name, None)
+    add_queue_bulk_obj = getattr(AudioPlayer, add_queue_bulk_name, None)
+    if not callable(add_queue_obj) or not callable(add_queue_bulk_obj):
+        return
+
+    if getattr(add_queue_obj, "__name__", "") == "_patched_add_queue":
+        return
+
+    add_queue = cast(Callable[..., Awaitable[Result]], add_queue_obj)
+    add_queue_bulk = cast(Callable[..., Awaitable[Result]], add_queue_bulk_obj)
+
+    def _queue_stuck(player: AudioPlayer) -> bool:
+        return (
+            player.state == AudioPlaybackState.IDLE
+            and player.current is None
+            and bool(player.queue)
+        )
+
+    async def _repair_idle_queue(player: AudioPlayer) -> None:
+        if not _queue_stuck(player):
+            return
+
+        for delay_seconds in (0.0, 0.0, 0.02):
+            await asyncio.sleep(delay_seconds)
+            if not _queue_stuck(player):
+                return
+
+        lock = cast(asyncio.Lock | None, getattr(player, "_lock", None))
+        if lock is None:
+            return
+
+        async with lock:
+            if not _queue_stuck(player):
+                return
+
+            task = cast(asyncio.Task[None] | None, getattr(player, "_player_task", None))
+            previous_task_state = "missing"
+            if task is not None:
+                previous_task_state = "done" if task.done() else "pending"
+                if not task.done():
+                    task.cancel()
+
+            setattr(player, "_player_task", None)
+            ensure_loop = cast(Callable[[bool | None], None] | None, getattr(player, "_AudioPlayer__ensure_loop", None))
+            if not callable(ensure_loop):
+                return
+
+            ensure_loop(True)
+            log.warning(
+                "Recovered stuck hikari-wave player loop "
+                f"state={getattr(player.state, 'name', player.state)} queue_len={len(player.queue)} "
+                f"previous_task={previous_task_state}"
+            )
+
+    async def _patched_add_queue(self: AudioPlayer, source: object, *, autoplay: bool = True) -> Result:
+        result = await add_queue(self, source, autoplay=autoplay)
+        if result.success and autoplay:
+            await _repair_idle_queue(self)
+        return result
+
+    async def _patched_add_queue_bulk(self: AudioPlayer, sources: object, *, autoplay: bool = True) -> Result:
+        result = await add_queue_bulk(self, sources, autoplay=autoplay)
+        if result.success and autoplay:
+            await _repair_idle_queue(self)
+        return result
+
+    setattr(AudioPlayer, add_queue_name, _patched_add_queue)
+    setattr(AudioPlayer, add_queue_bulk_name, _patched_add_queue_bulk)
+    log.warning("Applied hikari-wave idle queue restart workaround")
+
+
 _patch_hikariwave_cache_state_update_bug()
 _patch_hikariwave_udp_discovery_timeout()
+_patch_hikariwave_player_idle_queue_race()
 
 
 @dataclass(slots=True, frozen=True)
 class VoiceJob:
     guild_id: hikari.Snowflake
     message_id: hikari.Snowflake
-    text: str
+    speech: SpeechContent
     voice: str
     variant: str | None
+
+
+@dataclass(slots=True)
+class ActivePlayback:
+    jobs: tuple[VoiceJob, ...]
+    text: str
+    connection: hikariwave.VoiceConnection
+    source: hikariwave.AudioSource
+    begin_timeout_seconds: float
+    timeout_seconds: float
+    expected_duration_seconds: float | None
+    started_at: float | None = None
+    done_event: asyncio.Event = field(default_factory=asyncio.Event)
+    monitor_task: asyncio.Task[None] | None = None
+
+
+class PlaybackWaitResult(enum.StrEnum):
+    JOB = "job"
+    DONE = "done"
+    TIMEOUT = "timeout"
+
+
+class SpeechTokenKind(enum.StrEnum):
+    TEXT = "text"
+    EMOJI = "emoji"
+
+
+@dataclass(slots=True, frozen=True)
+class SpeechToken:
+    text: str
+    kind: SpeechTokenKind
+    repeat_count: int = 1
+
+    def render(self) -> str:
+        if self.kind is SpeechTokenKind.EMOJI and self.repeat_count > 1:
+            return f"{self.text} x{self.repeat_count}"
+        return self.text
+
+    def rendered_len(self) -> int:
+        return len(self.render())
+
+    def can_merge_emoji_repeat(self, other: SpeechToken) -> bool:
+        return (
+            self.kind is SpeechTokenKind.EMOJI
+            and other.kind is SpeechTokenKind.EMOJI
+            and self.text == other.text
+        )
+
+    def merge_emoji_repeat(self, other: SpeechToken) -> SpeechToken:
+        if not self.can_merge_emoji_repeat(other):
+            raise ValueError("Speech tokens are not merge-compatible emoji repeats.")
+        return SpeechToken(self.text, self.kind, self.repeat_count + other.repeat_count)
+
+
+@dataclass(slots=True, frozen=True)
+class SpeechContent:
+    tokens: tuple[SpeechToken, ...]
+
+    def __bool__(self) -> bool:
+        return bool(self.tokens)
+
+    def render(self) -> str:
+        return " ".join(token.render() for token in self.tokens if token.text)
+
+    def rendered_len(self) -> int:
+        return len(self.render())
+
+    def starts_with_emoji(self) -> bool:
+        return bool(self.tokens and self.tokens[0].kind is SpeechTokenKind.EMOJI)
+
+    def ends_with_emoji(self) -> bool:
+        return bool(self.tokens and self.tokens[-1].kind is SpeechTokenKind.EMOJI)
+
+    def first_token(self) -> SpeechToken | None:
+        return self.tokens[0] if self.tokens else None
+
+    def last_token(self) -> SpeechToken | None:
+        return self.tokens[-1] if self.tokens else None
+
+
+@dataclass(slots=True)
+class PiperPythonVoiceRuntime:
+    raw_voice: Any
+    synthesis_config_factory: Callable[..., Any] | None = None
+
+    def synthesize_to_wav(self, text: str, wav_file: wave.Wave_write, speaker_id: int | None = None) -> None:
+        synthesize_wav = getattr(self.raw_voice, "synthesize_wav", None)
+        syn_config = self._synthesis_config(speaker_id)
+        if callable(synthesize_wav):
+            try:
+                if syn_config is None:
+                    synthesize_wav(text, wav_file)
+                else:
+                    synthesize_wav(text, wav_file, syn_config=syn_config)
+                return
+            except TypeError:
+                pass
+
+        synthesize = getattr(self.raw_voice, "synthesize", None)
+        if callable(synthesize):
+            try:
+                maybe_chunks = synthesize(text, syn_config=syn_config)
+            except TypeError:
+                maybe_chunks = synthesize(text)
+
+            chunks = cast(Iterable[Any], maybe_chunks)
+            first_chunk = True
+            for chunk in chunks:
+                sample_rate = getattr(chunk, "sample_rate", None)
+                sample_width = getattr(chunk, "sample_width", None)
+                sample_channels = getattr(chunk, "sample_channels", None)
+                audio_bytes = getattr(chunk, "audio_int16_bytes", None)
+                if not isinstance(audio_bytes, (bytes, bytearray, memoryview)):
+                    raise RuntimeError("Piper Python synth chunk has no readable PCM bytes.")
+                if first_chunk:
+                    if not isinstance(sample_rate, int) or sample_rate <= 0:
+                        raise RuntimeError("Piper Python synth chunk has no valid sample rate.")
+                    if not isinstance(sample_width, int) or sample_width <= 0:
+                        raise RuntimeError("Piper Python synth chunk has no valid sample width.")
+                    if not isinstance(sample_channels, int) or sample_channels <= 0:
+                        raise RuntimeError("Piper Python synth chunk has no valid channel count.")
+                    wav_file.setframerate(sample_rate)
+                    wav_file.setsampwidth(sample_width)
+                    wav_file.setnchannels(sample_channels)
+                    first_chunk = False
+                wav_file.writeframes(bytes(audio_bytes))
+
+            if not first_chunk:
+                return
+
+        synthesize_stream_raw = getattr(self.raw_voice, "synthesize_stream_raw", None)
+        if callable(synthesize_stream_raw):
+            sample_rate = self.sample_rate()
+            if sample_rate is None:
+                raise RuntimeError("Piper Python voice has no readable sample rate for raw streaming output.")
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            raw_chunks = cast(Iterable[bytes | bytearray | memoryview], synthesize_stream_raw(text))
+            for chunk in raw_chunks:
+                wav_file.writeframes(bytes(chunk))
+            return
+
+        raise RuntimeError("Unsupported Piper Python voice API.")
+
+    def sample_rate(self) -> int | None:
+        config = getattr(self.raw_voice, "config", None)
+        sample_rate = getattr(config, "sample_rate", None)
+        return int(sample_rate) if isinstance(sample_rate, (int, float)) and sample_rate > 0 else None
+
+    def _synthesis_config(self, speaker_id: int | None) -> Any | None:
+        if speaker_id is None or self.synthesis_config_factory is None:
+            return None
+        return self.synthesis_config_factory(speaker_id=speaker_id)
 
 
 @dataclass(slots=True, frozen=True)
@@ -157,25 +400,39 @@ class UserVoiceSettings:
 class VoiceTTSService:
     _MAX_SPOKEN_CHARS = 550
     _LOG_PREVIEW_CHARS = 120
+    _MAX_BACKLOG_JOBS = 64
     _VARIANT_CLEAR_VALUES = frozenset({"none", "off", "clear", "default"})
     _VOICE_CONNECT_TIMEOUT_SECONDS = 20.0
+    _QUEUE_BATCH_WINDOW_SECONDS = 0.35
+    _QUEUE_LATE_JOIN_TAIL_MIN_SECONDS = 0.35
+    _QUEUE_LATE_JOIN_TAIL_MAX_SECONDS = 1.25
+    _QUEUE_LATE_JOIN_TAIL_RATIO = 0.18
+    _MAX_BATCHED_JOBS = 12
     _MAX_SUBSTITUTIONS_PER_USER = 100
     _MAX_SUBSTITUTION_KEY_CHARS = 40
     _MAX_SUBSTITUTION_VALUE_CHARS = 120
 
-    def __init__(self, bot: hikari.GatewayBot):
+    def __init__(self, bot: hikari.GatewayBot, voice_client: hikariwave.VoiceClient):
         self.bot = bot
-        self.voice_channel = config.VOICE_CHANNEL
-        self.tts_channel = config.TTS_CHANNEL
+        self._voice_targets: dict[hikari.Snowflake, config.VoiceTargetConfig] = dict(config.VOICE_TARGETS)
 
-        self._voice_client = hikariwave.VoiceClient(bot)
+        self._voice_client = voice_client
+        self._music_active_channel_provider: Callable[[hikari.Snowflake], hikari.Snowflake | None] | None = None
+        self._music_duck_handler: Callable[
+            [hikari.Snowflake, hikari.Snowflake, bytes],
+            Awaitable[tuple[hikariwave.VoiceConnection, hikariwave.AudioSource] | None],
+        ] | None = None
         self._queue: asyncio.Queue[VoiceJob] = asyncio.Queue()
+        self._backlog_job_count = 0
         self._worker_task: asyncio.Task[None] | None = None
         self._engine_kind, self._engine = self._resolve_local_tts_engine()
+        self._piper_python_loader = self._resolve_piper_python_loader()
+        self._piper_python_voice_cache: dict[str, PiperPythonVoiceRuntime] = {}
         self._piper_data_dir = config.TTS_PIPER_DATA_DIR
         self._piper_config_path = config.TTS_PIPER_CONFIG
         self._users_path = VOICE_USERS_FILE
         self._corrections_path = VOICE_CORRECTIONS_FILE
+        self._voice_target_labels_path = VOICE_TARGET_LABELS_FILE
         self._user_settings: dict[int, UserVoiceSettings] = {}
         self.voice = config.TTS_VOICE
         if self._engine_kind == "piper":
@@ -186,14 +443,16 @@ class VoiceTTSService:
         self._piper_config_cache: dict[str, tuple[int, dict[str, object] | None]] = {}
         self._common_text_corrections = self._load_common_text_corrections()
         self._load_user_settings()
+        self._voice_target_name_cache = self._load_voice_target_name_cache()
+        self._voice_target_choices_dirty = True
 
-        self._enabled = bool(self.voice_channel and self.tts_channel)
+        self._enabled = bool(self._voice_targets)
         if not self._enabled:
-            log.warning("Voice TTS disabled: VOICE_CHANNEL and TTS_CHANNEL must be configured")
+            log.warning("Voice TTS disabled: configure VOICE_TARGETS or the legacy VOICE_CHANNEL/TTS_CHANNEL pair")
         elif not self._engine:
             requested = config.TTS_ENGINE or "auto"
             log.warning(
-                f"Voice TTS disabled: local TTS executable not found for {requested=!r} (espeak-ng/espeak/piper)"
+                f"Voice TTS disabled: local TTS engine not found for {requested=!r} (espeak-ng/espeak/piper)"
             )
         elif self._engine_kind == "piper" and not self._piper_model_path(self.voice):
             model_hint = f"voice={self.voice!r} data_dir={self._piper_data_dir!r}"
@@ -202,17 +461,25 @@ class VoiceTTSService:
                 f"set TTS_PIPER_MODEL/TTS_VOICE and TTS_PIPER_DATA_DIR if needed ({model_hint})"
             )
 
-    async def setup(self):
+    async def setup(self, client: lightbulb.Client | None = None):
         if self._worker_task:
             return
         self._worker_task = asyncio.create_task(self._worker_loop(), name="voice-tts-worker")
+        if not shutil.which("ffmpeg"):
+            log.warning("Voice playback may fail: ffmpeg is not available in PATH.")
         await self._validate_voice()
         await self._validate_variant()
+        if client:
+            await self.sync_voice_target_choices(client, reason="startup")
         if self._enabled:
             users = self.listening_users()
             target_users = ",".join(str(uid) for uid in users) if users else "none"
+            target_summary = ", ".join(
+                f"{target.guild_id}:tts={target.tts_channel}/voice={target.voice_channel}"
+                for target in sorted(self._voice_targets.values(), key=lambda item: int(item.guild_id))
+            )
             log.info(
-                f"Voice TTS ready: {self.tts_channel=} {self.voice_channel=} target_users={target_users} "
+                f"Voice TTS ready: targets=[{target_summary}] target_users={target_users} "
                 f"voice={self.voice} variant={self.variant or 'none'} engine={self._engine_display()}"
             )
 
@@ -222,23 +489,235 @@ class VoiceTTSService:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker_task
             self._worker_task = None
-        await self._voice_client.close()
+        self._drop_queued_jobs()
 
     def get_connection(self, guild_id: hikari.Snowflakeish) -> hikariwave.VoiceConnection | None:
         return self._voice_client.get_connection(guild_id=guild_id)
 
-    def active_voice_connection(self) -> hikariwave.VoiceConnection | None:
-        if not self.voice_channel:
-            return None
-        return self._voice_client.get_connection(channel_id=hikari.Snowflake(self.voice_channel))
+    def set_music_active_channel_provider(
+        self,
+        provider: Callable[[hikari.Snowflake], hikari.Snowflake | None] | None,
+    ) -> None:
+        self._music_active_channel_provider = provider
 
-    def _target_voice_channel_id(self) -> hikari.Snowflake | None:
-        if not self.voice_channel:
+    def set_music_duck_handler(
+        self,
+        handler: Callable[
+            [hikari.Snowflake, hikari.Snowflake, bytes],
+            Awaitable[tuple[hikariwave.VoiceConnection, hikariwave.AudioSource] | None],
+        ]
+        | None,
+    ) -> None:
+        self._music_duck_handler = handler
+
+    def _active_music_channel(self, guild_id: hikari.Snowflakeish) -> hikari.Snowflake | None:
+        if not self._music_active_channel_provider:
             return None
-        return hikari.Snowflake(self.voice_channel)
+        return self._music_active_channel_provider(hikari.Snowflake(guild_id))
+
+    def voice_target(self, guild_id: hikari.Snowflakeish) -> config.VoiceTargetConfig | None:
+        return self._voice_targets.get(hikari.Snowflake(guild_id))
+
+    def _load_voice_target_name_cache(self) -> dict[hikari.Snowflake, str]:
+        if not self._voice_target_labels_path.exists():
+            return {}
+
+        try:
+            raw = json.loads(self._voice_target_labels_path.read_text(config.STR_ENCODE))
+        except (OSError, ValueError) as xcp:
+            log.warning(
+                f"TTS voice-target label cache read failed path={self._voice_target_labels_path!s}: "
+                f"{type(xcp).__name__}: {xcp}"
+            )
+            return {}
+
+        if not isinstance(raw, dict):
+            return {}
+
+        labels: dict[hikari.Snowflake, str] = {}
+        for guild_key, label in raw.items():
+            if not isinstance(label, str) or not label.strip():
+                continue
+            try:
+                guild_id = hikari.Snowflake(str(guild_key).strip())
+            except ValueError:
+                continue
+            if guild_id not in self._voice_targets:
+                continue
+            labels[guild_id] = label.strip()
+        return labels
+
+    def _save_voice_target_name_cache(self) -> None:
+        payload = {
+            str(guild_id): self._voice_target_name_cache[guild_id]
+            for guild_id in self.configured_voice_guild_ids()
+            if guild_id in self._voice_target_name_cache
+        }
+        try:
+            self._voice_target_labels_path.write_text(json.dumps(payload, indent=2), config.STR_ENCODE)
+        except OSError as xcp:
+            log.warning(
+                f"TTS voice-target label cache write failed path={self._voice_target_labels_path!s}: "
+                f"{type(xcp).__name__}: {xcp}"
+            )
+
+    def _set_voice_target_label(self, guild_id: hikari.Snowflakeish, label: str) -> bool:
+        guild = hikari.Snowflake(guild_id)
+        clean = label.strip()
+        if not clean:
+            return False
+        if self._voice_target_name_cache.get(guild) == clean:
+            return False
+        self._voice_target_name_cache[guild] = clean
+        self._save_voice_target_name_cache()
+        return True
+
+    def configured_voice_guild_ids(self) -> list[hikari.Snowflake]:
+        guild_ids = sorted(self._voice_targets, key=int)
+        primary = hikari.Snowflake(config.DISCORD_GUILD)
+        if primary in self._voice_targets:
+            guild_ids.remove(primary)
+            guild_ids.insert(0, primary)
+        return guild_ids
+
+    def primary_voice_guild_id(self) -> hikari.Snowflake | None:
+        primary = hikari.Snowflake(config.DISCORD_GUILD)
+        if primary in self._voice_targets:
+            return primary
+        guild_ids = self.configured_voice_guild_ids()
+        return guild_ids[0] if guild_ids else None
+
+    def resolve_voice_target_selection(self, value: str | None) -> hikari.Snowflake | None:
+        if value is None:
+            return self.primary_voice_guild_id()
+
+        selected = value.strip()
+        if not selected:
+            return self.primary_voice_guild_id()
+
+        try:
+            guild_id = hikari.Snowflake(selected)
+        except ValueError as xcp:
+            raise LookupError("Unknown voice target.") from xcp
+
+        if guild_id not in self._voice_targets:
+            raise LookupError("Unknown voice target.")
+        return guild_id
+
+    async def describe_voice_target(self, guild_id: hikari.Snowflakeish) -> str:
+        guild = hikari.Snowflake(guild_id)
+        if cached := self._voice_target_name_cache.get(guild):
+            return cached
+
+        target = self.voice_target(guild)
+        if not target:
+            raise LookupError(f"Unknown voice target guild: {guild}")
+
+        guild_name: str | None = None
+        channel_name: str | None = None
+
+        guild_obj = self.bot.cache.get_guild(guild)
+        if guild_obj:
+            guild_name = guild_obj.name
+
+        channel_obj = self.bot.cache.get_guild_channel(target.voice_channel)
+        if channel_obj:
+            channel_name = getattr(channel_obj, "name", None)
+
+        if guild_name is None:
+            with contextlib.suppress(Exception):
+                guild_obj = await self.bot.rest.fetch_guild(guild)
+                guild_name = guild_obj.name
+
+        if channel_name is None:
+            with contextlib.suppress(Exception):
+                channel_obj = await self.bot.rest.fetch_channel(target.voice_channel)
+                channel_name = getattr(channel_obj, "name", None)
+
+        label = f"{guild_name or guild} [{channel_name or target.voice_channel}]"
+        self._set_voice_target_label(guild, label)
+        return label
+
+    async def voice_target_choice_list(self) -> list[Choice[str]]:
+        choices: list[Choice[str]] = []
+        for guild_id in self.configured_voice_guild_ids():
+            label = await self.describe_voice_target(guild_id)
+            choices.append(Choice(self._voice_target_choice_label(label), str(guild_id)))
+        return choices
+
+    @staticmethod
+    def _voice_target_choice_label(label: str) -> str:
+        if len(label) <= 100:
+            return label
+        return label[:97].rstrip() + "..."
+
+    async def refresh_voice_target_choices(self) -> bool:
+        option_data = CMD_VoiceSay._command_data.options["target"]
+        choices = await self.voice_target_choice_list()
+        current = option_data.choices
+        current_pairs = [] if current is hikari.UNDEFINED else [(choice.name, choice.value) for choice in current]
+        next_pairs = [(choice.name, choice.value) for choice in choices]
+        if current_pairs == next_pairs and not option_data.autocomplete:
+            return False
+
+        option_data.choices = choices
+        option_data.autocomplete = False
+        option_data.autocomplete_provider = hikari.UNDEFINED
+        self._voice_target_choices_dirty = True
+        return True
+
+    async def sync_voice_target_choices(self, client: lightbulb.Client, *, reason: str) -> bool:
+        changed = await self.refresh_voice_target_choices()
+        if not changed and not self._voice_target_choices_dirty:
+            return False
+
+        try:
+            await client.sync_application_commands()
+        except Exception as xcp:
+            log.warning(f"TTS voice-target command sync failed reason={reason}: {type(xcp).__name__}: {xcp}")
+            return False
+
+        self._voice_target_choices_dirty = False
+        log.info(f"TTS voice-target command sync complete reason={reason}")
+        return True
+
+    async def on_guild_available(self, guild: hikari.GatewayGuild, client: lightbulb.Client) -> bool:
+        target = self.voice_target(guild.id)
+        if not target:
+            return False
+
+        channel = guild.get_channels().get(target.voice_channel)
+        channel_name = getattr(channel, "name", None) if channel else None
+        label = f"{guild.name} [{channel_name or target.voice_channel}]"
+        changed = self._set_voice_target_label(guild.id, label)
+        if not changed:
+            return False
+
+        return await self.sync_voice_target_choices(client, reason=f"guild_available:{guild.id}")
+
+    def active_voice_connections(self) -> list[hikariwave.VoiceConnection]:
+        connections: list[hikariwave.VoiceConnection] = []
+        for guild_id in sorted(self._voice_targets, key=int):
+            if connection := self._voice_client.get_connection(guild_id=guild_id):
+                connections.append(connection)
+        return connections
+
+    def active_voice_connection(self, guild_id: hikari.Snowflakeish | None = None) -> hikariwave.VoiceConnection | None:
+        if guild_id is not None:
+            return self.get_connection(guild_id)
+
+        connections = self.active_voice_connections()
+        if len(connections) != 1:
+            return None
+        return connections[0]
+
+    def _target_voice_channel_id(self, guild_id: hikari.Snowflakeish) -> hikari.Snowflake | None:
+        if not (target := self.voice_target(guild_id)):
+            return None
+        return target.voice_channel
 
     def _target_voice_listener_count(self, guild_id: hikari.Snowflakeish) -> int:
-        channel_id = self._target_voice_channel_id()
+        channel_id = self._target_voice_channel_id(guild_id)
         if channel_id is None:
             return 0
 
@@ -310,14 +789,14 @@ class VoiceTTSService:
         return ok and not has_active_connection and not still_in_target
 
     async def on_voice_state_update(self, event: hikari.VoiceStateUpdateEvent):
-        if not self.voice_channel:
+        if not (target := self.voice_target(event.guild_id)):
             return
 
         me = self.bot.get_me()
         if me and event.state.user_id == me.id:
             return
 
-        target_channel = hikari.Snowflake(self.voice_channel)
+        target_channel = target.voice_channel
         old_channel_id = event.old_state.channel_id if event.old_state else None
         new_channel_id = event.state.channel_id
 
@@ -325,7 +804,7 @@ class VoiceTTSService:
         if old_channel_id != target_channel or new_channel_id == target_channel:
             return
 
-        connection = self.active_voice_connection()
+        connection = self.get_connection(event.guild_id)
         if not connection or connection.channel_id != target_channel:
             return
 
@@ -753,6 +1232,13 @@ class VoiceTTSService:
         self._available_voices = []
         self._available_variants = []
         self._piper_config_cache.clear()
+        self._piper_python_voice_cache.clear()
+
+    def _piper_python_runtime_ready(self, voice: str | None = None) -> bool:
+        if self._engine_kind != "piper" or self._engine != "python":
+            return True
+        target_voice = self.voice if voice is None else voice
+        return self._piper_model_path(target_voice) is not None
 
     async def scan_piper_models_from_hf(self, url: str) -> tuple[HFRepoRef, list[str]]:
         if self._engine_kind != "piper":
@@ -873,8 +1359,10 @@ class VoiceTTSService:
             return "service_disabled"
         if not self._engine:
             return "no_local_tts_engine"
-        if not self.voice_channel:
-            return "voice_channel_unconfigured"
+        if not self._piper_python_runtime_ready():
+            return "voice_unavailable"
+        if not self.voice_target(guild_id):
+            return "guild_unconfigured"
         if require_worker and (not self._worker_task or self._worker_task.done()):
             return "worker_not_running"
         if self._target_voice_listener_count(guild_id) == 0:
@@ -885,8 +1373,10 @@ class VoiceTTSService:
     def _queue_preflight_error(reason: str) -> str:
         if reason == "no_local_tts_engine":
             return "TTS engine is unavailable on the bot host."
-        if reason == "voice_channel_unconfigured":
-            return "VOICE_CHANNEL is not configured."
+        if reason == "voice_unavailable":
+            return "The configured Piper voice model is unavailable on the bot host."
+        if reason == "guild_unconfigured":
+            return "Voice TTS is not configured for this server."
         if reason == "worker_not_running":
             return "Voice TTS worker is not running."
         if reason == "voice_channel_empty":
@@ -895,8 +1385,35 @@ class VoiceTTSService:
             return "Voice TTS is disabled."
         return "TTS is unavailable."
 
+    def _try_enqueue_job(self, job: VoiceJob) -> int | None:
+        if self._backlog_job_count >= self._MAX_BACKLOG_JOBS:
+            return None
+        self._queue.put_nowait(job)
+        self._backlog_job_count += 1
+        return self._backlog_job_count
+
+    def _drop_queued_jobs(self) -> int:
+        dropped = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self._queue.task_done()
+                dropped += 1
+
+        self._backlog_job_count = max(0, self._backlog_job_count - dropped)
+        if dropped or self._backlog_job_count:
+            self._backlog_job_count = 0
+        return dropped
+
     async def on_message(self, event: hikari.GuildMessageCreateEvent):
-        if event.channel_id != self.tts_channel:
+        if not event.guild_id:
+            return
+
+        target = self.voice_target(event.guild_id)
+        if not target or event.channel_id != target.tts_channel:
             return
 
         raw = (event.content or "").strip()
@@ -912,9 +1429,6 @@ class VoiceTTSService:
         if not self.is_user_listening(event.author_id):
             log.info(f"{base_log} said=no reason=wrong_user")
             return
-        if not event.guild_id:
-            log.info(f"{base_log} said=no reason=no_guild")
-            return
         if raw.startswith(config.CHAT_IGNORE):
             log.info(f"{base_log} said=no reason=chat_ignore_prefix")
             return
@@ -929,7 +1443,7 @@ class VoiceTTSService:
 
         selected_voice, selected_variant = self.user_voice_variant(event.author_id)
         voice_spec = self._voice_spec(selected_voice, selected_variant)
-        self._queue.put_nowait(
+        queue_size = self._try_enqueue_job(
             VoiceJob(
                 hikari.Snowflake(event.guild_id),
                 event.message_id,
@@ -938,9 +1452,12 @@ class VoiceTTSService:
                 selected_variant,
             )
         )
+        if queue_size is None:
+            log.warning(f"{base_log} said=no reason=queue_full backlog={self._backlog_job_count}")
+            return
         log.info(
-            f"{base_log} said=queued reason=accepted queue_size={self._queue.qsize()} "
-            f"voice={voice_spec} spoken={self._preview(spoken)!r}"
+            f"{base_log} said=queued reason=accepted queue_size={queue_size} "
+            f"voice={voice_spec} spoken={self._preview(spoken.render())!r}"
         )
 
     def queue_say(
@@ -964,62 +1481,359 @@ class VoiceTTSService:
         guild = hikari.Snowflake(guild_id)
         message = hikari.Snowflake(message_id)
         voice_spec = self._voice_spec(selected_voice, selected_variant)
-        self._queue.put_nowait(VoiceJob(guild, message, spoken, selected_voice, selected_variant))
-        queue_size = self._queue.qsize()
+        queue_size = self._try_enqueue_job(VoiceJob(guild, message, spoken, selected_voice, selected_variant))
+        if queue_size is None:
+            raise RuntimeError("Voice TTS backlog is full. Try again once the queue drains.")
         log.info(
             f"TTS command queued guild={guild} message_id={message} "
-            f"queue_size={queue_size} voice={voice_spec} spoken={self._preview(spoken)!r}"
+            f"queue_size={queue_size} voice={voice_spec} spoken={self._preview(spoken.render())!r}"
         )
-        return spoken, queue_size
+        return spoken.render(), queue_size
 
     async def _worker_loop(self):
-        while True:
-            job = await self._queue.get()
-            try:
-                await self._process_job(job)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception(f"Voice TTS failed for {job.message_id=}")
-            finally:
-                self._queue.task_done()
+        pending_jobs: deque[VoiceJob] = deque()
+        current_playback: ActivePlayback | None = None
+        queued_playback: ActivePlayback | None = None
+        inflight_jobs: tuple[VoiceJob, ...] = ()
 
-    async def _process_job(self, job: VoiceJob):
+        try:
+            while True:
+                if current_playback is None:
+                    job = pending_jobs.popleft() if pending_jobs else await self._queue.get()
+                    batch = [job]
+                    inflight_jobs = (job,)
+                    try:
+                        batch = await self._collect_batch(job, pending_jobs)
+                        inflight_jobs = tuple(batch)
+                        current_playback = await self._enqueue_job_batch(batch)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        log.exception(f"Voice TTS failed for message_id={job.message_id} batch_size={len(batch)}")
+                    if current_playback is None:
+                        self._mark_jobs_done(batch)
+                    inflight_jobs = ()
+                    continue
+
+                if queued_playback is None:
+                    await self._buffer_jobs_until_tail(current_playback, pending_jobs)
+                    if current_playback.done_event.is_set():
+                        await self._finalize_playback(current_playback)
+                        current_playback = None
+                        continue
+
+                    if not pending_jobs:
+                        await self._buffer_jobs_until_ready_or_done(current_playback, pending_jobs)
+                        if current_playback.done_event.is_set():
+                            await self._finalize_playback(current_playback)
+                            current_playback = None
+                            continue
+                        if not pending_jobs:
+                            continue
+
+                    job = pending_jobs.popleft()
+                    batch = [job]
+                    inflight_jobs = (job,)
+                    try:
+                        batch = await self._collect_batch(job, pending_jobs)
+                        inflight_jobs = tuple(batch)
+                        queued_playback = await self._enqueue_job_batch(batch, predecessor=current_playback)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        log.exception(f"Voice TTS failed for message_id={job.message_id} batch_size={len(batch)}")
+                    if queued_playback is None:
+                        self._mark_jobs_done(batch)
+                    inflight_jobs = ()
+                    continue
+
+                await self._buffer_jobs_until_done(current_playback, pending_jobs)
+                await self._finalize_playback(current_playback)
+                current_playback = queued_playback
+                queued_playback = None
+        except asyncio.CancelledError:
+            if inflight_jobs:
+                self._mark_jobs_done(inflight_jobs)
+                inflight_jobs = ()
+            if pending_jobs:
+                self._mark_jobs_done(pending_jobs)
+                pending_jobs.clear()
+            for playback in (current_playback, queued_playback):
+                if playback and playback.monitor_task:
+                    playback.monitor_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await playback.monitor_task
+                    self._mark_jobs_done(playback.jobs)
+            raise
+
+    async def _collect_batch(self, first_job: VoiceJob, pending_jobs: deque[VoiceJob]) -> list[VoiceJob]:
+        batch = [first_job]
+        deadline = asyncio.get_running_loop().time() + self._QUEUE_BATCH_WINDOW_SECONDS
+        batch_len = first_job.speech.rendered_len()
+
+        while len(batch) < self._MAX_BATCHED_JOBS:
+            if pending_jobs:
+                next_job = pending_jobs[0]
+                fetched_from_queue = False
+            else:
+                timeout = deadline - asyncio.get_running_loop().time()
+                if timeout <= 0:
+                    break
+                try:
+                    next_job = await asyncio.wait_for(self._queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    break
+                fetched_from_queue = True
+
+            if not self._jobs_can_batch(first_job, next_job):
+                if fetched_from_queue:
+                    pending_jobs.appendleft(next_job)
+                break
+
+            next_len = batch_len + self._batched_message_additional_len(batch[-1].speech, next_job.speech)
+            if next_len > self._MAX_SPOKEN_CHARS:
+                if fetched_from_queue:
+                    pending_jobs.appendleft(next_job)
+                break
+
+            if not fetched_from_queue:
+                pending_jobs.popleft()
+            batch.append(next_job)
+            batch_len = next_len
+
+        return batch
+
+    @staticmethod
+    def _jobs_can_batch(left: VoiceJob, right: VoiceJob) -> bool:
+        return (
+            left.guild_id == right.guild_id
+            and left.voice == right.voice
+            and left.variant == right.variant
+        )
+
+    async def _enqueue_job_batch(
+        self,
+        jobs: list[VoiceJob],
+        predecessor: ActivePlayback | None = None,
+    ) -> ActivePlayback | None:
+        job = jobs[0]
         connection = await self._ensure_connection(job.guild_id)
         if not connection:
-            log.warning(f"TTS job dropped {job.message_id=} said=no reason=no_voice_connection")
+            log.warning(
+                f"TTS job dropped {job.message_id=} batch_size={len(jobs)} said=no reason=no_voice_connection"
+            )
             return
 
         self._recover_stale_player_task(connection, job.message_id)
 
-        audio = await self._synth_text(job.text, job.voice, job.variant)
+        text = self._render_batched_speech(job.speech for job in jobs)
+        audio = await self._synth_text(text, job.voice, job.variant)
         if not audio:
-            log.warning(f"TTS job dropped {job.message_id=} said=no reason=tts_synth_empty")
-            return
+            log.warning(f"TTS job dropped {job.message_id=} batch_size={len(jobs)} said=no reason=tts_synth_empty")
+            return None
+
+        source: hikariwave.AudioSource
+        music_channel = self._active_music_channel(job.guild_id)
+        if self._music_duck_handler:
+            ducked_playback = await self._music_duck_handler(job.guild_id, job.message_id, audio)
+            if ducked_playback is not None:
+                connection, source = ducked_playback
+                playback = ActivePlayback(
+                    jobs=tuple(jobs),
+                    text=text,
+                    connection=connection,
+                    source=source,
+                    begin_timeout_seconds=self._playback_begin_timeout_seconds(predecessor),
+                    timeout_seconds=self._playback_timeout_seconds(text),
+                    expected_duration_seconds=self._audio_duration_seconds(audio),
+                )
+                playback.monitor_task = asyncio.create_task(
+                    self._monitor_playback(playback),
+                    name=f"voice-tts-playback-{job.message_id}",
+                )
+                log.info(
+                    f"TTS job ducked-to-player {job.message_id=} batch_size={len(jobs)} "
+                    f"voice={self._voice_spec(job.voice, job.variant)} spoken={self._preview(text)!r}"
+                )
+                return playback
+            if music_channel is not None and connection.channel_id == music_channel:
+                log.warning(
+                    f"TTS job dropped {job.message_id=} batch_size={len(jobs)} "
+                    "said=no reason=music_duck_unavailable"
+                )
+                return None
 
         source = hikariwave.BufferAudioSource(audio, name=f"tts-{job.message_id}")
         result = await connection.player.add_queue(source)
         if not result.success:
-            log.warning(f"TTS job dropped {job.message_id=} said=no reason=player_rejected detail={result.reason}")
-            return
+            log.warning(
+                f"TTS job dropped {job.message_id=} batch_size={len(jobs)} "
+                f"said=no reason=player_rejected detail={result.reason}"
+            )
+            return None
+
+        playback = ActivePlayback(
+            jobs=tuple(jobs),
+            text=text,
+            connection=connection,
+            source=source,
+            begin_timeout_seconds=self._playback_begin_timeout_seconds(predecessor),
+            timeout_seconds=self._playback_timeout_seconds(text),
+            expected_duration_seconds=self._audio_duration_seconds(audio),
+        )
+        playback.monitor_task = asyncio.create_task(
+            self._monitor_playback(playback),
+            name=f"voice-tts-playback-{job.message_id}",
+        )
 
         log.info(
             f"TTS job queued-to-player {job.message_id=} queue_len={connection.player.queue} "
-            f"voice={self._voice_spec(job.voice, job.variant)}"
+            f"batch_size={len(jobs)} voice={self._voice_spec(job.voice, job.variant)} "
+            f"spoken={self._preview(text)!r}"
         )
-        finished = await self._wait_for_completion(job, connection, source)
-        if finished:
-            log.info(f"TTS job completed {job.message_id=} said=yes")
-        else:
-            log.warning(f"TTS job dropped {job.message_id=} said=no reason=playback_timeout_or_reset")
+        return playback
 
-    async def _ensure_connection(self, guild_id: hikari.Snowflake) -> hikariwave.VoiceConnection | None:
-        if not self.voice_channel:
+    async def _buffer_jobs_until_tail(self, playback: ActivePlayback, pending_jobs: deque[VoiceJob]) -> None:
+        while not playback.done_event.is_set():
+            timeout = self._time_until_late_join(playback)
+            if timeout is not None and timeout <= 0:
+                return
+
+            result, job = await self._await_job_or_playback(playback, timeout)
+            if result is PlaybackWaitResult.JOB and job is not None:
+                pending_jobs.append(job)
+                continue
+            if result is PlaybackWaitResult.DONE:
+                return
+            if result is PlaybackWaitResult.TIMEOUT:
+                return
+
+    async def _buffer_jobs_until_ready_or_done(self, playback: ActivePlayback, pending_jobs: deque[VoiceJob]) -> None:
+        while not playback.done_event.is_set() and not pending_jobs:
+            result, job = await self._await_job_or_playback(playback)
+            if result is PlaybackWaitResult.JOB and job is not None:
+                pending_jobs.append(job)
+                return
+            if result is PlaybackWaitResult.DONE:
+                return
+
+    async def _buffer_jobs_until_done(self, playback: ActivePlayback, pending_jobs: deque[VoiceJob]) -> None:
+        while not playback.done_event.is_set():
+            result, job = await self._await_job_or_playback(playback)
+            if result is PlaybackWaitResult.JOB and job is not None:
+                pending_jobs.append(job)
+                continue
+            return
+
+    async def _await_job_or_playback(
+        self,
+        playback: ActivePlayback,
+        timeout: float | None = None,
+    ) -> tuple[PlaybackWaitResult, VoiceJob | None]:
+        queue_task = asyncio.create_task(self._queue.get())
+        done_task = asyncio.create_task(playback.done_event.wait())
+        timeout_task: asyncio.Task[None] | None = None
+        tasks: set[asyncio.Task[object]] = {cast(asyncio.Task[object], queue_task), cast(asyncio.Task[object], done_task)}
+        if timeout is not None:
+            timeout_task = asyncio.create_task(asyncio.sleep(timeout))
+            tasks.add(cast(asyncio.Task[object], timeout_task))
+
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            recovered_job: VoiceJob | None = None
+            if queue_task.done() and not queue_task.cancelled():
+                with contextlib.suppress(Exception):
+                    recovered_job = queue_task.result()
+
+            for task in tasks:
+                if task is not queue_task or recovered_job is None:
+                    task.cancel()
+            for task in tasks:
+                if task is queue_task and recovered_job is not None:
+                    continue
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+            if recovered_job is not None:
+                self._queue.put_nowait(recovered_job)
+            raise
+        except Exception:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            raise
+
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        if queue_task in done:
+            return PlaybackWaitResult.JOB, queue_task.result()
+        if done_task in done:
+            return PlaybackWaitResult.DONE, None
+        return PlaybackWaitResult.TIMEOUT, None
+
+    async def _finalize_playback(self, playback: ActivePlayback) -> None:
+        if playback.monitor_task:
+            await playback.monitor_task
+        self._mark_jobs_done(playback.jobs)
+
+    def _mark_jobs_done(self, jobs: Iterable[VoiceJob]) -> None:
+        completed = 0
+        for _ in jobs:
+            self._queue.task_done()
+            completed += 1
+        self._backlog_job_count = max(0, self._backlog_job_count - completed)
+
+    def _time_until_late_join(self, playback: ActivePlayback) -> float | None:
+        if playback.started_at is None or playback.expected_duration_seconds is None:
             return None
 
-        target_channel = hikari.Snowflake(self.voice_channel)
+        late_join_tail = self._late_join_tail_seconds(playback.expected_duration_seconds)
+        deadline = playback.started_at + max(playback.expected_duration_seconds - late_join_tail, 0.0)
+        return deadline - asyncio.get_running_loop().time()
+
+    @classmethod
+    def _late_join_tail_seconds(cls, duration_seconds: float) -> float:
+        return min(
+            cls._QUEUE_LATE_JOIN_TAIL_MAX_SECONDS,
+            max(cls._QUEUE_LATE_JOIN_TAIL_MIN_SECONDS, duration_seconds * cls._QUEUE_LATE_JOIN_TAIL_RATIO),
+        )
+
+    def _playback_begin_timeout_seconds(self, predecessor: ActivePlayback | None) -> float:
+        if predecessor is None:
+            return 5.0
+        return max(5.0, self._remaining_playback_seconds(predecessor) + 5.0)
+
+    def _remaining_playback_seconds(self, playback: ActivePlayback) -> float:
+        if playback.started_at is not None and playback.expected_duration_seconds is not None:
+            elapsed = asyncio.get_running_loop().time() - playback.started_at
+            return max(playback.expected_duration_seconds - elapsed, 0.0)
+        if playback.expected_duration_seconds is not None:
+            return playback.expected_duration_seconds
+        return playback.timeout_seconds
+
+    async def _ensure_connection(self, guild_id: hikari.Snowflake) -> hikariwave.VoiceConnection | None:
+        target = self.voice_target(guild_id)
+        if not target:
+            return None
+
+        target_channel = target.voice_channel
         connection = self._voice_client.get_connection(guild_id=guild_id)
         listeners = self._target_voice_listener_count(guild_id)
+        music_channel = self._active_music_channel(guild_id)
+
+        if music_channel is not None and music_channel != target_channel:
+            log.info(
+                f"TTS voice skip connect {guild_id=} channel={target_channel} "
+                f"reason=music_active_other_channel active_channel={music_channel}"
+            )
+            return None
 
         if connection and connection.channel_id == target_channel:
             if listeners == 0:
@@ -1142,8 +1956,14 @@ class VoiceTTSService:
         if not self._engine:
             return b""
 
-        speaker_id = self._piper_speaker_id(voice, variant)
         model_path = self._piper_model_path(voice)
+        if self._piper_python_loader and model_path:
+            return await asyncio.to_thread(self._synth_text_piper_python, text, voice, variant)
+        if self._engine == "python":
+            log.warning(f"TTS synth failed voice={self._voice_spec(voice, variant)} reason=no_piper_model")
+            return b""
+
+        speaker_id = self._piper_speaker_id(voice, variant)
         model_arg = str(model_path) if model_path else voice
         command = [self._engine, "--model", model_arg, "--output_file", "-"]
         if self._piper_config_path:
@@ -1171,38 +1991,87 @@ class VoiceTTSService:
             return b""
         return out
 
-    async def _wait_for_completion(
-        self,
-        job: VoiceJob,
-        connection: hikariwave.VoiceConnection,
-        source: hikariwave.AudioSource,
-    ) -> bool:
-        timeout = self._playback_timeout_seconds(job.text)
+    def _synth_text_piper_python(self, text: str, voice: str, variant: str | None) -> bytes:
+        speaker_id = self._piper_speaker_id(voice, variant)
+        voice_runtime = self._piper_python_voice(voice)
+        if voice_runtime is None:
+            return b""
+
+        buffer = io.BytesIO()
+        wav_file: wave.Wave_write | None = None
+        try:
+            wav_file = wave.open(buffer, "wb")
+            voice_runtime.synthesize_to_wav(text, wav_file, speaker_id=speaker_id)
+        except Exception as xcp:
+            log.warning(
+                f"TTS Piper python synth failed voice={self._voice_spec(voice, variant)} "
+                f"speaker={speaker_id}: {type(xcp).__name__}: {xcp}"
+            )
+            return b""
+        finally:
+            if wav_file is not None:
+                with contextlib.suppress(Exception):
+                    wav_file.close()
+        return buffer.getvalue()
+
+    async def _monitor_playback(self, playback: ActivePlayback) -> None:
+        job = playback.jobs[0]
 
         def pred(e):
-            return e.guild_id == job.guild_id and e.audio is source
+            return e.guild_id == job.guild_id and e.audio is playback.source
 
         try:
-            await self.bot.wait_for(hikariwave.AudioBeginEvent, 5.0, pred)
-            log.info(f"TTS audio begin {job.message_id=} timeout={timeout:.1f}s")
-        except asyncio.TimeoutError:
-            log.warning(f"TTS audio begin timeout {job.message_id=} continuing wait_for_end")
+            begin_timed_out = False
+            try:
+                await self.bot.wait_for(hikariwave.AudioBeginEvent, playback.begin_timeout_seconds, pred)
+                playback.started_at = asyncio.get_running_loop().time()
+                log.info(f"TTS audio begin {job.message_id=} timeout={playback.timeout_seconds:.1f}s")
+            except asyncio.TimeoutError:
+                begin_timed_out = True
+                log.warning(f"TTS audio begin timeout {job.message_id=} continuing wait_for_end")
+
+            try:
+                end_timeout = playback.timeout_seconds + (playback.begin_timeout_seconds if begin_timed_out else 0.0)
+                await self.bot.wait_for(hikariwave.AudioEndEvent, end_timeout, pred)
+                log.info(f"TTS job completed {job.message_id=} batch_size={len(playback.jobs)} said=yes")
+            except asyncio.TimeoutError:
+                state = getattr(playback.connection.player.state, "name", str(playback.connection.player.state))
+                log.warning(
+                    f"TTS audio end timeout {job.message_id=} state={state} "
+                    f"elapsed={playback.connection.player.elapsed:.2f}s "
+                    f"queue_len={len(playback.connection.player.queue)} timeout={playback.timeout_seconds:.1f}s"
+                )
+                with contextlib.suppress(Exception):
+                    await playback.connection.player.stop()
+                with contextlib.suppress(Exception):
+                    await self._voice_client.disconnect(guild_id=job.guild_id)
+                await asyncio.sleep(0.35)
+                log.warning(
+                    f"TTS job dropped {job.message_id=} batch_size={len(playback.jobs)} "
+                    "said=no reason=playback_timeout_or_reset"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception(f"TTS playback monitor failed for message_id={job.message_id} batch_size={len(playback.jobs)}")
+        finally:
+            playback.done_event.set()
+
+    @staticmethod
+    def _audio_duration_seconds(audio: bytes) -> float | None:
+        if not audio:
+            return None
 
         try:
-            await self.bot.wait_for(hikariwave.AudioEndEvent, timeout, pred)
-            return True
-        except asyncio.TimeoutError:
-            state = getattr(connection.player.state, "name", str(connection.player.state))
-            log.warning(
-                f"TTS audio end timeout {job.message_id=} state={state} elapsed={connection.player.elapsed:.2f}s "
-                f"queue_len={len(connection.player.queue)} timeout={timeout:.1f}s"
-            )
-            with contextlib.suppress(Exception):
-                await connection.player.stop()
-            with contextlib.suppress(Exception):
-                await self._voice_client.disconnect(guild_id=job.guild_id)
-            await asyncio.sleep(0.35)
-            return False
+            with wave.open(io.BytesIO(audio), "rb") as stream:
+                frames = stream.getnframes()
+                frame_rate = stream.getframerate()
+        except (wave.Error, EOFError):
+            return None
+
+        if frames < 0 or frame_rate <= 0:
+            return None
+        return frames / frame_rate
 
     def _recover_stale_player_task(self, connection: hikariwave.VoiceConnection, message_id: hikari.Snowflake):
         player = connection.player
@@ -1231,10 +2100,10 @@ class VoiceTTSService:
         content: str,
         event: hikari.GuildMessageCreateEvent | None = None,
         user_id: hikari.Snowflakeish | None = None,
-    ) -> str:
+    ) -> SpeechContent:
         text = content.strip()
         if not text:
-            return ""
+            return SpeechContent(())
 
         substitutions: dict[str, str] = {}
         source_user: int | None = None
@@ -1257,7 +2126,7 @@ class VoiceTTSService:
         text = DISCORD_CUSTOM_EMOJI_RE.sub(lambda m: f":{m.group(1)}:", text)
         text = emoji.demojize(text, language="en")
 
-        spoken = []
+        spoken_tokens: list[SpeechToken] = []
         repeat_tag: str | None = None
         repeat_count = 0
 
@@ -1267,10 +2136,7 @@ class VoiceTTSService:
             if not repeat_tag:
                 return
             label = self._emoji_tag_to_words(repeat_tag)
-            if repeat_count > 1:
-                spoken.append(f"{label} x{repeat_count}")
-            else:
-                spoken.append(label)
+            spoken_tokens.append(SpeechToken(label, SpeechTokenKind.EMOJI, repeat_count))
             repeat_tag = None
             repeat_count = 0
 
@@ -1289,18 +2155,111 @@ class VoiceTTSService:
             if substitutions:
                 token = self._apply_substitution_token(token, substitutions)
             token = self._apply_common_typo_correction(token)
-            spoken.append(token)
+            clean = re.sub(r"\s+", " ", token).strip()
+            if clean:
+                spoken_tokens.append(SpeechToken(clean, SpeechTokenKind.TEXT))
 
         flush_repeat()
 
-        text = " ".join(spoken)
-        text = re.sub(r"\s+", " ", text).strip()
-        if not text:
-            return ""
+        tokens = self._truncate_speech_tokens(spoken_tokens)
+        if not tokens:
+            return SpeechContent(())
+        return SpeechContent(tokens)
 
-        if len(text) > self._MAX_SPOKEN_CHARS:
-            text = text[: self._MAX_SPOKEN_CHARS].rstrip()
-        return text
+    def _truncate_speech_tokens(self, tokens: list[SpeechToken]) -> tuple[SpeechToken, ...]:
+        trimmed: list[SpeechToken] = []
+        total_len = 0
+
+        for token in tokens:
+            if not token.text:
+                continue
+
+            separator_len = 1 if trimmed else 0
+            next_len = total_len + separator_len + token.rendered_len()
+            if next_len <= self._MAX_SPOKEN_CHARS:
+                trimmed.append(token)
+                total_len = next_len
+                continue
+
+            if token.kind is SpeechTokenKind.EMOJI:
+                break
+
+            remaining = self._MAX_SPOKEN_CHARS - total_len - separator_len
+            if remaining <= 0:
+                break
+
+            clipped = token.text[:remaining].rstrip()
+            if clipped:
+                trimmed.append(SpeechToken(clipped, token.kind, token.repeat_count))
+            break
+
+        return tuple(trimmed)
+
+    @staticmethod
+    def _batched_message_separator(previous: SpeechContent, current: SpeechContent) -> str:
+        return " " if previous.ends_with_emoji() and current.starts_with_emoji() else "\n"
+
+    @classmethod
+    def _batched_message_additional_len(cls, previous: SpeechContent, current: SpeechContent) -> int:
+        separator = cls._batched_message_separator(previous, current)
+        previous_last = previous.last_token()
+        current_first = current.first_token()
+        if (
+            separator == " "
+            and previous_last is not None
+            and current_first is not None
+            and previous_last.can_merge_emoji_repeat(current_first)
+        ):
+            added_len = (
+                previous_last.merge_emoji_repeat(current_first).rendered_len() - previous_last.rendered_len()
+            )
+            for token in current.tokens[1:]:
+                if token.text:
+                    added_len += 1 + token.rendered_len()
+            return added_len
+
+        return len(separator) + current.rendered_len()
+
+    @classmethod
+    def _render_batched_speech(cls, contents: Iterable[SpeechContent]) -> str:
+        rendered: list[str] = []
+        previous: SpeechContent | None = None
+        last_token: SpeechToken | None = None
+
+        for raw_content in contents:
+            if not raw_content:
+                continue
+            current_tokens = [token for token in raw_content.tokens if token.text]
+            if not current_tokens:
+                continue
+
+            if previous is None:
+                rendered.append(current_tokens[0].render())
+                last_token = current_tokens[0]
+                start_index = 1
+            else:
+                separator = cls._batched_message_separator(previous, raw_content)
+                first_token = current_tokens[0]
+                if (
+                    separator == " "
+                    and last_token is not None
+                    and last_token.can_merge_emoji_repeat(first_token)
+                ):
+                    last_token = last_token.merge_emoji_repeat(first_token)
+                    rendered[-1] = last_token.render()
+                    start_index = 1
+                else:
+                    rendered.extend((separator, first_token.render()))
+                    last_token = first_token
+                    start_index = 1
+
+            for token in current_tokens[start_index:]:
+                rendered.extend((" ", token.render()))
+                last_token = token
+
+            previous = raw_content
+
+        return "".join(rendered)
 
     @staticmethod
     def _apply_substitution_token(token: str, substitutions: dict[str, str]) -> str:
@@ -1379,9 +2338,12 @@ class VoiceTTSService:
     @staticmethod
     def _resolve_local_tts_engine() -> tuple[str, str | None]:
         preferred = (config.TTS_ENGINE or "auto").strip().lower()
+        has_piper_python = VoiceTTSService._resolve_piper_python_loader() is not None
         if preferred in {"", "auto"}:
             if piper_path := shutil.which("piper"):
                 return "piper", piper_path
+            if has_piper_python:
+                return "piper", "python"
             if espeak_path := VoiceTTSService._resolve_espeak_engine():
                 return "espeak", espeak_path
             return "auto", None
@@ -1390,14 +2352,34 @@ class VoiceTTSService:
             return "espeak", VoiceTTSService._resolve_espeak_engine()
 
         if preferred == "piper":
-            return "piper", shutil.which("piper")
+            return "piper", shutil.which("piper") or ("python" if has_piper_python else None)
 
         log.warning(f"Unknown TTS_ENGINE={preferred!r}; falling back to auto")
         if piper_path := shutil.which("piper"):
             return "piper", piper_path
+        if has_piper_python:
+            return "piper", "python"
         if espeak_path := VoiceTTSService._resolve_espeak_engine():
             return "espeak", espeak_path
         return "auto", None
+
+    @staticmethod
+    def _resolve_piper_python_loader() -> Callable[[str, str | None], PiperPythonVoiceRuntime] | None:
+        try:
+            from piper.voice import PiperVoice
+            from piper.config import SynthesisConfig
+        except Exception:
+            return None
+
+        def load_voice(model_path: str, config_path: str | None) -> PiperPythonVoiceRuntime:
+            loaded = cast(Any, PiperVoice).load(
+                model_path,
+                config_path=config_path,
+                use_cuda=False,
+            )
+            return PiperPythonVoiceRuntime(loaded, synthesis_config_factory=cast(Callable[..., Any], SynthesisConfig))
+
+        return load_voice
 
     @staticmethod
     def _resolve_espeak_engine() -> str | None:
@@ -1409,6 +2391,10 @@ class VoiceTTSService:
     def _engine_display(self) -> str:
         if not self._engine:
             return "none"
+        if self._engine_kind == "piper" and self._piper_python_loader:
+            if self._engine == "python":
+                return "piper:python"
+            return f"{self._engine_kind}:python+{self._engine}"
         return f"{self._engine_kind}:{self._engine}"
 
     def _initial_piper_voice(self) -> str:
@@ -1762,6 +2748,34 @@ class VoiceTTSService:
                 return candidate
         return None
 
+    def _piper_python_voice(self, voice: str) -> PiperPythonVoiceRuntime | None:
+        if not self._piper_python_loader:
+            return None
+
+        model_path = self._piper_model_path(voice)
+        if not model_path:
+            return None
+
+        config_path = self._piper_config_file(voice)
+        resolved_model = str(model_path.resolve())
+        resolved_config = str(config_path.resolve()) if config_path else ""
+        cache_key = f"{resolved_model}::{resolved_config}"
+        cached = self._piper_python_voice_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            loaded = self._piper_python_loader(
+                resolved_model,
+                str(config_path) if config_path else None,
+            )
+        except Exception as xcp:
+            log.warning(f"TTS Piper python voice load failed path={model_path!s}: {type(xcp).__name__}: {xcp}")
+            return None
+
+        self._piper_python_voice_cache[cache_key] = loaded
+        return loaded
+
     @staticmethod
     def _hf_parse_repo_url(url: str) -> HFRepoRef:
         value = url.strip()
@@ -2047,21 +3061,31 @@ class CMD_VoiceSay(
     description="Queue TTS text from any channel",
 ):
     text = lightbulb.string("text", "What the bot should say")
+    target = lightbulb.string(
+        "target",
+        "Configured voice target (defaults to the primary guild)",
+        default=None,
+    )
 
     @lightbulb.invoke
     async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, voice_tts: VoiceTTSService):
         await acl.perm_check(ctx.user.id, acl.LvL.user)
-        guild_id = hikari.Snowflake(ctx.guild_id) if ctx.guild_id else voice_tts.active_voice_guild_id()
-        if guild_id is None:
-            await ctx.respond(
-                "In DMs, `/voice say` works only while I am already connected to the configured voice channel."
-            )
-            log.info(f"Voice cmd say rejected no_active_connection user={ctx.user.id} guild={ctx.guild_id}")
+        try:
+            guild_id = voice_tts.resolve_voice_target_selection(self.target)
+        except LookupError as xcp:
+            await ctx.respond(str(xcp))
+            log.info(f"Voice cmd say rejected unknown_target user={ctx.user.id} target={self.target!r}")
             return
+        if guild_id is None:
+            await ctx.respond("Voice TTS is not configured for any server.")
+            log.info(f"Voice cmd say rejected no_targets user={ctx.user.id}")
+            return
+
+        target_label = await voice_tts.describe_voice_target(guild_id)
 
         log.info(
             f"Voice cmd say invoked user={ctx.user.id} guild={ctx.guild_id} "
-            f"resolved_guild={guild_id} text={voice_tts._preview(self.text)!r}"
+            f"resolved_guild={guild_id} target={target_label!r} text={voice_tts._preview(self.text)!r}"
         )
 
         try:
@@ -2076,13 +3100,14 @@ class CMD_VoiceSay(
         await ctx.respond(
             "\n".join(
                 [
+                    f"target: `{target_label}`",
                     f"says `{voice_tts._preview(spoken)}`",
                 ]
             )
         )
         log.info(
             f"Voice cmd say success user={ctx.user.id} guild={ctx.guild_id} resolved_guild={guild_id} "
-            f"queue_size={queue_len} voice={voice_spec} spoken={voice_tts._preview(spoken)!r}"
+            f"target={target_label!r} queue_size={queue_len} voice={voice_spec} spoken={voice_tts._preview(spoken)!r}"
         )
 
 
@@ -2116,6 +3141,20 @@ class CMD_VoiceSet(
             shown += f", ... (+{len(variants) - cls._VARIANT_PREVIEW_LIMIT} more)"
         return shown
 
+    @staticmethod
+    def _connection_status(ctx: lightbulb.Context, voice_tts: VoiceTTSService) -> str:
+        if ctx.guild_id:
+            connection = voice_tts.get_connection(hikari.Snowflake(ctx.guild_id))
+            return f"<#{connection.channel_id}>" if connection else "not connected"
+
+        connections = voice_tts.active_voice_connections()
+        if not connections:
+            return "not connected"
+        if len(connections) == 1:
+            connection = connections[0]
+            return f"<#{connection.channel_id}> in `{connection.guild_id}`"
+        return ", ".join(f"`{connection.guild_id}` -> <#{connection.channel_id}>" for connection in connections)
+
     @lightbulb.invoke
     async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, voice_tts: VoiceTTSService):
         await acl.perm_check(ctx.user.id, acl.LvL.user)
@@ -2127,11 +3166,8 @@ class CMD_VoiceSet(
         )
 
         if not self.voice and not self.variant:
-            guild_id = hikari.Snowflake(ctx.guild_id or config.DISCORD_GUILD)
-            conn = voice_tts.get_connection(guild_id)
             voices = await voice_tts.available_voices()
             variants = await voice_tts.available_variants_for_voice(current_voice, force_refresh=True)
-            conn_chan = f"<#{conn.channel_id}>" if conn else "not connected"
             await ctx.respond(
                 "\n".join(
                     [
@@ -2139,7 +3175,7 @@ class CMD_VoiceSet(
                         f"voice: `{current_voice}`",
                         f"variant: `{current_variant or 'none'}`",
                         f"engine: `{voice_tts._engine_display()}`",
-                        f"connected: {conn_chan}",
+                        f"connected: {self._connection_status(ctx, voice_tts)}",
                         f"available voices: `{len(voices)}` (use autocomplete on `voice` option)",
                         f"available variants for `{current_voice}`: `{len(variants)}` (use autocomplete on `variant` option)",
                         f"variants: {self._variant_preview(variants)}",

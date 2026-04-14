@@ -5,6 +5,7 @@ import logging.config
 import os
 import re
 import sys
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import cache
 from pathlib import Path
@@ -72,28 +73,85 @@ def env_opt(var: str) -> str | None:
     return env.strip()
 
 
+@dataclass(frozen=True, slots=True)
+class VoiceTargetConfig:
+    guild_id: hikari.Snowflake
+    voice_channel: hikari.Snowflake
+    tts_channel: hikari.Snowflake
+
+
+def _parse_optional_snowflake(var: str) -> hikari.Snowflakeish | None:
+    value = env_opt(var)
+    if not value:
+        return None
+    return hikari.Snowflake(value)
+
+
+def _parse_voice_targets(
+    raw: str | None,
+    *,
+    default_guild_id: hikari.Snowflake,
+    legacy_voice_channel: hikari.Snowflakeish | None,
+    legacy_tts_channel: hikari.Snowflakeish | None,
+) -> dict[hikari.Snowflake, VoiceTargetConfig]:
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except ValueError as xcp:
+            raise ValueError("VOICE_TARGETS must be valid JSON.") from xcp
+
+        if not isinstance(payload, dict):
+            raise ValueError("VOICE_TARGETS must be a JSON object keyed by guild id.")
+
+        targets: dict[hikari.Snowflake, VoiceTargetConfig] = {}
+        for guild_key, value in payload.items():
+            try:
+                guild_id = hikari.Snowflake(str(guild_key).strip())
+            except ValueError as xcp:
+                raise ValueError(f"VOICE_TARGETS has invalid guild id: {guild_key!r}") from xcp
+
+            if not isinstance(value, dict):
+                raise ValueError(f"VOICE_TARGETS[{guild_key!r}] must be an object.")
+
+            voice_channel = value.get("voice_channel")
+            tts_channel = value.get("tts_channel")
+            if voice_channel is None or tts_channel is None:
+                raise ValueError(f"VOICE_TARGETS[{guild_key!r}] must include both 'voice_channel' and 'tts_channel'.")
+
+            try:
+                targets[guild_id] = VoiceTargetConfig(
+                    guild_id=guild_id,
+                    voice_channel=hikari.Snowflake(str(voice_channel).strip()),
+                    tts_channel=hikari.Snowflake(str(tts_channel).strip()),
+                )
+            except ValueError as xcp:
+                raise ValueError(f"VOICE_TARGETS[{guild_key!r}] contains an invalid channel id.") from xcp
+
+        return targets
+
+    if legacy_voice_channel and legacy_tts_channel:
+        return {
+            default_guild_id: VoiceTargetConfig(
+                guild_id=default_guild_id,
+                voice_channel=hikari.Snowflake(legacy_voice_channel),
+                tts_channel=hikari.Snowflake(legacy_tts_channel),
+            )
+        }
+
+    return {}
+
+
 APP_PATH = Path(env_req("DIR_APP"))
 DISCORD_GUILD = hikari.Snowflake(env_req("DISCORD_GUILD"))
-chan = env_opt("STARTED_CHANNEL")
-STARTED_CHANNEL: hikari.Snowflakeish | None
-if not chan:
-    STARTED_CHANNEL = None
-else:
-    STARTED_CHANNEL = hikari.Snowflake(chan)
-
-chan = env_opt("VOICE_CHANNEL")
-VOICE_CHANNEL: hikari.Snowflakeish | None
-if not chan:
-    VOICE_CHANNEL = None
-else:
-    VOICE_CHANNEL = hikari.Snowflake(chan)
-
-chan = env_opt("TTS_CHANNEL")
-TTS_CHANNEL: hikari.Snowflakeish | None
-if not chan:
-    TTS_CHANNEL = None
-else:
-    TTS_CHANNEL = hikari.Snowflake(chan)
+STARTED_CHANNEL = _parse_optional_snowflake("STARTED_CHANNEL")
+VOICE_CHANNEL = _parse_optional_snowflake("VOICE_CHANNEL")
+TTS_CHANNEL = _parse_optional_snowflake("TTS_CHANNEL")
+VOICE_TARGETS = _parse_voice_targets(
+    env_opt("VOICE_TARGETS"),
+    default_guild_id=DISCORD_GUILD,
+    legacy_voice_channel=VOICE_CHANNEL,
+    legacy_tts_channel=TTS_CHANNEL,
+)
 
 TTS_ENGINE = (env_opt("TTS_ENGINE") or "auto").lower()
 TTS_VOICE = env_opt("TTS_VOICE") or "en-gb-x-rp"
@@ -101,6 +159,8 @@ TTS_VARIANT = env_opt("TTS_VARIANT")
 TTS_PIPER_MODEL = env_opt("TTS_PIPER_MODEL")
 TTS_PIPER_CONFIG = env_opt("TTS_PIPER_CONFIG")
 TTS_PIPER_DATA_DIR = env_opt("TTS_PIPER_DATA_DIR")
+MUSIC_YTDLP_COOKIE_FILE = Path(value).expanduser() if (value := env_opt("MUSIC_YTDLP_COOKIE_FILE")) else None
+MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS = env_opt("MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS")
 
 DISCORD_UPLOAD_LIMIT = DISCORD_UPLOAD_LIMIT * 1024 * 1024
 "total byte size limit for uploads to discord"
@@ -216,6 +276,7 @@ SILENT_DEBUG = IS_DEBUG and "-silent" in sys.argv
 log.info(
     f"Log Level={logging._levelToName[root_lvl]} DCLog={logging._levelToName[dc_lvl]} {SILENT_DEBUG=} | sys.argv={str(sys.argv).strip('[]')}"
 )
+CLEAR_CMDS = False
 
 
 if not FILE_USERS.exists():

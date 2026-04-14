@@ -9,6 +9,7 @@ pydantic
 python-dateutil
 python-dotenv
 requests
+yt-dlp
 tenorgrabber
 uvloop
 anyio

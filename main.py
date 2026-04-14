@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import hikari
+import hikariwave
 import lightbulb
 
 import _sys
@@ -23,6 +24,7 @@ from cmd_alias import group_alias
 from cmd_app import group_app
 from cmd_misc import group_misc
 from cmd_mod import group_mod
+from cmd_music import MusicService, group_music
 from cmd_saves import group_saves  # noqa: F401
 from cmd_settings import group_settings
 from cmd_update import group_update
@@ -80,8 +82,13 @@ def main():
     registry.register_value(Distils, Distils())
     registry.register_value(Resolutator, resolutator)
     dc_relay = DC_Relay(bot)
-    voice_tts = VoiceTTSService(bot)
+    voice_client = hikariwave.VoiceClient(bot)
+    voice_tts = VoiceTTSService(bot, voice_client)
+    music = MusicService(bot, voice_client)
+    voice_tts.set_music_active_channel_provider(music.active_channel_id)
+    voice_tts.set_music_duck_handler(music.duck_tts_playback)
     registry.register_value(DC_Relay, dc_relay)
+    registry.register_value(MusicService, music)
     registry.register_value(VoiceTTSService, voice_tts)
     registry.register_value(Utilities, utilities)
     registry.register_value(File_Utils, File_Utils())
@@ -98,6 +105,7 @@ def main():
     # client.register(group_saves)
     client.register(group_settings)
     client.register(group_update)
+    client.register(group_music)
     client.register(group_voice)
 
     @client.error_handler
@@ -135,11 +143,15 @@ def main():
             await app_manager.post_init(bot, am)
 
             await dc_relay.setup()
-            await voice_tts.setup()
+            await music.setup(client)
+            await voice_tts.setup(client)
             bot.subscribe(hikari.MessageCreateEvent, dc_relay.on_dcdm_message)  # type: ignore
             bot.subscribe(hikari.GuildMessageCreateEvent, dc_relay.on_gddm_message)  # type: ignore
             bot.subscribe(hikari.GuildMessageCreateEvent, voice_tts.on_message)  # type: ignore
+            bot.subscribe(hikari.VoiceStateUpdateEvent, music.on_voice_state_update)  # type: ignore
             bot.subscribe(hikari.VoiceStateUpdateEvent, voice_tts.on_voice_state_update)  # type: ignore
+            bot.subscribe(hikariwave.AudioBeginEvent, music.on_audio_begin)  # type: ignore
+            bot.subscribe(hikariwave.AudioEndEvent, music.on_audio_end)  # type: ignore
         except Exception as xcp:
             starting_xcp.append(str(xcp))
             raise xcp
@@ -256,6 +268,8 @@ def main():
         log.info("Ending")
         print("Ending")
         await voice_tts.close()
+        await music.close()
+        await voice_client.close()
         await app_manager.end()
         is_silent_restart = config.IS_RESTARTING and Path("silent_restart").exists()
         if not config.STARTED_CHANNEL or is_silent_restart:
@@ -270,9 +284,8 @@ def main():
 
     @bot.listen(hikari.GuildAvailableEvent)
     async def _on_guild(event: hikari.GuildAvailableEvent):
-        guild = event.get_guild()
-        if guild:
-            if not config.IS_DEBUG:
+        if guild := event.get_guild():
+            if config.CLEAR_CMDS:
                 appli = await bot.rest.fetch_application()
                 cmds = await event.app.rest.fetch_application_commands(appli, event.guild.id)
                 if cmds:
@@ -285,6 +298,7 @@ def main():
                 k: v for k, v in chans.items() if isinstance(v, hikari.TextableChannel)
             }
             dc_relay._channel_objects.update(text_chans)
+            await voice_tts.on_guild_available(guild, client)
             # log.debug(f"{text_chans=}")
 
     @bot.listen(hikari.MessageCreateEvent)
