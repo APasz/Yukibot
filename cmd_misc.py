@@ -430,6 +430,15 @@ class CMD_MiscRestart(
         default=RestartTarget.BOT.value,
     )
     silent = lightbulb.boolean("silent", "Suppress shutdown/startup messages", default=False)
+    _TARGET_PERMISSIONS: dict[RestartTarget, Access_Control.LvL] = {
+        RestartTarget.VOICE: Access_Control.LvL.admin,
+        RestartTarget.BOT: Access_Control.LvL.sudo,
+        RestartTarget.SYSTEM: Access_Control.LvL.sudo,
+    }
+
+    @classmethod
+    def _required_level(cls, restart_type: RestartTarget) -> Access_Control.LvL:
+        return cls._TARGET_PERMISSIONS[restart_type]
 
     async def _reset_voice_runtime(
         self,
@@ -466,9 +475,9 @@ class CMD_MiscRestart(
         music: MusicService,
         voice_tts: VoiceTTSService,
     ):
-        await acl.perm_check(ctx.user.id, acl.LvL.sudo)
-        await ctx.defer()
         restart_type = RestartTarget(self.target)
+        await acl.perm_check(ctx.user.id, self._required_level(restart_type))
+        await ctx.defer()
         log.critical(f"Misc.Restart; target={restart_type.value} silent={self.silent}: {ctx.user.display_name}")
         if restart_type is RestartTarget.VOICE:
             await self._reset_voice_runtime(ctx, music, voice_tts)
