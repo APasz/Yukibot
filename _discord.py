@@ -245,8 +245,8 @@ class Message:
         if not isinstance(player, (str, int, hikari.UndefinedType, hikari.Snowflake)):
             raise ValueError(f"Player must be str | int | UNDEFINED, not {type(player)}")
 
-        self.urls: set[URLish] = set()
-        self.files: set[Fileish] = {f for f in files if isinstance(f, Fileish)} if files else set()
+        self.urls = set()
+        self.files = {f for f in files if isinstance(f, Fileish)} if files else set()
 
         if enrich:
             self.enrich_task = asyncio.create_task(self.find_urls())

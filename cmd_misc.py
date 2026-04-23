@@ -27,6 +27,8 @@ from _discord import Distils
 from _manager import App_Manager, ac_app_logs
 from _security import Access_Control
 from _utils import Utilities
+from cmd_music import MusicService
+from cmd_voice import VoiceTTSService
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +39,12 @@ class TZ_LOCS(StrEnum):
     LONDON = "Europe/London"
     ZURICH = "Europe/Zurich"
     HELSINKI = "Europe/Helsinki"
+
+
+class RestartTarget(StrEnum):
+    BOT = "bot"
+    VOICE = "voice"
+    SYSTEM = "system"
 
 
 USER_TZ = {
@@ -412,19 +420,60 @@ class CMD_MiscLog(
 class CMD_MiscRestart(
     lightbulb.SlashCommand,
     name="restart",
-    description="Restart Bot aka crash bot",
+    description="Restart the bot, voice layer, or host system",
     hooks=[lightbulb.prefab.sliding_window(60, 1, "global")],
 ):
-    sys = lightbulb.boolean("sys", "System", default=False)
+    target = lightbulb.string(
+        "target",
+        "What to restart",
+        choices=[lightbulb.Choice(target.value, target.value) for target in RestartTarget],
+        default=RestartTarget.BOT.value,
+    )
     silent = lightbulb.boolean("silent", "Suppress shutdown/startup messages", default=False)
 
+    async def _reset_voice_runtime(
+        self,
+        ctx: lightbulb.Context,
+        music: MusicService,
+        voice_tts: VoiceTTSService,
+    ) -> None:
+        music_guild_ids = music.active_guild_ids()
+        music_result = await music.reset_runtime()
+        voice_result = await voice_tts.reset_runtime(extra_guild_ids=music_guild_ids)
+        await ctx.respond(
+            "\n".join(
+                [
+                    "Voice layer reset complete.",
+                    f"music sessions dropped: `{music_result.session_count}`",
+                    f"music queued tracks cleared: `{music_result.track_count}`",
+                    f"managed music sources cleaned: `{music_result.managed_source_count}`",
+                    f"TTS outstanding jobs cleared: `{voice_result.outstanding_job_count}`",
+                    f"voice connections reset: `{voice_result.active_connection_count}`",
+                    f"voice guilds targeted: `{voice_result.targeted_guild_count}`",
+                    f"TTS connect backoffs cleared: `{voice_result.backoff_count}`",
+                    f"TTS worker running: `{'yes' if voice_result.worker_restarted else 'no'}`",
+                ]
+            )
+        )
+
     @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, bot: hikari.GatewayBot, manager: App_Manager):
+    async def invoke(
+        self,
+        ctx: lightbulb.Context,
+        acl: Access_Control,
+        bot: hikari.GatewayBot,
+        manager: App_Manager,
+        music: MusicService,
+        voice_tts: VoiceTTSService,
+    ):
         await acl.perm_check(ctx.user.id, acl.LvL.sudo)
         await ctx.defer()
-        log.critical(f"Misc.Restart; sys={self.sys}: {ctx.user.display_name}")
-        restart_type = "system" if self.sys else "bot"
-        await _sys.restart(ctx, bot, manager, restart_type, self.silent)
+        restart_type = RestartTarget(self.target)
+        log.critical(f"Misc.Restart; target={restart_type.value} silent={self.silent}: {ctx.user.display_name}")
+        if restart_type is RestartTarget.VOICE:
+            await self._reset_voice_runtime(ctx, music, voice_tts)
+            return
+        await _sys.restart(ctx, bot, manager, restart_type.value, self.silent)
 
 
 @group_misc.register
@@ -460,6 +509,36 @@ class CMD_STDDrink(
         result = round(grams / to_grams, 2)
 
         await ctx.respond(f"{self.from_unit} {self.value} converts to {self.to_unit} {result}")
+
+@group_misc.register
+class CMD_MiscPFP(
+    lightbulb.SlashCommand,
+    name="pfp",
+    description="Show your profile picture or another user's",
+):
+    user = lightbulb.user("user", "Optional target user", default=None)  # type: ignore
+
+    @lightbulb.invoke
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control):
+        await acl.perm_check(ctx.user.id, acl.LvL.guest)
+        await ctx.defer()
+        log.info(f"Misc.PFP: {ctx.user.display_name} > {self.user}")
+
+        target = self.user or ctx.member or ctx.user
+        if isinstance(target, hikari.Member):
+            avatar_url = target.make_guild_avatar_url()
+        else:
+            avatar_url = target.make_avatar_url()
+        if not avatar_url:
+            avatar_url = target.display_avatar_url
+        filename = f"avatar_{target.id}.{avatar_url.extension}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(str(avatar_url)) as resp:
+                resp.raise_for_status()
+                avatar_bytes = await resp.read()
+
+        await ctx.respond(target.display_name, attachment=hikari.Bytes(avatar_bytes, filename))
 
 
 MAX_INLINE_LEN = 1800

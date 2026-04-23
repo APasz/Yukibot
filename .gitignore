@@ -7,6 +7,7 @@ data/*
 
 logs/
 .venv
+.basedpyright/
 __p*
 dev_apps
 opt/
@@ -21,3 +22,4 @@ se_ticks
 wagons.json
 online_watch.json
 voices/*
+.cod*

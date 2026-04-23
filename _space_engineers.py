@@ -103,7 +103,7 @@ class SEKeyManager:
 
             try:
                 log.info("SEKeyManager: refreshing RemoteSecurityKey via FTP...")
-                async with aioftp.Client.context(
+                async with aioftp.Client.context(  # pyright: ignore[reportPrivateImportUsage]
                     self._ftp.host, self._ftp.port, self._ftp.user, self._ftp.password
                 ) as client:
                     stream = await client.download_stream(self._ftp.path_cfg)

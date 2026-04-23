@@ -62,14 +62,15 @@ def main():
     app_manager = App_Manager()
     name_cache = Name_Cache()
     online_tracker = Online_Tracker()
+    client: lightbulb.Client
 
     if deg := config.env_opt("INDEV"):
         log.info(f"DEG|DEV: {deg}")
-        client: lightbulb.Client = lightbulb.client_from_app(
+        client = lightbulb.client_from_app(
             bot,
         )
     else:
-        client: lightbulb.Client = lightbulb.client_from_app(bot)
+        client = lightbulb.client_from_app(bot)
 
     utilities = Utilities()
     resolutator = Resolutator(bot)

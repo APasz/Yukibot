@@ -20,3 +20,4 @@ regex
 piper-tts
 pathvalidate
 modmux
+basedpyright

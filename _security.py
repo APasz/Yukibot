@@ -11,19 +11,38 @@ log = logging.getLogger(__name__)
 
 class Power_Level(IntEnum):
     guest = 0
-    user = 1
-    sudo = 2
-    root = 3
+    user = 10
+    admin = 20
+    sudo = 30
+    root = 40
 
 
 class Access_Control:
     LvL = Power_Level
+    _LEVEL_ALIASES: dict[str, Power_Level] = {
+        "guest": Power_Level.guest,
+        "guests": Power_Level.guest,
+        "user": Power_Level.user,
+        "users": Power_Level.user,
+        "admin": Power_Level.admin,
+        "admins": Power_Level.admin,
+        "sudo": Power_Level.sudo,
+        "sudoers": Power_Level.sudo,
+        "root": Power_Level.root,
+        "roots": Power_Level.root,
+    }
+    _LEGACY_NUMERIC_LEVELS: dict[int, Power_Level] = {
+        0: Power_Level.guest,
+        1: Power_Level.user,
+        2: Power_Level.sudo,
+        3: Power_Level.root,
+    }
 
     def __init__(self, pointer: Path = Path("users.json")):
         self._roles: dict[int, Power_Level] = {}
         self._guests_enabled = getattr(config, "GUESTS_ALLOWED", True)
 
-        raw: dict[str, list[int | str]] = {}
+        raw: object = {}
         if not pointer.exists():
             log.error(f"Permissions file not found @ {pointer}")
         else:
@@ -37,6 +56,7 @@ class Access_Control:
 
         problems: set[str] = set()
         name_map: dict[str, Power_Level] = {lvl.name.casefold(): lvl for lvl in Power_Level}
+        name_map.update(self._LEVEL_ALIASES)
 
         def _to_level(value: int | str) -> Power_Level | None:
             if isinstance(value, str):
@@ -44,15 +64,17 @@ class Access_Control:
                 if string in name_map:
                     return name_map[string]
                 try:
-                    return Power_Level(int(value))
+                    numeric = int(value)
                 except Exception:
                     return None
-            if isinstance(value, int):
                 try:
-                    return Power_Level(value)
+                    return Power_Level(numeric)
                 except ValueError:
-                    return None
-            return None
+                    return self._LEGACY_NUMERIC_LEVELS.get(numeric)
+            try:
+                return Power_Level(value)
+            except ValueError:
+                return self._LEGACY_NUMERIC_LEVELS.get(value)
 
         def _to_user_id(ident: int | str) -> int | None:
             if isinstance(ident, int):

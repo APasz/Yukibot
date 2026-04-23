@@ -3,13 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import enum
-import io
 import logging
 import os
 import re
 import shutil
 import tempfile
-import wave
 from collections import deque
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -26,8 +24,9 @@ from hikariwave.audio.source.youtube import YouTubeAudioSource
 from hikariwave.config import validate_volume
 from yt_dlp.YoutubeDL import YoutubeDL as YT
 
-from _security import Access_Control
 import config
+from _security import Access_Control
+from voice_common import cached_user_voice_channel, cached_voice_channel_occupants, wav_audio_duration_seconds
 
 log = logging.getLogger(__name__)
 
@@ -68,8 +67,6 @@ class PipeAudioSource(AudioSource):
         name: str | None = None,
         volume: float | str | None = None,
     ) -> None:
-        if not isinstance(pipe_path, str):
-            raise TypeError("Provided pipe_path must be `str`")
         if not pipe_path:
             raise ValueError("Provided pipe_path cannot be empty")
         self._content = pipe_path
@@ -229,6 +226,13 @@ class GuildMusicSession:
         return list(self.tracks)[1:]
 
 
+@dataclass(slots=True, frozen=True)
+class MusicResetResult:
+    session_count: int
+    track_count: int
+    managed_source_count: int
+
+
 class MusicService:
     _QUEUE_PREVIEW_LIMIT = 10
     _DUCKED_MUSIC_VOLUME = 0.35
@@ -240,9 +244,7 @@ class MusicService:
         self._managed_sources: dict[int, GeneratedSourceHandle] = {}
         self._ffmpeg_path = shutil.which("ffmpeg")
         self._youtube_cookie_file = config.MUSIC_YTDLP_COOKIE_FILE
-        self._youtube_extractor_args = self._parse_youtube_extractor_args(
-            config.MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS
-        )
+        self._youtube_extractor_args = self._parse_youtube_extractor_args(config.MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS)
 
     async def setup(self, client: lightbulb.Client | None = None):
         del client
@@ -253,9 +255,7 @@ class MusicService:
         elif self._youtube_cookie_file.exists():
             log.info(f"Music YouTube auth: cookie file enabled path={self._youtube_cookie_file}")
         else:
-            log.warning(
-                f"Music YouTube auth: configured cookie file does not exist path={self._youtube_cookie_file}"
-            )
+            log.warning(f"Music YouTube auth: configured cookie file does not exist path={self._youtube_cookie_file}")
         if self._youtube_extractor_args:
             keys = ",".join(sorted(self._youtube_extractor_args))
             log.info(f"Music YouTube extractor args enabled keys={keys}")
@@ -267,6 +267,24 @@ class MusicService:
         for handle in list(self._managed_sources.values()):
             await self._cleanup_generated_source_handle(handle)
         self._managed_sources.clear()
+
+    def active_guild_ids(self) -> list[hikari.Snowflake]:
+        return sorted(self._sessions, key=int)
+
+    async def reset_runtime(self) -> MusicResetResult:
+        result = MusicResetResult(
+            session_count=len(self._sessions),
+            track_count=sum(len(session.tracks) for session in self._sessions.values()),
+            managed_source_count=len(self._managed_sources),
+        )
+        await self.close()
+        log.warning(
+            "Music runtime reset session_count=%s track_count=%s managed_sources=%s",
+            result.session_count,
+            result.track_count,
+            result.managed_source_count,
+        )
+        return result
 
     def get_connection(self, guild_id: hikari.Snowflakeish) -> hikariwave.VoiceConnection | None:
         return self._voice_client.get_connection(guild_id=guild_id)
@@ -289,10 +307,7 @@ class MusicService:
         guild_id: hikari.Snowflakeish,
         user_id: hikari.Snowflakeish,
     ) -> hikari.Snowflake | None:
-        voice_state = self.bot.cache.get_voice_state(hikari.Snowflake(guild_id), hikari.Snowflake(user_id))
-        if voice_state is None or voice_state.channel_id is None:
-            return None
-        return hikari.Snowflake(voice_state.channel_id)
+        return cached_user_voice_channel(self.bot, guild_id, user_id)
 
     def session(self, guild_id: hikari.Snowflakeish) -> GuildMusicSession | None:
         return self._sessions.get(hikari.Snowflake(guild_id))
@@ -315,32 +330,37 @@ class MusicService:
             session = GuildMusicSession(guild_id=guild, channel_id=target_channel)
             self._sessions[guild] = session
 
-        async with session.lock:
-            try:
-                connection = await self._ensure_connection(session, target_channel)
-                had_tracks = bool(session.tracks)
-                session.tracks.append(track)
-                if not had_tracks:
-                    session.current_source = track.audio_source
+        disconnect_empty_session = False
+        try:
+            async with session.lock:
+                try:
+                    connection = await self._ensure_connection(session, target_channel)
+                    had_tracks = bool(session.tracks)
+                    session.tracks.append(track)
+                    if not had_tracks:
+                        session.current_source = track.audio_source
 
-                connection.player.set_volume(session.volume)
-                result = await connection.player.add_queue(track.audio_source)
-                if not result.success:
-                    session.tracks.pop()
-                    if not session.tracks:
-                        session.current_source = None
-                    raise RuntimeError(f"Music queue rejected the track ({result.reason}).")
+                    connection.player.set_volume(session.volume)
+                    result = await connection.player.add_queue(track.audio_source)
+                    if not result.success:
+                        session.tracks.pop()
+                        if not session.tracks:
+                            session.current_source = None
+                        raise RuntimeError(f"Music queue rejected the track ({result.reason}).")
 
-                queue_position = len(session.tracks) - 1
-                log.info(
-                    f"Music queued guild={guild} channel={target_channel} position={queue_position} "
-                    f"kind={track.source_kind} name={track.display_name!r} requester={requester}"
-                )
-                return track, queue_position
-            except Exception:
-                if not session.tracks and self.get_connection(guild) is None:
-                    self._sessions.pop(guild, None)
-                raise
+                    queue_position = len(session.tracks) - 1
+                    log.info(
+                        f"Music queued guild={guild} channel={target_channel} position={queue_position} "
+                        f"kind={track.source_kind} name={track.display_name!r} requester={requester}"
+                    )
+                    return track, queue_position
+                except Exception:
+                    disconnect_empty_session = not session.tracks
+                    raise
+        except Exception:
+            if disconnect_empty_session:
+                await self._disconnect_session(guild, reason="queue_rejected")
+            raise
 
     async def pause(self, guild_id: hikari.Snowflakeish) -> None:
         connection = self.get_connection(guild_id)
@@ -460,23 +480,31 @@ class MusicService:
             log.warning(f"TTS ducking unavailable guild={guild} reason=no_ffmpeg")
             return None
 
-        tts_duration = self._audio_duration_seconds(audio)
+        tts_duration = wav_audio_duration_seconds(audio)
         if tts_duration is None or tts_duration <= 0:
             log.warning(f"TTS ducking unavailable guild={guild} reason=unknown_tts_duration")
             return None
 
+        old_tracks: list[MusicTrack] = []
+        replacement_tracks: list[MusicTrack] | None = None
+        overlay_result: MusicTrack | None = None
+        failure_reason: str | None = None
+        disconnect_after_failure = False
+
         async with session.lock:
-            current_track = session.current_track()
             current_audio = connection.player.current
-            if current_track is None or current_audio is None:
+            if current_audio is None:
+                return None
+            current_track = self._align_session_to_current_audio(session, current_audio)
+            if current_track is None:
+                log.warning(f"TTS ducking unavailable guild={guild} reason=player_track_desync")
                 return None
 
             absolute_seek = current_track.seek_seconds + max(connection.player.elapsed, 0.0)
             remaining_tracks = self._duck_remainder_tracks(current_track, session.queued_tracks())
             old_tracks = list(session.tracks)
 
-            overlay_track: MusicTrack | None = None
-            resume_track: MusicTrack | None = None
+            generated_tracks: list[MusicTrack] = []
             try:
                 overlay_track = await self._build_duck_overlay_track(
                     current_track,
@@ -485,17 +513,18 @@ class MusicService:
                     overlay_duration=tts_duration,
                     message_id=hikari.Snowflake(message_id),
                 )
+                generated_tracks.append(overlay_track)
                 if self._should_resume_track(current_track, absolute_seek, tts_duration):
                     resume_track = await self._build_resumed_track(
                         current_track,
                         seek_seconds=absolute_seek + tts_duration,
                         message_id=hikari.Snowflake(message_id),
                     )
+                    generated_tracks.append(resume_track)
+                else:
+                    resume_track = None
             except Exception:
-                if overlay_track is not None:
-                    await self._cleanup_generated_source(overlay_track.audio_source)
-                if resume_track is not None:
-                    await self._cleanup_generated_source(resume_track.audio_source)
+                await self._cleanup_tracks(generated_tracks)
                 raise
 
             rebuilt_tracks = [overlay_track]
@@ -507,21 +536,38 @@ class MusicService:
             connection.player.set_volume(session.volume)
             result = await connection.player.add_queue_bulk([track.audio_source for track in rebuilt_tracks])
             if not result.success:
-                await self._cleanup_tracks([overlay_track, *( [resume_track] if resume_track is not None else [])])
+                await self._cleanup_tracks([overlay_track, *([resume_track] if resume_track is not None else [])])
+                replacement_tracks = await self._restore_ducked_queue(
+                    connection,
+                    session,
+                    current_track,
+                    remaining_tracks,
+                    absolute_seek=absolute_seek,
+                    message_id=hikari.Snowflake(message_id),
+                )
+                disconnect_after_failure = replacement_tracks is None
+                failure_reason = str(result.reason)
+            else:
                 session.tracks.clear()
-                session.current_source = None
-                raise RuntimeError(f"Music duck rebuild failed ({result.reason}).")
+                session.tracks.extend(rebuilt_tracks)
+                session.current_source = overlay_track.audio_source
+                replacement_tracks = rebuilt_tracks
+                overlay_result = overlay_track
 
-            session.tracks.clear()
-            session.tracks.extend(rebuilt_tracks)
-            session.current_source = overlay_track.audio_source
+        if replacement_tracks is not None:
+            await self._cleanup_replaced_tracks(old_tracks, replacement_tracks)
+        if disconnect_after_failure:
+            await self._disconnect_session(guild, reason="duck_rebuild_failed")
+        if failure_reason is not None:
+            raise RuntimeError(f"Music duck rebuild failed ({failure_reason}).")
+        if overlay_result is None:
+            return None
 
-        await self._cleanup_replaced_tracks(old_tracks, rebuilt_tracks)
         log.info(
             f"TTS ducked into music guild={guild} message_id={message_id} "
-            f"track={overlay_track.base_display_name!r} offset={absolute_seek:.2f}s duration={tts_duration:.2f}s"
+            f"track={overlay_result.base_display_name!r} offset={absolute_seek:.2f}s duration={tts_duration:.2f}s"
         )
-        return connection, overlay_track.audio_source
+        return connection, overlay_result.audio_source
 
     @staticmethod
     def _duck_remainder_tracks(current_track: MusicTrack, queued_tracks: list[MusicTrack]) -> list[MusicTrack]:
@@ -534,6 +580,70 @@ class MusicService:
         ):
             remaining_tracks.pop(0)
         return remaining_tracks
+
+    def _align_session_to_current_audio(
+        self,
+        session: GuildMusicSession,
+        current_audio: AudioSource,
+    ) -> MusicTrack | None:
+        for index, track in enumerate(session.tracks):
+            if track.audio_source is current_audio:
+                while index > 0:
+                    dropped = session.tracks.popleft()
+                    log.warning(
+                        f"Music queue realigned guild={session.guild_id} "
+                        f"dropped_track={dropped.display_name!r} reason=current_audio_out_of_order"
+                    )
+                    index -= 1
+                session.current_source = current_audio
+                return session.current_track()
+        return None
+
+    async def _restore_ducked_queue(
+        self,
+        connection: hikariwave.VoiceConnection,
+        session: GuildMusicSession,
+        current_track: MusicTrack,
+        remaining_tracks: list[MusicTrack],
+        *,
+        absolute_seek: float,
+        message_id: hikari.Snowflake,
+    ) -> list[MusicTrack] | None:
+        restored_tracks = list(remaining_tracks)
+        resumed_track: MusicTrack | None = None
+        restored = False
+        try:
+            if self._should_resume_track(current_track, absolute_seek, 0.0):
+                resumed_track = await self._build_resumed_track(
+                    current_track,
+                    seek_seconds=absolute_seek,
+                    message_id=message_id,
+                )
+                restored_tracks.insert(0, resumed_track)
+
+            if not restored_tracks:
+                return None
+
+            connection.player.set_volume(session.volume)
+            result = await connection.player.add_queue_bulk([track.audio_source for track in restored_tracks])
+            if not result.success:
+                return None
+
+            session.tracks.clear()
+            session.tracks.extend(restored_tracks)
+            session.current_source = restored_tracks[0].audio_source
+            restored = True
+            log.warning(
+                f"Music duck rollback restored guild={session.guild_id} "
+                f"track_count={len(restored_tracks)} offset={absolute_seek:.2f}s"
+            )
+            return restored_tracks
+        except Exception:
+            log.exception(f"Music duck rollback failed guild={session.guild_id}")
+            return None
+        finally:
+            if resumed_track is not None and not restored:
+                await self._cleanup_generated_source(resumed_track.audio_source)
 
     async def on_audio_begin(self, event: hikariwave.AudioBeginEvent):
         session = self._sessions.get(hikari.Snowflake(event.guild_id))
@@ -602,10 +712,12 @@ class MusicService:
         if event.state.channel_id == session.channel_id:
             return
 
-        voice_states = self.bot.cache.get_voice_states_view_for_channel(event.guild_id, session.channel_id)
-        occupants = [
-            user_id for user_id in voice_states if (not me or user_id != me.id) and user_id != event.state.user_id
-        ]
+        occupants = cached_voice_channel_occupants(
+            self.bot,
+            event.guild_id,
+            session.channel_id,
+            exclude_user_id=event.state.user_id,
+        )
         if occupants:
             return
 
@@ -734,10 +846,7 @@ class MusicService:
         detail = str(error)
         if "confirm you're not a bot" in detail or "Sign in to confirm" in detail:
             if self._youtube_cookie_file is None:
-                return (
-                    f"{message}. Configure MUSIC_YTDLP_COOKIE_FILE with a Netscape-format "
-                    "YouTube cookie export."
-                )
+                return f"{message}. Configure MUSIC_YTDLP_COOKIE_FILE with a Netscape-format YouTube cookie export."
             if not self._youtube_cookie_file.exists():
                 return (
                     f"{message}. MUSIC_YTDLP_COOKIE_FILE is set but the file does not exist: "
@@ -769,9 +878,7 @@ class MusicService:
 
             key, separator, values = item.partition("=")
             if not separator:
-                raise ValueError(
-                    "MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS must use 'key=value1,value2;other=value'."
-                )
+                raise ValueError("MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS must use 'key=value1,value2;other=value'.")
 
             normalised_key = key.strip().lower().replace("-", "_")
             if not normalised_key:
@@ -1007,22 +1114,6 @@ class MusicService:
             pipe_path.unlink()
         with contextlib.suppress(OSError):
             directory.rmdir()
-
-    @staticmethod
-    def _audio_duration_seconds(audio: bytes) -> float | None:
-        if not audio:
-            return None
-
-        try:
-            with wave.open(io.BytesIO(audio), "rb") as stream:
-                frames = stream.getnframes()
-                frame_rate = stream.getframerate()
-        except (wave.Error, EOFError):
-            return None
-
-        if frames < 0 or frame_rate <= 0:
-            return None
-        return frames / frame_rate
 
     @classmethod
     def _queue_lines(cls, current: MusicTrack | None, queued: list[MusicTrack]) -> list[str]:
@@ -1269,3 +1360,4 @@ class CMD_MusicVolume(
             return
 
         await ctx.respond(f"music volume: `{volume:.2f}`")
+# AiviA APasz

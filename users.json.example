@@ -1,4 +1,6 @@
 {
+    "USERS": [],
+    "ADMINS": [],
     "SUDOERS": [],
-    "USERS": []
+    "ROOTS": []
 }
