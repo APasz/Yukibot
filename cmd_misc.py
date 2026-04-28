@@ -943,7 +943,7 @@ def _encode_selector(scope: str, name: str) -> str:
 def _decode_selector(s: str) -> tuple[str, str] | None:
     # Returns ("guild"|"user", name) or None if it's a legacy unscoped value.
     if not isinstance(s, str):
-        return None
+        return None  # pyright: ignore[reportUnreachable]
     if len(s) > 2 and s[1] == ":" and s[0] in ("g", "u"):
         return ("guild" if s[0] == "g" else "user", s[2:])
     return None

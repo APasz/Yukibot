@@ -1,25 +1,24 @@
 from __future__ import annotations
-from abc import abstractmethod
+
 import asyncio
 import logging
 import os
 import signal
 import subprocess
+from abc import abstractmethod
 from pathlib import Path
+from typing import IO, TYPE_CHECKING, Protocol
 
 import hikari
 import psutil
 
-
 import _errors
-from apps._settings import App_Settings, Settings_Manager
-from config import Activity_Manager
-from apps._updater import Update_Manager
 import config
 from apps._config import App_Config, Mod_Config
 from apps._mod import Mod, Mod_Manager
-
-from typing import IO, Protocol, TYPE_CHECKING
+from apps._settings import App_Settings, Settings_Manager
+from apps._updater import Update_Manager
+from config import Activity_Manager
 
 if TYPE_CHECKING:
     from _discord import App_Bound
@@ -72,9 +71,9 @@ class App:
         modcf_cls: type[Mod_Config] | None = None,
     ):
         if not bot:
-            raise ValueError("App missing bot")
+            raise ValueError("App missing bot")  # pyright: ignore[reportUnreachable]
         if not cfg:
-            raise ValueError("App missing instance configuration")
+            raise ValueError("App missing instance configuration")  # pyright: ignore[reportUnreachable]
         self.bot = bot
         self.cfg = cfg
         self.name = cfg.name

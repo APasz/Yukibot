@@ -52,7 +52,7 @@ class Tailer:
         self._initialised = True
 
         if not callable(app_alive):
-            raise TypeError("Tailer.app_alive must be a callable that returns a bool | Awaitable[bool] | Event")
+            raise TypeError("Tailer.app_alive must be a callable that returns a bool | Awaitable[bool] | Event")  # pyright: ignore[reportUnreachable]
         self.app_alive = app_alive
 
         if isinstance(pointer, Path):

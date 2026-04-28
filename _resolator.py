@@ -215,7 +215,7 @@ class Resolutator(metaclass=config.Singleton):
             Resolved string path
         """
         if not isinstance(raw, str):
-            return raw
+            return raw  # pyright: ignore[reportUnreachable]
 
         raw = re.sub(r"\{ENV:([\w\d_]+)\}", lambda m: config.env_opt(m.group(1)) or "", raw)
 

@@ -1,0 +1,17 @@
+{
+    "hosts": {
+        "giphy.com": "giphy",
+        "klipy.com": "gif",
+        "tenor.com": "gif",
+        "www.giphy.com": "giphy",
+        "www.klipy.com": "gif",
+        "www.tenor.com": "gif"
+    },
+    "rules": [
+        {
+            "host": "store.steampowered.com",
+            "path_regex": "^/(?:agecheck/)?app/\\d+/(?P<title>[^/?#]+)",
+            "template": "steam store {title_words}"
+        }
+    ]
+}

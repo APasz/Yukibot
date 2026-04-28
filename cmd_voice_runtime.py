@@ -8,6 +8,7 @@ import wave
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, Iterable, cast
+from urllib.parse import unquote, urlparse
 
 import emoji
 import hikari
@@ -32,9 +33,25 @@ from cmd_voice_common import (
     UserVoiceSettings,
     VoiceConnectBackoff,
     VoiceJob,
+    VoiceLinkRules,
     log,
 )
 from voice_common import wav_audio_duration_seconds
+
+DISCORD_TIMESTAMP_RE = re.compile(r"<t:\d+(?::[A-Za-z])?>")
+DISCORD_HEADING_RE = re.compile(r"^(#{1,3}|-#)\s+(.*\S)\s*$", re.MULTILINE)
+DISCORD_CODE_BLOCK_RE = re.compile(r"```(?:[^\s`]+\n)?(.*?)```", re.DOTALL)
+DISCORD_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+DISCORD_SPOILER_RE = re.compile(r"\|\|(.+?)\|\|", re.DOTALL)
+DISCORD_STRIKETHROUGH_RE = re.compile(r"~~(.+?)~~", re.DOTALL)
+DISCORD_UNDERLINE_RE = re.compile(r"__(.+?)__", re.DOTALL)
+DISCORD_TRIPLE_STAR_RE = re.compile(r"\*\*\*(.+?)\*\*\*", re.DOTALL)
+DISCORD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+DISCORD_ITALIC_STAR_RE = re.compile(r"(?<!\*)\*(?![\s*])(.+?)(?<![\s*])\*(?!\*)", re.DOTALL)
+DISCORD_ITALIC_UNDERSCORE_RE = re.compile(r"(?<![\w_])_(?![\s_])(.+?)(?<![\s_])_(?![\w_])", re.DOTALL)
+COMPACT_UNIT_RE = re.compile(r"^([^\d]*)(\d+)(km|m|s|h|d)([^\d]*)$")
+SLASH_RATIO_RE = re.compile(r"^([^\d]*)(\d+)/(\d+)([^\d]*)$")
+WITH_SHORTHAND_RE = re.compile(r"^([^\w]*)(w/|w/o)([^\w]*)$", re.IGNORECASE)
 
 
 class VoiceTTSRuntimeMixin:
@@ -57,6 +74,7 @@ class VoiceTTSRuntimeMixin:
         _piper_config_path: str | None
         _user_settings: dict[int, UserVoiceSettings]
         _text_corrections: TextCorrectionCatalog
+        _voice_link_rules: VoiceLinkRules
         _enabled: bool
         voice: str
         variant: str | None
@@ -109,6 +127,8 @@ class VoiceTTSRuntimeMixin:
         def _piper_speaker_id(self, voice: str, variant: str | None) -> int | None: ...
         def _piper_model_search_dirs(self) -> list[Path]: ...
         def _piper_python_voice(self, voice: str) -> PiperPythonVoiceRuntime | None: ...
+        def _refresh_voice_link_rules_if_needed(self) -> None: ...
+        async def _mod_link_name(self, url: str) -> str | None: ...
 
     def _queue_preflight_reason(
         self,
@@ -183,7 +203,7 @@ class VoiceTTSRuntimeMixin:
         if not target or event.channel_id != target.tts_channel:
             return
 
-        raw = (event.content or "").strip()
+        raw = self._message_speech_input((event.content or "").strip(), attachment_count=len(event.message.attachments))
         preview = self._preview(raw)
         base_log = (
             f"TTS message {event.message_id=} {event.guild_id=} {event.channel_id=} {event.author_id=} "
@@ -203,7 +223,7 @@ class VoiceTTSRuntimeMixin:
             log.info(f"{base_log} said=no reason={reason}")
             return
 
-        spoken = self._normalise_for_speech(raw, event)
+        spoken = await self._normalise_for_speech_async(raw, event)
         if not spoken:
             log.info(f"{base_log} said=no reason=empty_after_normalise")
             return
@@ -227,7 +247,15 @@ class VoiceTTSRuntimeMixin:
             f"voice={voice_spec} spoken={self._preview(spoken.render())!r}"
         )
 
-    def queue_say(
+    @staticmethod
+    def _message_speech_input(raw_content: str, *, attachment_count: int) -> str:
+        if raw_content:
+            return raw_content
+        if attachment_count > 0:
+            return "attachment"
+        return ""
+
+    async def queue_say(
         self,
         guild_id: hikari.Snowflakeish,
         message_id: hikari.Snowflakeish,
@@ -237,7 +265,7 @@ class VoiceTTSRuntimeMixin:
         if reason := self._queue_preflight_reason(guild_id, require_worker=True):
             raise RuntimeError(self._queue_preflight_error(reason))
 
-        spoken = self._normalise_for_speech(text, user_id=user_id)
+        spoken = await self._normalise_for_speech_async(text, user_id=user_id)
         if not spoken:
             raise ValueError("No speakable text after normalisation.")
 
@@ -256,6 +284,47 @@ class VoiceTTSRuntimeMixin:
             f"queue_size={queue_size} voice={voice_spec} spoken={self._preview(spoken.render())!r}"
         )
         return spoken.render(), queue_size
+
+    async def _normalise_for_speech_async(
+        self,
+        content: str,
+        event: hikari.GuildMessageCreateEvent | None = None,
+        user_id: hikari.Snowflakeish | None = None,
+    ) -> SpeechContent:
+        text = content.strip()
+        if not text:
+            return SpeechContent(())
+
+        self._refresh_voice_link_rules_if_needed()
+        text = await self._replace_links_async(text)
+        return self._normalise_for_speech(text, event=event, user_id=user_id, links_resolved=True)
+
+    async def _replace_links_async(self, text: str) -> str:
+        parts: list[str] = []
+        cursor = 0
+        for match in URL_RE.finditer(text):
+            parts.append(text[cursor : match.start()])
+            parts.append(await self._replace_link_async(match.group(0)))
+            cursor = match.end()
+        parts.append(text[cursor:])
+        return "".join(parts)
+
+    async def _replace_link_async(self, raw_url: str) -> str:
+        trimmed_url = raw_url.rstrip(".,!?;:")
+        if not trimmed_url:
+            return " "
+
+        parsed = urlparse(trimmed_url if "://" in trimmed_url else f"https://{trimmed_url}")
+        hostname = parsed.hostname
+        if not hostname:
+            return " link "
+
+        mod_name = await self._mod_link_name(trimmed_url)
+        if mod_name:
+            return f" mod {mod_name} "
+
+        spoken = self._describe_link(hostname, parsed.path)
+        return f" {spoken} "
 
     async def _worker_loop(self):
         pending_jobs: deque[VoiceJob] = deque()
@@ -865,6 +934,8 @@ class VoiceTTSRuntimeMixin:
         content: str,
         event: hikari.GuildMessageCreateEvent | None = None,
         user_id: hikari.Snowflakeish | None = None,
+        *,
+        links_resolved: bool = False,
     ) -> SpeechContent:
         text = content.strip()
         if not text:
@@ -890,8 +961,10 @@ class VoiceTTSRuntimeMixin:
         else:
             text = USER_MENTION_RE.sub(" user ", text)
             text = CHANNEL_MENTION_RE.sub(" channel ", text)
-        text = text.replace("-#", " ")
-        text = URL_RE.sub(" ", text)
+        if not links_resolved:
+            self._refresh_voice_link_rules_if_needed()
+            text = URL_RE.sub(lambda match: self._replace_link(match.group(0)), text)
+        text = self._replace_discord_formatting(text)
         text = DISCORD_CUSTOM_EMOJI_RE.sub(lambda m: f":{m.group(1)}:", text)
         text = emoji.demojize(text, language="en")
 
@@ -925,8 +998,10 @@ class VoiceTTSRuntimeMixin:
                 token = self._apply_substitution_token(token, pronunciations)
             if substitutions:
                 token = self._apply_substitution_token(token, substitutions)
+            token = self._expand_compact_speech_token(token)
             token = self._apply_exact_correction_token(token, self._text_corrections.slang)
             token = self._apply_exact_correction_token(token, self._text_corrections.typos)
+            token = self._expand_common_shorthand_token(token)
             if fuzzy_autocorrect_enabled:
                 token = self._apply_fuzzy_typo_correction(token)
             clean = re.sub(r"\s+", " ", token).strip()
@@ -939,6 +1014,138 @@ class VoiceTTSRuntimeMixin:
         if not tokens:
             return SpeechContent(())
         return SpeechContent(tokens)
+
+    @staticmethod
+    def _expand_compact_speech_token(token: str) -> str:
+        if match := COMPACT_UNIT_RE.fullmatch(token):
+            lead, raw_value, raw_unit, tail = match.groups()
+            singular, plural = {
+                "km": ("kilometer", "kilometers"),
+                "m": ("minute", "minutes"),
+                "s": ("second", "seconds"),
+                "h": ("hour", "hours"),
+                "d": ("day", "days"),
+            }[raw_unit]
+            unit = singular if raw_value == "1" else plural
+            return f"{lead}{raw_value} {unit}{tail}"
+
+        if match := SLASH_RATIO_RE.fullmatch(token):
+            lead, left, right, tail = match.groups()
+            return f"{lead}{left} out of {right}{tail}"
+
+        return token
+
+    @staticmethod
+    def _expand_common_shorthand_token(token: str) -> str:
+        if match := WITH_SHORTHAND_RE.fullmatch(token):
+            lead, raw_core, tail = match.groups()
+            core = raw_core.lower()
+            replacement = "with" if core == "w/" else "without"
+            return f"{lead}{replacement}{tail}"
+        return token
+
+    @classmethod
+    def _replace_discord_formatting(cls, text: str) -> str:
+        text = DISCORD_TIMESTAMP_RE.sub(" time code ", text)
+        text = DISCORD_HEADING_RE.sub(lambda match: cls._replace_heading(match), text)
+        text = DISCORD_CODE_BLOCK_RE.sub(lambda match: cls._markdown_replacement("code block", match), text)
+        text = DISCORD_INLINE_CODE_RE.sub(lambda match: cls._markdown_replacement("code", match), text)
+
+        replacements: tuple[tuple[re.Pattern[str], str], ...] = (
+            (DISCORD_SPOILER_RE, "spoiler"),
+            (DISCORD_STRIKETHROUGH_RE, "strikethrough"),
+            (DISCORD_UNDERLINE_RE, "underline"),
+            (DISCORD_TRIPLE_STAR_RE, "bold italic"),
+            (DISCORD_BOLD_RE, "bold"),
+            (DISCORD_ITALIC_STAR_RE, "italic"),
+            (DISCORD_ITALIC_UNDERSCORE_RE, "italic"),
+        )
+        for pattern, label in replacements:
+            text = pattern.sub(
+                lambda match, replacement_label=label: cls._markdown_replacement(replacement_label, match), text
+            )
+        return text
+
+    @staticmethod
+    def _markdown_replacement(label: str, match: re.Match[str]) -> str:
+        inner = re.sub(r"\s+", " ", match.group(1)).strip()
+        if not inner:
+            return " "
+        return f" {label} {inner} "
+
+    @staticmethod
+    def _replace_heading(match: re.Match[str]) -> str:
+        marker = match.group(1)
+        body = re.sub(r"\s+", " ", match.group(2)).strip()
+        if not body:
+            return " "
+        label = {
+            "-#": "subtext",
+            "#": "heading",
+            "##": "heading 2",
+            "###": "heading 3",
+        }[marker]
+        return f" {label} {body} "
+
+    def _replace_link(self, raw_url: str) -> str:
+        trimmed_url = raw_url.rstrip(".,!?;:")
+        if not trimmed_url:
+            return " "
+
+        parsed = urlparse(trimmed_url if "://" in trimmed_url else f"https://{trimmed_url}")
+        hostname = parsed.hostname
+        if not hostname:
+            return " link "
+
+        spoken = self._describe_link(hostname, parsed.path)
+        return f" {spoken} "
+
+    def _describe_link(self, hostname: str, path: str) -> str:
+        host_candidates = self._link_host_candidates(hostname)
+        for host_candidate in host_candidates:
+            for rule in self._voice_link_rules.rules:
+                if rule.host != host_candidate:
+                    continue
+                match = rule.path_pattern.search(path)
+                if match is None:
+                    continue
+                rendered = self._render_link_rule_template(rule.template, host_candidate, match)
+                if rendered:
+                    return rendered
+
+        for host_candidate in host_candidates:
+            host_label = self._voice_link_rules.host_labels.get(host_candidate)
+            if host_label:
+                return host_label
+        return f"link {host_candidates[0]}"
+
+    @staticmethod
+    def _link_host_candidates(hostname: str) -> tuple[str, ...]:
+        normalised_host = hostname.lower()
+        if normalised_host.startswith("www."):
+            return (normalised_host, normalised_host.removeprefix("www."))
+        return (normalised_host,)
+
+    @staticmethod
+    def _render_link_rule_template(template: str, hostname: str, match: re.Match[str]) -> str | None:
+        values: dict[str, str] = {"host": hostname}
+        for key, value in match.groupdict().items():
+            decoded = unquote(value).strip() if value is not None else ""
+            values[key] = decoded
+            values[f"{key}_words"] = VoiceTTSRuntimeMixin._normalise_link_template_value(decoded)
+
+        try:
+            rendered = template.format_map(values)
+        except (KeyError, ValueError):
+            return None
+        return re.sub(r"\s+", " ", rendered).strip() or None
+
+    @staticmethod
+    def _normalise_link_template_value(value: str) -> str:
+        cleaned = value.strip().strip("/")
+        cleaned = re.sub(r"[_\-]+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned.strip()
 
     def _truncate_speech_tokens(self, tokens: list[SpeechToken]) -> tuple[SpeechToken, ...]:
         trimmed: list[SpeechToken] = []

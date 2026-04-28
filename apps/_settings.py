@@ -1,13 +1,13 @@
+import logging
 from collections.abc import Callable
 from enum import StrEnum
-import logging
 from pathlib import Path
 from typing import Any, Generic, TypeVar, cast
 
 import hikari
 
-from apps._config import App_Config
 from _security import Power_Level
+from apps._config import App_Config
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class Setting(Generic[T]):
         desc: str | None = None,
     ):
         if not callable(value_type):
-            raise TypeError("Type must be a callable that casts input to the expected type")
+            raise TypeError("Type must be a callable that casts input to the expected type")  # pyright: ignore[reportUnreachable]
         self.value_type = value_type
         self.path = path
         self.key = key

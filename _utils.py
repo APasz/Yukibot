@@ -149,7 +149,7 @@ class Utilities:
         elif isinstance(byte_num, str):
             byte_num = int(byte_num)
         elif not isinstance(byte_num, int):
-            raise ValueError(f"byte_num must be an int, got {type(byte_num)}")
+            raise ValueError(f"byte_num must be an int, got {type(byte_num)}")  # pyright: ignore[reportUnreachable]
         if convert:
             if is_bit:
                 byte_num = round((byte_num / 8))
@@ -161,7 +161,7 @@ class Utilities:
         if magnitude is None:
             magnitude = Utilities.find_magnitude(byte_num, use_iec)
         elif not isinstance(magnitude, str):
-            raise ValueError(f"Magnitude must be a str, got {type(magnitude)}")
+            raise ValueError(f"Magnitude must be a str, got {type(magnitude)}")  # pyright: ignore[reportUnreachable]
         elif magnitude.upper() not in Utilities.MAGNITUDES:
             raise ValueError(f"Unrecognised magnitude: {magnitude}")
 
@@ -195,7 +195,7 @@ class Utilities:
              Examples: "2:30", "1:02:03", "3:12:00:00", "-2:03:12:00:00"
         """
         if not isinstance(string, str):
-            raise ValueError(f"string must be of type str not: {type(string)}")
+            raise ValueError(f"string must be of type str not: {type(string)}")  # pyright: ignore[reportUnreachable]
 
         s_raw = string.strip()
         if not s_raw:
@@ -301,7 +301,7 @@ class Utilities:
     @classmethod
     def parse_timezone(cls, value: str) -> tzinfo | None:
         if not isinstance(value, str):
-            return None
+            return None  # pyright: ignore[reportUnreachable]
 
         raw = value.strip()
         if not raw:

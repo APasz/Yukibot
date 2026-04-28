@@ -246,7 +246,7 @@ class File_Utils:
             else:
                 raise ValueError("Mixed or invalid collection passed to compress()")
         else:
-            raise TypeError("target must be a Path or Collection[Path]")
+            raise TypeError("target must be a Path or Collection[Path]")  # pyright: ignore[reportUnreachable]
 
         return zip_path
 
@@ -293,7 +293,7 @@ class File_Utils:
     @staticmethod
     def file_set(target: Path, resolve: bool | None = False) -> set[Path]:
         if resolve not in (True, False, None):
-            raise ValueError("resolve must be bool or None")
+            raise ValueError("resolve must be bool or None")  # pyright: ignore[reportUnreachable]
 
         try:
             entries = list(target.iterdir())

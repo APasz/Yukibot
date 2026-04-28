@@ -6,18 +6,30 @@ import json
 import re
 import shutil
 from pathlib import Path
+from string import Formatter
 from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, Iterable
+from urllib.parse import urlparse
 
 import hikari
 import hikariwave
 import lightbulb
 from lightbulb import Choice
+from modmux import Muxer, SteamCreds
+from modmux.models import ProviderCreds
+from modmux.modmux_errors import ModMuxError
+from modmux.providers.curseforge import CurseforgeCreds
+from modmux.providers.modio import ModioCreds
+from modmux.providers.modrinth import ModrinthCreds
+from modmux.providers.nexusmods import NexusCreds
+from modmux.providers.wube import WubeCreds
+from pydantic import SecretStr
 
 import config
 from cmd_voice_common import (
     VARIANT_FILE_RE,
     VOICE_CORRECTIONS_FILE,
     VOICE_LINE_RE,
+    VOICE_LINK_RULES_FILE,
     VOICE_TARGET_LABELS_FILE,
     VOICE_USERS_FILE,
     HFRepoRef,
@@ -26,6 +38,8 @@ from cmd_voice_common import (
     UserVoiceSettings,
     VoiceConnectBackoff,
     VoiceJob,
+    VoiceLinkRule,
+    VoiceLinkRules,
     VoiceRuntimeResetResult,
     log,
 )
@@ -50,9 +64,14 @@ class VoiceTTSCoreMixin:
         _users_path: Path
         _corrections_path: Path
         _voice_target_labels_path: Path
+        _voice_link_rules_path: Path
         voice: str
         variant: str | None
         _text_corrections: TextCorrectionCatalog
+        _voice_link_rules: VoiceLinkRules
+        _voice_link_rules_mtime_ns: int | None
+        _mod_link_name_cache: dict[str, str | None]
+        _modmux: Muxer | None
         _voice_target_name_cache: dict[hikari.Snowflake, str]
         _voice_target_choices_dirty: bool
         _enabled: bool
@@ -126,6 +145,7 @@ class VoiceTTSCoreMixin:
         self._users_path = VOICE_USERS_FILE
         self._corrections_path = VOICE_CORRECTIONS_FILE
         self._voice_target_labels_path = VOICE_TARGET_LABELS_FILE
+        self._voice_link_rules_path = VOICE_LINK_RULES_FILE
         self._user_settings: dict[int, UserVoiceSettings] = {}
         self._voice_connect_backoff: dict[hikari.Snowflake, VoiceConnectBackoff] = {}
         self.voice = config.TTS_VOICE
@@ -136,6 +156,10 @@ class VoiceTTSCoreMixin:
         self._available_variants: list[str] = []
         self._piper_config_cache: dict[str, tuple[int, dict[str, object] | None]] = {}
         self._text_corrections = self._load_text_corrections()
+        self._voice_link_rules = self._load_voice_link_rules()
+        self._voice_link_rules_mtime_ns = self._path_mtime_ns(self._voice_link_rules_path)
+        self._mod_link_name_cache: dict[str, str | None] = {}
+        self._modmux: Muxer | None = None
         self._load_user_settings()
         self._voice_target_name_cache = self._load_voice_target_name_cache()
         self._voice_target_choices_dirty = True
@@ -182,6 +206,9 @@ class VoiceTTSCoreMixin:
                 await self._worker_task
             self._worker_task = None
         self._drop_queued_jobs()
+        if self._modmux is not None:
+            await self._modmux.aclose()
+            self._modmux = None
 
     async def reset_runtime(
         self,
@@ -296,7 +323,7 @@ class VoiceTTSCoreMixin:
             if guild_id in self._voice_target_name_cache
         }
         try:
-            self._voice_target_labels_path.write_text(json.dumps(payload, indent=2), config.STR_ENCODE)
+            self._voice_target_labels_path.write_text(json.dumps(payload, indent=4), config.STR_ENCODE)
         except OSError as xcp:
             log.warning(
                 f"TTS voice-target label cache write failed path={self._voice_target_labels_path!s}: "
@@ -1013,7 +1040,7 @@ class VoiceTTSCoreMixin:
 
         payload = {"users": users}
         try:
-            self._users_path.write_text(json.dumps(payload, indent=2), config.STR_ENCODE)
+            self._users_path.write_text(json.dumps(payload, indent=4), config.STR_ENCODE)
         except OSError as xcp:
             log.warning(f"TTS user settings write failed path={self._users_path!s}: {type(xcp).__name__}: {xcp}")
 
@@ -1172,6 +1199,370 @@ class VoiceTTSCoreMixin:
             log.warning(
                 f"TTS correction file write failed path={self._corrections_path!s}: {type(xcp).__name__}: {xcp}"
             )
+
+    @staticmethod
+    def _path_mtime_ns(path: Path) -> int | None:
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def _refresh_voice_link_rules_if_needed(self) -> None:
+        current_mtime_ns = self._path_mtime_ns(self._voice_link_rules_path)
+        if current_mtime_ns == self._voice_link_rules_mtime_ns:
+            return
+
+        self._voice_link_rules = self._load_voice_link_rules()
+        self._voice_link_rules_mtime_ns = current_mtime_ns
+
+    def _load_voice_link_rules(self) -> VoiceLinkRules:
+        self._ensure_voice_link_rules_file()
+        if not self._voice_link_rules_path.exists():
+            return VoiceLinkRules()
+
+        try:
+            raw = json.loads(self._voice_link_rules_path.read_text(config.STR_ENCODE))
+        except (OSError, ValueError) as xcp:
+            log.warning(
+                f"TTS link rule file read failed path={self._voice_link_rules_path!s}: {type(xcp).__name__}: {xcp}"
+            )
+            return VoiceLinkRules()
+
+        if not isinstance(raw, dict):
+            log.warning(f"TTS link rule file invalid path={self._voice_link_rules_path!s}: expected a JSON object")
+            return VoiceLinkRules()
+
+        host_labels = self._load_voice_link_host_labels(raw.get("hosts"))
+        rules = self._load_voice_link_rule_list(raw.get("rules"))
+        log.info(
+            f"TTS link rule file loaded path={self._voice_link_rules_path!s}: "
+            f"hosts={len(host_labels)} rules={len(rules)}"
+        )
+        return VoiceLinkRules(host_labels=host_labels, rules=rules)
+
+    def _ensure_voice_link_rules_file(self) -> None:
+        if self._voice_link_rules_path.exists():
+            return
+
+        payload = {
+            "hosts": {
+                "giphy.com": "giphy",
+                "klipy.com": "gif",
+                "tenor.com": "gif",
+                "www.giphy.com": "giphy",
+                "www.klipy.com": "gif",
+                "www.tenor.com": "gif",
+            },
+            "rules": [
+                {
+                    "host": "store.steampowered.com",
+                    "path_regex": r"^/(?:agecheck/)?app/\d+/(?P<title>[^/?#]+)",
+                    "template": "link steam store {title_words}",
+                }
+            ],
+        }
+        try:
+            self._voice_link_rules_path.write_text(
+                json.dumps(payload, indent=4, ensure_ascii=False) + "\n",
+                config.STR_ENCODE,
+            )
+        except OSError as xcp:
+            log.warning(
+                f"TTS link rule file write failed path={self._voice_link_rules_path!s}: {type(xcp).__name__}: {xcp}"
+            )
+
+    def _modmux_client(self) -> Muxer:
+        if self._modmux is not None:
+            return self._modmux
+
+        creds = self._modmux_creds_from_env()
+        self._modmux = Muxer(creds=creds)
+        return self._modmux
+
+    async def _mod_link_name(self, url: str) -> str | None:
+        if url in self._mod_link_name_cache:
+            return self._mod_link_name_cache[url]
+
+        try:
+            mux = self._modmux_client()
+            mod = await mux.get_mod_from_url(url)
+        except (ModMuxError, ValueError) as xcp:
+            log.debug(f"TTS mod link lookup skipped url={url!r}: {type(xcp).__name__}: {xcp}")
+            self._mod_link_name_cache[url] = None
+            return None
+
+        name = str(mod.name).strip()
+        result = name or None
+        self._mod_link_name_cache[url] = result
+        return result
+
+    def _invalidate_mod_link_name_cache(self) -> None:
+        self._mod_link_name_cache.clear()
+
+    def _modmux_creds_from_env(self) -> list[ProviderCreds]:
+        creds: list[ProviderCreds] = []
+
+        if secret := self._env_secret("MODRINTH_API_KEY"):
+            creds.append(ModrinthCreds(api_key=secret))
+        if secret := self._env_secret("CURSEFORGE_API_KEY"):
+            creds.append(CurseforgeCreds(api_key=secret))
+        if secret := self._env_secret("NEXUSMODS_API_KEY"):
+            creds.append(NexusCreds(token=secret))
+        if secret := self._env_secret("WUBE_API_KEY"):
+            creds.append(WubeCreds(api_key=secret))
+
+        modio_api_key = self._env_secret("MODIO_API_KEY")
+        modio_user_id = self._env_secret("MODIO_USER_ID")
+        if modio_api_key and modio_user_id:
+            creds.append(ModioCreds(api_key=modio_api_key, user_id=modio_user_id))
+        elif modio_api_key or modio_user_id:
+            log.warning("TTS mod.io link lookup disabled: both MODIO_API_KEY and MODIO_USER_ID are required")
+
+        if secret := self._env_secret("STEAM_WEB_API_KEY"):
+            creds.append(SteamCreds(api_key=secret))
+
+        return creds
+
+    @staticmethod
+    def _env_secret(name: str) -> SecretStr | None:
+        value = (config.env_opt(name) or "").strip()
+        return SecretStr(value) if value else None
+
+    def _load_voice_link_host_labels(self, raw: object) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+
+        host_labels: dict[str, str] = {}
+        for host, label in raw.items():
+            if not isinstance(host, str) or not isinstance(label, str):
+                continue
+            normalised_host = host.strip().lower()
+            normalised_label = label.strip()
+            if not normalised_host or not normalised_label:
+                continue
+            host_labels[normalised_host] = normalised_label
+        return dict(sorted(host_labels.items()))
+
+    def _load_voice_link_rule_list(self, raw: object) -> tuple[VoiceLinkRule, ...]:
+        if not isinstance(raw, list):
+            return ()
+
+        loaded_rules: list[VoiceLinkRule] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+
+            host = item.get("host")
+            path_regex = item.get("path_regex")
+            template = item.get("template")
+            if not isinstance(host, str) or not isinstance(path_regex, str) or not isinstance(template, str):
+                continue
+
+            normalised_host = host.strip().lower()
+            normalised_template = template.strip()
+            if not normalised_host or not path_regex.strip() or not normalised_template:
+                continue
+
+            try:
+                path_pattern = re.compile(path_regex)
+            except re.error as xcp:
+                log.warning(
+                    f"TTS link rule regex invalid path={self._voice_link_rules_path!s} host={normalised_host!r}: {xcp}"
+                )
+                continue
+
+            loaded_rules.append(
+                VoiceLinkRule(
+                    host=normalised_host,
+                    path_regex=path_regex,
+                    path_pattern=path_pattern,
+                    template=normalised_template,
+                )
+            )
+
+        return tuple(loaded_rules)
+
+    def voice_link_host_labels(self) -> dict[str, str]:
+        self._refresh_voice_link_rules_if_needed()
+        return dict(self._voice_link_rules.host_labels)
+
+    def voice_link_rules(self) -> tuple[VoiceLinkRule, ...]:
+        self._refresh_voice_link_rules_if_needed()
+        return self._voice_link_rules.rules
+
+    def set_voice_link_host_label(self, host: str, label: str) -> tuple[str, str, bool]:
+        self._refresh_voice_link_rules_if_needed()
+        host_key = self._normalise_voice_link_host(host)
+        label_value = self._normalise_voice_link_label(label)
+        host_labels = dict(self._voice_link_rules.host_labels)
+        existed = host_key in host_labels
+        host_labels[host_key] = label_value
+        self._replace_voice_link_rules(host_labels=host_labels, rules=self._voice_link_rules.rules)
+        self._save_voice_link_rules()
+        return host_key, label_value, existed
+
+    def remove_voice_link_host_label(self, host: str) -> tuple[str, bool]:
+        self._refresh_voice_link_rules_if_needed()
+        host_key = self._normalise_voice_link_host(host)
+        host_labels = dict(self._voice_link_rules.host_labels)
+        removed = host_labels.pop(host_key, None) is not None
+        if removed:
+            self._replace_voice_link_rules(host_labels=host_labels, rules=self._voice_link_rules.rules)
+            self._save_voice_link_rules()
+        return host_key, removed
+
+    def add_voice_link_rule(self, host: str, path_regex: str, template: str) -> tuple[int, VoiceLinkRule]:
+        self._refresh_voice_link_rules_if_needed()
+        rule = self._build_voice_link_rule(host, path_regex, template)
+        rules = [*self._voice_link_rules.rules, rule]
+        self._replace_voice_link_rules(host_labels=self._voice_link_rules.host_labels, rules=rules)
+        self._save_voice_link_rules()
+        return len(rules), rule
+
+    def update_voice_link_rule(
+        self,
+        index: int,
+        *,
+        host: str | None = None,
+        path_regex: str | None = None,
+        template: str | None = None,
+    ) -> tuple[int, VoiceLinkRule]:
+        self._refresh_voice_link_rules_if_needed()
+        position = self._normalise_voice_link_rule_index(index)
+        existing = self._voice_link_rules.rules[position - 1]
+        rule = self._build_voice_link_rule(
+            host if host is not None else existing.host,
+            path_regex if path_regex is not None else existing.path_regex,
+            template if template is not None else existing.template,
+        )
+        rules = list(self._voice_link_rules.rules)
+        rules[position - 1] = rule
+        self._replace_voice_link_rules(host_labels=self._voice_link_rules.host_labels, rules=rules)
+        self._save_voice_link_rules()
+        return position, rule
+
+    def remove_voice_link_rule(self, index: int) -> tuple[int, VoiceLinkRule]:
+        self._refresh_voice_link_rules_if_needed()
+        position = self._normalise_voice_link_rule_index(index)
+        rules = list(self._voice_link_rules.rules)
+        removed = rules.pop(position - 1)
+        self._replace_voice_link_rules(host_labels=self._voice_link_rules.host_labels, rules=rules)
+        self._save_voice_link_rules()
+        return position, removed
+
+    def _replace_voice_link_rules(
+        self,
+        *,
+        host_labels: dict[str, str],
+        rules: Iterable[VoiceLinkRule],
+    ) -> None:
+        self._voice_link_rules = VoiceLinkRules(
+            host_labels=dict(sorted(host_labels.items())),
+            rules=tuple(rules),
+        )
+
+    def _save_voice_link_rules(self) -> None:
+        payload = {
+            "hosts": dict(sorted(self._voice_link_rules.host_labels.items())),
+            "rules": [
+                {
+                    "host": rule.host,
+                    "path_regex": rule.path_regex,
+                    "template": rule.template,
+                }
+                for rule in self._voice_link_rules.rules
+            ],
+        }
+        try:
+            self._voice_link_rules_path.write_text(
+                json.dumps(payload, indent=4, ensure_ascii=False) + "\n",
+                config.STR_ENCODE,
+            )
+        except OSError as xcp:
+            log.warning(
+                f"TTS link rule file write failed path={self._voice_link_rules_path!s}: {type(xcp).__name__}: {xcp}"
+            )
+            return
+
+        self._voice_link_rules_mtime_ns = self._path_mtime_ns(self._voice_link_rules_path)
+
+    def _build_voice_link_rule(self, host: str, path_regex: str, template: str) -> VoiceLinkRule:
+        host_key = self._normalise_voice_link_host(host)
+        regex_value = self._normalise_voice_link_regex(path_regex)
+        template_value = self._normalise_voice_link_template(template)
+        try:
+            path_pattern = re.compile(regex_value)
+        except re.error as xcp:
+            raise ValueError(f"path_regex is invalid: {xcp}") from xcp
+        self._validate_voice_link_template(template_value, path_pattern)
+        return VoiceLinkRule(
+            host=host_key,
+            path_regex=regex_value,
+            path_pattern=path_pattern,
+            template=template_value,
+        )
+
+    @staticmethod
+    def _normalise_voice_link_label(label: str) -> str:
+        value = re.sub(r"\s+", " ", label).strip()
+        if not value:
+            raise ValueError("label must not be empty")
+        return value
+
+    @staticmethod
+    def _normalise_voice_link_regex(path_regex: str) -> str:
+        value = path_regex.strip()
+        if not value:
+            raise ValueError("path_regex must not be empty")
+        return value
+
+    @staticmethod
+    def _normalise_voice_link_template(template: str) -> str:
+        value = re.sub(r"\s+", " ", template).strip()
+        if not value:
+            raise ValueError("template must not be empty")
+        return value
+
+    def _normalise_voice_link_host(self, host: str) -> str:
+        value = host.strip().lower()
+        if not value:
+            raise ValueError("host must not be empty")
+        if any(char.isspace() for char in value):
+            raise ValueError("host must not contain whitespace")
+
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+        hostname = parsed.hostname
+        if hostname is None:
+            raise ValueError("host must be a hostname like `example.com`")
+        if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+            raise ValueError("host must not include a path, query, or fragment")
+        return hostname.lower()
+
+    def _normalise_voice_link_rule_index(self, index: int) -> int:
+        self._refresh_voice_link_rules_if_needed()
+        if index <= 0:
+            raise ValueError("index must be 1 or greater")
+        if index > len(self._voice_link_rules.rules):
+            raise ValueError(f"index must be between 1 and {len(self._voice_link_rules.rules)}")
+        return index
+
+    @staticmethod
+    def _validate_voice_link_template(template: str, path_pattern: re.Pattern[str]) -> None:
+        allowed_fields = {"host"}
+        for group_name in path_pattern.groupindex:
+            allowed_fields.add(group_name)
+            allowed_fields.add(f"{group_name}_words")
+
+        for _, field_name, format_spec, conversion in Formatter().parse(template):
+            if field_name is None:
+                continue
+            if not field_name:
+                raise ValueError("template must use named fields like `{title_words}`")
+            if conversion is not None or format_spec:
+                raise ValueError("template format conversions/specifiers are not supported")
+            if field_name not in allowed_fields:
+                allowed_list = ", ".join(sorted(allowed_fields))
+                raise ValueError(f"template field `{field_name}` is invalid; allowed: {allowed_list}")
 
     async def available_voices(self, force_refresh: bool = False) -> list[str]:
         if self._available_voices and not force_refresh:

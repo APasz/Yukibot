@@ -344,7 +344,7 @@ class Name_Cache(metaclass=Singleton):
 
     def set_names(self, user: hikari.User | hikari.Member):
         if not user:
-            return
+            return  # pyright: ignore[reportUnreachable]
         userName = self.by_id.setdefault(user.id, UserNames())
         userName.account = user.username
         userName.names = {

@@ -20,6 +20,7 @@ group_voice = lightbulb.Group("voice", "Voice commands and TTS")  # type: ignore
 VOICE_USERS_FILE = Path("voice_users.json")
 VOICE_CORRECTIONS_FILE = Path("voice_corrections.json")
 VOICE_TARGET_LABELS_FILE = Path("voice_target_labels.json")
+VOICE_LINK_RULES_FILE = Path("voice_link_rules.json")
 DISCORD_CUSTOM_EMOJI_RE = re.compile(r"<a?:(\w+):\d+>")
 URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 EMOJI_TAG_RE = re.compile(r":[a-z0-9_+\-]+:", re.IGNORECASE)
@@ -222,6 +223,28 @@ class VoiceConnectBackoff:
     listener_count: int
     reason: str
     detail: str
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceLinkRule:
+    host: str
+    path_regex: str
+    path_pattern: re.Pattern[str]
+    template: str
+
+
+@dataclass(slots=True, frozen=True, init=False)
+class VoiceLinkRules:
+    host_labels: dict[str, str]
+    rules: tuple[VoiceLinkRule, ...]
+
+    def __init__(
+        self,
+        host_labels: dict[str, str] | None = None,
+        rules: tuple[VoiceLinkRule, ...] = (),
+    ) -> None:
+        object.__setattr__(self, "host_labels", {} if host_labels is None else host_labels)
+        object.__setattr__(self, "rules", rules)
 
 
 @dataclass(slots=True, frozen=True)

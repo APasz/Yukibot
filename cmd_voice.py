@@ -11,7 +11,7 @@ import requests
 
 import config
 from _security import Access_Control
-from cmd_voice_common import DISCORD_CUSTOM_EMOJI_RE, EMOJI_TAG_RE
+from cmd_voice_common import DISCORD_CUSTOM_EMOJI_RE, EMOJI_TAG_RE, VoiceLinkRule
 from cmd_voice_service import (
     HFRepoRef,
     PiperPythonVoiceRuntime,
@@ -118,6 +118,20 @@ async def ac_tts_substitution_sources(ctx: lightbulb.AutocompleteContext, voice_
     await ctx.respond(sources[:25])
 
 
+async def ac_tts_link_hosts(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTTSService):
+    if not isinstance(ctx.focused.value, str):
+        await ctx.respond([])
+        return
+
+    needle = ctx.focused.value.strip().lower()
+    hosts = set(voice_tts.voice_link_host_labels())
+    hosts.update(rule.host for rule in voice_tts.voice_link_rules())
+    choices = sorted(hosts)
+    if needle:
+        choices = [host for host in choices if needle in host.lower()]
+    await ctx.respond(choices[:25])
+
+
 async def ac_tts_pronunciation_sources(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTTSService):
     if not isinstance(ctx.focused.value, str):
         await ctx.respond([])
@@ -199,7 +213,7 @@ class CMD_VoiceSay(
         )
 
         try:
-            spoken, queue_len = voice_tts.queue_say(guild_id, ctx.interaction.id, self.text, user_id=ctx.user.id)
+            spoken, queue_len = await voice_tts.queue_say(guild_id, ctx.interaction.id, self.text, user_id=ctx.user.id)
         except (RuntimeError, ValueError) as xcp:
             await ctx.respond(str(xcp))
             log.info(f"Voice cmd say rejected user={ctx.user.id} reason={xcp}")
@@ -951,6 +965,252 @@ class CMD_VoiceProtect(
 
 
 @group_voice.register
+class CMD_VoiceLinkHost(
+    lightbulb.SlashCommand,
+    name="linkhost",
+    description="Manage shared TTS link host labels",
+):
+    _MAX_MESSAGE_CHARS = 1850
+
+    host = lightbulb.string(
+        "host",
+        "Host to label, like example.com (leave empty to list)",
+        autocomplete=ac_tts_link_hosts,  # pyright: ignore[reportArgumentType]
+        default=None,
+    )
+    label = lightbulb.string(
+        "label",
+        "Spoken label for the host (omit to remove host)",
+        default=None,
+    )
+
+    @classmethod
+    def _chunk_messages(cls, hosts: dict[str, str]) -> list[str]:
+        header = [f"link hosts: `{len(hosts)}`"]
+        if not hosts:
+            return ["\n".join([*header, "No shared host labels set. Example: `/voice linkhost host:example.com label:link example site`"])]
+
+        messages: list[str] = []
+        current = "\n".join([*header, "host -> label:"])
+        for host, label in hosts.items():
+            line = f"`{host}` -> `{label}`"
+            if len(current) + 1 + len(line) > cls._MAX_MESSAGE_CHARS:
+                messages.append(current)
+                current = "\n".join(["link hosts (cont):", line])
+            else:
+                current = f"{current}\n{line}"
+
+        messages.append(current)
+        return messages
+
+    @lightbulb.invoke
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, voice_tts: VoiceTTSService):
+        await acl.perm_check(ctx.user.id, acl.LvL.admin)
+        host = self.host.strip() if isinstance(self.host, str) else ""
+        label = self.label.strip() if isinstance(self.label, str) else None
+
+        log.info(f"Voice cmd linkhost invoked user={ctx.user.id} host={host!r} label={voice_tts._preview(label or '')!r}")
+
+        if not host and label is not None:
+            await ctx.respond("host is required when label is provided")
+            log.info(f"Voice cmd linkhost rejected missing_host user={ctx.user.id}")
+            return
+
+        if not host:
+            hosts = voice_tts.voice_link_host_labels()
+            for message in self._chunk_messages(hosts):
+                await ctx.respond(message)
+            log.info(f"Voice cmd linkhost list user={ctx.user.id} count={len(hosts)}")
+            return
+
+        if label is None:
+            try:
+                host_key, removed = voice_tts.remove_voice_link_host_label(host)
+            except ValueError as xcp:
+                await ctx.respond(str(xcp))
+                log.info(f"Voice cmd linkhost rejected remove user={ctx.user.id} host={host!r} reason={xcp}")
+                return
+
+            if removed:
+                await ctx.respond(f"Removed link host label: `{host_key}`")
+            else:
+                await ctx.respond(f"No link host label set for `{host_key}`.")
+            log.info(f"Voice cmd linkhost remove user={ctx.user.id} host={host_key!r} removed={removed}")
+            return
+
+        try:
+            host_key, label_value, existed = voice_tts.set_voice_link_host_label(host, label)
+        except ValueError as xcp:
+            await ctx.respond(str(xcp))
+            log.info(
+                f"Voice cmd linkhost rejected set user={ctx.user.id} host={host!r} "
+                f"label={voice_tts._preview(label)!r} reason={xcp}"
+            )
+            return
+
+        action = "Updated" if existed else "Added"
+        await ctx.respond(f"{action} link host label: `{host_key}` -> `{label_value}`")
+        log.info(
+            f"Voice cmd linkhost set user={ctx.user.id} host={host_key!r} "
+            f"label={voice_tts._preview(label_value)!r} updated={existed}"
+        )
+
+
+@group_voice.register
+class CMD_VoiceLinkRule(
+    lightbulb.SlashCommand,
+    name="linkrule",
+    description="Manage shared TTS link regex rules",
+):
+    _MAX_MESSAGE_CHARS = 1850
+
+    index = lightbulb.integer(
+        "index",
+        "1-based rule index for update/remove",
+        default=None,
+    )
+    host = lightbulb.string(
+        "host",
+        "Host for this rule, like store.steampowered.com",
+        autocomplete=ac_tts_link_hosts,  # pyright: ignore[reportArgumentType]
+        default=None,
+    )
+    path_regex = lightbulb.string(
+        "path_regex",
+        "Regex to match the URL path",
+        default=None,
+    )
+    template = lightbulb.string(
+        "template",
+        "Spoken template, eg link steam store {title_words}",
+        default=None,
+    )
+    remove = lightbulb.boolean(
+        "remove",
+        "Remove the indexed rule instead of adding/updating",
+        default=False,
+    )
+
+    @classmethod
+    def _chunk_messages(cls, rules: tuple[VoiceLinkRule, ...]) -> list[str]:
+        header = [f"link rules: `{len(rules)}`"]
+        if not rules:
+            return [
+                "\n".join(
+                    [
+                        *header,
+                        "No shared link rules set.",
+                        "Example: `/voice linkrule host:store.steampowered.com path_regex:^/(?:agecheck/)?app/\\d+/(?P<title>[^/?#]+) template:link steam store {title_words}`",
+                    ]
+                )
+            ]
+
+        messages: list[str] = []
+        current = "\n".join([*header, "index | host | path_regex | template:"])
+        for offset, rule in enumerate(rules, start=1):
+            line = f"`{offset}` | `{rule.host}` | `{rule.path_regex}` | `{rule.template}`"
+            if len(current) + 1 + len(line) > cls._MAX_MESSAGE_CHARS:
+                messages.append(current)
+                current = "\n".join(["link rules (cont):", line])
+            else:
+                current = f"{current}\n{line}"
+
+        messages.append(current)
+        return messages
+
+    @lightbulb.invoke
+    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, voice_tts: VoiceTTSService):
+        await acl.perm_check(ctx.user.id, acl.LvL.admin)
+        index = int(self.index) if isinstance(self.index, int) else None
+        host = self.host.strip() if isinstance(self.host, str) else None
+        path_regex = self.path_regex.strip() if isinstance(self.path_regex, str) else None
+        template = self.template.strip() if isinstance(self.template, str) else None
+        remove = bool(self.remove)
+
+        log.info(
+            f"Voice cmd linkrule invoked user={ctx.user.id} index={index!r} host={host!r} "
+            f"path_regex={voice_tts._preview(path_regex or '')!r} template={voice_tts._preview(template or '')!r} remove={remove}"
+        )
+
+        if remove:
+            if index is None:
+                await ctx.respond("index is required when remove is true")
+                log.info(f"Voice cmd linkrule rejected missing_index_remove user={ctx.user.id}")
+                return
+            if host is not None or path_regex is not None or template is not None:
+                await ctx.respond("host, path_regex, and template must be omitted when remove is true")
+                log.info(f"Voice cmd linkrule rejected mixed_remove user={ctx.user.id}")
+                return
+            try:
+                rule_index, removed = voice_tts.remove_voice_link_rule(index)
+            except ValueError as xcp:
+                await ctx.respond(str(xcp))
+                log.info(f"Voice cmd linkrule rejected remove user={ctx.user.id} index={index!r} reason={xcp}")
+                return
+
+            await ctx.respond(
+                f"Removed link rule `{rule_index}`: `{removed.host}` | `{removed.path_regex}` | `{removed.template}`"
+            )
+            log.info(f"Voice cmd linkrule remove user={ctx.user.id} index={rule_index} host={removed.host!r}")
+            return
+
+        if index is None and host is None and path_regex is None and template is None:
+            rules = voice_tts.voice_link_rules()
+            for message in self._chunk_messages(rules):
+                await ctx.respond(message)
+            log.info(f"Voice cmd linkrule list user={ctx.user.id} count={len(rules)}")
+            return
+
+        if index is None:
+            if host is None or path_regex is None or template is None:
+                await ctx.respond("host, path_regex, and template are all required when adding a rule")
+                log.info(f"Voice cmd linkrule rejected missing_add_fields user={ctx.user.id}")
+                return
+            try:
+                rule_index, rule = voice_tts.add_voice_link_rule(host, path_regex, template)
+            except ValueError as xcp:
+                await ctx.respond(str(xcp))
+                log.info(
+                    f"Voice cmd linkrule rejected add user={ctx.user.id} host={host!r} "
+                    f"path_regex={voice_tts._preview(path_regex)!r} template={voice_tts._preview(template)!r} reason={xcp}"
+                )
+                return
+
+            await ctx.respond(f"Added link rule `{rule_index}`: `{rule.host}` | `{rule.path_regex}` | `{rule.template}`")
+            log.info(f"Voice cmd linkrule add user={ctx.user.id} index={rule_index} host={rule.host!r}")
+            return
+
+        if host is None and path_regex is None and template is None:
+            rules = voice_tts.voice_link_rules()
+            if index <= 0 or index > len(rules):
+                await ctx.respond(f"index must be between 1 and {len(rules)}")
+                log.info(f"Voice cmd linkrule rejected show user={ctx.user.id} index={index!r} count={len(rules)}")
+                return
+            rule = rules[index - 1]
+            await ctx.respond(f"Link rule `{index}`: `{rule.host}` | `{rule.path_regex}` | `{rule.template}`")
+            log.info(f"Voice cmd linkrule show user={ctx.user.id} index={index}")
+            return
+
+        try:
+            rule_index, rule = voice_tts.update_voice_link_rule(
+                index,
+                host=host,
+                path_regex=path_regex,
+                template=template,
+            )
+        except ValueError as xcp:
+            await ctx.respond(str(xcp))
+            log.info(
+                f"Voice cmd linkrule rejected update user={ctx.user.id} index={index!r} host={host!r} "
+                f"path_regex={voice_tts._preview(path_regex or '')!r} template={voice_tts._preview(template or '')!r} reason={xcp}"
+            )
+            return
+
+        await ctx.respond(f"Updated link rule `{rule_index}`: `{rule.host}` | `{rule.path_regex}` | `{rule.template}`")
+        log.info(f"Voice cmd linkrule update user={ctx.user.id} index={rule_index} host={rule.host!r}")
+
+
+@group_voice.register
 class CMD_VoiceAddModel(
     lightbulb.SlashCommand,
     name="addmodel",
@@ -1173,6 +1433,8 @@ __all__ = [
     "CMD_VoiceAutocorrect",
     "CMD_VoiceDeleteModel",
     "CMD_VoiceGlobalSub",
+    "CMD_VoiceLinkHost",
+    "CMD_VoiceLinkRule",
     "CMD_VoiceList",
     "CMD_VoiceListen",
     "CMD_VoicePron",
@@ -1188,6 +1450,7 @@ __all__ = [
     "VoiceTTSService",
     "ac_tts_custom_models",
     "ac_tts_global_substitution_sources",
+    "ac_tts_link_hosts",
     "ac_tts_pronunciation_sources",
     "ac_tts_protected_tokens",
     "ac_tts_substitution_sources",

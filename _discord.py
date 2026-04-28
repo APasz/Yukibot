@@ -239,11 +239,11 @@ class Message:
             self._string = content.value
             self.is_generic = True
         else:
-            raise ValueError(f"Content must be str, not {type(content)}")
+            raise ValueError(f"Content must be str, not {type(content)}")  # pyright: ignore[reportUnreachable]
 
         self.player = player
         if not isinstance(player, (str, int, hikari.UndefinedType, hikari.Snowflake)):
-            raise ValueError(f"Player must be str | int | UNDEFINED, not {type(player)}")
+            raise ValueError(f"Player must be str | int | UNDEFINED, not {type(player)}")  # pyright: ignore[reportUnreachable]
 
         self.urls = set()
         self.files = {f for f in files if isinstance(f, Fileish)} if files else set()

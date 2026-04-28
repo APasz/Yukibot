@@ -116,12 +116,12 @@ class Mod_Manager:
             raise FileNotFoundError(f"{app_cfg.name} mods folder missing")
 
         if not mod_cls or not issubclass(mod_cls, Mod):
-            raise ValueError(f"mod_cls not appropriate type: {type(mod_cls)}")
+            raise ValueError(f"mod_cls not appropriate type: {type(mod_cls)}")  # pyright: ignore[reportUnreachable]
         else:
             self.mod_cls = mod_cls
 
         if not modcf_cls or not issubclass(modcf_cls, Mod_Config):
-            raise ValueError(f"modcf_cls not appropriate type: {type(modcf_cls)}")
+            raise ValueError(f"modcf_cls not appropriate type: {type(modcf_cls)}")  # pyright: ignore[reportUnreachable]
         else:
             self.modcf_cls = modcf_cls
 
@@ -214,7 +214,7 @@ class Mod_Manager:
 
     async def add(self, src: Path):
         if not src or not isinstance(src, Path):
-            raise ValueError(f"src must be Path not: {type(src)}")
+            raise ValueError(f"src must be Path not: {type(src)}")  # pyright: ignore[reportUnreachable]
         mod = self.mod_cls(self.modcf_cls(name=src.name, directory=self.folder))
         await mod.install(src)
         self.index[mod.name] = mod
