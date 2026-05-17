@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
+from typing import cast
 import unittest
+from unittest.mock import patch
 
 import config
 from cmd_voice_common import TextCorrectionCatalog, UserVoiceSettings, VoiceLinkRules
@@ -83,6 +85,36 @@ class _CorrectionAsyncRuntime(_CorrectionRuntime):
 
     async def _mod_link_name(self, url: str) -> str | None:
         return self._mod_names.get(url)
+
+
+class _HFScanRuntime(VoiceTTSCoreMixin, VoiceTTSModelMixin):
+    _MAX_SUBSTITUTIONS_PER_USER = 100
+    _MAX_SUBSTITUTION_KEY_CHARS = 40
+    _MAX_SUBSTITUTION_VALUE_CHARS = 120
+    repo_files_called = False
+    candidate_result = False
+
+    def __init__(self, *, is_candidate: bool) -> None:
+        self._engine_kind = "piper"
+        type(self).candidate_result = is_candidate
+        type(self).repo_files_called = False
+
+    @staticmethod
+    def _hf_parse_repo_url(url: str):
+        return VoiceTTSModelMixin._hf_parse_repo_url(url)
+
+    @staticmethod
+    def _hf_repo_files(repo_id: str, revision: str) -> list[str]:
+        _HFScanRuntime.repo_files_called = True
+        raise AssertionError("Direct model URL should not enumerate repository files.")
+
+    @classmethod
+    def _hf_is_piper_file_candidate(cls, repo_id: str, revision: str, onnx_file: str) -> bool:
+        return cls.candidate_result
+
+
+async def _immediate_to_thread(func, /, *args, **kwargs):
+    return func(*args, **kwargs)
 
 
 class VoiceCorrectionTests(unittest.TestCase):
@@ -356,8 +388,19 @@ class VoiceCorrectionTests(unittest.TestCase):
             ModioCreds,
             SteamCreds,
         ])
-        self.assertTrue(all(isinstance(item.api_key, SecretStr) for item in creds if hasattr(item, "api_key")))
-        self.assertIsInstance(creds[4].user_id, SecretStr)
+        modrinth = cast(ModrinthCreds, creds[0])
+        curseforge = cast(CurseforgeCreds, creds[1])
+        nexus = cast(NexusCreds, creds[2])
+        wube = cast(WubeCreds, creds[3])
+        modio = cast(ModioCreds, creds[4])
+        steam = cast(SteamCreds, creds[5])
+        self.assertTrue(
+            all(
+                isinstance(item.api_key, SecretStr)
+                for item in (modrinth, curseforge, nexus, wube, modio, steam)
+            )
+        )
+        self.assertIsInstance(modio.user_id, SecretStr)
 
     def test_modmux_creds_skip_incomplete_modio_env(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -458,6 +501,78 @@ class VoiceCorrectionTests(unittest.TestCase):
         self.assertEqual(target, "ehg")
         self.assertFalse(existed)
         self.assertEqual(payload["users"]["123"]["pronunciations"], {"egg": "ehg"})
+
+    def test_direct_hf_model_url_is_validated_without_scanning_repo(self) -> None:
+        runtime = _HFScanRuntime(is_candidate=True)
+
+        with patch("cmd_voice_core.asyncio.to_thread", new=_immediate_to_thread):
+            repo_ref, candidates = asyncio.run(
+                runtime.scan_piper_models_from_hf(
+                    "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fi/fi_FI/harri/low/fi_FI-harri-low.onnx"
+                )
+            )
+
+        self.assertEqual(repo_ref.repo_id, "rhasspy/piper-voices")
+        self.assertEqual(repo_ref.revision, "v1.0.0")
+        self.assertEqual(
+            candidates,
+            ["fi/fi_FI/harri/low/fi_FI-harri-low.onnx"],
+        )
+        self.assertFalse(runtime.repo_files_called)
+
+    def test_direct_hf_model_url_rejects_invalid_piper_config(self) -> None:
+        runtime = _HFScanRuntime(is_candidate=False)
+
+        with patch("cmd_voice_core.asyncio.to_thread", new=_immediate_to_thread):
+            with self.assertRaisesRegex(LookupError, "not Piper-compatible"):
+                asyncio.run(
+                    runtime.scan_piper_models_from_hf(
+                        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fi/fi_FI/harri/low/fi_FI-harri-low.onnx"
+                    )
+                )
+
+        self.assertFalse(runtime.repo_files_called)
+
+    def test_hf_candidate_falls_back_to_official_voices_index(self) -> None:
+        def fake_load_json_file(repo_id: str, revision: str, path: str) -> dict[str, object] | None:
+            if path == "fi/fi_FI/harri/low/fi_FI-harri-low.onnx.json":
+                return None
+            if path == "voices.json":
+                return {
+                    "fi_FI-harri-low": {
+                        "files": {
+                            "fi/fi_FI/harri/low/fi_FI-harri-low.onnx": {},
+                            "fi/fi_FI/harri/low/fi_FI-harri-low.onnx.json": {},
+                        }
+                    }
+                }
+            raise AssertionError(f"Unexpected path: {path}")
+
+        with patch.object(VoiceTTSModelMixin, "_hf_load_json_file", side_effect=fake_load_json_file):
+            self.assertTrue(
+                VoiceTTSModelMixin._hf_is_piper_file_candidate(
+                    "rhasspy/piper-voices",
+                    "v1.0.0",
+                    "fi/fi_FI/harri/low/fi_FI-harri-low.onnx",
+                )
+            )
+
+    def test_hf_candidate_does_not_use_index_fallback_for_other_repos(self) -> None:
+        def fake_load_json_file(repo_id: str, revision: str, path: str) -> dict[str, object] | None:
+            if path == "fi/fi_FI/harri/low/fi_FI-harri-low.onnx.json":
+                return None
+            if path == "voices.json":
+                raise AssertionError("Non-official repos should not query voices.json fallback.")
+            raise AssertionError(f"Unexpected path: {path}")
+
+        with patch.object(VoiceTTSModelMixin, "_hf_load_json_file", side_effect=fake_load_json_file):
+            self.assertFalse(
+                VoiceTTSModelMixin._hf_is_piper_file_candidate(
+                    "someone-else/piper-voices",
+                    "main",
+                    "fi/fi_FI/harri/low/fi_FI-harri-low.onnx",
+                )
+            )
 
 
 if __name__ == "__main__":

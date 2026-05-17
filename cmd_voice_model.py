@@ -563,7 +563,70 @@ class VoiceTTSModelMixin:
             if cls._hf_is_piper_model_config(raw):
                 candidates.append(onnx_file)
 
+        log.info(
+            f"TTS HF candidate scan repo={repo_id!r} revision={revision!r} "
+            f"files={len(files)} onnx_files={len(onnx_files)} candidates={len(candidates)}"
+        )
         return candidates
+
+    @classmethod
+    def _hf_is_piper_file_candidate(cls, repo_id: str, revision: str, onnx_file: str) -> bool:
+        clean = onnx_file.strip()
+        if not clean or not clean.lower().endswith(".onnx"):
+            log.info(
+                f"TTS HF direct candidate rejected repo={repo_id!r} revision={revision!r} "
+                f"file={onnx_file!r} reason=invalid_extension"
+            )
+            return False
+
+        raw = cls._hf_load_json_file(repo_id, revision, f"{clean}.json")
+        if raw and cls._hf_is_piper_model_config(raw):
+            log.info(
+                f"TTS HF direct candidate accepted repo={repo_id!r} revision={revision!r} "
+                f"file={clean!r} source=config_json"
+            )
+            return True
+
+        if repo_id == "rhasspy/piper-voices":
+            in_index = cls._hf_repo_index_lists_piper_file(repo_id, revision, clean)
+            log.info(
+                f"TTS HF direct candidate fallback repo={repo_id!r} revision={revision!r} "
+                f"file={clean!r} source=voices_json accepted={in_index}"
+            )
+            return in_index
+
+        log.info(
+            f"TTS HF direct candidate rejected repo={repo_id!r} revision={revision!r} "
+            f"file={clean!r} reason=missing_or_invalid_config"
+        )
+        return False
+
+    @classmethod
+    def _hf_repo_index_lists_piper_file(cls, repo_id: str, revision: str, onnx_file: str) -> bool:
+        raw = cls._hf_load_json_file(repo_id, revision, "voices.json")
+        if not isinstance(raw, dict):
+            log.info(
+                f"TTS HF voices index unavailable repo={repo_id!r} revision={revision!r} file={onnx_file!r}"
+            )
+            return False
+
+        config_file = f"{onnx_file}.json"
+        matched = False
+        for entry in raw.values():
+            if not isinstance(entry, dict):
+                continue
+            files = entry.get("files")
+            if not isinstance(files, dict):
+                continue
+            if onnx_file in files and config_file in files:
+                matched = True
+                break
+
+        log.info(
+            f"TTS HF voices index lookup repo={repo_id!r} revision={revision!r} "
+            f"file={onnx_file!r} matched={matched}"
+        )
+        return matched
 
     @classmethod
     def _hf_load_json_file(cls, repo_id: str, revision: str, path: str) -> dict[str, object] | None:

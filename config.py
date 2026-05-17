@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 NAME: str = "Yukibot"
 UPLOAD_CLEAR_HOURS: int = 36
 DISCORD_UPLOAD_LIMIT: int = 10  # in MiB
+log = logging.getLogger(__name__)
 
 
 class Currency(enum.StrEnum):
@@ -187,11 +188,19 @@ ENABLED_FILE = Path("enabled_apps.json")
 
 
 @cache
-def public_ip(url: str = PUBLIC_IP_ADDR):
-    return requests.get(url).text
+def public_ip(url: str = PUBLIC_IP_ADDR) -> str:
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+    except requests.RequestException as xcp:
+        fallback = "127.0.0.1"
+        log.warning(f"Public IP lookup failed via {url!r}: {type(xcp).__name__}: {xcp}; using {fallback}")
+        return fallback
+
+    return response.text.strip()
 
 
-PUBLIC_URL_BASE = f"http://{public_ip()}/uploads/"
+PUBLIC_URL_BASE = env_opt("PUBLIC_URL_BASE") or f"http://{public_ip()}/uploads/"
 DIR_LOG = Path("logs")
 DIR_TMP = Path(env_req("DIR_TMP"))
 "/tmp/yukibot"

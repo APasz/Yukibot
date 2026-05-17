@@ -112,6 +112,9 @@ class VoiceTTSCoreMixin:
         @classmethod
         def _hf_find_piper_candidates(cls, repo_id: str, revision: str, files: list[str]) -> list[str]: ...
 
+        @classmethod
+        def _hf_is_piper_file_candidate(cls, repo_id: str, revision: str, onnx_file: str) -> bool: ...
+
         @staticmethod
         def _hf_resolve_download_url(repo_id: str, revision: str, path: str) -> str: ...
 
@@ -1686,17 +1689,38 @@ class VoiceTTSCoreMixin:
             raise RuntimeError("Model add/remove commands are only available for Piper TTS.")
 
         repo_ref = self._hf_parse_repo_url(url)
-        files = await asyncio.to_thread(self._hf_repo_files, repo_ref.repo_id, repo_ref.revision)
-        candidates = await asyncio.to_thread(self._hf_find_piper_candidates, repo_ref.repo_id, repo_ref.revision, files)
+        log.info(
+            f"TTS HF scan start repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
+            f"direct_file={repo_ref.onnx_file!r}"
+        )
 
         if repo_ref.onnx_file:
-            selected = repo_ref.onnx_file.lower()
-            match = next((path for path in candidates if path.lower() == selected), None)
-            if not match:
+            is_candidate = await asyncio.to_thread(
+                self._hf_is_piper_file_candidate,
+                repo_ref.repo_id,
+                repo_ref.revision,
+                repo_ref.onnx_file,
+            )
+            if not is_candidate:
+                log.info(
+                    f"TTS HF scan rejected repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
+                    f"file={repo_ref.onnx_file!r}"
+                )
                 raise LookupError(
                     "The `.onnx` file in that URL is not Piper-compatible (missing/invalid `.onnx.json` Piper config)."
                 )
-            return repo_ref, [match]
+            log.info(
+                f"TTS HF scan accepted repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
+                f"file={repo_ref.onnx_file!r}"
+            )
+            return repo_ref, [repo_ref.onnx_file]
+
+        files = await asyncio.to_thread(self._hf_repo_files, repo_ref.repo_id, repo_ref.revision)
+        candidates = await asyncio.to_thread(self._hf_find_piper_candidates, repo_ref.repo_id, repo_ref.revision, files)
+        log.info(
+            f"TTS HF scan complete repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
+            f"repo_files={len(files)} candidates={len(candidates)}"
+        )
 
         return repo_ref, candidates
 
@@ -1717,6 +1741,10 @@ class VoiceTTSCoreMixin:
         if target_model.exists():
             raise FileExistsError(f"Model `{target_model.stem}` already exists.")
 
+        log.info(
+            f"TTS HF model download start repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
+            f"file={selected_file!r} target={str(target_model)!r}"
+        )
         await asyncio.to_thread(self._download_file, model_url, target_model, False)
         config_downloaded = False
         try:
@@ -1725,6 +1753,9 @@ class VoiceTTSCoreMixin:
             log.warning(f"TTS Piper model config download failed model={target_model.stem!r}: {xcp}")
 
         self._invalidate_piper_runtime_cache()
+        log.info(
+            f"TTS HF model download complete model={target_model.stem!r} config_downloaded={config_downloaded}"
+        )
         return target_model.stem, config_downloaded
 
     async def delete_piper_model(self, model: str) -> str:

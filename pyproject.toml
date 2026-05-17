@@ -1,0 +1,74 @@
+[project]
+name = "yukibot"
+version = "0.1.0"
+description = "Discord bot for game server management, voice features, and automation."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "aiofiles",
+    "aioftp",
+    "aiohttp",
+    "anyio",
+    "emoji",
+    "factorio-rcon-py",
+    "hikari-lightbulb~=3.2.3",
+    "hikari-ui",
+    "hikari-wave>=0.7.0a1",
+    "hikari[speedups]~=2.5.0",
+    "modmux",
+    "pathvalidate",
+    "piper-tts",
+    "psutil",
+    "pydantic",
+    "python-dateutil",
+    "python-dotenv",
+    "regex",
+    "requests",
+    "tenorgrabber",
+    "tomli_w",
+    "uvloop; platform_system != 'Windows'",
+    "yt-dlp",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright",
+]
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[tool.uv.sources]
+hikari-ui = { path = "../hikari_editor" }
+
+[tool.basedpyright]
+include = [
+    "*.py",
+    "apps",
+]
+exclude = [
+    "**/__pycache__",
+    "**/node_modules",
+    "**/.git",
+    "**/.hg",
+    "**/.svn",
+    ".venv",
+    "data",
+    "dev_apps",
+    "logs",
+    "opt",
+    "tmp",
+    "voices",
+    "**/.*",
+]
+pythonVersion = "3.14"
+pythonPlatform = "Linux"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+useLibraryCodeForTypes = true
+reportMissingImports = "error"
+reportMissingTypeStubs = "none"
+reportIgnoreCommentWithoutRule = "warning"
+reportUnreachable = "warning"
