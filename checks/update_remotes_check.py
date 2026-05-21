@@ -45,23 +45,6 @@ class UpdateRemotesTests(unittest.TestCase):
 
         self.assertEqual(report_path.name, "update_remotes_dry.txt")
 
-    def test_remote_parent_directories_include_nested_paths(self) -> None:
-        target = rupdater.RemoteTarget(
-            name=rupdater.TargetName.WAKUSEI,
-            host="wakusei.apasz.com",
-            user="bot",
-            password="secret",
-            remote_root=PurePosixPath("/srv/yukibot"),
-        )
-        files = [Path("main.py"), Path("apps/_app.py")]
-
-        directories = rupdater.remote_parent_directories(target, files)
-
-        self.assertEqual(
-            directories,
-            [PurePosixPath("/srv/yukibot"), PurePosixPath("/srv/yukibot/apps")],
-        )
-
     def test_remote_file_path_joins_relative_path(self) -> None:
         target = rupdater.RemoteTarget(
             name=rupdater.TargetName.WAKUSEI,
@@ -77,7 +60,10 @@ class UpdateRemotesTests(unittest.TestCase):
 
     def test_remote_command_path_is_absolute(self) -> None:
         self.assertEqual(rupdater.REMOTE_MKDIR_PATH, "/bin/mkdir")
-        self.assertEqual(rupdater.REMOTE_CAT_PATH, "/bin/cat")
+        self.assertEqual(
+            rupdater.REMOTE_TAR_CANDIDATES,
+            (PurePosixPath("/bin/tar"), PurePosixPath("/usr/bin/tar")),
+        )
 
     def test_ssh_control_path_is_target_specific(self) -> None:
         wakusei_path = rupdater.ssh_control_path(
@@ -87,10 +73,33 @@ class UpdateRemotesTests(unittest.TestCase):
                 user="bot",
                 password="secret",
                 remote_root=PurePosixPath("/srv/yukibot"),
-            )
+            ),
+            "run-123",
         )
 
-        self.assertEqual(wakusei_path.name, "yukibot-wakusei.ssh")
+        self.assertEqual(wakusei_path.name, "yukibot-wakusei-run-123.ssh")
+
+    def test_ordered_restart_targets_prioritises_wakusei_before_kousei(self) -> None:
+        targets = [
+            rupdater.RemoteTarget(
+                name=rupdater.TargetName.KOUSEI,
+                host="kousei.apasz.com",
+                user="bot",
+                password="secret",
+                remote_root=PurePosixPath("/srv/yukibot"),
+            ),
+            rupdater.RemoteTarget(
+                name=rupdater.TargetName.WAKUSEI,
+                host="wakusei.apasz.com",
+                user="bot",
+                password="secret",
+                remote_root=PurePosixPath("/srv/yukibot"),
+            ),
+        ]
+
+        ordered = rupdater.ordered_restart_targets(targets)
+
+        self.assertEqual([target.name for target in ordered], [rupdater.TargetName.WAKUSEI, rupdater.TargetName.KOUSEI])
 
     def test_restart_delay_seconds_waits_for_kousei_after_wakusei(self) -> None:
         targets = [

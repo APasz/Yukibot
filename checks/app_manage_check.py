@@ -12,7 +12,7 @@ import hikari
 
 import config
 from _discord import App_Bound, DC_Relay
-from _manager import AppInstanceCreateRequest, App_Manager
+from _manager import AppInstanceCreateRequest, AppInstanceTemplate, App_Manager
 from apps._app import AM_Receiver, App, ChatRelaySupport
 from apps._config import App_Config, RelayChannelSource
 from cmd_app import AppManageCapability, _app_capabilities, _app_extra_capability_labels, _app_started_response_text
@@ -278,6 +278,68 @@ class AppManageTests(unittest.TestCase):
 
             payload = json.loads(instances_path.read_text(encoding="utf-8"))
             self.assertEqual(tuple(payload.keys()), ("alpha",))
+
+    def test_list_create_scopes_includes_scope_with_builtin_template_and_no_instances(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "demo"
+            scope_path.mkdir(parents=True)
+            (scope_path / "__init__.py").write_text("", encoding="utf-8")
+
+            os.chdir(temp_path)
+            try:
+                with patch.dict(
+                    "_manager._SCOPE_INSTANCE_TEMPLATES",
+                    {"demo": AppInstanceTemplate(mods_dir="{WD}/mods", join_port=25565)},
+                ):
+                    scopes = manager.list_create_scopes()
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(scopes, ("demo",))
+
+    def test_create_instance_writes_new_entry_from_builtin_template(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "demo"
+            scope_path.mkdir(parents=True)
+            (scope_path / "__init__.py").write_text("", encoding="utf-8")
+            instances_path = scope_path / "instances.json"
+
+            os.chdir(temp_path)
+            try:
+                with patch.dict(
+                    "_manager._SCOPE_INSTANCE_TEMPLATES",
+                    {
+                        "demo": AppInstanceTemplate(
+                            mods_dir="{WD}/mods",
+                            server_log_file="{WD}/Server.log",
+                            join_port=25565,
+                        )
+                    },
+                ):
+                    instance_name = manager.create_instance(
+                        AppInstanceCreateRequest(
+                            scope="demo",
+                            instance_key="alpha",
+                            friendly_name="Demo Alpha",
+                            subfolder="demo-alpha",
+                        )
+                    )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertEqual(instance_name, "demo_alpha")
+            self.assertEqual(payload["alpha"]["friendly_name"], "Demo Alpha")
+            self.assertEqual(payload["alpha"]["directory"], "{APPS}/demo-alpha")
+            self.assertEqual(payload["alpha"]["mods_dir"], "{WD}/mods")
+            self.assertEqual(payload["alpha"]["server_log_file"], "{WD}/Server.log")
+            self.assertEqual(payload["alpha"]["join_port"], 25565)
 
 
 if __name__ == "__main__":

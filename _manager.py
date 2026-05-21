@@ -30,6 +30,60 @@ class AppInstanceCreateRequest:
     server_log_file: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class AppInstanceTemplate:
+    mods_dir: str | None = None
+    server_log_file: str | None = None
+    join_port: int | None = None
+    api_host: str | None = None
+    api_port: int | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        if self.mods_dir is not None:
+            payload["mods_dir"] = self.mods_dir
+        if self.server_log_file is not None:
+            payload["server_log_file"] = self.server_log_file
+        if self.join_port is not None:
+            payload["join_port"] = self.join_port
+        if self.api_host is not None:
+            payload["api_host"] = self.api_host
+        if self.api_port is not None:
+            payload["api_port"] = self.api_port
+        return payload
+
+
+_SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
+    "beammp": AppInstanceTemplate(
+        mods_dir="{WD}/Resources/Client",
+        server_log_file="{WD}/Server.log",
+        join_port=30814,
+    ),
+    "ets": AppInstanceTemplate(
+        server_log_file="{WD}/home_data/Euro Truck Simulator 2/server.log.txt",
+        join_port=27015,
+    ),
+    "factorio": AppInstanceTemplate(
+        mods_dir="{WD}/mods",
+        server_log_file="{WD}/factorio-current.log",
+        join_port=34197,
+    ),
+    "minecraft": AppInstanceTemplate(
+        mods_dir="{WD}/mods",
+        join_port=25565,
+    ),
+    "satisfactory": AppInstanceTemplate(
+        join_port=7777,
+        api_host="127.0.0.1",
+    ),
+    "sevendays": AppInstanceTemplate(
+        mods_dir="{WD}/Mods",
+        server_log_file="{WD}/server_stdout.log",
+        join_port=26900,
+    ),
+}
+
+
 def format_enabled_app_dump(apps: Sequence[App]) -> str:
     ordered_apps = sorted(apps, key=lambda app: app.name.casefold())
     return "\n".join(f"{app.name}: {app.cfg.enabled_txt}" for app in ordered_apps) + "\n"
@@ -233,7 +287,7 @@ class App_Manager(metaclass=config.Singleton):
         for entry in Path("apps").iterdir():
             if not entry.is_dir() or entry.name.startswith("_"):
                 continue
-            if not (entry / "instances.json").exists():
+            if not self._scope_supports_create(entry):
                 continue
             scopes.append(entry.name)
         return tuple(sorted(scopes, key=str.casefold))
@@ -259,7 +313,11 @@ class App_Manager(metaclass=config.Singleton):
         if instance_key in raw:
             raise ValueError(f"Instance key `{instance_key}` already exists for scope `{scope}`.")
 
-        template_key, template_payload = self._select_instance_template(raw, scope=scope)
+        template_key, template_payload = self._resolve_instance_template(
+            scope=scope,
+            scope_path=scope_path,
+            payload=raw,
+        )
         next_payload = dict(template_payload)
         next_payload["friendly_name"] = friendly_name
         next_payload["directory"] = f"{{APPS}}/{subfolder.as_posix()}"
@@ -420,15 +478,59 @@ class App_Manager(metaclass=config.Singleton):
             permitate(app.friendly, name)
 
     @staticmethod
+    def _find_instance_template(
+        payload: Mapping[str, object],
+    ) -> tuple[str, Mapping[str, object]] | None:
+        for instance_key, value in payload.items():
+            if isinstance(value, Mapping):
+                return (str(instance_key), value)
+        return None
+
+    @classmethod
     def _select_instance_template(
+        cls,
         payload: Mapping[str, object],
         *,
         scope: str,
     ) -> tuple[str, Mapping[str, object]]:
-        for instance_key, value in payload.items():
-            if isinstance(value, Mapping):
-                return (str(instance_key), value)
+        template = cls._find_instance_template(payload)
+        if template is not None:
+            return template
         raise ValueError(f"Scope `{scope}` does not contain a usable instance template.")
+
+    @staticmethod
+    def _builtin_instance_template(scope: str) -> tuple[str, Mapping[str, object]] | None:
+        template = _SCOPE_INSTANCE_TEMPLATES.get(scope)
+        if template is None:
+            return None
+        return ("default", template.to_payload())
+
+    def _resolve_instance_template(
+        self,
+        *,
+        scope: str,
+        scope_path: Path,
+        payload: Mapping[str, object],
+    ) -> tuple[str, Mapping[str, object]]:
+        template = self._find_instance_template(payload)
+        if template is not None:
+            return template
+
+        builtin_template = self._builtin_instance_template(scope)
+        if builtin_template is not None:
+            return builtin_template
+
+        raise ValueError(
+            f"Scope `{scope}` does not contain a usable instance template. "
+            f"Add `{scope_path / 'instances.json'}` with a template entry first."
+        )
+
+    def _scope_supports_create(self, scope_path: Path) -> bool:
+        if not (scope_path / "__init__.py").exists():
+            return False
+        instances_path = scope_path / "instances.json"
+        raw = self._read_json_object(instances_path)
+        return self._find_instance_template(raw) is not None or self._builtin_instance_template(scope_path.name) is not None
 
     @staticmethod
     def _validate_scope_name(raw: str) -> str:

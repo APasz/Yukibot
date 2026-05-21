@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from dataclasses import dataclass
@@ -20,7 +22,11 @@ SSH_CONNECTION_TIMEOUT_SECONDS = 5
 SSH_CONTROL_PERSIST_SECONDS = 30
 KOUSEI_RESTART_DELAY_SECONDS = 5
 REMOTE_MKDIR_PATH = "/bin/mkdir"
-REMOTE_CAT_PATH = "/bin/cat"
+REMOTE_TAR_CANDIDATES = (
+    PurePosixPath("/bin/tar"),
+    PurePosixPath("/usr/bin/tar"),
+)
+REMOTE_TAR_EXTRACT_FLAGS = "--overwrite -xf -"
 
 
 class TargetName(StrEnum):
@@ -48,6 +54,13 @@ class RemoteTarget:
             raise ValueError(f"{self.name.value} password is still the placeholder value")
         if self.remote_root == PLACEHOLDER_REMOTE_ROOT:
             raise ValueError(f"{self.name.value} remote_root is still the placeholder value")
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteSession:
+    target: RemoteTarget
+    control_path: Path
+    tar_path: PurePosixPath
 
 
 REMOTE_TARGETS: dict[TargetName, RemoteTarget] = {
@@ -182,11 +195,11 @@ def remote_file_path(target: RemoteTarget, relative_path: Path) -> PurePosixPath
     return target.remote_root / PurePosixPath(relative_path.as_posix())
 
 
-def ssh_control_path(target: RemoteTarget) -> Path:
-    return Path(tempfile.gettempdir()) / f"yukibot-{target.name.value}.ssh"
+def ssh_control_path(target: RemoteTarget, run_token: str) -> Path:
+    return Path(tempfile.gettempdir()) / f"yukibot-{target.name.value}-{run_token}.ssh"
 
 
-def ssh_connection_options(target: RemoteTarget) -> list[str]:
+def ssh_connection_options(control_path: Path) -> list[str]:
     return [
         "-o",
         "PreferredAuthentications=password",
@@ -201,11 +214,30 @@ def ssh_connection_options(target: RemoteTarget) -> list[str]:
         "-o",
         f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}s",
         "-o",
-        f"ControlPath={ssh_control_path(target).as_posix()}",
+        f"ControlPath={control_path.as_posix()}",
     ]
 
 
-def open_ssh_master(target: RemoteTarget) -> None:
+def run_quiet(
+    command: list[str],
+    *,
+    password: str | None,
+) -> int:
+    env = os.environ.copy()
+    if password is not None:
+        env["SSHPASS"] = password
+    result = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    return result.returncode
+
+
+def open_ssh_master(target: RemoteTarget, control_path: Path) -> None:
     run_checked(
         [
             "sshpass",
@@ -214,15 +246,14 @@ def open_ssh_master(target: RemoteTarget) -> None:
             "-M",
             "-N",
             "-f",
-            *ssh_connection_options(target),
+            *ssh_connection_options(control_path),
             target.ssh_destination,
         ],
         password=target.password,
     )
 
 
-def close_ssh_master(target: RemoteTarget) -> None:
-    control_path = ssh_control_path(target)
+def close_ssh_master(target: RemoteTarget, control_path: Path) -> None:
     if not control_path.exists():
         return
 
@@ -242,42 +273,58 @@ def close_ssh_master(target: RemoteTarget) -> None:
         control_path.unlink(missing_ok=True)
 
 
-def remote_parent_directories(target: RemoteTarget, files: list[Path]) -> list[PurePosixPath]:
-    directories = {remote_file_path(target, path).parent for path in files}
-    return sorted(directories, key=lambda path: path.as_posix())
+def resolve_remote_tar_path(target: RemoteTarget, control_path: Path) -> PurePosixPath:
+    for candidate in REMOTE_TAR_CANDIDATES:
+        return_code = run_quiet(
+            [
+                "ssh",
+                *ssh_connection_options(control_path),
+                target.ssh_destination,
+                f"test -x {shlex.quote(candidate.as_posix())}",
+            ],
+            password=None,
+        )
+        if return_code == 0:
+            return candidate
+    raise RuntimeError(f"No remote tar binary found for {target.name.value}")
 
 
-def ensure_remote_directories(target: RemoteTarget, files: list[Path]) -> None:
-    directories = remote_parent_directories(target, files)
-    if not directories:
-        raise RuntimeError("No remote directories were derived from tracked Python files")
+def open_remote_session(target: RemoteTarget, run_token: str) -> RemoteSession:
+    control_path = ssh_control_path(target, run_token)
+    open_ssh_master(target, control_path)
+    tar_path = resolve_remote_tar_path(target, control_path)
+    return RemoteSession(target=target, control_path=control_path, tar_path=tar_path)
 
-    quoted_directories = " ".join(shlex.quote(directory.as_posix()) for directory in directories)
-    run_checked(
-        [
-            "sshpass",
-            "-e",
-            "ssh",
-            *ssh_connection_options(target),
-            target.ssh_destination,
-            f"{REMOTE_MKDIR_PATH} -p -- {quoted_directories}",
-        ],
-        password=target.password,
+
+def close_remote_session(session: RemoteSession) -> None:
+    close_ssh_master(session.target, session.control_path)
+
+
+def build_tar_archive(files: list[Path]) -> bytes:
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
+        for path in files:
+            archive.add(REPO_ROOT / path, arcname=path.as_posix(), recursive=False)
+    return archive_buffer.getvalue()
+
+
+def sync_python_files(session: RemoteSession, archive_bytes: bytes) -> None:
+    remote_root = shlex.quote(session.target.remote_root.as_posix())
+    remote_command = (
+        f"{REMOTE_MKDIR_PATH} -p -- {remote_root} && "
+        f"cd {remote_root} && "
+        f"{session.tar_path.as_posix()} {REMOTE_TAR_EXTRACT_FLAGS}"
     )
-
-
-def sync_python_files(target: RemoteTarget, files: list[Path]) -> None:
-    for path in files:
-        local_path = REPO_ROOT / path
-        remote_path = remote_file_path(target, path).as_posix()
-        remote_command = f"{REMOTE_CAT_PATH} > {shlex.quote(remote_path)}"
-        command = [
+    run_checked_bytes(
+        [
             "ssh",
-            *ssh_connection_options(target),
-            target.ssh_destination,
+            *ssh_connection_options(session.control_path),
+            session.target.ssh_destination,
             remote_command,
-        ]
-        run_checked_bytes(command, password=None, stdin_bytes=local_path.read_bytes())
+        ],
+        password=None,
+        stdin_bytes=archive_bytes,
+    )
 
 
 def print_check_plan(target: RemoteTarget, files: list[Path]) -> None:
@@ -286,15 +333,21 @@ def print_check_plan(target: RemoteTarget, files: list[Path]) -> None:
         print(f"  {path.as_posix()} -> {remote_file_path(target, path).as_posix()}")
 
 
-def restart_remote(target: RemoteTarget) -> None:
-    if target.restart_command is None:
-        raise ValueError(f"{target.name.value} restart_command is not configured")
+def print_synced_files(target: RemoteTarget, files: list[Path]) -> None:
+    print(f"Updated {target.name.value}:")
+    for path in files:
+        print(f"  {path.as_posix()}")
+
+
+def restart_remote(session: RemoteSession) -> None:
+    if session.target.restart_command is None:
+        raise ValueError(f"{session.target.name.value} restart_command is not configured")
     run_checked(
         [
             "ssh",
-            *ssh_connection_options(target),
-            target.ssh_destination,
-            target.restart_command,
+            *ssh_connection_options(session.control_path),
+            session.target.ssh_destination,
+            session.target.restart_command,
         ],
         password=None,
     )
@@ -305,6 +358,14 @@ def restart_delay_seconds(target: RemoteTarget, restart_targets: list[RemoteTarg
     if target.name is TargetName.KOUSEI and TargetName.WAKUSEI in target_names and TargetName.KOUSEI in target_names:
         return KOUSEI_RESTART_DELAY_SECONDS
     return 0
+
+
+def ordered_restart_targets(targets: list[RemoteTarget]) -> list[RemoteTarget]:
+    priority = {
+        TargetName.WAKUSEI: 0,
+        TargetName.KOUSEI: 1,
+    }
+    return sorted(targets, key=lambda target: priority[target.name])
 
 
 def configured_targets(target_names: list[str]) -> list[RemoteTarget]:
@@ -335,20 +396,28 @@ def main() -> int:
     require_program("sshpass")
     require_program("ssh")
 
-    for target in targets:
-        print(f"==> {target.name.value} ({target.host})")
-        open_ssh_master(target)
-        try:
-            ensure_remote_directories(target, files)
-            sync_python_files(target, files)
-            if args.restart:
+    archive_bytes = build_tar_archive(files)
+    run_token = f"{os.getpid()}-{time.time_ns():x}"
+    sessions_by_name: dict[TargetName, RemoteSession] = {}
+
+    try:
+        for target in targets:
+            print(f"==> {target.name.value} ({target.host})")
+            session = open_remote_session(target, run_token)
+            sessions_by_name[target.name] = session
+            sync_python_files(session, archive_bytes)
+            print_synced_files(target, files)
+
+        if args.restart:
+            for target in ordered_restart_targets(targets):
                 delay_seconds = restart_delay_seconds(target, targets)
                 if delay_seconds > 0:
                     print(f"Waiting {delay_seconds}s before restarting {target.name.value}")
                     time.sleep(delay_seconds)
-                restart_remote(target)
-        finally:
-            close_ssh_master(target)
+                restart_remote(sessions_by_name[target.name])
+    finally:
+        for session in sessions_by_name.values():
+            close_remote_session(session)
 
     return 0
 
