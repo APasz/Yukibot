@@ -88,7 +88,51 @@ class Setting(Generic[T]):
             data = data.setdefault(key, {})
         data[self.key] = self.value
 
+    def normalise_input(self, value: str) -> str:
+        if isinstance(self.choices, dict):
+            return self.choices.get(value, value)
+        return value
+
+    def choice_items(self) -> tuple[tuple[str, str], ...]:
+        if isinstance(self.choices, dict):
+            return tuple(self.choices.items())
+        return tuple((choice, choice) for choice in self.choices)
+
+    def choice_label_for_value(self, value: T | hikari.UndefinedType | None = None) -> str | None:
+        current_value = self.value if value is None else value
+        if isinstance(current_value, hikari.UndefinedType):
+            return None
+
+        for label, raw_value in self.choice_items():
+            try:
+                if self._cast_value(raw_value) == current_value:
+                    return label
+            except Exception:
+                continue
+        return None
+
+    def display_value(self) -> str:
+        if isinstance(self.value, hikari.UndefinedType):
+            return "undefined"
+
+        label = self.choice_label_for_value(self.value)
+        raw_value = str(self.value)
+        if label is None or label == raw_value:
+            return raw_value
+        return f"{label} ({raw_value})"
+
+    def _cast_value(self, value: str) -> T:
+        if self.value_type is bool:
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return cast(T, True)
+            if lowered in {"0", "false", "no", "off"}:
+                return cast(T, False)
+            raise ValueError(f"{value} is not recognisable bool equivalent")
+        return self.value_type(value)
+
     def update(self, value: str):
+        value = self.normalise_input(value)
         if self.validator:
             if not self.validator(value):
                 raise ValueError(f"`{value}` not valid")
@@ -96,16 +140,7 @@ class Setting(Generic[T]):
             if value not in self.choices.values() if isinstance(self.choices, dict) else value not in self.choices:
                 raise IndexError(f"{value} must match provided choices")
         try:
-            if self.value_type is bool:
-                lowered = value.strip().lower()
-                if lowered in {"1", "true", "yes", "on"}:
-                    self.value = cast(T, True)
-                elif lowered in {"0", "false", "no", "off"}:
-                    self.value = cast(T, False)
-                else:
-                    raise ValueError(f"{value} is not recognisable bool equivalent")
-            else:
-                self.value = self.value_type(value)
+            self.value = self._cast_value(value)
         except Exception as xcp:
             log.exception(f"Casting Setting value Failed: {type(value)} > {self.value_type}")
             raise ValueError(f"Invalid value for {self.label}: {xcp}")

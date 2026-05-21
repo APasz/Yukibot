@@ -26,8 +26,18 @@ class Mod:
         "Hopefully more user friendly name"
         self.directory = cfg.directory
         "Directory of app's mods folder"
-        self.path = cfg.directory.joinpath(cfg.name)
-        "Path to mod in app's mods folder"
+
+    @property
+    def enabled_path(self) -> Path:
+        return self.directory / self.name
+
+    @property
+    def disabled_path(self) -> Path:
+        return self.enabled_path.with_suffix(".disabled")
+
+    @property
+    def path(self) -> Path:
+        return self.enabled_path if self.cfg.enabled else self.disabled_path
 
     def is_coremod(self, silent: bool = False) -> bool:
         if not self.cfg.coremod:
@@ -37,11 +47,11 @@ class Mod:
         raise RuntimeError("Coremod")
 
     async def _handle_drop(self, src: Path, atomic: bool = True):
-        self.path = await asyncio.to_thread(File_Utils.move, src, self.path, atomic)
+        await asyncio.to_thread(File_Utils.move, src, self.path, atomic)
         log.info(f"Copied mod; {self.name}: {self.path}")
 
     async def _handle_extr(self, src: Path, atomic: bool = True):
-        self.path = await asyncio.to_thread(File_Utils.extract, src, self.path.parent, atomic)
+        await asyncio.to_thread(File_Utils.extract, src, self.path.parent, atomic)
         log.info(f"Extracted mod; {self.name}: {self.path}")
 
     @abstractmethod
@@ -56,8 +66,10 @@ class Mod:
     async def _enable_file(self, override_coremod: bool = False) -> Path:
         if not override_coremod:
             self.is_coremod()
+        target = self.enabled_path
+        await asyncio.to_thread(File_Utils.move, self.disabled_path, target)
         self.cfg.enabled = True
-        return await asyncio.to_thread(File_Utils.move, self.path.with_suffix(".disabled"), self.path)
+        return target
 
     async def enable(self, override_coremod: bool = False) -> bool:
         return bool(await self._enable_file(override_coremod))
@@ -65,8 +77,10 @@ class Mod:
     async def _disable_file(self, override_coremod: bool = False) -> Path:
         if not override_coremod:
             self.is_coremod()
+        target = self.disabled_path
+        await asyncio.to_thread(File_Utils.move, self.enabled_path, target)
         self.cfg.enabled = False
-        return await asyncio.to_thread(File_Utils.move, self.path, self.path.with_suffix(".disabled"))
+        return target
 
     async def disable(self, override_coremod: bool = False) -> bool:
         return bool(await self._disable_file(override_coremod))
@@ -137,7 +151,23 @@ class Mod_Manager:
 
         if not self.db_path.exists():
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            self.db_path.write_text("{}", config.STR_ENCODE)
+            self.db_path.write_text("", config.STR_ENCODE)
+
+    def _permit_lookup(self, trans: str, base: str, /) -> None:
+        if trans:
+            self._lookup[trans] = base
+            self._lookup[trans.lower()] = base
+            self._lookup[trans.upper()] = base
+            self._lookup[trans.title()] = base
+            self._lookup[trans.capitalize()] = base
+            self._lookup[trans.casefold()] = base
+            self._lookup[trans.swapcase()] = base
+
+    def _rebuild_lookup(self) -> None:
+        self._lookup.clear()
+        for name, mod in self.index.items():
+            self._permit_lookup(mod.name, name)
+            self._permit_lookup(mod.friendly, name)
 
     def _make_slug(self, apps_dir: Path, db_path: Path | None = None):
         resolved = self.folder
@@ -177,30 +207,20 @@ class Mod_Manager:
                 except Exception:
                     log.exception("ModCF Load")
                     continue
-                pointer = cfg.directory / cfg.name
-                if pointer.exists():
-                    self.index[cfg.name] = self.mod_cls(cfg)
+                mod = self.mod_cls(cfg)
+                if mod.path.exists():
+                    self.index[cfg.name] = mod
                 elif cfg.name in self.index:
                     del self.index[cfg.name]
 
-            def permitate(trans: str, base: str, /):
-                if trans:
-                    self._lookup[trans] = base
-                    self._lookup[trans.lower()] = base
-                    self._lookup[trans.upper()] = base
-                    self._lookup[trans.title()] = base
-                    self._lookup[trans.capitalize()] = base
-                    self._lookup[trans.casefold()] = base
-                    self._lookup[trans.swapcase()] = base
-
-            for name, mod in self.index.items():
-                permitate(mod.name, name)
-                permitate(mod.friendly, name)
-
+        known_files = {mod.path.name for mod in self.index.values()}
         for file in self.folder.iterdir():
-            if file.name not in self.index:
-                self.index[file.name] = self.mod_cls(self.modcf_cls(name=file.name, directory=self.folder))
+            if file.name in known_files:
+                continue
+            self.index[file.name] = self.mod_cls(self.modcf_cls(name=file.name, directory=self.folder))
+            known_files.add(file.name)
 
+        self._rebuild_lookup()
         await self.save_mods()
 
     async def save_mods(self):
@@ -210,19 +230,44 @@ class Mod_Manager:
 
     async def reload_mods(self):
         self.index.clear()
+        self._lookup.clear()
         await self.load_mods()
 
-    async def add(self, src: Path):
+    async def add(self, src: Path, *, atomic: bool = True) -> Mod:
         if not src or not isinstance(src, Path):
             raise ValueError(f"src must be Path not: {type(src)}")  # pyright: ignore[reportUnreachable]
         mod = self.mod_cls(self.modcf_cls(name=src.name, directory=self.folder))
-        await mod.install(src)
+        await mod.install(src, atomic)
         self.index[mod.name] = mod
+        self._rebuild_lookup()
+        await self.save_mods()
+        return mod
 
-    async def remove(self, mod_name: str | Mod):
+    async def remove(self, mod_name: str | Mod, *, override_coremod: bool = False) -> Mod:
         mod = self.get(mod_name)
-        await mod.uninstall()
+        await mod.uninstall(override_coremod)
         del self.index[mod.name]
+        self._rebuild_lookup()
+        await self.save_mods()
+        return mod
+
+    async def set_enabled(self, mod_name: str | Mod, state: bool, *, override_coremod: bool = False) -> Mod:
+        mod = self.get(mod_name)
+        await mod.toggle(state, override_coremod)
+        await self.save_mods()
+        return mod
+
+    async def toggle(self, mod_name: str | Mod, *, override_coremod: bool = False) -> Mod:
+        mod = self.get(mod_name)
+        await mod.toggle(not mod.cfg.enabled, override_coremod)
+        await self.save_mods()
+        return mod
+
+    async def set_coremod(self, mod_name: str | Mod, state: bool) -> Mod:
+        mod = self.get(mod_name)
+        mod.cfg.coremod = state
+        await self.save_mods()
+        return mod
 
     def get(self, name: str | Mod) -> Mod:
         if isinstance(name, Mod):
@@ -233,20 +278,21 @@ class Mod_Manager:
 
     __getitem__ = get
 
-    def list_mods(self) -> list[Mod]:
-        return sorted(self.index.values(), key=lambda m: m.cfg.added)
+    def list_mods(self, state: bool | None = None) -> list[Mod]:
+        mods = sorted(self.index.values(), key=lambda m: m.cfg.added)
+        match state:
+            case None:
+                return mods
+            case True:
+                return [mod for mod in mods if mod.cfg.enabled]
+            case False:
+                return [mod for mod in mods if not mod.cfg.enabled]
 
     def list_mods_json(self) -> list[Mod] | Mapping[str, str]:
         return {name: mod.cfg.model_dump_json(indent=4) for name, mod in self.index.items()}
 
     def list_names(self, state: bool | None = None) -> list[str]:
-        match state:
-            case None:
-                return sorted([m.name for m in self.index.values()], key=str.lower)
-            case True:
-                return sorted([m.name for m in self.index.values() if m.cfg.enabled], key=str.lower)
-            case False:
-                return sorted([m.name for m in self.index.values() if not m.cfg.enabled], key=str.lower)
+        return sorted((mod.name for mod in self.list_mods(state)), key=str.lower)
 
 
 # AiviA APasz

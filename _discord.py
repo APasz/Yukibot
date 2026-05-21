@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from collections import deque
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -20,7 +21,7 @@ import config
 from _file import File_Utils
 from _resolator import Resolutator
 from _utils import Utilities
-from config import Name_Cache, Singleton
+from config import Name_Cache, NameResolutionResult, NameResolutionStatus, Singleton
 
 if TYPE_CHECKING:
     from apps._app import App
@@ -40,6 +41,56 @@ class Distils:
     util = Utilities()
 
     @classmethod
+    async def _deliver_files(
+        cls,
+        paths: list[Path],
+        *,
+        base_name: str,
+        force_download: bool,
+        force_zip: bool,
+        send_text: Callable[[str], Awaitable[object]],
+        send_many_files: Callable[[str, list[hikari.File]], Awaitable[object]],
+        send_single_file: Callable[[str, hikari.File], Awaitable[object]],
+    ) -> FileDeliveryMode:
+        if not paths:
+            raise ValueError("paths list must not be empty")
+
+        zip_name = base_name + ".zip" if not base_name.endswith(".zip") else ""
+        delivery_paths = paths
+        if force_zip:
+            delivery_paths = [await cls.file.compress(paths, zip_name)]
+
+        if force_download:
+            await send_text(await cls.build_direct_file_message(delivery_paths, base_name))
+            return FileDeliveryMode.DIRECT
+
+        if len(delivery_paths) <= 10:
+            try:
+                total_size = sum(cls.file.pointer_size(path) for path in delivery_paths)
+                if total_size < config.DISCORD_UPLOAD_LIMIT:
+                    await send_many_files(
+                        f"Here ya go, `{base_name}`",
+                        [hikari.File(str(path)) for path in delivery_paths],
+                    )
+                    return FileDeliveryMode.ATTACHMENTS
+            except Exception:
+                log.warning("Failed size pre-check, continuing anyway")
+
+        zip_path = await cls.file.compress(delivery_paths, zip_name)
+        try:
+            if cls.file.pointer_size(zip_path) < config.DISCORD_UPLOAD_LIMIT:
+                await send_single_file(f"Your file sweets, `{base_name}`", hikari.File(str(zip_path)))
+                return FileDeliveryMode.ZIP
+        except hikari.HTTPResponseError as xcp:
+            xcp.code
+            log.warning(f"Zipped-all upload failed: {xcp}")
+        except Exception:
+            log.exception("Compression or zipped upload failed")
+
+        await send_text(await cls.build_direct_file_message([zip_path], base_name))
+        return FileDeliveryMode.DIRECT
+
+    @classmethod
     async def respond_files(
         cls,
         ctx: lightbulb.Context,
@@ -49,50 +100,56 @@ class Distils:
         app_name: str | None = None,
         force_download: bool = False,
         force_zip: bool = False,
-    ):
-        if not paths:
-            raise ValueError("paths list must not be empty")
-
+    ) -> FileDeliveryMode:
         base_name = f"{app_name}_{display_name}" if app_name else display_name
-        zip_name = base_name + ".zip" if not base_name.endswith(".zip") else ""
+        return await cls._deliver_files(
+            paths,
+            base_name=base_name,
+            force_download=force_download,
+            force_zip=force_zip,
+            send_text=lambda content: ctx.respond(content),
+            send_many_files=lambda content, attachments: ctx.respond(content, attachments=attachments),
+            send_single_file=lambda content, attachment: ctx.respond(content, attachment=attachment),
+        )
 
-        if force_zip:
-            paths = [await cls.file.compress(paths, zip_name)]
-
-        # Forced direct download override
-        if force_download:
-            log.info("Force download mode enabled")
-            await cls.direct(ctx, paths, base_name)
-            return
-
-        # Try direct send first
-        if len(paths) <= 10:
-            try:
-                total_size = sum(cls.file.pointer_size(p) for p in paths)
-                if total_size < config.DISCORD_UPLOAD_LIMIT:
-                    await ctx.respond(f"Here ya go, `{base_name}`", attachments=[hikari.File(str(p)) for p in paths])
-                    return
-            except Exception:
-                log.warning("Failed size pre-check, continuing anyway")
-
-        # Try compressed all-in-one
-
-        zip_path = await cls.file.compress(paths, zip_name)
-        try:
-            if cls.file.pointer_size(zip_path) < config.DISCORD_UPLOAD_LIMIT:
-                await ctx.respond(f"Your file sweets, `{base_name}`", attachment=hikari.File(str(zip_path)))
-                return
-        except hikari.HTTPResponseError as xcp:
-            xcp.code
-            log.warning(f"Zipped-all upload failed: {xcp}")
-        except Exception:
-            log.exception("Compression or zipped upload failed")
-
-        # Final fallback: direct download
-        await cls.direct(ctx, [zip_path], base_name)
+    @classmethod
+    async def send_files(
+        cls,
+        rest: hikari.api.RESTClient,
+        channel_id: hikari.Snowflakeish,
+        paths: list[Path],
+        *,
+        display_name: str = "mods",
+        app_name: str | None = None,
+        force_download: bool = False,
+        force_zip: bool = False,
+    ) -> FileDeliveryMode:
+        base_name = f"{app_name}_{display_name}" if app_name else display_name
+        return await cls._deliver_files(
+            paths,
+            base_name=base_name,
+            force_download=force_download,
+            force_zip=force_zip,
+            send_text=lambda content: rest.create_message(channel_id, content),
+            send_many_files=lambda content, attachments: rest.create_message(
+                channel_id,
+                content,
+                attachments=attachments,
+            ),
+            send_single_file=lambda content, attachment: rest.create_message(
+                channel_id,
+                content,
+                attachment=attachment,
+            ),
+        )
 
     @classmethod
     async def direct(cls, ctx: lightbulb.Context, paths: Collection[Path], base_name: str):
+        msg = await cls.build_direct_file_message(paths, base_name)
+        await ctx.respond(msg)
+
+    @classmethod
+    async def build_direct_file_message(cls, paths: Collection[Path], base_name: str) -> str:
         links: list[str] = []
         files: list[Path] = []
 
@@ -108,9 +165,8 @@ class Distils:
             files.append(pointer)
 
         expire = cls.util.nice_time(config.UPLOAD_CLEAR_TIME)
-        size = sum([File_Utils.pointer_size(s) for s in files])
-        msg = f"`{base_name}` {Utilities.humanise_bytes(size)} expires {expire}\n" + "\n".join(links)
-        await ctx.respond(msg)
+        size = sum(File_Utils.pointer_size(path) for path in files)
+        return f"`{base_name}` {Utilities.humanise_bytes(size)} expires {expire}\n" + "\n".join(links)
 
     @staticmethod
     def cat_name(
@@ -171,6 +227,12 @@ class Generics(Enum):
     left = "{player} left {app}"
     died_pve = "{player} died to {cause}"
     died_pvp = "{player} killed by {cause}"
+
+
+class FileDeliveryMode(Enum):
+    ATTACHMENTS = "attachments"
+    ZIP = "zip"
+    DIRECT = "direct"
 
 
 @dataclass(slots=True, frozen=True)
@@ -320,8 +382,20 @@ class Message:
 
 
 class DC_Bound(Message):
-    __slots__ = ("app", "_string", "is_generic", "player", "player_id", "urls", "files", "enrich_task", "extra_fmt")
+    __slots__ = (
+        "app",
+        "_string",
+        "is_generic",
+        "player",
+        "player_id",
+        "player_resolution",
+        "urls",
+        "files",
+        "enrich_task",
+        "extra_fmt",
+    )
     player_id: int | None
+    player_resolution: NameResolutionResult
 
     def __init__(
         self,
@@ -333,7 +407,8 @@ class DC_Bound(Message):
     ) -> None:
         super().__init__(content, player, files, extra_fmt=extra_fmt)
         self.app = app
-        self.player_id = Name_Cache().resolve_to_id(str(player), app.scope)
+        self.player_resolution = Name_Cache().resolve_name(str(player), app.scope)
+        self.player_id = self.player_resolution.user_id
 
         log.debug(f"Create DC_Message: {player} @ {self.app.name}")
 
@@ -374,6 +449,7 @@ class DC_Relay(metaclass=Singleton):
     _channel_objects: dict[hikari.Snowflakeish, hikari.TextableChannel] = {}
     _chat_channels: dict[hikari.Snowflakeish, set["App"]] = {}
     _special_channels: dict[hikari.Snowflakeish, set[tuple[str, Callable]]] = {}
+    _resolution_notice_at: dict[tuple[str, str, NameResolutionStatus], float] = {}
     "channel: Apps"
     names = Name_Cache()
 
@@ -392,6 +468,23 @@ class DC_Relay(metaclass=Singleton):
     def register_app_channel(cls, channel_id: hikari.Snowflakeish, app: "App"):
         log.info(f"DC.Register App: {app.name} @ {channel_id=}")
         cls._chat_channels.setdefault(channel_id, set()).add(app)
+
+    @classmethod
+    def unregister_app(cls, app: "App") -> None:
+        empty_channels: list[hikari.Snowflakeish] = []
+        for channel_id, apps in cls._chat_channels.items():
+            apps.discard(app)
+            if not apps:
+                empty_channels.append(channel_id)
+        for channel_id in empty_channels:
+            cls._chat_channels.pop(channel_id, None)
+
+    @classmethod
+    def bind_app_channel(cls, app: "App") -> None:
+        cls.unregister_app(app)
+        if app.chat_channel is None or not app.supports_inbound_chat_relay:
+            return
+        cls.register_app_channel(app.chat_channel, app)
 
     async def resolve_channel(self, channel_id: hikari.Snowflakeish) -> hikari.TextableChannel | None:
         chan = self._channel_objects.get(channel_id)
@@ -423,10 +516,41 @@ class DC_Relay(metaclass=Singleton):
             return "UNDEFINED"
         if mess.player_id or isinstance(mess.player, int):
             return f"<<@{mess.player_id or mess.player}>>"
-        player = cls.names.resolve_to_id(mess.player, mess.app.scope)
-        if player:
-            return f"<<@{player}>>"
         return f"<{mess.player}>"
+
+    async def _notify_resolution_failure(self, message: DC_Bound) -> None:
+        if not isinstance(message.player, str):
+            return
+        if message.player_resolution.status is NameResolutionStatus.UNIQUE:
+            return
+        if not message.app.supports_relay_system_notices or not message.app._running or not message.app.am_receiver:
+            return
+
+        notice_key = (message.app.name, message.player, message.player_resolution.status)
+        now = time.monotonic()
+        last_notified_at = self._resolution_notice_at.get(notice_key)
+        if last_notified_at is not None and now - last_notified_at < 900:
+            return
+        self._resolution_notice_at[notice_key] = now
+
+        if message.player_resolution.status is NameResolutionStatus.AMBIGUOUS:
+            notice_text = (
+                f"{message.app.cfg.chat_ignore_symbol}relay notice: multiple Discord users match player "
+                f"'{message.player}'. Discord relay will show the raw game name until this is disambiguated."
+            )
+        else:
+            notice_text = (
+                f"{message.app.cfg.chat_ignore_symbol}relay notice: no Discord user is linked to player "
+                f"'{message.player}'. Discord relay will show the raw game name until it is linked."
+            )
+
+        system_channel = hikari.TextableChannel(app=self.bot, id=hikari.Snowflake(0), name="SYSTEM", type=1)
+        notice = App_Bound(system_channel, notice_text, "System")
+        notice.app = message.app
+        try:
+            await message.app.am_receiver.send(notice)
+        except Exception:
+            log.exception(f"Failed to send relay resolution notice to {message.app.name} for {message.player!r}")
 
     @staticmethod
     def embedify(mess: DC_Bound) -> list[hikari.Embed]:
@@ -470,6 +594,7 @@ class DC_Relay(metaclass=Singleton):
         if message.enrich_task:
             await message.enrich_task
         try:
+            await self._notify_resolution_failure(message)
             mess = await chan.send(
                 text,
                 user_mentions=list(mentions) if mentions else hikari.UNDEFINED,
@@ -532,7 +657,7 @@ class DC_Relay(metaclass=Singleton):
             if app._running and app.am_receiver:
                 message.app = app
                 await app.am_receiver.send(message)
-        for app_name, send_func in self._special_channels[ctx.channel_id]:
+        for app_name, send_func in self._special_channels.get(ctx.channel_id, ()):
             log.debug(f"{app_name} | {send_func} | {bool(send_func)}")
             await send_func(message)
 

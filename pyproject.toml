@@ -24,6 +24,7 @@ dependencies = [
     "python-dotenv",
     "regex",
     "requests",
+    "satisfactory-api-client",
     "tenorgrabber",
     "tomli_w",
     "uvloop; platform_system != 'Windows'",

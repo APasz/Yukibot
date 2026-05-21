@@ -83,7 +83,10 @@ class SevenDays_Settings(App_Settings):
 
 
 class SevenDays(App):
+    chat_relay_outbound = True
+
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
+        self.manage_embed_color = 0xB91C1C
         self.proc_name = "7DaysToDie"
         self.proc_cmd = ["7DaysToDieServer", "-nographics"]
 
@@ -123,7 +126,7 @@ class SevenDays(App):
             await asyncio.sleep(1)
             count += 1
 
-        self._tail = Tailer(lambda: self._relay.connected_event, reader, self.file_stdout)  # type: ignore
+        self._tail = Tailer(lambda: self._relay.connected_event, reader, self.file_stdout)  # type: ignore[arg-type]
         await self._tail.start(self._tail_matchers)
         await self._players.start()
         await self._activities.start()

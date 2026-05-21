@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import re
 import shutil
 from pathlib import Path
 from string import Formatter
-from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, Iterable
+from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, Iterable, TypeVar
 from urllib.parse import urlparse
 
 import hikari
@@ -26,6 +27,7 @@ from pydantic import SecretStr
 
 import config
 from cmd_voice_common import (
+    MAX_TTS_VOICES,
     VARIANT_FILE_RE,
     VOICE_CORRECTIONS_FILE,
     VOICE_LINE_RE,
@@ -34,7 +36,10 @@ from cmd_voice_common import (
     VOICE_USERS_FILE,
     HFRepoRef,
     PiperPythonVoiceRuntime,
+    PronunciationFormat,
+    PronunciationOverride,
     TextCorrectionCatalog,
+    TextSubstitutionRule,
     UserVoiceSettings,
     VoiceConnectBackoff,
     VoiceJob,
@@ -52,6 +57,9 @@ class VoiceTTSCoreMixin:
         "typo": "typos",
         "typos": "typos",
     }
+    _MAX_AVAILABLE_VOICES: ClassVar[int] = MAX_TTS_VOICES
+    _BOT_CONFIGURATION_PATH: ClassVar[Path] = Path("configuration.json")
+    _VOICE_TARGETS_CONFIG_KEY: ClassVar[str] = "voice_targets"
 
     if TYPE_CHECKING:
         bot: hikari.GatewayBot
@@ -65,6 +73,7 @@ class VoiceTTSCoreMixin:
         _corrections_path: Path
         _voice_target_labels_path: Path
         _voice_link_rules_path: Path
+        _bot_configuration_path: Path
         voice: str
         variant: str | None
         _text_corrections: TextCorrectionCatalog
@@ -91,10 +100,13 @@ class VoiceTTSCoreMixin:
         def _normalise_variant(cls, variant: str | None, allow_empty: bool = True) -> str | None: ...
 
         @classmethod
-        def _normalise_substitution_key(cls, source: str) -> str: ...
+        def _normalise_substitution_key(cls, source: str, *, case_sensitive: bool = False) -> str: ...
 
         @classmethod
         def _normalise_substitution_value(cls, target: str) -> str: ...
+        @staticmethod
+        def _normalise_pronunciation_format(value: PronunciationFormat | str) -> PronunciationFormat: ...
+        def voice_supports_ipa_pronunciations(self, voice: str) -> bool: ...
 
         def _piper_model_path(self, voice: str) -> Path | None: ...
         def _piper_available_voices(self) -> list[str]: ...
@@ -126,7 +138,8 @@ class VoiceTTSCoreMixin:
 
     def __init__(self, bot: hikari.GatewayBot, voice_client: hikariwave.VoiceClient):
         self.bot = bot
-        self._voice_targets: dict[hikari.Snowflake, config.VoiceTargetConfig] = dict(config.VOICE_TARGETS)
+        self._bot_configuration_path = self._BOT_CONFIGURATION_PATH
+        self._voice_targets = self._load_voice_targets()
 
         self._voice_client = voice_client
         self._music_active_channel_provider: Callable[[hikari.Snowflake], hikari.Snowflake | None] | None = None
@@ -161,8 +174,8 @@ class VoiceTTSCoreMixin:
         self._text_corrections = self._load_text_corrections()
         self._voice_link_rules = self._load_voice_link_rules()
         self._voice_link_rules_mtime_ns = self._path_mtime_ns(self._voice_link_rules_path)
-        self._mod_link_name_cache: dict[str, str | None] = {}
-        self._modmux: Muxer | None = None
+        self._mod_link_name_cache = {}
+        self._modmux = None
         self._load_user_settings()
         self._voice_target_name_cache = self._load_voice_target_name_cache()
         self._voice_target_choices_dirty = True
@@ -289,6 +302,73 @@ class VoiceTTSCoreMixin:
 
     def voice_target(self, guild_id: hikari.Snowflakeish) -> config.VoiceTargetConfig | None:
         return self._voice_targets.get(hikari.Snowflake(guild_id))
+
+    def _load_voice_targets(self) -> dict[hikari.Snowflake, config.VoiceTargetConfig]:
+        if not self._bot_configuration_path.exists():
+            return dict(config.VOICE_TARGETS)
+
+        try:
+            raw = json.loads(self._bot_configuration_path.read_text(config.STR_ENCODE))
+            bot_config = config.BotConfiguration.model_validate(raw)
+            payload = {
+                guild_id: target.model_dump(mode="json")
+                for guild_id, target in bot_config.voice_targets.items()
+            }
+            return config.parse_voice_targets_payload(
+                payload,
+                source=f"configuration.json.{self._VOICE_TARGETS_CONFIG_KEY}",
+            )
+        except (OSError, ValueError) as xcp:
+            log.warning(
+                f"TTS voice-target config read failed path={self._bot_configuration_path!s}: "
+                f"{type(xcp).__name__}: {xcp}"
+            )
+            return dict(config.VOICE_TARGETS)
+
+    def _save_voice_targets(self) -> None:
+        voice_targets = {
+            str(guild_id): config.PersistedVoiceTarget(
+                voice_channel=int(target.voice_channel),
+                tts_channel=int(target.tts_channel),
+            )
+            for guild_id, target in sorted(self._voice_targets.items(), key=lambda item: int(item[0]))
+        }
+        bot_config = config.BotConfiguration()
+        if self._bot_configuration_path.exists():
+            try:
+                existing = json.loads(self._bot_configuration_path.read_text(config.STR_ENCODE))
+                bot_config = config.BotConfiguration.model_validate(existing)
+            except (OSError, ValueError) as xcp:
+                log.warning(
+                    f"TTS bot configuration read failed path={self._bot_configuration_path!s}: "
+                    f"{type(xcp).__name__}: {xcp}"
+                )
+        bot_config.voice_targets = voice_targets
+        self._bot_configuration_path.parent.mkdir(parents=True, exist_ok=True)
+        self._bot_configuration_path.write_text(
+            json.dumps(bot_config.model_dump(mode="json"), sort_keys=True, indent=4),
+            config.STR_ENCODE,
+        )
+
+    def set_voice_target_config(
+        self,
+        guild_id: hikari.Snowflakeish,
+        *,
+        voice_channel: hikari.Snowflakeish,
+        tts_channel: hikari.Snowflakeish,
+    ) -> config.VoiceTargetConfig:
+        target = config.VoiceTargetConfig(
+            guild_id=hikari.Snowflake(guild_id),
+            voice_channel=hikari.Snowflake(voice_channel),
+            tts_channel=hikari.Snowflake(tts_channel),
+        )
+        self._voice_targets[target.guild_id] = target
+        self._enabled = bool(self._voice_targets)
+        self._voice_target_choices_dirty = True
+        if self._voice_target_name_cache.pop(target.guild_id, None) is not None:
+            self._save_voice_target_name_cache()
+        self._save_voice_targets()
+        return target
 
     def _load_voice_target_name_cache(self) -> dict[hikari.Snowflake, str]:
         if not self._voice_target_labels_path.exists():
@@ -702,42 +782,192 @@ class VoiceTTSCoreMixin:
             selected_voice = self.voice
         return selected_voice, settings.variant
 
-    def user_text_substitutions(self, user_id: hikari.Snowflakeish) -> dict[str, str]:
+    @staticmethod
+    def _substitution_sort_key(item: tuple[str, TextSubstitutionRule]) -> tuple[str, int, str]:
+        key, rule = item
+        return (key.lower(), 0 if not rule.case_sensitive else 1, key)
+
+    @classmethod
+    def _sorted_substitution_map(
+        cls,
+        substitutions: dict[str, TextSubstitutionRule],
+    ) -> dict[str, TextSubstitutionRule]:
+        return dict(sorted(substitutions.items(), key=cls._substitution_sort_key))
+
+    @staticmethod
+    def _resolve_substitution_storage_key(
+        source: str,
+        substitutions: dict[str, TextSubstitutionRule],
+    ) -> str | None:
+        exact = source.strip()
+        if exact in substitutions:
+            return exact
+
+        lowered = exact.lower()
+        rule = substitutions.get(lowered)
+        if rule is not None and not rule.case_sensitive:
+            return lowered
+        return None
+
+    def user_mention_overrides(self, user_id: hikari.Snowflakeish) -> dict[int, str]:
+        settings = self._user_settings.get(int(user_id))
+        if not settings or not settings.mention_overrides:
+            return {}
+        return dict(sorted(settings.mention_overrides.items()))
+
+    def global_mention_overrides(self) -> dict[int, str]:
+        if not self._text_corrections.mention_overrides:
+            return {}
+        return dict(sorted(self._text_corrections.mention_overrides.items()))
+
+    def user_text_substitutions(self, user_id: hikari.Snowflakeish) -> dict[str, TextSubstitutionRule]:
         settings = self._user_settings.get(int(user_id))
         if not settings or not settings.substitutions:
             return {}
-        return dict(sorted(settings.substitutions.items()))
+        return self._sorted_substitution_map(settings.substitutions)
 
-    def user_pronunciations(self, user_id: hikari.Snowflakeish) -> dict[str, str]:
+    def user_pronunciations(
+        self,
+        user_id: hikari.Snowflakeish,
+        voice: str | None = None,
+    ) -> dict[str, PronunciationOverride]:
+        selected_voice = self._normalise_pronunciation_voice(voice) if voice is not None else self.user_voice_variant(user_id)[0]
+        merged = self.global_pronunciations(selected_voice)
+        overrides = self.user_pronunciation_overrides(user_id, selected_voice)
+        merged.update(overrides)
+        return dict(sorted(merged.items()))
+
+    def user_pronunciation_overrides(
+        self,
+        user_id: hikari.Snowflakeish,
+        voice: str | None = None,
+    ) -> dict[str, PronunciationOverride]:
         settings = self._user_settings.get(int(user_id))
         if not settings or not settings.pronunciations:
             return {}
-        return dict(sorted(settings.pronunciations.items()))
+        selected_voice = self._normalise_pronunciation_voice(voice) if voice is not None else self.user_voice_variant(user_id)[0]
+        entries = settings.pronunciations.get(selected_voice)
+        if not entries:
+            return {}
+        return dict(sorted(entries.items()))
 
-    def base_text_substitutions(self) -> dict[str, str]:
+    def global_pronunciations(self, voice: str | None = None) -> dict[str, PronunciationOverride]:
+        selected_voice = self._normalise_pronunciation_voice(voice) if voice is not None else self.voice
+        entries = self._text_corrections.pronunciations.get(selected_voice)
+        if not entries:
+            return {}
+        return dict(sorted(entries.items()))
+
+    def all_global_pronunciations(self) -> dict[str, dict[str, PronunciationOverride]]:
+        if not self._text_corrections.pronunciations:
+            return {}
+        return {
+            voice: dict(sorted(entries.items()))
+            for voice, entries in sorted(self._text_corrections.pronunciations.items())
+        }
+
+    def base_text_substitutions(self) -> dict[str, TextSubstitutionRule]:
         combined = dict(self._text_corrections.slang)
         combined.update(self._text_corrections.typos)
         if not combined:
             return {}
-        return dict(sorted(combined.items()))
+        return self._sorted_substitution_map(combined)
 
-    def global_text_substitutions(self, category: str | None = None) -> dict[str, str]:
+    def global_text_substitutions(self, category: str | None = None) -> dict[str, TextSubstitutionRule]:
         if category is None:
             return self.base_text_substitutions()
 
         normalised = self._normalise_text_correction_category(category)
         corrections = self._text_correction_map(normalised)
-        return dict(sorted(corrections.items()))
+        return self._sorted_substitution_map(corrections)
+
+    def set_user_mention_override(
+        self,
+        user_id: hikari.Snowflakeish,
+        target_user_id: hikari.Snowflakeish,
+        spoken_name: str,
+    ) -> tuple[int, str, bool]:
+        uid = int(user_id)
+        target_uid = int(target_user_id)
+        value = self._normalise_substitution_value(spoken_name)
+
+        settings = self._user_settings.get(uid, UserVoiceSettings())
+        mention_overrides = dict(settings.mention_overrides)
+        existed = target_uid in mention_overrides
+        if not existed and len(mention_overrides) >= self._MAX_SUBSTITUTIONS_PER_USER:
+            raise ValueError(f"You can store up to {self._MAX_SUBSTITUTIONS_PER_USER} mention overrides.")
+
+        mention_overrides[target_uid] = value
+        settings.mention_overrides = dict(sorted(mention_overrides.items()))
+        self._user_settings[uid] = settings
+        self._save_user_settings()
+        return target_uid, value, existed
+
+    def remove_user_mention_override(
+        self,
+        user_id: hikari.Snowflakeish,
+        target_user_id: hikari.Snowflakeish,
+    ) -> tuple[int, bool]:
+        uid = int(user_id)
+        target_uid = int(target_user_id)
+        settings = self._user_settings.get(uid)
+        if not settings or target_uid not in settings.mention_overrides:
+            return target_uid, False
+
+        mention_overrides = dict(settings.mention_overrides)
+        del mention_overrides[target_uid]
+        settings.mention_overrides = mention_overrides
+        self._user_settings[uid] = settings
+        self._save_user_settings()
+        return target_uid, True
+
+    def set_global_mention_override(
+        self,
+        target_user_id: hikari.Snowflakeish,
+        spoken_name: str,
+    ) -> tuple[int, str, bool]:
+        target_uid = int(target_user_id)
+        value = self._normalise_substitution_value(spoken_name)
+        mention_overrides = dict(self._text_corrections.mention_overrides)
+        existed = target_uid in mention_overrides
+        mention_overrides[target_uid] = value
+        self._replace_text_corrections(
+            slang=dict(self._text_corrections.slang),
+            typos=dict(self._text_corrections.typos),
+            pronunciations=self.all_global_pronunciations(),
+            mention_overrides=mention_overrides,
+            protected=set(self._text_corrections.protected),
+        )
+        self._save_text_corrections()
+        return target_uid, value, existed
+
+    def remove_global_mention_override(self, target_user_id: hikari.Snowflakeish) -> tuple[int, bool]:
+        target_uid = int(target_user_id)
+        mention_overrides = dict(self._text_corrections.mention_overrides)
+        removed = mention_overrides.pop(target_uid, None) is not None
+        if removed:
+            self._replace_text_corrections(
+                slang=dict(self._text_corrections.slang),
+                typos=dict(self._text_corrections.typos),
+                pronunciations=self.all_global_pronunciations(),
+                mention_overrides=mention_overrides,
+                protected=set(self._text_corrections.protected),
+            )
+            self._save_text_corrections()
+        return target_uid, removed
 
     def set_global_text_substitution(
         self,
         category: str,
         source: str,
         target: str,
-    ) -> tuple[str, str, str, bool]:
+        *,
+        case_sensitive: bool = False,
+    ) -> tuple[str, str, TextSubstitutionRule, bool]:
         normalised = self._normalise_text_correction_category(category)
-        key = self._normalise_text_correction_key(source)
+        key = self._normalise_text_correction_key(source, case_sensitive=case_sensitive)
         value = self._normalise_substitution_value(target)
+        rule = TextSubstitutionRule(source=key, target=value, case_sensitive=case_sensitive)
 
         slang = dict(self._text_corrections.slang)
         typos = dict(self._text_corrections.typos)
@@ -745,23 +975,40 @@ class VoiceTTSCoreMixin:
         other_map = typos if normalised == "slang" else slang
 
         existed = key in target_map
-        target_map[key] = value
+        target_map[key] = rule
         other_map.pop(key, None)
-        self._replace_text_corrections(slang=slang, typos=typos, protected=set(self._text_corrections.protected))
+        self._replace_text_corrections(
+            slang=self._sorted_substitution_map(slang),
+            typos=self._sorted_substitution_map(typos),
+            pronunciations=self.all_global_pronunciations(),
+            mention_overrides=dict(self._text_corrections.mention_overrides),
+            protected=set(self._text_corrections.protected),
+        )
         self._save_text_corrections()
-        return normalised, key, value, existed
+        return normalised, key, rule, existed
 
     def remove_global_text_substitution(self, category: str, source: str) -> tuple[str, str, bool]:
         normalised = self._normalise_text_correction_category(category)
-        key = self._normalise_text_correction_key(source)
 
         slang = dict(self._text_corrections.slang)
         typos = dict(self._text_corrections.typos)
         corrections = slang if normalised == "slang" else typos
+        key = self._resolve_substitution_storage_key(source, corrections)
+        if key is None:
+            try:
+                key = self._normalise_text_correction_key(source)
+            except ValueError:
+                key = source.strip()
         removed = corrections.pop(key, None) is not None
 
         if removed:
-            self._replace_text_corrections(slang=slang, typos=typos, protected=set(self._text_corrections.protected))
+            self._replace_text_corrections(
+                slang=self._sorted_substitution_map(slang),
+                typos=self._sorted_substitution_map(typos),
+                pronunciations=self.all_global_pronunciations(),
+                mention_overrides=dict(self._text_corrections.mention_overrides),
+                protected=set(self._text_corrections.protected),
+            )
             self._save_text_corrections()
         return normalised, key, removed
 
@@ -776,6 +1023,8 @@ class VoiceTTSCoreMixin:
         self._replace_text_corrections(
             slang=dict(self._text_corrections.slang),
             typos=dict(self._text_corrections.typos),
+            pronunciations=self.all_global_pronunciations(),
+            mention_overrides=dict(self._text_corrections.mention_overrides),
             protected=protected,
         )
         self._save_text_corrections()
@@ -790,6 +1039,8 @@ class VoiceTTSCoreMixin:
             self._replace_text_corrections(
                 slang=dict(self._text_corrections.slang),
                 typos=dict(self._text_corrections.typos),
+                pronunciations=self.all_global_pronunciations(),
+                mention_overrides=dict(self._text_corrections.mention_overrides),
                 protected=protected,
             )
             self._save_text_corrections()
@@ -799,6 +1050,18 @@ class VoiceTTSCoreMixin:
     def _match_case_insensitive(options: list[str], requested: str) -> str | None:
         requested_lower = requested.lower()
         return next((option for option in options if option.lower() == requested_lower), None)
+
+    def _limit_available_voices(self, voices: list[str], *, preferred: str | None = None) -> list[str]:
+        if len(voices) <= self._MAX_AVAILABLE_VOICES:
+            return voices
+
+        limited = list(voices[: self._MAX_AVAILABLE_VOICES])
+        if preferred:
+            match = self._match_case_insensitive(voices, preferred)
+            if match and not any(voice.lower() == match.lower() for voice in limited):
+                limited[-1] = match
+                limited.sort(key=str.lower)
+        return limited
 
     async def _resolve_requested_voice(self, voice: str) -> str:
         requested_voice = voice.strip()
@@ -811,9 +1074,6 @@ class VoiceTTSCoreMixin:
 
         if match := self._match_case_insensitive(voices, requested_voice):
             return match
-
-        if self._engine_kind == "piper" and self._piper_model_path(requested_voice):
-            return requested_voice
 
         raise LookupError(f"Unknown voice: {requested_voice}")
 
@@ -869,11 +1129,17 @@ class VoiceTTSCoreMixin:
         return next_voice, next_variant
 
     def set_user_text_substitution(
-        self, user_id: hikari.Snowflakeish, source: str, target: str
-    ) -> tuple[str, str, bool]:
+        self,
+        user_id: hikari.Snowflakeish,
+        source: str,
+        target: str,
+        *,
+        case_sensitive: bool = False,
+    ) -> tuple[str, TextSubstitutionRule, bool]:
         uid = int(user_id)
-        key = self._normalise_substitution_key(source)
+        key = self._normalise_substitution_key(source, case_sensitive=case_sensitive)
         value = self._normalise_substitution_value(target)
+        rule = TextSubstitutionRule(source=key, target=value, case_sensitive=case_sensitive)
 
         settings = self._user_settings.get(uid, UserVoiceSettings())
         substitutions = dict(settings.substitutions)
@@ -881,48 +1147,223 @@ class VoiceTTSCoreMixin:
         if not existed and len(substitutions) >= self._MAX_SUBSTITUTIONS_PER_USER:
             raise ValueError(f"You can store up to {self._MAX_SUBSTITUTIONS_PER_USER} substitutions.")
 
-        substitutions[key] = value
-        settings.substitutions = dict(sorted(substitutions.items()))
+        substitutions[key] = rule
+        settings.substitutions = self._sorted_substitution_map(substitutions)
         self._user_settings[uid] = settings
         self._save_user_settings()
-        return key, value, existed
+        return key, rule, existed
 
-    def set_user_pronunciation(self, user_id: hikari.Snowflakeish, source: str, target: str) -> tuple[str, str, bool]:
+    def set_user_pronunciation(
+        self,
+        user_id: hikari.Snowflakeish,
+        voice: str,
+        source: str,
+        target: str,
+        format: PronunciationFormat | str,
+    ) -> tuple[str, PronunciationOverride, bool]:
         uid = int(user_id)
+        voice_key = self._normalise_pronunciation_voice(voice)
         key = self._normalise_substitution_key(source)
-        value = self._normalise_substitution_value(target)
+        value = PronunciationOverride(
+            format=self._normalise_pronunciation_format(format),
+            value=self._normalise_substitution_value(target),
+        )
+        self._validate_pronunciation_override(voice_key, value)
 
         settings = self._user_settings.get(uid, UserVoiceSettings())
         pronunciations = dict(settings.pronunciations)
-        existed = key in pronunciations
-        if not existed and len(pronunciations) >= self._MAX_SUBSTITUTIONS_PER_USER:
+        voice_pronunciations = dict(pronunciations.get(voice_key, {}))
+        existed = key in voice_pronunciations
+        if not existed and len(voice_pronunciations) >= self._MAX_SUBSTITUTIONS_PER_USER:
             raise ValueError(f"You can store up to {self._MAX_SUBSTITUTIONS_PER_USER} pronunciations.")
 
-        pronunciations[key] = value
+        voice_pronunciations[key] = value
+        pronunciations[voice_key] = dict(sorted(voice_pronunciations.items()))
         settings.pronunciations = dict(sorted(pronunciations.items()))
         self._user_settings[uid] = settings
         self._save_user_settings()
         return key, value, existed
 
-    def remove_user_pronunciation(self, user_id: hikari.Snowflakeish, source: str) -> tuple[str, bool]:
+    def remove_user_pronunciation(self, user_id: hikari.Snowflakeish, voice: str, source: str) -> tuple[str, bool]:
         uid = int(user_id)
+        voice_key = self._normalise_pronunciation_voice(voice)
         key = self._normalise_substitution_key(source)
         settings = self._user_settings.get(uid)
-        if not settings or key not in settings.pronunciations:
+        if not settings:
             return key, False
 
         pronunciations = dict(settings.pronunciations)
-        del pronunciations[key]
+        voice_pronunciations = dict(pronunciations.get(voice_key, {}))
+        if key not in voice_pronunciations:
+            return key, False
+
+        del voice_pronunciations[key]
+        if voice_pronunciations:
+            pronunciations[voice_key] = dict(sorted(voice_pronunciations.items()))
+        else:
+            pronunciations.pop(voice_key, None)
         settings.pronunciations = pronunciations
         self._user_settings[uid] = settings
         self._save_user_settings()
         return key, True
 
+    def set_global_pronunciation(
+        self,
+        voice: str,
+        source: str,
+        target: str,
+        format: PronunciationFormat | str,
+    ) -> tuple[str, str, PronunciationOverride, bool]:
+        voice_key = self._normalise_pronunciation_voice(voice)
+        key = self._normalise_substitution_key(source)
+        value = PronunciationOverride(
+            format=self._normalise_pronunciation_format(format),
+            value=self._normalise_substitution_value(target),
+        )
+        self._validate_pronunciation_override(voice_key, value)
+
+        pronunciations = {
+            loaded_voice: dict(entries)
+            for loaded_voice, entries in self._text_corrections.pronunciations.items()
+        }
+        voice_pronunciations = dict(pronunciations.get(voice_key, {}))
+        existed = key in voice_pronunciations
+        voice_pronunciations[key] = value
+        pronunciations[voice_key] = dict(sorted(voice_pronunciations.items()))
+        self._replace_text_corrections(
+            slang=dict(self._text_corrections.slang),
+            typos=dict(self._text_corrections.typos),
+            pronunciations=pronunciations,
+            mention_overrides=dict(self._text_corrections.mention_overrides),
+            protected=set(self._text_corrections.protected),
+        )
+        self._save_text_corrections()
+        return voice_key, key, value, existed
+
+    def remove_global_pronunciation(self, voice: str, source: str) -> tuple[str, str, bool]:
+        voice_key = self._normalise_pronunciation_voice(voice)
+        key = self._normalise_substitution_key(source)
+        pronunciations = {
+            loaded_voice: dict(entries)
+            for loaded_voice, entries in self._text_corrections.pronunciations.items()
+        }
+        voice_pronunciations = dict(pronunciations.get(voice_key, {}))
+        if key not in voice_pronunciations:
+            return voice_key, key, False
+
+        del voice_pronunciations[key]
+        if voice_pronunciations:
+            pronunciations[voice_key] = dict(sorted(voice_pronunciations.items()))
+        else:
+            pronunciations.pop(voice_key, None)
+        self._replace_text_corrections(
+            slang=dict(self._text_corrections.slang),
+            typos=dict(self._text_corrections.typos),
+            pronunciations=pronunciations,
+            mention_overrides=dict(self._text_corrections.mention_overrides),
+            protected=set(self._text_corrections.protected),
+        )
+        self._save_text_corrections()
+        return voice_key, key, True
+
+    @staticmethod
+    def _normalise_pronunciation_voice(voice: str) -> str:
+        value = voice.strip()
+        if not value:
+            raise ValueError("voice must not be empty")
+        return value
+
+    def _validate_pronunciation_override(self, voice: str, value: PronunciationOverride) -> None:
+        if value.format is PronunciationFormat.IPA and not self.voice_supports_ipa_pronunciations(voice):
+            raise ValueError(f"IPA pronunciations are not supported for voice `{voice}`.")
+
+    def _load_pronunciation_entry(self, raw: object) -> PronunciationOverride | None:
+        if isinstance(raw, str):
+            try:
+                value = self._normalise_substitution_value(raw)
+            except ValueError:
+                return None
+            return PronunciationOverride(format=PronunciationFormat.TEXT, value=value)
+
+        if not isinstance(raw, dict):
+            return None
+
+        format_raw = raw.get("format", raw.get("type"))
+        value_raw = raw.get("value")
+        if not isinstance(format_raw, str) or not isinstance(value_raw, str):
+            return None
+
+        try:
+            format_value = self._normalise_pronunciation_format(format_raw)
+            value = self._normalise_substitution_value(value_raw)
+        except ValueError:
+            return None
+        return PronunciationOverride(format=format_value, value=value)
+
+    def _load_pronunciation_entries(self, raw: object) -> dict[str, PronunciationOverride]:
+        if not isinstance(raw, dict):
+            return {}
+
+        pronunciations: dict[str, PronunciationOverride] = {}
+        for source, target in raw.items():
+            if not isinstance(source, str):
+                continue
+            entry = self._load_pronunciation_entry(target)
+            if entry is None:
+                continue
+            try:
+                key = self._normalise_substitution_key(source)
+            except ValueError:
+                continue
+            pronunciations[key] = entry
+
+        return dict(sorted(pronunciations.items()))
+
+    def _load_pronunciation_voice_map(
+        self,
+        raw: object,
+        *,
+        legacy_voice: str | None = None,
+    ) -> dict[str, dict[str, PronunciationOverride]]:
+        if not isinstance(raw, dict):
+            return {}
+
+        pronunciations: dict[str, dict[str, PronunciationOverride]] = {}
+        if legacy_voice is not None and raw and all(not isinstance(target, dict) for target in raw.values()):
+            legacy_entries = self._load_pronunciation_entries(raw)
+            if legacy_entries:
+                pronunciations[legacy_voice] = legacy_entries
+            return dict(sorted(pronunciations.items()))
+
+        for pronunciation_voice, voice_entries_raw in raw.items():
+            if not isinstance(pronunciation_voice, str):
+                continue
+            try:
+                voice_key = self._normalise_pronunciation_voice(pronunciation_voice)
+            except ValueError:
+                continue
+            voice_entries = self._load_pronunciation_entries(voice_entries_raw)
+            if voice_entries:
+                pronunciations[voice_key] = voice_entries
+
+        return dict(sorted(pronunciations.items()))
+
     def remove_user_text_substitution(self, user_id: hikari.Snowflakeish, source: str) -> tuple[str, bool]:
         uid = int(user_id)
-        key = self._normalise_substitution_key(source)
         settings = self._user_settings.get(uid)
-        if not settings or key not in settings.substitutions:
+        if not settings:
+            try:
+                key = self._normalise_substitution_key(source)
+            except ValueError:
+                key = source.strip()
+            return key, False
+
+        key = self._resolve_substitution_storage_key(source, settings.substitutions)
+        if key is None:
+            try:
+                key = self._normalise_substitution_key(source)
+            except ValueError:
+                key = source.strip()
             return key, False
 
         substitutions = dict(settings.substitutions)
@@ -931,6 +1372,82 @@ class VoiceTTSCoreMixin:
         self._user_settings[uid] = settings
         self._save_user_settings()
         return key, True
+
+    def _load_substitution_rule(
+        self,
+        source: str,
+        raw: object,
+        *,
+        allow_symbols: bool,
+    ) -> tuple[str, TextSubstitutionRule] | None:
+        case_sensitive = False
+        target_raw = raw
+        if isinstance(raw, dict):
+            target_raw = raw.get("value")
+            case_sensitive = bool(raw.get("case_sensitive"))
+
+        if not isinstance(target_raw, str):
+            return None
+
+        try:
+            key = (
+                self._normalise_text_correction_key(source, case_sensitive=case_sensitive)
+                if allow_symbols
+                else self._normalise_substitution_key(source, case_sensitive=case_sensitive)
+            )
+            value = self._normalise_substitution_value(target_raw)
+        except ValueError:
+            return None
+        return key, TextSubstitutionRule(source=key, target=value, case_sensitive=case_sensitive)
+
+    def _load_substitution_map(
+        self,
+        raw: object,
+        *,
+        allow_symbols: bool,
+    ) -> dict[str, TextSubstitutionRule]:
+        if not isinstance(raw, dict):
+            return {}
+
+        substitutions: dict[str, TextSubstitutionRule] = {}
+        for source, target in raw.items():
+            if not isinstance(source, str):
+                continue
+            loaded = self._load_substitution_rule(source, target, allow_symbols=allow_symbols)
+            if loaded is None:
+                continue
+            key, rule = loaded
+            substitutions[key] = rule
+        return self._sorted_substitution_map(substitutions)
+
+    def _load_mention_override_map(self, raw: object) -> dict[int, str]:
+        if not isinstance(raw, dict):
+            return {}
+
+        mention_overrides: dict[int, str] = {}
+        for user_id, spoken_name in raw.items():
+            if not isinstance(spoken_name, str):
+                continue
+            try:
+                target_uid = int(str(user_id).strip())
+                mention_overrides[target_uid] = self._normalise_substitution_value(spoken_name)
+            except (TypeError, ValueError):
+                continue
+        return dict(sorted(mention_overrides.items()))
+
+    @staticmethod
+    def _serialise_substitution_map(substitutions: dict[str, TextSubstitutionRule]) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        for source, rule in substitutions.items():
+            payload[source] = (
+                {
+                    "value": rule.target,
+                    "case_sensitive": True,
+                }
+                if rule.case_sensitive
+                else rule.target
+            )
+        return payload
 
     async def set_user_voice_variant(
         self,
@@ -986,6 +1503,7 @@ class VoiceTTSCoreMixin:
             voice = values.get("voice")
             variant = values.get("variant")
             pronunciations_raw = values.get("pronunciations")
+            mention_overrides_raw = values.get("mention_overrides")
             substitutions_raw = values.get("substitutions")
 
             selected_voice = voice.strip() if isinstance(voice, str) and voice.strip() else None
@@ -996,29 +1514,10 @@ class VoiceTTSCoreMixin:
                 except ValueError:
                     selected_variant = None
 
-            pronunciations: dict[str, str] = {}
-            if isinstance(pronunciations_raw, dict):
-                for source, target in pronunciations_raw.items():
-                    if not isinstance(source, str) or not isinstance(target, str):
-                        continue
-                    try:
-                        key = self._normalise_substitution_key(source)
-                        value = self._normalise_substitution_value(target)
-                    except ValueError:
-                        continue
-                    pronunciations[key] = value
-
-            substitutions: dict[str, str] = {}
-            if isinstance(substitutions_raw, dict):
-                for source, target in substitutions_raw.items():
-                    if not isinstance(source, str) or not isinstance(target, str):
-                        continue
-                    try:
-                        key = self._normalise_substitution_key(source)
-                        value = self._normalise_substitution_value(target)
-                    except ValueError:
-                        continue
-                    substitutions[key] = value
+            legacy_voice = selected_voice or self.voice
+            pronunciations = self._load_pronunciation_voice_map(pronunciations_raw, legacy_voice=legacy_voice)
+            mention_overrides = self._load_mention_override_map(mention_overrides_raw)
+            substitutions = self._load_substitution_map(substitutions_raw, allow_symbols=False)
 
             self._user_settings[uid] = UserVoiceSettings(
                 enabled=enabled,
@@ -1026,7 +1525,8 @@ class VoiceTTSCoreMixin:
                 voice=selected_voice,
                 variant=selected_variant,
                 pronunciations=dict(sorted(pronunciations.items())),
-                substitutions=dict(sorted(substitutions.items())),
+                mention_overrides=mention_overrides,
+                substitutions=substitutions,
             )
 
     def _save_user_settings(self):
@@ -1037,8 +1537,21 @@ class VoiceTTSCoreMixin:
                 "autocorrect": settings.autocorrect,
                 "voice": settings.voice,
                 "variant": settings.variant,
-                "pronunciations": dict(sorted(settings.pronunciations.items())),
-                "substitutions": dict(sorted(settings.substitutions.items())),
+                "pronunciations": {
+                    voice: {
+                        source: {
+                            "format": entry.format.value,
+                            "value": entry.value,
+                        }
+                        for source, entry in sorted(entries.items())
+                    }
+                    for voice, entries in sorted(settings.pronunciations.items())
+                },
+                "mention_overrides": {
+                    str(target_uid): spoken_name
+                    for target_uid, spoken_name in sorted(settings.mention_overrides.items())
+                },
+                "substitutions": self._serialise_substitution_map(settings.substitutions),
             }
 
         payload = {"users": users}
@@ -1064,6 +1577,8 @@ class VoiceTTSCoreMixin:
 
         slang_raw: object = {}
         typos_raw: object = {}
+        pronunciations_raw: object = {}
+        mention_overrides_raw: object = {}
         protected_raw: object = ()
         legacy_mode = all(isinstance(target, str) for target in raw.values())
         if legacy_mode:
@@ -1071,10 +1586,14 @@ class VoiceTTSCoreMixin:
         else:
             slang_raw = raw.get("slang", {})
             typos_raw = raw.get("typos", {})
+            pronunciations_raw = raw.get("pronunciations", {})
+            mention_overrides_raw = raw.get("mention_overrides", {})
             protected_raw = raw.get("protected", ())
 
-        slang = self._load_text_correction_map(slang_raw)
-        typos = self._load_text_correction_map(typos_raw)
+        slang = self._load_substitution_map(slang_raw, allow_symbols=True)
+        typos = self._load_substitution_map(typos_raw, allow_symbols=True)
+        pronunciations = self._load_pronunciation_voice_map(pronunciations_raw)
+        mention_overrides = self._load_mention_override_map(mention_overrides_raw)
         protected = self._load_protected_text_tokens(protected_raw)
         fuzzy_targets = self._build_fuzzy_targets((slang, typos), protected)
         skipped = 0
@@ -1082,45 +1601,37 @@ class VoiceTTSCoreMixin:
             skipped += len(slang_raw) - len(slang)
         if isinstance(typos_raw, dict):
             skipped += len(typos_raw) - len(typos)
+        if isinstance(pronunciations_raw, dict):
+            skipped += sum(
+                1
+                for voice, entries in pronunciations_raw.items()
+                if not isinstance(voice, str) or not isinstance(entries, dict)
+            )
+        if isinstance(mention_overrides_raw, dict):
+            skipped += len(mention_overrides_raw) - len(mention_overrides)
         if isinstance(protected_raw, list):
             skipped += len(protected_raw) - len(protected)
 
         catalog = TextCorrectionCatalog(
-            slang=dict(sorted(slang.items())),
-            typos=dict(sorted(typos.items())),
+            slang=slang,
+            typos=typos,
+            pronunciations=pronunciations,
+            mention_overrides=mention_overrides,
             protected=frozenset(sorted(protected)),
             fuzzy_targets=fuzzy_targets,
         )
         mode = "legacy-map" if legacy_mode else "sectioned"
         log_message = (
             f"TTS correction file loaded path={self._corrections_path!s}: mode={mode} "
-            f"slang={len(catalog.slang)} typos={len(catalog.typos)} "
-            f"protected={len(catalog.protected)} fuzzy_targets={len(catalog.fuzzy_targets)}"
+            f"slang={len(catalog.slang)} typos={len(catalog.typos)} pronunciations={len(catalog.pronunciations)} "
+            f"mentions={len(catalog.mention_overrides)} protected={len(catalog.protected)} "
+            f"fuzzy_targets={len(catalog.fuzzy_targets)}"
         )
         if skipped:
             log.warning(f"{log_message} skipped={skipped}")
         else:
             log.info(log_message)
         return catalog
-
-    def _load_text_correction_map(self, raw: object) -> dict[str, str]:
-        if not isinstance(raw, dict):
-            return {}
-
-        corrections: dict[str, str] = {}
-        invalid = 0
-        for source, target in raw.items():
-            if not isinstance(source, str) or not isinstance(target, str):
-                invalid += 1
-                continue
-            try:
-                key = self._normalise_text_correction_key(source)
-                value = self._normalise_substitution_value(target)
-            except ValueError:
-                invalid += 1
-                continue
-            corrections[key] = value
-        return corrections
 
     def _load_protected_text_tokens(self, raw: object) -> set[str]:
         if not isinstance(raw, list):
@@ -1137,11 +1648,14 @@ class VoiceTTSCoreMixin:
         return protected
 
     @staticmethod
-    def _build_fuzzy_targets(correction_maps: Iterable[dict[str, str]], protected: set[str]) -> tuple[str, ...]:
+    def _build_fuzzy_targets(
+        correction_maps: Iterable[dict[str, TextSubstitutionRule]],
+        protected: set[str],
+    ) -> tuple[str, ...]:
         candidates: set[str] = set()
         for corrections in correction_maps:
-            for target in corrections.values():
-                target_word = target.strip().lower()
+            for rule in corrections.values():
+                target_word = rule.target.strip().lower()
                 if re.fullmatch(r"[a-z]+", target_word):
                     candidates.add(target_word)
         candidates.difference_update(protected)
@@ -1155,10 +1669,12 @@ class VoiceTTSCoreMixin:
             raise ValueError("category must be `slang` or `typo`")
         return normalised
 
-    def _normalise_text_correction_key(self, source: str) -> str:
-        key = source.strip().lower()
+    def _normalise_text_correction_key(self, source: str, *, case_sensitive: bool = False) -> str:
+        key = source.strip()
         if not key:
             raise ValueError("source must not be empty")
+        if not case_sensitive:
+            key = key.lower()
         max_chars = getattr(self, "_MAX_SUBSTITUTION_KEY_CHARS", 40)
         if len(key) > max_chars:
             raise ValueError(f"source is too long (max {max_chars} chars)")
@@ -1166,7 +1682,7 @@ class VoiceTTSCoreMixin:
             raise ValueError("source must be a single token without whitespace")
         return key
 
-    def _text_correction_map(self, category: str) -> dict[str, str]:
+    def _text_correction_map(self, category: str) -> dict[str, TextSubstitutionRule]:
         if category == "slang":
             return self._text_corrections.slang
         if category == "typos":
@@ -1176,21 +1692,42 @@ class VoiceTTSCoreMixin:
     def _replace_text_corrections(
         self,
         *,
-        slang: dict[str, str],
-        typos: dict[str, str],
+        slang: dict[str, TextSubstitutionRule],
+        typos: dict[str, TextSubstitutionRule],
+        pronunciations: dict[str, dict[str, PronunciationOverride]],
+        mention_overrides: dict[int, str],
         protected: set[str],
     ) -> None:
         self._text_corrections = TextCorrectionCatalog(
-            slang=dict(sorted(slang.items())),
-            typos=dict(sorted(typos.items())),
+            slang=self._sorted_substitution_map(slang),
+            typos=self._sorted_substitution_map(typos),
+            pronunciations={
+                voice: dict(sorted(entries.items()))
+                for voice, entries in sorted(pronunciations.items())
+            },
+            mention_overrides=dict(sorted(mention_overrides.items())),
             protected=frozenset(sorted(protected)),
             fuzzy_targets=self._build_fuzzy_targets((slang, typos), protected),
         )
 
     def _save_text_corrections(self) -> None:
         payload = {
-            "slang": dict(sorted(self._text_corrections.slang.items())),
-            "typos": dict(sorted(self._text_corrections.typos.items())),
+            "slang": self._serialise_substitution_map(self._text_corrections.slang),
+            "typos": self._serialise_substitution_map(self._text_corrections.typos),
+            "pronunciations": {
+                voice: {
+                    source: {
+                        "format": entry.format.value,
+                        "value": entry.value,
+                    }
+                    for source, entry in sorted(entries.items())
+                }
+                for voice, entries in sorted(self._text_corrections.pronunciations.items())
+            },
+            "mention_overrides": {
+                str(target_uid): spoken_name
+                for target_uid, spoken_name in sorted(self._text_corrections.mention_overrides.items())
+            },
             "protected": sorted(self._text_corrections.protected),
         }
         try:
@@ -1212,11 +1749,14 @@ class VoiceTTSCoreMixin:
 
     def _refresh_voice_link_rules_if_needed(self) -> None:
         current_mtime_ns = self._path_mtime_ns(self._voice_link_rules_path)
-        if current_mtime_ns == self._voice_link_rules_mtime_ns:
+        if (
+            current_mtime_ns == self._voice_link_rules_mtime_ns
+            and current_mtime_ns is not None
+        ):
             return
 
         self._voice_link_rules = self._load_voice_link_rules()
-        self._voice_link_rules_mtime_ns = current_mtime_ns
+        self._voice_link_rules_mtime_ns = self._path_mtime_ns(self._voice_link_rules_path)
 
     def _load_voice_link_rules(self) -> VoiceLinkRules:
         self._ensure_voice_link_rules_file()
@@ -1249,10 +1789,10 @@ class VoiceTTSCoreMixin:
 
         payload = {
             "hosts": {
-                "giphy.com": "giphy",
+                "giphy.com": "gif",
                 "klipy.com": "gif",
                 "tenor.com": "gif",
-                "www.giphy.com": "giphy",
+                "www.giphy.com": "gif",
                 "www.klipy.com": "gif",
                 "www.tenor.com": "gif",
             },
@@ -1260,7 +1800,7 @@ class VoiceTTSCoreMixin:
                 {
                     "host": "store.steampowered.com",
                     "path_regex": r"^/(?:agecheck/)?app/\d+/(?P<title>[^/?#]+)",
-                    "template": "link steam store {title_words}",
+                    "template": "link steam store {title_norm}",
                 }
             ],
         }
@@ -1554,13 +2094,14 @@ class VoiceTTSCoreMixin:
         allowed_fields = {"host"}
         for group_name in path_pattern.groupindex:
             allowed_fields.add(group_name)
+            allowed_fields.add(f"{group_name}_norm")
             allowed_fields.add(f"{group_name}_words")
 
         for _, field_name, format_spec, conversion in Formatter().parse(template):
             if field_name is None:
                 continue
             if not field_name:
-                raise ValueError("template must use named fields like `{title_words}`")
+                raise ValueError("template must use named fields like `{title_norm}`")
             if conversion is not None or format_spec:
                 raise ValueError("template format conversions/specifiers are not supported")
             if field_name not in allowed_fields:
@@ -1575,7 +2116,10 @@ class VoiceTTSCoreMixin:
             return self._available_voices
 
         if self._engine_kind == "piper":
-            self._available_voices = self._piper_available_voices()
+            self._available_voices = self._limit_available_voices(
+                self._piper_available_voices(),
+                preferred=self.voice,
+            )
             return self._available_voices
 
         process = await asyncio.create_subprocess_exec(
@@ -1594,8 +2138,18 @@ class VoiceTTSCoreMixin:
         raw = out.decode(config.STR_ENCODE, "replace")
         voices = sorted({m.group(1) for m in [VOICE_LINE_RE.match(line) for line in raw.splitlines()] if m})
         english = [v for v in voices if v.lower().startswith("en")]
-        self._available_voices = english if english else voices
+        self._available_voices = self._limit_available_voices(english if english else voices, preferred=self.voice)
         return self._available_voices
+
+    @staticmethod
+    async def _run_blocking_io(
+        func: Callable[..., BlockingReturnT],
+        /,
+        *args: object,
+    ) -> BlockingReturnT:
+        loop = asyncio.get_running_loop()
+        call = functools.partial(func, *args)
+        return await loop.run_in_executor(None, call)
 
     async def available_variants(self, force_refresh: bool = False) -> list[str]:
         if self._available_variants and not force_refresh:
@@ -1695,7 +2249,7 @@ class VoiceTTSCoreMixin:
         )
 
         if repo_ref.onnx_file:
-            is_candidate = await asyncio.to_thread(
+            is_candidate = await self._run_blocking_io(
                 self._hf_is_piper_file_candidate,
                 repo_ref.repo_id,
                 repo_ref.revision,
@@ -1715,8 +2269,8 @@ class VoiceTTSCoreMixin:
             )
             return repo_ref, [repo_ref.onnx_file]
 
-        files = await asyncio.to_thread(self._hf_repo_files, repo_ref.repo_id, repo_ref.revision)
-        candidates = await asyncio.to_thread(self._hf_find_piper_candidates, repo_ref.repo_id, repo_ref.revision, files)
+        files = await self._run_blocking_io(self._hf_repo_files, repo_ref.repo_id, repo_ref.revision)
+        candidates = await self._run_blocking_io(self._hf_find_piper_candidates, repo_ref.repo_id, repo_ref.revision, files)
         log.info(
             f"TTS HF scan complete repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
             f"repo_files={len(files)} candidates={len(candidates)}"
@@ -1740,15 +2294,20 @@ class VoiceTTSCoreMixin:
         target_config = Path(f"{target_model}.json")
         if target_model.exists():
             raise FileExistsError(f"Model `{target_model.stem}` already exists.")
+        if len(self._piper_available_voices()) >= self._MAX_AVAILABLE_VOICES:
+            raise ValueError(
+                f"Voice limit reached: at most {self._MAX_AVAILABLE_VOICES} total voices are supported, "
+                "including built-in voices. Remove a voice before adding another."
+            )
 
         log.info(
             f"TTS HF model download start repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
             f"file={selected_file!r} target={str(target_model)!r}"
         )
-        await asyncio.to_thread(self._download_file, model_url, target_model, False)
+        await self._run_blocking_io(self._download_file, model_url, target_model, False)
         config_downloaded = False
         try:
-            config_downloaded = await asyncio.to_thread(self._download_file, config_url, target_config, True)
+            config_downloaded = await self._run_blocking_io(self._download_file, config_url, target_config, True)
         except Exception as xcp:
             log.warning(f"TTS Piper model config download failed model={target_model.stem!r}: {xcp}")
 
@@ -1825,3 +2384,4 @@ class VoiceTTSCoreMixin:
 
 
 # AiviA APasz
+    BlockingReturnT = TypeVar("BlockingReturnT")

@@ -4,12 +4,12 @@ from pathlib import Path
 
 import hikari
 
-from apps._settings import App_Settings, Setting
-from config import Activity_Manager
+import config
 from apps._app import App
 from apps._config import App_Config, Mod_Config
 from apps._mod import Mod
-import config
+from apps._settings import App_Settings, Setting
+from config import Activity_Manager
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ class Base(App):
     _instance = None
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
+        self.manage_embed_color = 0x6B7280
         self.proc_name = ""
         self.proc_cmd = [""]
         file_settings = cfg.directory.absolute() / "server.properties"
@@ -46,9 +47,6 @@ class Base(App):
         ]
 
         self.process = None
-        chat_channel = config.env_opt("BASE_CHAT_CHANNEL")
-        if chat_channel:
-            cfg.chat_channel = chat_channel
         super().__init__(bot, am, cfg, Base_Settings(Path()), Mod_Base)
         self.act_err_threshold = 100
 

@@ -126,8 +126,10 @@ class BeamMP_Settings(App_Settings):
 
 class BeamMP(App):
     _instance = None
+    chat_relay_outbound = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
+        self.manage_embed_color = 0xF97316
         self.process = None
         self.proc_name = "BeamMP-Server"
         self.proc_cmd = ["script", "-qfc", self.proc_name, "/dev/null"]

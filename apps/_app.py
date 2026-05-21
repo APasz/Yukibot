@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import enum
 import logging
 import os
 import signal
@@ -14,7 +16,7 @@ import psutil
 
 import _errors
 import config
-from apps._config import App_Config, Mod_Config
+from apps._config import App_Config, Mod_Config, RelayChannelSource
 from apps._mod import Mod, Mod_Manager
 from apps._settings import App_Settings, Settings_Manager
 from apps._updater import Update_Manager
@@ -30,7 +32,43 @@ class AM_Receiver(Protocol):
     async def send(self, payload: App_Bound) -> None: ...
 
 
+class ChatRelaySupport(enum.StrEnum):
+    NONE = "none"
+    INBOUND = "inbound"
+    OUTBOUND = "outbound"
+    BIDIRECTIONAL = "bidirectional"
+
+    @property
+    def capability_label(self) -> str | None:
+        if self is ChatRelaySupport.NONE:
+            return None
+        if self is ChatRelaySupport.INBOUND:
+            return "Chat [In]"
+        if self is ChatRelaySupport.OUTBOUND:
+            return "Chat [Out]"
+        return "Chat"
+
+    @property
+    def display_value(self) -> str:
+        if self is ChatRelaySupport.NONE:
+            return "Unsupported"
+        if self is ChatRelaySupport.INBOUND:
+            return "Inbound only"
+        if self is ChatRelaySupport.OUTBOUND:
+            return "Outbound only"
+        return "Inbound + Outbound"
+
+    @property
+    def supports_inbound(self) -> bool:
+        return self in {ChatRelaySupport.INBOUND, ChatRelaySupport.BIDIRECTIONAL}
+
+    @property
+    def supports_outbound(self) -> bool:
+        return self in {ChatRelaySupport.OUTBOUND, ChatRelaySupport.BIDIRECTIONAL}
+
+
 class App:
+    cfg_cls: type[App_Config] = App_Config
     bot: hikari.GatewayBot
     cfg: App_Config
     name: str
@@ -52,14 +90,18 @@ class App:
     act_err_threshold = 25
     name_cache = config.Name_Cache()
     am_receiver: "AM_Receiver | None" = None
+    chat_relay_outbound: bool = False
     cmd_start: list[str]
     cmd_cwd: Path | None = None
     shell: bool = False
     _stderr_task = None
     _running: bool = False
     chat_channel: hikari.Snowflake | None = None
+    chat_channel_override: hikari.Snowflake | None = None
+    chat_channel_source: RelayChannelSource = RelayChannelSource.NONE
     activity_manager: Activity_Manager
     providers: list[config.Activity_Provider]
+    manage_embed_color: int = 0x96212B
 
     def __init__(
         self,
@@ -81,6 +123,8 @@ class App:
         self.scope = cfg.scope
         self.directory = cfg.directory
         self.chat_channel = hikari.Snowflake(cfg.chat_channel) if cfg.chat_channel else None
+        self.chat_channel_override = hikari.Snowflake(cfg.chat_channel_override) if cfg.chat_channel_override else None
+        self.chat_channel_source = cfg.chat_channel_source
         self.server_log = cfg.server_log_file
         self.dir_log = Path(config.DIR_LOG, self.name)
         self.dir_log.mkdir(exist_ok=True, parents=True)
@@ -107,6 +151,34 @@ class App:
         if self.mods:
             await self.mods.load_mods()
         log.debug(f"{self.name}.__post_init__")
+
+    @property
+    def chat_relay_support(self) -> ChatRelaySupport:
+        has_inbound = self.am_receiver is not None
+        has_outbound = self.chat_relay_outbound
+        if has_inbound and has_outbound:
+            return ChatRelaySupport.BIDIRECTIONAL
+        if has_inbound:
+            return ChatRelaySupport.INBOUND
+        if has_outbound:
+            return ChatRelaySupport.OUTBOUND
+        return ChatRelaySupport.NONE
+
+    @property
+    def supports_chat_relay(self) -> bool:
+        return self.chat_relay_support is not ChatRelaySupport.NONE
+
+    @property
+    def supports_inbound_chat_relay(self) -> bool:
+        return self.chat_relay_support.supports_inbound
+
+    @property
+    def supports_outbound_chat_relay(self) -> bool:
+        return self.chat_relay_support.supports_outbound
+
+    @property
+    def supports_relay_system_notices(self) -> bool:
+        return self.supports_inbound_chat_relay
 
     @property
     def has_mod_manager(self) -> Mod_Manager:
@@ -165,6 +237,19 @@ class App:
         await self._launch_process()
         await self._postlaunch_tasks()
 
+    async def _drain_stderr_task(self, timeout_seconds: float = 1.0) -> None:
+        task = self._stderr_task
+        if task is None or task.done():
+            return
+
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout_seconds)
+        except asyncio.TimeoutError:
+            log.warning(f"{self.name} stderr reader did not finish in time; cancelling it.")
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     async def _terminate(self):
         if self.process is None and not self.proc_name:
             log.info(f"{self.name} already terminated, skipping.")
@@ -174,9 +259,8 @@ class App:
 
             try:
                 self.process.terminate()
-                self.process.wait(timeout=5)
-                if self._stderr_task:
-                    await self._stderr_task
+                await asyncio.to_thread(self.process.wait, 5)
+                await self._drain_stderr_task()
             except Exception as xcp:
                 log.exception(f"Termination failed: {xcp}")
 
@@ -187,7 +271,8 @@ class App:
             else:
                 try:
                     self.process.kill()
-                    self.process.wait(timeout=5)
+                    await asyncio.to_thread(self.process.wait, 5)
+                    await self._drain_stderr_task()
                     log.warning(f"{self.name} kill escalation")
                 except Exception as xcp:
                     log.exception(f"Kill escalation failed: {xcp}")

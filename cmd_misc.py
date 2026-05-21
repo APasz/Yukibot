@@ -21,30 +21,21 @@ import hikari
 import lightbulb
 
 import _errors
-import _sys
 import config
 from _discord import Distils
-from _manager import App_Manager, ac_app_logs
 from _security import Access_Control
 from _utils import Utilities
-from cmd_music import MusicService
-from cmd_voice import VoiceTTSService
 
 log = logging.getLogger(__name__)
 
 group_misc = lightbulb.Group("misc", "Misc comands")  # type: ignore
+
 
 class TZ_LOCS(StrEnum):
     MELBOURNE = "Australia/Melbourne"
     LONDON = "Europe/London"
     ZURICH = "Europe/Zurich"
     HELSINKI = "Europe/Helsinki"
-
-
-class RestartTarget(StrEnum):
-    BOT = "bot"
-    VOICE = "voice"
-    SYSTEM = "system"
 
 
 USER_TZ = {
@@ -179,6 +170,9 @@ class CMD_MiscCurrency(
 
     @classmethod
     async def convert(cls, amount: Decimal, src: config.Currency, dst: config.Currency) -> Decimal | None:
+        if not config.EXR_TOK:
+            raise ValueError("EXG_TOKEN must be set to use currency conversion")
+
         now = time()
         key = (src, dst)
 
@@ -390,99 +384,6 @@ class CMD_MiscCurrency(
             header = f"**{amount:,.3f} {src.name.upper()}** converts to:\n"
 
         await ctx.respond(header + "\n".join(sorted(lines, key=str.upper)))
-
-
-@group_misc.register
-class CMD_MiscLog(
-    lightbulb.SlashCommand,
-    name="logs",
-    description="Retrieve log for app/system",
-    hooks=[lightbulb.prefab.sliding_window(15, 1, "user")],
-):
-    app = lightbulb.string("app", "What to get logs for", autocomplete=ac_app_logs)  # type: ignore
-
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, distils: Distils, manager: App_Manager):
-        await acl.perm_check(ctx.user.id, acl.LvL.user)
-        log.info(f"Misc.Log; {self.app}: {ctx.user.display_name}")
-
-        if self.app.lower() == "system":
-            target = [(config.DIR_LOG / self.app).with_suffix(".log")]
-            name = self.app
-        else:
-            app = manager.get(self.app)
-            target = [app.dir_log]
-            name = app.friendly
-        await distils.respond_files(ctx, target, display_name="logs", app_name=name)
-
-
-@group_misc.register
-class CMD_MiscRestart(
-    lightbulb.SlashCommand,
-    name="restart",
-    description="Restart the bot, voice layer, or host system",
-    hooks=[lightbulb.prefab.sliding_window(60, 1, "global")],
-):
-    target = lightbulb.string(
-        "target",
-        "What to restart",
-        choices=[lightbulb.Choice(target.value, target.value) for target in RestartTarget],
-        default=RestartTarget.BOT.value,
-    )
-    silent = lightbulb.boolean("silent", "Suppress shutdown/startup messages", default=False)
-    _TARGET_PERMISSIONS: dict[RestartTarget, Access_Control.LvL] = {
-        RestartTarget.VOICE: Access_Control.LvL.admin,
-        RestartTarget.BOT: Access_Control.LvL.sudo,
-        RestartTarget.SYSTEM: Access_Control.LvL.sudo,
-    }
-
-    @classmethod
-    def _required_level(cls, restart_type: RestartTarget) -> Access_Control.LvL:
-        return cls._TARGET_PERMISSIONS[restart_type]
-
-    async def _reset_voice_runtime(
-        self,
-        ctx: lightbulb.Context,
-        music: MusicService,
-        voice_tts: VoiceTTSService,
-    ) -> None:
-        music_guild_ids = music.active_guild_ids()
-        music_result = await music.reset_runtime()
-        voice_result = await voice_tts.reset_runtime(extra_guild_ids=music_guild_ids)
-        await ctx.respond(
-            "\n".join(
-                [
-                    "Voice layer reset complete.",
-                    f"music sessions dropped: `{music_result.session_count}`",
-                    f"music queued tracks cleared: `{music_result.track_count}`",
-                    f"managed music sources cleaned: `{music_result.managed_source_count}`",
-                    f"TTS outstanding jobs cleared: `{voice_result.outstanding_job_count}`",
-                    f"voice connections reset: `{voice_result.active_connection_count}`",
-                    f"voice guilds targeted: `{voice_result.targeted_guild_count}`",
-                    f"TTS connect backoffs cleared: `{voice_result.backoff_count}`",
-                    f"TTS worker running: `{'yes' if voice_result.worker_restarted else 'no'}`",
-                ]
-            )
-        )
-
-    @lightbulb.invoke
-    async def invoke(
-        self,
-        ctx: lightbulb.Context,
-        acl: Access_Control,
-        bot: hikari.GatewayBot,
-        manager: App_Manager,
-        music: MusicService,
-        voice_tts: VoiceTTSService,
-    ):
-        restart_type = RestartTarget(self.target)
-        await acl.perm_check(ctx.user.id, self._required_level(restart_type))
-        await ctx.defer()
-        log.critical(f"Misc.Restart; target={restart_type.value} silent={self.silent}: {ctx.user.display_name}")
-        if restart_type is RestartTarget.VOICE:
-            await self._reset_voice_runtime(ctx, music, voice_tts)
-            return
-        await _sys.restart(ctx, bot, manager, restart_type.value, self.silent)
 
 
 @group_misc.register

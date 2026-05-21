@@ -10,20 +10,14 @@ from pathlib import Path
 from typing import Any
 
 import hikari
-import lightbulb
 from modmux import Muxer, Provider, SteamCreds
 from modmux.modmux_errors import ModMuxError
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 import config
-from _discord import Distils
-from _file import File_Utils
-from _security import Access_Control
 from config import Name_Cache
 
 log = logging.getLogger(__name__)
-
-group_online = lightbulb.Group("online", "Presence and activity tracking")  # type: ignore
 
 PLATFORMS = ("desktop", "mobile", "web")
 STATUS_TYPES = (
@@ -329,6 +323,8 @@ class Online_Tracker(metaclass=config.Singleton):
         self._game_sessions: dict[hikari.Snowflake, dict[str, datetime]] = {}
         self._suppressed_game_stops: dict[hikari.Snowflake, set[str]] = {}
         self._snapshots: dict[hikari.Snowflake, PresenceSnapshot] = {}
+        self._deferred_presence_baselines: dict[hikari.Snowflake, PresenceSnapshot] = {}
+        self._deferred_presence_tasks: dict[hikari.Snowflake, asyncio.Task[None]] = {}
         self._dm_channels: dict[hikari.Snowflake, hikari.Snowflake] = {}
         self._dm_backoff_until: dict[hikari.Snowflake, datetime] = {}
         self._recent_notifications: dict[tuple[hikari.Snowflake, str], datetime] = {}
@@ -596,6 +592,24 @@ class Online_Tracker(metaclass=config.Singleton):
         if not rule or rule.games_mode == "all":
             return []
         return sorted([g for g in rule.games if not self._is_ignored_activity_name(g)], key=str.casefold)
+
+    def display_game(self, user_id: hikari.Snowflake, game: str) -> str:
+        return self._display_game(user_id, self._norm_game(game))
+
+    def set_rule_games_mode(self, watcher_id: hikari.Snowflake, target_id: hikari.Snowflake, mode: str) -> bool:
+        mode_key = str(mode).strip().lower()
+        if mode_key not in {"all", "include", "exclude"}:
+            raise ValueError(f"Unknown games mode: {mode}")
+
+        rule, _ = self.ensure_rule(watcher_id, target_id)
+        if rule.games_mode == mode_key:
+            return False
+
+        rule.games_mode = mode_key
+        if mode_key == "all":
+            rule.games.clear()
+        self._dump()
+        return True
 
     def set_rule_silent(self, watcher_id: hikari.Snowflake, target_id: hikari.Snowflake, silent: bool) -> bool:
         rule, _ = self.ensure_rule(watcher_id, target_id)
@@ -934,6 +948,36 @@ class Online_Tracker(metaclass=config.Singleton):
 
     def get_drink_rule(self, user_id: hikari.Snowflake) -> DrinkRule | None:
         return self.drink_rules.get(user_id)
+
+    def set_drink_mode(self, user_id: hikari.Snowflake, mode: str) -> bool:
+        rule = self.drink_rules.get(user_id, DrinkRule())
+        next_mode = self._norm_mode(mode, default=rule.mode)
+        if rule.mode == next_mode:
+            return False
+        rule.mode = next_mode
+        self.drink_rules[user_id] = rule
+        self._dump()
+        return True
+
+    def add_drink_game(self, user_id: hikari.Snowflake, game: str) -> bool:
+        game_key = self._norm_filter_game(game)
+        rule = self.drink_rules.get(user_id, DrinkRule())
+        if game_key in rule.games:
+            return False
+        rule.games.add(game_key)
+        self.drink_rules[user_id] = rule
+        self._dump()
+        return True
+
+    def remove_drink_game(self, user_id: hikari.Snowflake, game: str) -> bool:
+        game_key = self._norm_filter_game(game)
+        rule = self.drink_rules.get(user_id)
+        if rule is None or game_key not in rule.games:
+            return False
+        rule.games.remove(game_key)
+        self.drink_rules[user_id] = rule
+        self._dump()
+        return True
 
     def toggle_drink_game(
         self,
@@ -1651,15 +1695,17 @@ class Online_Tracker(metaclass=config.Singleton):
                 stable.append(change)
                 continue
 
-            if new_snapshot.status != "offline" and new_snapshot.ignored_games:
+            if new_snapshot.status != "offline" and game_key in new_snapshot.ignored_games:
                 suppressed.add(game_key)
                 continue
 
             suppressed.discard(game_key)
             stable.append(change)
 
-        if suppressed and (new_snapshot.status == "offline" or not new_snapshot.ignored_games):
-            to_confirm = sorted(suppressed - visible_games)
+        if suppressed and (
+            new_snapshot.status == "offline" or any(game_key not in new_snapshot.ignored_games for game_key in suppressed)
+        ):
+            to_confirm = sorted(game_key for game_key in suppressed if game_key not in visible_games)
             for game_key in to_confirm:
                 stable.append(ActivityChange("stopped", "games", self._display_game(user_id, game_key)))
                 suppressed.discard(game_key)
@@ -1902,31 +1948,57 @@ class Online_Tracker(metaclass=config.Singleton):
         except Exception:
             log.exception(f"Online_Tracker notify failed for {user_id}")
 
-    async def on_presence_update(
+    def _queue_deferred_presence_flush(
         self,
-        event: hikari.PresenceUpdateEvent,
+        user_id: hikari.Snowflake,
+        old_snapshot: PresenceSnapshot,
         bot: hikari.GatewayBot,
-        names: Name_Cache | None = None,
-    ):
-        new_presence = event.presence
-        user_id = new_presence.user_id
-        if self.is_ignored_user(user_id):
+        names: Name_Cache | None,
+    ) -> None:
+        self._deferred_presence_baselines.setdefault(user_id, old_snapshot)
+        worker = self._deferred_presence_tasks.get(user_id)
+        if worker and not worker.done():
             return
-        now = datetime.now(timezone.utc)
-        prev_snapshot = self._snapshots.get(user_id)
-        event_old = self._snapshot_from_presence(event.old_presence) if event.old_presence else None
-        old_snapshot = prev_snapshot or event_old
-        new_snapshot = self._snapshot_from_presence(new_presence)
+        self._deferred_presence_tasks[user_id] = asyncio.create_task(
+            self._deferred_presence_worker(user_id, bot, names)
+        )
 
-        if prev_snapshot == new_snapshot:
-            return
+    def _cancel_deferred_presence_flush(self, user_id: hikari.Snowflake) -> None:
+        worker = self._deferred_presence_tasks.pop(user_id, None)
+        if worker and not worker.done():
+            worker.cancel()
 
-        self._snapshots[user_id] = new_snapshot
-        self._update_game_sessions(user_id, new_snapshot, now)
-        self._record_seen_games(user_id, new_snapshot)
-        self._maybe_queue_nickname_for_snapshot(user_id, new_snapshot, bot)
+    async def _deferred_presence_worker(
+        self,
+        user_id: hikari.Snowflake,
+        bot: hikari.GatewayBot,
+        names: Name_Cache | None,
+    ) -> None:
+        try:
+            while True:
+                now = datetime.now(timezone.utc)
+                wait_seconds = (self.ready_at - now).total_seconds()
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                old_snapshot = self._deferred_presence_baselines.pop(user_id, None)
+                new_snapshot = self._snapshots.get(user_id)
+                if old_snapshot is None or new_snapshot is None:
+                    return
+                await self._dispatch_presence_change(user_id, old_snapshot, new_snapshot, bot, names)
+                return
+        finally:
+            self._deferred_presence_tasks.pop(user_id, None)
 
-        if not old_snapshot or now < self.ready_at:
+    async def _dispatch_presence_change(
+        self,
+        user_id: hikari.Snowflake,
+        old_snapshot: PresenceSnapshot,
+        new_snapshot: PresenceSnapshot,
+        bot: hikari.GatewayBot,
+        names: Name_Cache | None,
+    ) -> None:
+        if old_snapshot == new_snapshot:
             return
 
         status_changes, activity_changes = self._diff(old_snapshot, new_snapshot)
@@ -1977,601 +2049,42 @@ class Online_Tracker(metaclass=config.Singleton):
             if loud_lines:
                 await self._notify(bot, watcher_id, loud_lines, silent=False)
 
-
-def _extract_user_id(value: object | None) -> hikari.Snowflake | None:
-    if value is None:
-        return None
-    if isinstance(value, hikari.Snowflake):
-        return value
-    if isinstance(value, int):
-        return hikari.Snowflake(value)
-    if hasattr(value, "id"):
-        ident = getattr(value, "id")
-        if isinstance(ident, (int, hikari.Snowflake)):
-            return hikari.Snowflake(ident)
-    if isinstance(value, str) and value.isdigit():
-        return hikari.Snowflake(value)
-    return None
-
-
-def _target_from_ctx(ctx: lightbulb.AutocompleteContext) -> hikari.Snowflake | None:
-    option = ctx.get_option("user")
-    if option is None:
-        return None
-    return _extract_user_id(getattr(option, "value", option))
-
-
-async def _ctx_defer(ctx: lightbulb.Context):
-    await ctx.defer(ephemeral=ctx.guild_id is not None)
-
-
-async def _ctx_respond(
-    ctx: lightbulb.Context,
-    content: hikari.UndefinedOr[object] = hikari.UNDEFINED,
-    *,
-    ephemeral: bool | None = None,
-    attachment: hikari.UndefinedOr[hikari.Resourceish] = hikari.UNDEFINED,
-):
-    if ephemeral is None:
-        ephemeral = ctx.guild_id is not None
-    await ctx.respond(content, ephemeral=ephemeral, attachment=attachment)
-
-
-def _rule_summary(rule: WatchRule) -> str:
-    status_txt = ", ".join(sorted(rule.types)) if rule.types else "(none)"
-    activity_txt = ", ".join(sorted(rule.activities)) if rule.activities else "(none)"
-    if rule.games_mode == "all":
-        games_txt = "all"
-    elif not rule.games:
-        games_txt = f"{rule.games_mode} (empty)"
-    else:
-        games_txt = f"{rule.games_mode}: {', '.join(sorted(rule.games))}"
-    silent_rules = len(rule.silent_rules)
-    return (
-        f"types: {status_txt}\n"
-        f"activities: {activity_txt}\n"
-        f"games: {games_txt}\n"
-        f"default_silent: {rule.silent}\n"
-        f"silent_rules: {silent_rules}"
-    )
-
-
-def _drink_summary(tracker: Online_Tracker, user_id: hikari.Snowflake, rule: DrinkRule) -> str:
-    games = sorted([tracker._display_game(user_id, game) for game in rule.games], key=str.casefold)
-    games_txt = ", ".join(games) if games else "(none)"
-    return f"mode: {rule.mode}\ngames: {games_txt}"
-
-
-def _nickname_summary(tracker: Online_Tracker, user_id: hikari.Snowflake) -> str:
-    entries = tracker.list_nickname_entries(user_id)
-    if not entries:
-        return "nickname rules: (none)"
-    lines = [f"{mode}/{platform} -> {nick}" for mode, platform, nick in entries]
-    return "nickname rules:\n" + "\n".join(f"- {line}" for line in lines)
-
-
-def _platform_id_summary(names: Name_Cache, user_id: hikari.Snowflake) -> str:
-    rows = names.list_platform_ids(int(user_id))
-    if not rows:
-        return "platform ids: (none)"
-    return "platform ids:\n" + "\n".join(f"- {platform}: {platform_id}" for platform, platform_id in rows.items())
-
-
-async def ac_type_add(ctx: lightbulb.AutocompleteContext):
-    await Distils.ac_focused_static(ctx, STATUS_TYPES)
-
-
-async def ac_type_remove(ctx: lightbulb.AutocompleteContext, tracker: Online_Tracker):
-    target_id = _target_from_ctx(ctx)
-    if target_id and (rule := tracker.get_rule(ctx.interaction.user.id, target_id)):
-        opts = sorted(rule.types)
-    else:
-        opts = list(STATUS_TYPES)
-    await Distils.ac_focused_static(ctx, opts)
-
-
-async def ac_activity_add(ctx: lightbulb.AutocompleteContext):
-    await Distils.ac_focused_static(ctx, ACTIVITY_TYPES)
-
-
-async def ac_activity_remove(ctx: lightbulb.AutocompleteContext, tracker: Online_Tracker):
-    target_id = _target_from_ctx(ctx)
-    if target_id and (rule := tracker.get_rule(ctx.interaction.user.id, target_id)):
-        opts = sorted(rule.activities)
-    else:
-        opts = list(ACTIVITY_TYPES)
-    await Distils.ac_focused_static(ctx, opts)
-
-
-async def ac_game_add(ctx: lightbulb.AutocompleteContext, tracker: Online_Tracker):
-    await Distils.ac_focused_static(ctx, tracker.list_games())
-
-
-async def ac_game_remove(ctx: lightbulb.AutocompleteContext, tracker: Online_Tracker):
-    target_id = _target_from_ctx(ctx)
-    if target_id:
-        opts = tracker.list_rule_games(ctx.interaction.user.id, target_id)
-    else:
-        opts = tracker.list_games()
-    await Distils.ac_focused_static(ctx, opts)
-
-
-async def ac_drink_games(ctx: lightbulb.AutocompleteContext, tracker: Online_Tracker):
-    await Distils.ac_focused_static(ctx, tracker.list_games_for_user(ctx.interaction.user.id))
-
-
-async def ac_nick_clear_entry(ctx: lightbulb.AutocompleteContext, tracker: Online_Tracker):
-    if not isinstance(ctx.focused.value, str):
-        raise ValueError(f"String go with strings, not {type(ctx.focused.value)}")
-    foc_val = ctx.focused.value.lower()
-    acb = hikari.impl.AutocompleteChoiceBuilder
-    options = tracker.list_nickname_clear_options(ctx.interaction.user.id)
-    await ctx.respond([acb(label, token) for label, token in options if foc_val in label.lower()][:25])
-
-
-async def ac_platform_ids(ctx: lightbulb.AutocompleteContext):
-    await Distils.ac_focused_static(ctx, ACCOUNT_ID_PLATFORMS)
-
-
-@group_online.register
-class CMD_OnlineAdd(
-    lightbulb.SlashCommand,
-    name="add",
-    description="Add watch config for a user",
-    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
-):
-    user = lightbulb.user("user", "User to watch")  # type: ignore
-    status_type = lightbulb.string("type", "Status type", autocomplete=ac_type_add, default=None)  # type: ignore
-    game = lightbulb.string("game", "Game filter", autocomplete=ac_game_add, default=None)  # type: ignore
-    activity = lightbulb.string("activity", "Activity filter", autocomplete=ac_activity_add, default=None)  # type: ignore
-    silent = lightbulb.boolean(
-        "silent",
-        "Default silence. With type/activity/game this sets a silent selector, not watch filters",
-        default=None,
-    )
-
-    @lightbulb.invoke
-    async def invoke(
+    async def on_presence_update(
         self,
-        ctx: lightbulb.Context,
-        acl: Access_Control,
-        tracker: Online_Tracker,
-        names: Name_Cache,
-    ):
-        await acl.perm_check(ctx.user.id, acl.LvL.guest)
-        target_id = _extract_user_id(self.user)
-        if target_id is None:
-            raise ValueError("Invalid target user")
-        if tracker.is_ignored_user(target_id):
-            raise ValueError("That user is ignored")
-
-        watcher_id = ctx.user.id
-        target_name = await names.best_known(target_id, f"<@{target_id}>")
-
-        scoped_silent = self.silent is not None and any([self.status_type, self.activity, self.game])
-        created = tracker.get_rule(watcher_id, target_id) is None
-
-        if self.status_type:
-            tracker._norm_status_type(self.status_type)
-        if self.activity:
-            tracker._norm_activity_name(self.activity)
-        if self.game:
-            tracker._norm_filter_game(self.game)
-
-        if not any([self.status_type, self.activity, self.game, self.silent is not None]):
-            tracker.ensure_rule(watcher_id, target_id)
-            await _ctx_respond(ctx, f"Watching {target_name} with default filters")
-            return
-
-        changes: list[str] = []
-
-        # When `silent` is provided with selectors, those selectors are treated as
-        # silent-rule matchers, not watch-filter edits.
-        if not scoped_silent:
-            if self.status_type and tracker.add_type(watcher_id, target_id, self.status_type):
-                changes.append(f"added type: {self.status_type}")
-            if self.activity and tracker.add_activity(watcher_id, target_id, self.activity):
-                changes.append(f"added activity: {self.activity}")
-            if self.game:
-                result = tracker.add_game(watcher_id, target_id, self.game)
-                if result != "no change":
-                    changes.append(result)
-        if self.silent is not None:
-            if scoped_silent:
-                changes.extend(
-                    tracker.set_rule_silent_filtered(
-                        watcher_id,
-                        target_id,
-                        status_type=self.status_type,
-                        activity=self.activity,
-                        game=self.game,
-                        silent=self.silent,
-                    )
-                )
-            elif tracker.set_rule_silent(watcher_id, target_id, self.silent):
-                changes.append(f"default silent: {self.silent}")
-
-        if not changes and not created:
-            await _ctx_respond(ctx, f"No changes for {target_name}")
-            return
-        if not changes and created:
-            await _ctx_respond(ctx, f"Watching {target_name} with default filters")
-            return
-
-        await _ctx_respond(ctx, f"Updated watch for {target_name}\n" + "\n".join(f"- {line}" for line in changes))
-
-
-@group_online.register
-class CMD_OnlineRemove(
-    lightbulb.SlashCommand,
-    name="remove",
-    description="Remove filters from a watch config",
-    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
-):
-    user = lightbulb.user("user", "Watched user")  # type: ignore
-    status_type = lightbulb.string("type", "Status type", autocomplete=ac_type_remove, default=None)  # type: ignore
-    game = lightbulb.string("game", "Game filter", autocomplete=ac_game_remove, default=None)  # type: ignore
-    activity = lightbulb.string("activity", "Activity filter", autocomplete=ac_activity_remove, default=None)  # type: ignore
-
-    @lightbulb.invoke
-    async def invoke(
-        self,
-        ctx: lightbulb.Context,
-        acl: Access_Control,
-        tracker: Online_Tracker,
-        names: Name_Cache,
+        event: hikari.PresenceUpdateEvent,
         bot: hikari.GatewayBot,
+        names: Name_Cache | None = None,
     ):
-        await acl.perm_check(ctx.user.id, acl.LvL.guest)
-        target_id = _extract_user_id(self.user)
-        if target_id is None:
-            raise ValueError("Invalid target user")
-        if tracker.is_ignored_user(target_id):
-            raise ValueError("That user is ignored")
+        new_presence = event.presence
+        user_id = new_presence.user_id
+        if self.is_ignored_user(user_id):
+            return
+        now = datetime.now(timezone.utc)
+        prev_snapshot = self._snapshots.get(user_id)
+        event_old = self._snapshot_from_presence(event.old_presence) if event.old_presence else None
+        deferred_old = self._deferred_presence_baselines.get(user_id)
+        old_snapshot = deferred_old or prev_snapshot or event_old
+        new_snapshot = self._snapshot_from_presence(new_presence)
 
-        watcher_id = ctx.user.id
-        target_name = await names.best_known(target_id, f"<@{target_id}>")
-
-        rule = tracker.get_rule(watcher_id, target_id)
-        if not rule:
-            await _ctx_respond(ctx, f"No watch config found for {target_name}")
+        if prev_snapshot == new_snapshot:
             return
 
-        if not any([self.status_type, self.activity, self.game]):
-            await _ctx_respond(ctx, "No filters passed. Use `/online unwatch` to clear all config for this user")
+        self._snapshots[user_id] = new_snapshot
+        self._update_game_sessions(user_id, new_snapshot, now)
+        self._record_seen_games(user_id, new_snapshot)
+        self._maybe_queue_nickname_for_snapshot(user_id, new_snapshot, bot)
+
+        if now < self.ready_at:
+            if old_snapshot is not None:
+                self._queue_deferred_presence_flush(user_id, old_snapshot, bot, names)
             return
 
-        changes: list[str] = []
-        if self.status_type and tracker.remove_type(watcher_id, target_id, self.status_type):
-            changes.append(f"removed type: {self.status_type}")
-        if self.activity and tracker.remove_activity(watcher_id, target_id, self.activity):
-            changes.append(f"removed activity: {self.activity}")
-        if self.game:
-            result = tracker.remove_game(watcher_id, target_id, self.game)
-            if result not in {"no change", "no watch config"}:
-                changes.append(result)
+        if deferred_old is not None:
+            self._deferred_presence_baselines.pop(user_id, None)
+            self._cancel_deferred_presence_flush(user_id)
+            old_snapshot = deferred_old
 
-        if not changes:
-            await _ctx_respond(ctx, f"No matching filters were set for {target_name}")
+        if not old_snapshot:
             return
 
-        await _ctx_respond(ctx, f"Updated watch for {target_name}\n" + "\n".join(f"- {line}" for line in changes))
-
-
-@group_online.register
-class CMD_OnlineUnwatch(
-    lightbulb.SlashCommand,
-    name="unwatch",
-    description="Remove all watch config for a user",
-    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
-):
-    user = lightbulb.user("user", "Watched user", default=None)  # type: ignore
-    ignore_me = lightbulb.boolean(
-        "ignore_me",
-        "Toggle yourself in ignored-users list",
-        default=False,
-    )
-
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker, names: Name_Cache):
-        await acl.perm_check(ctx.user.id, acl.LvL.guest)
-        watcher_id = ctx.user.id
-        target_id = _extract_user_id(self.user) if self.user else None
-        if self.user and target_id is None:
-            raise ValueError("Invalid target user")
-
-        if target_id is not None and tracker.is_ignored_user(target_id):
-            if not (self.ignore_me and target_id == watcher_id):
-                raise ValueError("That user is ignored")
-
-        if target_id is None and not self.ignore_me:
-            raise ValueError("Provide a `user` or set `ignore_me: true`")
-
-        lines: list[str] = []
-        if target_id is not None:
-            target_name = await names.best_known(target_id, f"<@{target_id}>")
-            if tracker.remove_rule(watcher_id, target_id):
-                lines.append(f"Stopped watching {target_name}")
-            else:
-                lines.append(f"No watch config found for {target_name}")
-
-        if self.ignore_me:
-            now_ignored = tracker.toggle_ignored_user(watcher_id)
-            if now_ignored:
-                lines.append("You are now ignored by online tracking")
-            else:
-                lines.append("You are no longer ignored by online tracking")
-
-        await _ctx_respond(ctx, "\n".join(lines))
-
-
-@group_online.register
-class CMD_OnlineDrink(
-    lightbulb.SlashCommand,
-    name="drink",
-    description="Toggle hydration reminders for a game",
-    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
-):
-    game = lightbulb.string("game", "Game from your play history", autocomplete=ac_drink_games)  # type: ignore
-    mode = lightbulb.string(
-        "mode",
-        "Include only listed games or exclude listed games",
-        choices=[lightbulb.Choice("include", "include"), lightbulb.Choice("exclude", "exclude")],
-        default=None,
-    )
-
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker):
-        await acl.perm_check(ctx.user.id, acl.LvL.guest)
-
-        action, rule = tracker.toggle_drink_game(ctx.user.id, self.game, self.mode)
-        game_name = tracker._display_game(ctx.user.id, tracker._norm_game(self.game))
-
-        await _ctx_respond(ctx, f"Drink reminder {action}: {game_name}\n{_drink_summary(tracker, ctx.user.id, rule)}")
-
-
-@group_online.register
-class CMD_OnlineAccount(
-    lightbulb.SlashCommand,
-    name="account",
-    description="Manage external platform account IDs",
-    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
-):
-    platform = lightbulb.string(
-        "platform", "Platform id namespace (omit to list all)", autocomplete=ac_platform_ids, default=None
-    )  # type: ignore
-    platform_id = lightbulb.string("id", "Platform account id (omit to show current mapping)", default=None)  # type: ignore
-    clear = lightbulb.boolean("clear", "Clear the stored mapping for this platform", default=False)
-    user = lightbulb.user("user", "Optional target user (sudo only)", default=None)  # type: ignore
-
-    @lightbulb.invoke
-    async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, names: Name_Cache):
-        await acl.perm_check(ctx.user.id, acl.LvL.guest)
-
-        target_id = _extract_user_id(self.user) if self.user else ctx.user.id
-        if target_id is None:
-            raise ValueError("Invalid target user")
-        if self.user and target_id != ctx.user.id:
-            await acl.perm_check(ctx.user.id, acl.LvL.sudo)
-
-        target_name = await names.best_known(target_id, f"<@{target_id}>")
-
-        if self.clear and self.platform_id is not None:
-            raise ValueError("Use either `clear:true` or `id`, not both")
-
-        platform = str(self.platform).strip().lower() if self.platform else ""
-        if not platform:
-            if self.clear or self.platform_id is not None:
-                raise ValueError("`platform` is required when using `id` or `clear`")
-            await _ctx_respond(ctx, f"External ids for {target_name}\n{_platform_id_summary(names, target_id)}")
-            return
-        if platform not in ACCOUNT_ID_PLATFORM_SET:
-            raise ValueError(f"Unknown platform: {platform}")
-
-        def _set_id(value: object | None) -> bool:
-            return names.set_platform_id(int(target_id), platform, value)
-
-        def _get_id() -> str | None:
-            return names.get_platform_id(int(target_id), platform)
-
-        if self.clear:
-            changed = _set_id(None)
-            if changed:
-                await _ctx_respond(
-                    ctx,
-                    f"Cleared `{platform}` id for {target_name}\n{_platform_id_summary(names, target_id)}",
-                )
-            else:
-                await _ctx_respond(
-                    ctx,
-                    f"No `{platform}` id set for {target_name}\n{_platform_id_summary(names, target_id)}",
-                )
-            return
-
-        if self.platform_id is None:
-            current = _get_id()
-            if current:
-                await _ctx_respond(
-                    ctx,
-                    f"`{platform}` id for {target_name}: `{current}`\n{_platform_id_summary(names, target_id)}",
-                )
-            else:
-                await _ctx_respond(
-                    ctx,
-                    f"No `{platform}` id set for {target_name}\n{_platform_id_summary(names, target_id)}",
-                )
-            return
-
-        changed = _set_id(self.platform_id)
-        current = _get_id()
-        if changed and current:
-            await _ctx_respond(
-                ctx,
-                f"Set `{platform}` id for {target_name}: `{current}`\n{_platform_id_summary(names, target_id)}",
-            )
-            return
-        if current:
-            await _ctx_respond(
-                ctx,
-                f"No change: `{platform}` id for {target_name} is already `{current}`\n"
-                f"{_platform_id_summary(names, target_id)}",
-            )
-            return
-        raise RuntimeError(f"Failed to set `{platform}` id for {target_name}")
-
-
-@group_online.register
-class CMD_OnlineNickname(
-    lightbulb.SlashCommand,
-    name="nickname",
-    description="Set an auto-nickname rule from your presence mode",
-    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
-):
-    nick = lightbulb.string("nick", "Nickname to use in the configured guild")  # type: ignore
-    mode = lightbulb.string(
-        "mode",
-        "Presence mode",
-        choices=[
-            lightbulb.Choice("online", "online"),
-            lightbulb.Choice("offline", "offline"),
-            lightbulb.Choice("idle", "idle"),
-            lightbulb.Choice("dnd", "dnd"),
-        ],
-    )
-    platform = lightbulb.string(
-        "platform",
-        "Optional platform override (omit for all platforms)",
-        choices=[
-            lightbulb.Choice("desktop", "desktop"),
-            lightbulb.Choice("mobile", "mobile"),
-            lightbulb.Choice("web", "web"),
-        ],
-        default=None,
-    )
-
-    @lightbulb.invoke
-    async def invoke(
-        self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker, bot: hikari.GatewayBot
-    ):
-        await acl.perm_check(ctx.user.id, acl.LvL.guest)
-        changed = tracker.set_nick_rule(ctx.user.id, self.nick, self.mode, self.platform)
-        await tracker.refresh_nickname(ctx.user.id, bot)
-
-        platform = self.platform or "all"
-        if changed:
-            await _ctx_respond(
-                ctx,
-                f"Saved nickname rule: {self.mode}/{platform} -> {self.nick}\n"
-                f"{_nickname_summary(tracker, ctx.user.id)}\n"
-                f"Changes are throttled to about {int(NICKNAME_CHANGE_DELAY.total_seconds())}s per update",
-            )
-            return
-
-        await _ctx_respond(
-            ctx,
-            f"No change: {self.mode}/{platform} already points to `{self.nick}`\n{_nickname_summary(tracker, ctx.user.id)}",
-        )
-
-
-@group_online.register
-class CMD_OnlineNickClear(
-    lightbulb.SlashCommand,
-    name="nick_clear",
-    description="Clear an auto-nickname rule",
-    hooks=[lightbulb.prefab.sliding_window(8, 2, "user")],
-):
-    entry = lightbulb.string("entry", "Nickname rule: <nick> (<state>)[<platforms>]", autocomplete=ac_nick_clear_entry)  # type: ignore
-
-    @lightbulb.invoke
-    async def invoke(
-        self, ctx: lightbulb.Context, acl: Access_Control, tracker: Online_Tracker, bot: hikari.GatewayBot
-    ):
-        await acl.perm_check(ctx.user.id, acl.LvL.guest)
-        selected = tracker.describe_nick_clear_token(self.entry)
-        removed = tracker.clear_nick_by_token(ctx.user.id, self.entry)
-        await tracker.refresh_nickname(ctx.user.id, bot, force_clear=not tracker.nick_rules.get(ctx.user.id))
-
-        if not removed:
-            await _ctx_respond(
-                ctx,
-                f"No matching nickname rule found for `{selected}`\n{_nickname_summary(tracker, ctx.user.id)}",
-            )
-            return
-
-        await _ctx_respond(
-            ctx,
-            f"Removed `{selected}` ({removed} entr{'y' if removed == 1 else 'ies'})\n"
-            f"{_nickname_summary(tracker, ctx.user.id)}",
-        )
-
-
-@group_online.register
-class CMD_OnlineList(
-    lightbulb.SlashCommand,
-    name="list",
-    description="List your online watch config",
-    hooks=[lightbulb.prefab.sliding_window(6, 2, "user")],
-):
-    user = lightbulb.user("user", "Optional target user", default=None)  # type: ignore
-    file = lightbulb.attachment(
-        "file",
-        "Optional JSON config file exported by this command; uploads replace your config",
-        default=None,
-    )
-
-    @lightbulb.invoke
-    async def invoke(
-        self,
-        ctx: lightbulb.Context,
-        acl: Access_Control,
-        tracker: Online_Tracker,
-        names: Name_Cache,
-        bot: hikari.GatewayBot,
-    ):
-        await acl.perm_check(ctx.user.id, acl.LvL.guest)
-        watcher_id = ctx.user.id
-
-        if self.file:
-            if self.user:
-                raise ValueError("`user` can't be used with `file` import")
-            await _ctx_defer(ctx)
-            path = await File_Utils.download_temp(self.file)
-            try:
-                payload = json.loads(path.read_text(config.STR_ENCODE))
-            except json.JSONDecodeError as xcp:
-                raise ValueError(f"Invalid JSON file: {xcp}") from xcp
-            if not isinstance(payload, dict):
-                raise ValueError("Invalid JSON file: top-level object expected")
-            result = tracker.apply_user_config(watcher_id, payload)
-            await tracker.refresh_nickname(watcher_id, bot, force_clear=not tracker.nick_rules.get(watcher_id))
-            await _ctx_respond(
-                ctx,
-                "Online config updated from file\n"
-                f"- watches: {result['watches']}\n"
-                f"- drink games: {result['drink_games']}\n"
-                f"- nicknames: {result['nicknames']}\n"
-                f"- skipped ignored users: {result['skipped_ignored_users']}",
-            )
-            return
-
-        target_id: hikari.Snowflake | None = None
-        if self.user:
-            target_id = _extract_user_id(self.user)
-            if target_id is None:
-                raise ValueError("Invalid target user")
-            if tracker.is_ignored_user(target_id):
-                raise ValueError("That user is ignored")
-
-        exported = tracker.export_user_config(watcher_id, target_id=target_id)
-        if target_id:
-            target_name = await names.best_known(target_id, f"<@{target_id}>")
-            filename = f"online_config_{target_id}.json"
-            msg = f"Online config export for {target_name}"
-        else:
-            filename = "online_config.json"
-            msg = "Online config export. Edit and upload with `/online list file:<attachment>` to apply"
-        payload = json.dumps(exported, indent=4, sort_keys=False).encode(config.STR_ENCODE)
-        await _ctx_respond(ctx, msg, attachment=hikari.Bytes(payload, filename))
-
-
-# AiviA APasz
+        await self._dispatch_presence_change(user_id, old_snapshot, new_snapshot, bot, names)

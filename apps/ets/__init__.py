@@ -69,8 +69,10 @@ class ETS_Settings(App_Settings):
 
 class ETS(App):
     _instance = None
+    chat_relay_outbound = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
+        self.manage_embed_color = 0x2563EB
         self.proc_name = "eurotrucks2_server"
         self.proc_cmd = [self.proc_name]
         file_settings = cfg.directory.absolute() / "home_data" / "Euro Truck Simulator 2" / "server_config.sii"
@@ -78,9 +80,6 @@ class ETS(App):
         self.cmd_cwd = cfg.directory.absolute() / "bin" / "linux_x64"
 
         self.process = None
-        chat_channel = config.env_opt("ETS_CHAT_CHANNEL")
-        if chat_channel:
-            cfg.chat_channel = chat_channel
         super().__init__(bot, am, cfg, ETS_Settings(file_settings))
         self.act_err_threshold = 100
 

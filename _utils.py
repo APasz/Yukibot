@@ -567,7 +567,7 @@ class Utilities:
     def linkify(target: Path) -> tuple[str, Path]:
         up_target = config.DIR_UPLOAD / target.name
         up_target = File_Utils.link(target, up_target, overwrite=None)
-        return (config.PUBLIC_URL_BASE + target.name, up_target)
+        return (config.PUBLIC_UPLOADS_BASE_URL + target.name, up_target)
 
     @staticmethod
     def is_awaitable(func: Callable[[], Any]) -> bool:

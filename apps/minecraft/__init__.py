@@ -91,7 +91,10 @@ class Minecraft_Settings(App_Settings):
 
 
 class Minecraft(App):
+    chat_relay_outbound = True
+
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
+        self.manage_embed_color = 0x22C55E
         self.proc_name = "java"
         self.proc_cmd = [self.proc_name, "nogui"]
         file_settings = cfg.directory.absolute() / "server.properties"
@@ -220,8 +223,8 @@ class Matchers:
             player, content = match.groups()
             if content and "CICode" in content:
                 content = CICODE_RE.sub(self._deCICodeify, content).strip()
-
-            DC_Relay.add(DC_Bound(self.app, content, player))
+            if content and not content.startswith(self.app.cfg.chat_ignore_symbol):
+                DC_Relay.add(DC_Bound(self.app, content, player))
 
     async def match_death(self, line: str):
         if match := DEATH_RE.match(line):

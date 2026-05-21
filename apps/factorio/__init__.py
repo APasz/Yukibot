@@ -68,8 +68,10 @@ class Factorio_Settings(App_Settings):
 
 class Factorio(App):
     _instance = None
+    chat_relay_outbound = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
+        self.manage_embed_color = 0xDC6B0F
         self.proc_name = "factorio"
         self.proc_cmd = [self.proc_name, "--start-server"]
         file_settings = cfg.directory.absolute() / "data" / "server-settings.json"
@@ -85,9 +87,6 @@ class Factorio(App):
         ]
 
         self.process = None
-        chat_channel = config.env_opt("FACTORIO_CHAT_CHANNEL")
-        if chat_channel:
-            cfg.chat_channel = chat_channel
         super().__init__(bot, am, cfg, Factorio_Settings(file_settings), Mod_Factorio)
         self.act_err_threshold = 100
         self._lock = self.directory / ".lock"
@@ -256,6 +255,7 @@ class Factorio_Updater(Update_Manager):
         pointer = await self.download(pointer, ver_str)
         if not pointer:
             raise FileNotFoundError("The download has gone walkabouts")
+        return ver_str
 
     async def mods(self) -> list[str] | None:
         await super().mods()

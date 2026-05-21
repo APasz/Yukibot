@@ -6,19 +6,25 @@ import io
 import re
 import wave
 from collections import deque
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, Iterable, cast
+from collections.abc import Iterable, Mapping, Sized
+from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, cast
 from urllib.parse import unquote, urlparse
 
 import emoji
 import hikari
 import hikariwave
+from hikari import messages as hikari_messages
 
 import config
 from cmd_voice_common import (
     CHANNEL_MENTION_RE,
     DISCORD_CUSTOM_EMOJI_RE,
     EMOJI_TAG_RE,
+    PronunciationFormat,
+    PronunciationOverride,
     SUBSTITUTION_TOKEN_RE,
     TOKEN_RE,
     URL_RE,
@@ -30,6 +36,7 @@ from cmd_voice_common import (
     SpeechToken,
     SpeechTokenKind,
     TextCorrectionCatalog,
+    TextSubstitutionRule,
     UserVoiceSettings,
     VoiceConnectBackoff,
     VoiceJob,
@@ -49,12 +56,54 @@ DISCORD_TRIPLE_STAR_RE = re.compile(r"\*\*\*(.+?)\*\*\*", re.DOTALL)
 DISCORD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
 DISCORD_ITALIC_STAR_RE = re.compile(r"(?<!\*)\*(?![\s*])(.+?)(?<![\s*])\*(?!\*)", re.DOTALL)
 DISCORD_ITALIC_UNDERSCORE_RE = re.compile(r"(?<![\w_])_(?![\s_])(.+?)(?<![\s_])_(?![\w_])", re.DOTALL)
-COMPACT_UNIT_RE = re.compile(r"^([^\d]*)(\d+)(km|m|s|h|d)([^\d]*)$")
-SLASH_RATIO_RE = re.compile(r"^([^\d]*)(\d+)/(\d+)([^\d]*)$")
+NUMERIC_VALUE_RE = r"\d+(?:\.\d+)?"
+COMPACT_UNIT_RE = re.compile(rf"^([^\w.]*)({NUMERIC_VALUE_RE})(km|m|s|h|d)([^\w]*)$", re.IGNORECASE)
+SLASH_RATIO_RE = re.compile(rf"^([^\w.]*)({NUMERIC_VALUE_RE})/({NUMERIC_VALUE_RE})([^\w]*)$")
+CURRENCY_AMOUNT_RE = re.compile(
+    rf"(?<!\w)(?:(?P<prefix>[$£€Є¥₩₹])\s*(?P<prefix_value>{NUMERIC_VALUE_RE})|(?P<suffix_value>{NUMERIC_VALUE_RE})\s*(?P<suffix>[$£€Є¥₩₹]))(?!\w)"
+)
 WITH_SHORTHAND_RE = re.compile(r"^([^\w]*)(w/|w/o)([^\w]*)$", re.IGNORECASE)
 
 
+@dataclass(slots=True, frozen=True)
+class SpokenQuantityForms:
+    singular: str
+    plural: str
+
+
+@dataclass(slots=True, frozen=True)
+class SpeechNormalisationContext:
+    source_user_id: int | None
+    selected_voice: str
+    pronunciations: dict[str, PronunciationOverride]
+    substitutions: dict[str, TextSubstitutionRule]
+    fuzzy_autocorrect_enabled: bool
+
+
 class VoiceTTSRuntimeMixin:
+    _SPOKEN_LINK_HOST_ALIASES: ClassVar[dict[str, str]] = {
+        "youtu.be": "youtube",
+        "youtube.com": "youtube",
+    }
+    _COMPACT_UNIT_WORDS: ClassVar[dict[str, SpokenQuantityForms]] = {
+        "km": SpokenQuantityForms("kilometer", "kilometers"),
+        "m": SpokenQuantityForms("minute", "minutes"),
+        "s": SpokenQuantityForms("second", "seconds"),
+        "h": SpokenQuantityForms("hour", "hours"),
+        "d": SpokenQuantityForms("day", "days"),
+    }
+    _CURRENCY_SYMBOL_WORDS: ClassVar[dict[str, SpokenQuantityForms]] = {
+        "$": SpokenQuantityForms("dollar", "dollars"),
+        "£": SpokenQuantityForms("pound", "pounds"),
+        "€": SpokenQuantityForms("euro", "euros"),
+        "Є": SpokenQuantityForms("euro", "euros"),
+        "¥": SpokenQuantityForms("yen", "yen"),
+        "₩": SpokenQuantityForms("won", "won"),
+        "₹": SpokenQuantityForms("rupee", "rupees"),
+    }
+    _REPLY_PREFIX: ClassVar[str] = "is reply..."
+    _FORWARD_PREFIX: ClassVar[str] = "is forwarded..."
+
     if TYPE_CHECKING:
         bot: hikari.GatewayBot
         _voice_client: hikariwave.VoiceClient
@@ -98,6 +147,12 @@ class VoiceTTSRuntimeMixin:
         def user_autocorrect_enabled(self, user_id: hikari.Snowflakeish) -> bool: ...
         def user_voice_variant(self, user_id: hikari.Snowflakeish) -> tuple[str, str | None]: ...
         def user_voice_variant_for_say(self, user_id: hikari.Snowflakeish) -> tuple[str, str | None]: ...
+        def user_pronunciations(
+            self,
+            user_id: hikari.Snowflakeish,
+            voice: str | None = None,
+        ) -> dict[str, PronunciationOverride]: ...
+        def voice_supports_ipa_pronunciations(self, voice: str) -> bool: ...
         def _preview(self, text: str) -> str: ...
 
         @staticmethod
@@ -203,7 +258,23 @@ class VoiceTTSRuntimeMixin:
         if not target or event.channel_id != target.tts_channel:
             return
 
-        raw = self._message_speech_input((event.content or "").strip(), attachment_count=len(event.message.attachments))
+        content = (event.content or "").strip()
+        if content.startswith(config.CHAT_IGNORE):
+            preview = self._preview(content)
+            log.info(
+                f"TTS message {event.message_id=} {event.guild_id=} {event.channel_id=} {event.author_id=} "
+                f"attachments={len(event.message.attachments)} preview={preview!r} said=no reason=chat_ignore_prefix"
+            )
+            return
+
+        raw = self._message_speech_input(
+            content,
+            attachment_count=len(event.message.attachments),
+            sticker_count=len(event.message.stickers),
+            is_reply=self._is_reply_message(event.message),
+            is_forward=self._is_forward_message(event.message),
+            forwarded_content=self._forwarded_snapshot_speech_input(event.message, event.author_id, event.guild_id),
+        )
         preview = self._preview(raw)
         base_log = (
             f"TTS message {event.message_id=} {event.guild_id=} {event.channel_id=} {event.author_id=} "
@@ -215,9 +286,6 @@ class VoiceTTSRuntimeMixin:
             return
         if not self.is_user_listening(event.author_id):
             log.info(f"{base_log} said=no reason=wrong_user")
-            return
-        if raw.startswith(config.CHAT_IGNORE):
-            log.info(f"{base_log} said=no reason=chat_ignore_prefix")
             return
         if reason := self._queue_preflight_reason(event.guild_id, require_enabled=True):
             log.info(f"{base_log} said=no reason={reason}")
@@ -247,13 +315,120 @@ class VoiceTTSRuntimeMixin:
             f"voice={voice_spec} spoken={self._preview(spoken.render())!r}"
         )
 
+    @classmethod
+    def _is_reply_message(cls, message: hikari.Message) -> bool:
+        return message.type is hikari.MessageType.REPLY
+
     @staticmethod
-    def _message_speech_input(raw_content: str, *, attachment_count: int) -> str:
-        if raw_content:
-            return raw_content
+    def _is_forward_message(message: hikari.Message) -> bool:
+        reference = message.message_reference
+        return (
+            reference is not None
+            and getattr(reference, "type", None) is hikari_messages.MessageReferenceType.FORWARD
+        )
+
+    @classmethod
+    def _message_speech_input(
+        cls,
+        raw_content: str,
+        *,
+        attachment_count: int,
+        sticker_count: int = 0,
+        is_reply: bool = False,
+        is_forward: bool = False,
+        forwarded_content: str = "",
+    ) -> str:
+        content = cls._compose_message_speech_body(
+            raw_content,
+            attachment_count=attachment_count,
+            sticker_count=sticker_count,
+        )
+        forwarded = forwarded_content.strip()
+        if forwarded:
+            content = f"{content}... {forwarded}" if content else forwarded
+
+        prefixes: list[str] = []
+        if is_forward:
+            prefixes.append(cls._FORWARD_PREFIX)
+        if is_reply:
+            prefixes.append(cls._REPLY_PREFIX)
+
+        if prefixes:
+            prefix_text = " ".join(prefixes)
+            if content:
+                return f"{prefix_text} {content}"
+            return prefix_text
+        return content
+
+    @classmethod
+    def _compose_message_speech_body(
+        cls,
+        raw_content: str,
+        *,
+        attachment_count: int,
+        sticker_count: int = 0,
+        include_extras_with_content: bool = False,
+    ) -> str:
+        content = raw_content.strip()
+        extras = cls._message_extra_speech(attachment_count=attachment_count, sticker_count=sticker_count)
+        if content:
+            if extras and include_extras_with_content:
+                return f"{content}, {extras}"
+            return content
+        return extras
+
+    @staticmethod
+    def _message_extra_speech(*, attachment_count: int, sticker_count: int) -> str:
+        extras: list[str] = []
         if attachment_count > 0:
-            return "attachment"
-        return ""
+            extras.append("attachment" if attachment_count == 1 else f"{attachment_count} attachments")
+        if sticker_count > 0:
+            extras.append("sticker" if sticker_count == 1 else f"{sticker_count} stickers")
+        return ", ".join(extras)
+
+    @staticmethod
+    def _collection_size(value: object) -> int:
+        if value is None or value is hikari.UNDEFINED:
+            return 0
+        try:
+            return len(cast(Sized, value))
+        except TypeError:
+            return 0
+
+    def _forwarded_snapshot_speech_input(
+        self,
+        message: hikari.Message,
+        source_user_id: hikari.Snowflakeish,
+        guild_id: hikari.Snowflake | None,
+    ) -> str:
+        snapshots = getattr(message, "message_snapshots", hikari.UNDEFINED)
+        if snapshots is None or snapshots is hikari.UNDEFINED:
+            return ""
+        try:
+            snapshot_items = tuple(cast(Iterable[object], snapshots))
+        except TypeError:
+            return ""
+
+        rendered_snapshots: list[str] = []
+        for snapshot in snapshot_items:
+            content = self._replace_mentions_with_context(
+                getattr(snapshot, "content", "") or "",
+                source_user_id=int(source_user_id),
+                guild_id=guild_id,
+                user_mentions=cast(
+                    Mapping[hikari.Snowflake, object] | hikari.UndefinedType,
+                    getattr(snapshot, "user_mentions", hikari.UNDEFINED),
+                ),
+            )
+            rendered = self._compose_message_speech_body(
+                content,
+                attachment_count=self._collection_size(getattr(snapshot, "attachments", None)),
+                sticker_count=self._collection_size(getattr(snapshot, "stickers", None)),
+                include_extras_with_content=True,
+            )
+            if rendered:
+                rendered_snapshots.append(rendered)
+        return "... ".join(rendered_snapshots)
 
     async def queue_say(
         self,
@@ -295,24 +470,37 @@ class VoiceTTSRuntimeMixin:
         if not text:
             return SpeechContent(())
 
+        context = self._speech_normalisation_context(event=event, user_id=user_id)
         self._refresh_voice_link_rules_if_needed()
-        text = await self._replace_links_async(text)
+        text = await self._replace_links_async(text, substitutions=context.substitutions)
         return self._normalise_for_speech(text, event=event, user_id=user_id, links_resolved=True)
 
-    async def _replace_links_async(self, text: str) -> str:
+    async def _replace_links_async(
+        self,
+        text: str,
+        *,
+        substitutions: Mapping[str, TextSubstitutionRule] | None = None,
+    ) -> str:
         parts: list[str] = []
         cursor = 0
         for match in URL_RE.finditer(text):
             parts.append(text[cursor : match.start()])
-            parts.append(await self._replace_link_async(match.group(0)))
+            parts.append(await self._replace_link_async(match.group(0), substitutions=substitutions))
             cursor = match.end()
         parts.append(text[cursor:])
         return "".join(parts)
 
-    async def _replace_link_async(self, raw_url: str) -> str:
+    async def _replace_link_async(
+        self,
+        raw_url: str,
+        *,
+        substitutions: Mapping[str, TextSubstitutionRule] | None = None,
+    ) -> str:
         trimmed_url = raw_url.rstrip(".,!?;:")
         if not trimmed_url:
             return " "
+        if substituted := self._url_substitution_target(trimmed_url, substitutions=substitutions):
+            return f" {substituted} "
 
         parsed = urlparse(trimmed_url if "://" in trimmed_url else f"https://{trimmed_url}")
         hostname = parsed.hostname
@@ -941,20 +1129,11 @@ class VoiceTTSRuntimeMixin:
         if not text:
             return SpeechContent(())
 
-        pronunciations: dict[str, str] = {}
-        substitutions: dict[str, str] = {}
-        fuzzy_autocorrect_enabled = True
-        source_user: int | None = None
-        if event is not None:
-            source_user = int(event.author_id)
-        elif user_id is not None:
-            source_user = int(user_id)
-        if source_user is not None:
-            settings = self._user_settings.get(source_user)
-            if settings:
-                pronunciations = settings.pronunciations
-                substitutions = settings.substitutions
-                fuzzy_autocorrect_enabled = settings.autocorrect
+        context = self._speech_normalisation_context(event=event, user_id=user_id)
+        selected_voice = context.selected_voice
+        pronunciations = context.pronunciations
+        substitutions = context.substitutions
+        fuzzy_autocorrect_enabled = context.fuzzy_autocorrect_enabled
 
         if event:
             text = self._replace_mentions_with_names(text, event)
@@ -963,10 +1142,11 @@ class VoiceTTSRuntimeMixin:
             text = CHANNEL_MENTION_RE.sub(" channel ", text)
         if not links_resolved:
             self._refresh_voice_link_rules_if_needed()
-            text = URL_RE.sub(lambda match: self._replace_link(match.group(0)), text)
+            text = URL_RE.sub(lambda match: self._replace_link(match.group(0), substitutions=substitutions), text)
         text = self._replace_discord_formatting(text)
         text = DISCORD_CUSTOM_EMOJI_RE.sub(lambda m: f":{m.group(1)}:", text)
         text = emoji.demojize(text, language="en")
+        text = self._expand_currency_speech_text(text)
 
         spoken_tokens: list[SpeechToken] = []
         repeat_tag: str | None = None
@@ -977,7 +1157,7 @@ class VoiceTTSRuntimeMixin:
             nonlocal repeat_count
             if not repeat_tag:
                 return
-            label = self._emoji_tag_to_words(repeat_tag, pronunciations, substitutions)
+            label = self._emoji_tag_to_words(repeat_tag, selected_voice, pronunciations, substitutions)
             spoken_tokens.append(SpeechToken(label, SpeechTokenKind.EMOJI, repeat_count))
             repeat_tag = None
             repeat_count = 0
@@ -995,7 +1175,7 @@ class VoiceTTSRuntimeMixin:
 
             flush_repeat()
             if pronunciations:
-                token = self._apply_substitution_token(token, pronunciations)
+                token = self._apply_pronunciation_token(token, selected_voice, pronunciations)
             if substitutions:
                 token = self._apply_substitution_token(token, substitutions)
             token = self._expand_compact_speech_token(token)
@@ -1015,25 +1195,71 @@ class VoiceTTSRuntimeMixin:
             return SpeechContent(())
         return SpeechContent(tokens)
 
-    @staticmethod
-    def _expand_compact_speech_token(token: str) -> str:
+    def _speech_normalisation_context(
+        self,
+        *,
+        event: hikari.GuildMessageCreateEvent | None,
+        user_id: hikari.Snowflakeish | None,
+    ) -> SpeechNormalisationContext:
+        source_user_id: int | None = None
+        if event is not None:
+            source_user_id = int(event.author_id)
+        elif user_id is not None:
+            source_user_id = int(user_id)
+
+        if source_user_id is None:
+            return SpeechNormalisationContext(
+                source_user_id=None,
+                selected_voice=self.voice,
+                pronunciations={},
+                substitutions={},
+                fuzzy_autocorrect_enabled=True,
+            )
+
+        selected_voice, _ = self.user_voice_variant(source_user_id)
+        settings = self._user_settings.get(source_user_id)
+        return SpeechNormalisationContext(
+            source_user_id=source_user_id,
+            selected_voice=selected_voice,
+            pronunciations=self.user_pronunciations(source_user_id, selected_voice),
+            substitutions={} if settings is None else settings.substitutions,
+            fuzzy_autocorrect_enabled=True if settings is None else settings.autocorrect,
+        )
+
+    @classmethod
+    def _expand_compact_speech_token(cls, token: str) -> str:
         if match := COMPACT_UNIT_RE.fullmatch(token):
             lead, raw_value, raw_unit, tail = match.groups()
-            singular, plural = {
-                "km": ("kilometer", "kilometers"),
-                "m": ("minute", "minutes"),
-                "s": ("second", "seconds"),
-                "h": ("hour", "hours"),
-                "d": ("day", "days"),
-            }[raw_unit]
-            unit = singular if raw_value == "1" else plural
-            return f"{lead}{raw_value} {unit}{tail}"
+            forms = cls._COMPACT_UNIT_WORDS[raw_unit.lower()]
+            return f"{lead}{raw_value} {cls._quantity_label(raw_value, forms)}{tail}"
 
         if match := SLASH_RATIO_RE.fullmatch(token):
             lead, left, right, tail = match.groups()
             return f"{lead}{left} out of {right}{tail}"
 
         return token
+
+    @classmethod
+    def _expand_currency_speech_text(cls, text: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            symbol = match.group("prefix") or match.group("suffix")
+            raw_value = match.group("prefix_value") or match.group("suffix_value")
+            if symbol is None or raw_value is None:
+                return match.group(0)
+            forms = cls._CURRENCY_SYMBOL_WORDS.get(symbol)
+            if forms is None:
+                return match.group(0)
+            return f"{raw_value} {cls._quantity_label(raw_value, forms)}"
+
+        return CURRENCY_AMOUNT_RE.sub(replace, text)
+
+    @staticmethod
+    def _quantity_label(raw_value: str, forms: SpokenQuantityForms) -> str:
+        try:
+            numeric_value = Decimal(raw_value)
+        except InvalidOperation:
+            return forms.plural
+        return forms.singular if numeric_value == 1 else forms.plural
 
     @staticmethod
     def _expand_common_shorthand_token(token: str) -> str:
@@ -1087,10 +1313,17 @@ class VoiceTTSRuntimeMixin:
         }[marker]
         return f" {label} {body} "
 
-    def _replace_link(self, raw_url: str) -> str:
+    def _replace_link(
+        self,
+        raw_url: str,
+        *,
+        substitutions: Mapping[str, TextSubstitutionRule] | None = None,
+    ) -> str:
         trimmed_url = raw_url.rstrip(".,!?;:")
         if not trimmed_url:
             return " "
+        if substituted := self._url_substitution_target(trimmed_url, substitutions=substitutions):
+            return f" {substituted} "
 
         parsed = urlparse(trimmed_url if "://" in trimmed_url else f"https://{trimmed_url}")
         hostname = parsed.hostname
@@ -1099,6 +1332,27 @@ class VoiceTTSRuntimeMixin:
 
         spoken = self._describe_link(hostname, parsed.path)
         return f" {spoken} "
+
+    def _url_substitution_target(
+        self,
+        url: str,
+        *,
+        substitutions: Mapping[str, TextSubstitutionRule] | None = None,
+    ) -> str | None:
+        substitution_sources: tuple[Mapping[str, TextSubstitutionRule], ...] = tuple(
+            source
+            for source in (
+                substitutions,
+                self._text_corrections.slang,
+                self._text_corrections.typos,
+            )
+            if source
+        )
+        for source_map in substitution_sources:
+            rule = self._lookup_substitution_rule(url, source_map)
+            if rule is not None:
+                return rule.target
+        return None
 
     def _describe_link(self, hostname: str, path: str) -> str:
         host_candidates = self._link_host_candidates(hostname)
@@ -1117,7 +1371,7 @@ class VoiceTTSRuntimeMixin:
             host_label = self._voice_link_rules.host_labels.get(host_candidate)
             if host_label:
                 return host_label
-        return f"link {host_candidates[0]}"
+        return f"link {self._spoken_link_host(host_candidates[0])}"
 
     @staticmethod
     def _link_host_candidates(hostname: str) -> tuple[str, ...]:
@@ -1128,11 +1382,13 @@ class VoiceTTSRuntimeMixin:
 
     @staticmethod
     def _render_link_rule_template(template: str, hostname: str, match: re.Match[str]) -> str | None:
-        values: dict[str, str] = {"host": hostname}
+        values: dict[str, str] = {"host": VoiceTTSRuntimeMixin._spoken_link_host(hostname)}
         for key, value in match.groupdict().items():
             decoded = unquote(value).strip() if value is not None else ""
+            normalised = VoiceTTSRuntimeMixin._normalise_link_template_value(decoded)
             values[key] = decoded
-            values[f"{key}_words"] = VoiceTTSRuntimeMixin._normalise_link_template_value(decoded)
+            values[f"{key}_norm"] = normalised
+            values[f"{key}_words"] = normalised
 
         try:
             rendered = template.format_map(values)
@@ -1146,6 +1402,20 @@ class VoiceTTSRuntimeMixin:
         cleaned = re.sub(r"[_\-]+", " ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned)
         return cleaned.strip()
+
+    @classmethod
+    def _spoken_link_host(cls, hostname: str) -> str:
+        normalised_host = hostname.lower()
+        if normalised_host.startswith("www."):
+            normalised_host = normalised_host.removeprefix("www.")
+        alias = cls._SPOKEN_LINK_HOST_ALIASES.get(normalised_host)
+        if alias is not None:
+            return alias
+        if normalised_host.endswith(".com"):
+            root = normalised_host[: -len(".com")]
+            if "." not in root:
+                return root
+        return normalised_host
 
     def _truncate_speech_tokens(self, tokens: list[SpeechToken]) -> tuple[SpeechToken, ...]:
         trimmed: list[SpeechToken] = []
@@ -1237,31 +1507,65 @@ class VoiceTTSRuntimeMixin:
         return "".join(rendered)
 
     @staticmethod
-    def _apply_substitution_token(token: str, substitutions: dict[str, str]) -> str:
+    def _lookup_substitution_rule(
+        source: str,
+        substitutions: Mapping[str, TextSubstitutionRule],
+    ) -> TextSubstitutionRule | None:
+        direct = substitutions.get(source)
+        if direct is not None and direct.case_sensitive:
+            return direct
+
+        lowered = substitutions.get(source.lower())
+        if lowered is not None and not lowered.case_sensitive:
+            return lowered
+
+        if direct is not None and not direct.case_sensitive:
+            return direct
+        return None
+
+    @classmethod
+    def _apply_substitution_token(cls, token: str, substitutions: dict[str, TextSubstitutionRule]) -> str:
         match = SUBSTITUTION_TOKEN_RE.fullmatch(token)
         if not match:
             return token
 
         lead, core, tail = match.groups()
-        replacement = substitutions.get(core.lower())
+        rule = cls._lookup_substitution_rule(core, substitutions)
+        if rule is None:
+            return token
+        return f"{lead}{rule.target}{tail}"
+
+    def _apply_pronunciation_token(
+        self,
+        token: str,
+        voice: str,
+        pronunciations: dict[str, PronunciationOverride],
+    ) -> str:
+        match = SUBSTITUTION_TOKEN_RE.fullmatch(token)
+        if not match:
+            return token
+
+        lead, core, tail = match.groups()
+        replacement = pronunciations.get(core.lower())
         if replacement is None:
             return token
+        return f"{lead}{self._render_pronunciation_override(voice, replacement)}{tail}"
+
+    def _apply_exact_correction_token(self, token: str, corrections: dict[str, TextSubstitutionRule]) -> str:
+        direct_rule = self._lookup_substitution_rule(token, corrections)
+        if direct_rule is not None:
+            return direct_rule.target if direct_rule.case_sensitive else self._match_token_case(direct_rule.target, token)
+
+        match = SUBSTITUTION_TOKEN_RE.fullmatch(token)
+        if not match:
+            return token
+
+        lead, core, tail = match.groups()
+        rule = self._lookup_substitution_rule(core, corrections)
+        if rule is None:
+            return token
+        replacement = rule.target if rule.case_sensitive else self._match_token_case(rule.target, core)
         return f"{lead}{replacement}{tail}"
-
-    def _apply_exact_correction_token(self, token: str, corrections: dict[str, str]) -> str:
-        direct_replacement = corrections.get(token.lower())
-        if direct_replacement is not None:
-            return self._match_token_case(direct_replacement, token)
-
-        match = SUBSTITUTION_TOKEN_RE.fullmatch(token)
-        if not match:
-            return token
-
-        lead, core, tail = match.groups()
-        replacement = corrections.get(core.lower())
-        if replacement is None:
-            return token
-        return f"{lead}{self._match_token_case(replacement, core)}{tail}"
 
     def _apply_fuzzy_typo_correction(self, token: str) -> str:
         match = SUBSTITUTION_TOKEN_RE.fullmatch(token)
@@ -1353,24 +1657,71 @@ class VoiceTTSRuntimeMixin:
 
     def _replace_mentions_with_names(self, text: str, event: hikari.GuildMessageCreateEvent) -> str:
         message = event.message
-        member_mentions = message.get_member_mentions()
-        user_mentions = message.user_mentions
-        channel_mentions = message.channel_mentions
+        return self._replace_mentions_with_context(
+            text,
+            source_user_id=int(event.author_id),
+            guild_id=event.guild_id,
+            member_mentions=message.get_member_mentions(),
+            user_mentions=message.user_mentions,
+            channel_mentions=message.channel_mentions,
+        )
+
+    def _replace_mentions_with_context(
+        self,
+        text: str,
+        *,
+        source_user_id: int,
+        guild_id: hikari.Snowflake | None,
+        member_mentions: Mapping[hikari.Snowflake, object] | hikari.UndefinedType = hikari.UNDEFINED,
+        user_mentions: Mapping[hikari.Snowflake, object] | hikari.UndefinedType = hikari.UNDEFINED,
+        channel_mentions: Mapping[hikari.Snowflake, object] | hikari.UndefinedType = hikari.UNDEFINED,
+    ) -> str:
+        user_mention_overrides = self._user_settings.get(source_user_id, UserVoiceSettings()).mention_overrides
+        global_mention_overrides = self._text_corrections.mention_overrides
+
+        def resolved_username(member: object | None = None, user: object | None = None) -> str | None:
+            if member is not None:
+                name = getattr(member, "username", None)
+                if isinstance(name, str) and name:
+                    return name
+                member_user = getattr(member, "user", None)
+                nested_name = getattr(member_user, "username", None)
+                if isinstance(nested_name, str) and nested_name:
+                    return nested_name
+            if user is not None:
+                name = getattr(user, "username", None)
+                if isinstance(name, str) and name:
+                    return name
+            return None
 
         def user_name(match: re.Match[str]) -> str:
             user_id = hikari.Snowflake(int(match.group(1)))
-            name: str | None = None
+            display_name: str | None = None
+            username: str | None = None
 
             if member_mentions is not hikari.UNDEFINED and (member := member_mentions.get(user_id)):
-                name = member.display_name
+                display_name = getattr(member, "display_name", None)
+                username = resolved_username(member=member)
             elif user_mentions is not hikari.UNDEFINED and (user := user_mentions.get(user_id)):
-                name = user.display_name or user.username
-            elif event.guild_id and (member := self.bot.cache.get_member(event.guild_id, user_id)):
-                name = member.display_name
+                username = resolved_username(user=user)
+                display_name = getattr(user, "display_name", None) or username
+            elif guild_id is not None and (member := self.bot.cache.get_member(guild_id, user_id)):
+                display_name = member.display_name
+                username = resolved_username(member=member)
             elif user := self.bot.cache.get_user(user_id):
-                name = user.display_name or user.username
+                username = resolved_username(user=user)
+                display_name = user.display_name or username
 
-            return f" {name or 'user'} "
+            override = user_mention_overrides.get(int(user_id))
+            if override is not None:
+                return f" {override} "
+
+            if display_name is not None and username is not None and display_name == username:
+                global_override = global_mention_overrides.get(int(user_id))
+                if global_override is not None:
+                    return f" {global_override} "
+
+            return f" {display_name or username or 'user'} "
 
         def channel_name(match: re.Match[str]) -> str:
             channel_id = hikari.Snowflake(int(match.group(1)))
@@ -1390,23 +1741,38 @@ class VoiceTTSRuntimeMixin:
     def _emoji_tag_to_words(
         self,
         tag: str,
-        pronunciations: dict[str, str] | None = None,
-        substitutions: dict[str, str] | None = None,
+        voice: str,
+        pronunciations: dict[str, PronunciationOverride] | None = None,
+        substitutions: dict[str, TextSubstitutionRule] | None = None,
     ) -> str:
         raw_name = tag.strip(":").strip().lower()
         for key in self._emoji_tag_substitution_keys(raw_name):
-            replacement = pronunciations.get(key) if pronunciations else None
+            pronunciation = pronunciations.get(key) if pronunciations else None
+            replacement = self._render_pronunciation_override(voice, pronunciation) if pronunciation else None
             if replacement is None:
-                replacement = substitutions.get(key) if substitutions else None
+                substitution = self._lookup_substitution_rule(key, substitutions) if substitutions else None
+                replacement = substitution.target if substitution is not None else None
             if replacement is None:
-                replacement = self._text_corrections.slang.get(key)
+                substitution = self._lookup_substitution_rule(key, self._text_corrections.slang)
+                replacement = substitution.target if substitution is not None else None
             if replacement is None:
-                replacement = self._text_corrections.typos.get(key)
+                substitution = self._lookup_substitution_rule(key, self._text_corrections.typos)
+                replacement = substitution.target if substitution is not None else None
             if replacement is not None:
                 return replacement
 
         name = raw_name.replace("_", " ").replace("-", " ")
         return name.strip() or "emoji"
+
+    def _render_pronunciation_override(self, voice: str, entry: PronunciationOverride) -> str:
+        if entry.format is PronunciationFormat.TEXT:
+            return entry.value
+        if self.voice_supports_ipa_pronunciations(voice):
+            return f"[[{entry.value}]]"
+        log.warning(
+            f"TTS ignored unsupported IPA pronunciation voice={voice!r} value={self._preview(entry.value)!r}"
+        )
+        return entry.value
 
     @staticmethod
     def _emoji_tag_substitution_keys(raw_name: str) -> tuple[str, ...]:

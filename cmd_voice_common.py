@@ -31,6 +31,7 @@ VARIANT_FILE_RE = re.compile(r"!v/(.+?)(?:\s{2,}|\s*$)")
 USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
 CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
 HUGGINGFACE_HOSTS = frozenset({"huggingface.co", "www.huggingface.co"})
+MAX_TTS_VOICES = 25
 
 
 @dataclass(slots=True, frozen=True)
@@ -199,20 +200,41 @@ class HFRepoRef:
     onnx_file: str | None = None
 
 
+class PronunciationFormat(enum.StrEnum):
+    TEXT = "text"
+    IPA = "ipa"
+
+
+@dataclass(slots=True, frozen=True)
+class PronunciationOverride:
+    format: PronunciationFormat
+    value: str
+
+
+@dataclass(slots=True, frozen=True)
+class TextSubstitutionRule:
+    source: str
+    target: str
+    case_sensitive: bool = False
+
+
 @dataclass(slots=True)
 class UserVoiceSettings:
     enabled: bool = False
     autocorrect: bool = True
     voice: str | None = None
     variant: str | None = None
-    pronunciations: dict[str, str] = field(default_factory=dict)
-    substitutions: dict[str, str] = field(default_factory=dict)
+    pronunciations: dict[str, dict[str, PronunciationOverride]] = field(default_factory=dict)
+    mention_overrides: dict[int, str] = field(default_factory=dict)
+    substitutions: dict[str, TextSubstitutionRule] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
 class TextCorrectionCatalog:
-    slang: dict[str, str] = field(default_factory=dict)
-    typos: dict[str, str] = field(default_factory=dict)
+    slang: dict[str, TextSubstitutionRule] = field(default_factory=dict)
+    typos: dict[str, TextSubstitutionRule] = field(default_factory=dict)
+    pronunciations: dict[str, dict[str, PronunciationOverride]] = field(default_factory=dict)
+    mention_overrides: dict[int, str] = field(default_factory=dict)
     protected: frozenset[str] = field(default_factory=frozenset)
     fuzzy_targets: tuple[str, ...] = ()
 

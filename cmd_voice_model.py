@@ -12,7 +12,7 @@ import hikari
 import requests
 
 import config
-from cmd_voice_common import HUGGINGFACE_HOSTS, HFRepoRef, PiperPythonVoiceRuntime, log
+from cmd_voice_common import HUGGINGFACE_HOSTS, HFRepoRef, PiperPythonVoiceRuntime, PronunciationFormat, log
 
 
 class VoiceTTSModelMixin:
@@ -87,11 +87,18 @@ class VoiceTTSModelMixin:
     def _engine_display(self) -> str:
         if not self._engine:
             return "none"
-        if self._engine_kind == "piper" and self._piper_python_loader:
+        if self._engine_kind == "piper":
             if self._engine == "python":
-                return "piper:python"
-            return f"{self._engine_kind}:python+{self._engine}"
-        return f"{self._engine_kind}:{self._engine}"
+                return "Python Piper"
+            if self._piper_python_loader:
+                return "Python Piper"
+            return "Piper"
+        if self._engine_kind == "espeak":
+            engine_name = Path(self._engine).name.lower()
+            if engine_name == "espeak-ng":
+                return "eSpeak NG"
+            return "eSpeak"
+        return self._engine_kind.title()
 
     def _initial_piper_voice(self) -> str:
         if model := config.TTS_PIPER_MODEL:
@@ -724,14 +731,21 @@ class VoiceTTSModelMixin:
         return value
 
     @classmethod
-    def _normalise_substitution_key(cls, source: str) -> str:
-        key = source.strip().lower()
+    def _normalise_substitution_key(cls, source: str, *, case_sensitive: bool = False) -> str:
+        key = source.strip()
         if not key:
             raise ValueError("source must not be empty")
+        if not case_sensitive:
+            key = key.lower()
         if len(key) > cls._MAX_SUBSTITUTION_KEY_CHARS:
             raise ValueError(f"source is too long (max {cls._MAX_SUBSTITUTION_KEY_CHARS} chars)")
-        if not re.fullmatch(r"[a-z0-9][a-z0-9'_-]*", key):
-            raise ValueError("source may only include letters, numbers, apostrophes, underscores, and hyphens")
+        if re.fullmatch(r"(?:https?://|www\.)\S+", key, re.IGNORECASE):
+            return key
+        pattern = r"[A-Za-z0-9][A-Za-z0-9'_-]*" if case_sensitive else r"[a-z0-9][a-z0-9'_-]*"
+        if not re.fullmatch(pattern, key):
+            raise ValueError(
+                "source may only include letters, numbers, apostrophes, underscores, hyphens, or a full URL"
+            )
         return key
 
     @classmethod
@@ -742,6 +756,25 @@ class VoiceTTSModelMixin:
         if len(value) > cls._MAX_SUBSTITUTION_VALUE_CHARS:
             raise ValueError(f"target is too long (max {cls._MAX_SUBSTITUTION_VALUE_CHARS} chars)")
         return value
+
+    @staticmethod
+    def _normalise_pronunciation_format(value: PronunciationFormat | str) -> PronunciationFormat:
+        if isinstance(value, PronunciationFormat):
+            return value
+
+        raw = value.strip().lower()
+        try:
+            return PronunciationFormat(raw)
+        except ValueError as xcp:
+            raise ValueError("pronunciation format must be `text` or `ipa`") from xcp
+
+    def voice_supports_ipa_pronunciations(self, voice: str) -> bool:
+        if self._engine_kind != "piper":
+            return False
+
+        raw = self._piper_load_config(voice)
+        phoneme_type = raw.get("phoneme_type") if isinstance(raw, dict) else None
+        return isinstance(phoneme_type, str) and phoneme_type.strip().lower() == "espeak"
 
     def _preview(self, text: str) -> str:
         if len(text) <= self._LOG_PREVIEW_CHARS:
