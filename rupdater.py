@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from enum import StrEnum
@@ -16,6 +17,7 @@ PLACEHOLDER_USER = "your-ssh-user"
 PLACEHOLDER_PASSWORD = "replace-me"
 PLACEHOLDER_REMOTE_ROOT = PurePosixPath("/path/to/Yukibot")
 SSH_CONNECTION_TIMEOUT_SECONDS = 5
+SSH_CONTROL_PERSIST_SECONDS = 30
 KOUSEI_RESTART_DELAY_SECONDS = 5
 REMOTE_MKDIR_PATH = "/bin/mkdir"
 REMOTE_CAT_PATH = "/bin/cat"
@@ -140,11 +142,12 @@ def write_dry_run_report(targets: list[RemoteTarget], files: list[Path]) -> Path
 def run_checked(
     command: list[str],
     *,
-    password: str,
+    password: str | None,
     stdin_text: str | None = None,
 ) -> None:
     env = os.environ.copy()
-    env["SSHPASS"] = password
+    if password is not None:
+        env["SSHPASS"] = password
     print(shlex.join(command))
     subprocess.run(
         command,
@@ -159,11 +162,12 @@ def run_checked(
 def run_checked_bytes(
     command: list[str],
     *,
-    password: str,
+    password: str | None,
     stdin_bytes: bytes,
 ) -> None:
     env = os.environ.copy()
-    env["SSHPASS"] = password
+    if password is not None:
+        env["SSHPASS"] = password
     print(shlex.join(command))
     subprocess.run(
         command,
@@ -176,6 +180,66 @@ def run_checked_bytes(
 
 def remote_file_path(target: RemoteTarget, relative_path: Path) -> PurePosixPath:
     return target.remote_root / PurePosixPath(relative_path.as_posix())
+
+
+def ssh_control_path(target: RemoteTarget) -> Path:
+    return Path(tempfile.gettempdir()) / f"yukibot-{target.name.value}.ssh"
+
+
+def ssh_connection_options(target: RemoteTarget) -> list[str]:
+    return [
+        "-o",
+        "PreferredAuthentications=password",
+        "-o",
+        "PubkeyAuthentication=no",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        f"ConnectTimeout={SSH_CONNECTION_TIMEOUT_SECONDS}",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPersist={SSH_CONTROL_PERSIST_SECONDS}s",
+        "-o",
+        f"ControlPath={ssh_control_path(target).as_posix()}",
+    ]
+
+
+def open_ssh_master(target: RemoteTarget) -> None:
+    run_checked(
+        [
+            "sshpass",
+            "-e",
+            "ssh",
+            "-M",
+            "-N",
+            "-f",
+            *ssh_connection_options(target),
+            target.ssh_destination,
+        ],
+        password=target.password,
+    )
+
+
+def close_ssh_master(target: RemoteTarget) -> None:
+    control_path = ssh_control_path(target)
+    if not control_path.exists():
+        return
+
+    try:
+        run_checked(
+            [
+                "ssh",
+                "-O",
+                "exit",
+                "-o",
+                f"ControlPath={control_path.as_posix()}",
+                target.ssh_destination,
+            ],
+            password=None,
+        )
+    finally:
+        control_path.unlink(missing_ok=True)
 
 
 def remote_parent_directories(target: RemoteTarget, files: list[Path]) -> list[PurePosixPath]:
@@ -194,10 +258,7 @@ def ensure_remote_directories(target: RemoteTarget, files: list[Path]) -> None:
             "sshpass",
             "-e",
             "ssh",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            f"ConnectTimeout={SSH_CONNECTION_TIMEOUT_SECONDS}",
+            *ssh_connection_options(target),
             target.ssh_destination,
             f"{REMOTE_MKDIR_PATH} -p -- {quoted_directories}",
         ],
@@ -211,21 +272,12 @@ def sync_python_files(target: RemoteTarget, files: list[Path]) -> None:
         remote_path = remote_file_path(target, path).as_posix()
         remote_command = f"{REMOTE_CAT_PATH} > {shlex.quote(remote_path)}"
         command = [
-            "sshpass",
-            "-e",
             "ssh",
-            "-o",
-            "PreferredAuthentications=password",
-            "-o",
-            "PubkeyAuthentication=no",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            f"ConnectTimeout={SSH_CONNECTION_TIMEOUT_SECONDS}",
+            *ssh_connection_options(target),
             target.ssh_destination,
             remote_command,
         ]
-        run_checked_bytes(command, password=target.password, stdin_bytes=local_path.read_bytes())
+        run_checked_bytes(command, password=None, stdin_bytes=local_path.read_bytes())
 
 
 def print_check_plan(target: RemoteTarget, files: list[Path]) -> None:
@@ -239,17 +291,12 @@ def restart_remote(target: RemoteTarget) -> None:
         raise ValueError(f"{target.name.value} restart_command is not configured")
     run_checked(
         [
-            "sshpass",
-            "-e",
             "ssh",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            f"ConnectTimeout={SSH_CONNECTION_TIMEOUT_SECONDS}",
+            *ssh_connection_options(target),
             target.ssh_destination,
             target.restart_command,
         ],
-        password=target.password,
+        password=None,
     )
 
 
@@ -290,16 +337,18 @@ def main() -> int:
 
     for target in targets:
         print(f"==> {target.name.value} ({target.host})")
-        ensure_remote_directories(target, files)
-        sync_python_files(target, files)
-
-    if args.restart:
-        for target in targets:
-            delay_seconds = restart_delay_seconds(target, targets)
-            if delay_seconds > 0:
-                print(f"Waiting {delay_seconds}s before restarting {target.name.value}")
-                time.sleep(delay_seconds)
-            restart_remote(target)
+        open_ssh_master(target)
+        try:
+            ensure_remote_directories(target, files)
+            sync_python_files(target, files)
+            if args.restart:
+                delay_seconds = restart_delay_seconds(target, targets)
+                if delay_seconds > 0:
+                    print(f"Waiting {delay_seconds}s before restarting {target.name.value}")
+                    time.sleep(delay_seconds)
+                restart_remote(target)
+        finally:
+            close_ssh_master(target)
 
     return 0
 
