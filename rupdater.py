@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import io
 import os
 import shlex
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 from dataclasses import dataclass
@@ -22,11 +20,8 @@ SSH_CONNECTION_TIMEOUT_SECONDS = 5
 SSH_CONTROL_PERSIST_SECONDS = 30
 KOUSEI_RESTART_DELAY_SECONDS = 5
 REMOTE_MKDIR_PATH = "/bin/mkdir"
-REMOTE_TAR_CANDIDATES = (
-    PurePosixPath("/bin/tar"),
-    PurePosixPath("/usr/bin/tar"),
-)
-REMOTE_TAR_EXTRACT_FLAGS = "--overwrite -xf -"
+REMOTE_CAT_PATH = "/bin/cat"
+REMOTE_SH_PATH = "/bin/sh"
 
 
 class TargetName(StrEnum):
@@ -60,7 +55,6 @@ class RemoteTarget:
 class RemoteSession:
     target: RemoteTarget
     control_path: Path
-    tar_path: PurePosixPath
 
 
 REMOTE_TARGETS: dict[TargetName, RemoteTarget] = {
@@ -69,7 +63,7 @@ REMOTE_TARGETS: dict[TargetName, RemoteTarget] = {
         host="wakusei.apasz.com",
         user="debian",
         password="scheme-python-dingo",
-        remote_root=PurePosixPath("/home/debian"),
+        remote_root=PurePosixPath("/home/debian/yukibot2"),
         restart_command="/usr/bin/sudo /usr/bin/systemctl restart yukibot.service",
     ),
     TargetName.KOUSEI: RemoteTarget(
@@ -77,7 +71,7 @@ REMOTE_TARGETS: dict[TargetName, RemoteTarget] = {
         host="kousei.apasz.com",
         user="debian",
         password="scheme-python-taiga",
-        remote_root=PurePosixPath("/home/debian"),
+        remote_root=PurePosixPath("/home/debian/erinbot"),
         restart_command="/usr/bin/sudo /usr/bin/systemctl restart erinbot.service",
     ),
 }
@@ -109,6 +103,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write the planned file list to a local .txt report and skip remote actions.",
     )
+    parser.add_argument(
+        "--all-tracked",
+        action="store_true",
+        help="Sync all tracked Python files instead of only changed local Python files.",
+    )
     return parser.parse_args()
 
 
@@ -133,6 +132,39 @@ def tracked_python_files() -> list[Path]:
         text=True,
     )
     return parse_tracked_python_files(result.stdout)
+
+
+def parse_changed_python_files(stdout: str) -> list[Path]:
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for raw_line in stdout.splitlines():
+        if not raw_line:
+            continue
+        path_text = raw_line[3:]
+        if " -> " in path_text:
+            _, path_text = path_text.rsplit(" -> ", 1)
+        path = Path(path_text)
+        if path.suffix != ".py":
+            continue
+        if not (REPO_ROOT / path).is_file():
+            continue
+        if path not in seen:
+            seen.add(path)
+            files.append(path)
+    if not files:
+        raise RuntimeError("git status returned no changed Python files")
+    return files
+
+
+def changed_python_files() -> list[Path]:
+    result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", "*.py"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return parse_changed_python_files(result.stdout)
 
 
 def dry_run_report_path() -> Path:
@@ -172,25 +204,6 @@ def run_checked(
     )
 
 
-def run_checked_bytes(
-    command: list[str],
-    *,
-    password: str | None,
-    stdin_bytes: bytes,
-) -> None:
-    env = os.environ.copy()
-    if password is not None:
-        env["SSHPASS"] = password
-    print(shlex.join(command))
-    subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=True,
-        input=stdin_bytes,
-        env=env,
-    )
-
-
 def remote_file_path(target: RemoteTarget, relative_path: Path) -> PurePosixPath:
     return target.remote_root / PurePosixPath(relative_path.as_posix())
 
@@ -216,25 +229,6 @@ def ssh_connection_options(control_path: Path) -> list[str]:
         "-o",
         f"ControlPath={control_path.as_posix()}",
     ]
-
-
-def run_quiet(
-    command: list[str],
-    *,
-    password: str | None,
-) -> int:
-    env = os.environ.copy()
-    if password is not None:
-        env["SSHPASS"] = password
-    result = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=env,
-    )
-    return result.returncode
 
 
 def open_ssh_master(target: RemoteTarget, control_path: Path) -> None:
@@ -273,57 +267,64 @@ def close_ssh_master(target: RemoteTarget, control_path: Path) -> None:
         control_path.unlink(missing_ok=True)
 
 
-def resolve_remote_tar_path(target: RemoteTarget, control_path: Path) -> PurePosixPath:
-    for candidate in REMOTE_TAR_CANDIDATES:
-        return_code = run_quiet(
-            [
-                "ssh",
-                *ssh_connection_options(control_path),
-                target.ssh_destination,
-                f"test -x {shlex.quote(candidate.as_posix())}",
-            ],
-            password=None,
-        )
-        if return_code == 0:
-            return candidate
-    raise RuntimeError(f"No remote tar binary found for {target.name.value}")
-
-
 def open_remote_session(target: RemoteTarget, run_token: str) -> RemoteSession:
     control_path = ssh_control_path(target, run_token)
     open_ssh_master(target, control_path)
-    tar_path = resolve_remote_tar_path(target, control_path)
-    return RemoteSession(target=target, control_path=control_path, tar_path=tar_path)
+    return RemoteSession(target=target, control_path=control_path)
 
 
 def close_remote_session(session: RemoteSession) -> None:
     close_ssh_master(session.target, session.control_path)
 
 
-def build_tar_archive(files: list[Path]) -> bytes:
-    archive_buffer = io.BytesIO()
-    with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
-        for path in files:
-            archive.add(REPO_ROOT / path, arcname=path.as_posix(), recursive=False)
-    return archive_buffer.getvalue()
+def remote_parent_directories(target: RemoteTarget, files: list[Path]) -> list[PurePosixPath]:
+    directories = {remote_file_path(target, path).parent for path in files}
+    return sorted(directories, key=lambda path: path.as_posix())
 
 
-def sync_python_files(session: RemoteSession, archive_bytes: bytes) -> None:
-    remote_root = shlex.quote(session.target.remote_root.as_posix())
-    remote_command = (
-        f"{REMOTE_MKDIR_PATH} -p -- {remote_root} && "
-        f"cd {remote_root} && "
-        f"{session.tar_path.as_posix()} {REMOTE_TAR_EXTRACT_FLAGS}"
-    )
-    run_checked_bytes(
+def heredoc_delimiter(path: Path, content: str) -> str:
+    base = f"__YUKIBOT_SYNC_{path.as_posix().replace('/', '_').replace('.', '_').upper()}__"
+    delimiter = base
+    suffix = 0
+    while delimiter in content:
+        suffix += 1
+        delimiter = f"{base}_{suffix}"
+    return delimiter
+
+
+def build_remote_sync_script(target: RemoteTarget, files: list[Path]) -> str:
+    directories = remote_parent_directories(target, files)
+    if not directories:
+        raise RuntimeError("No remote directories were derived from tracked Python files")
+
+    lines: list[str] = ["set -eu"]
+    quoted_directories = " ".join(shlex.quote(directory.as_posix()) for directory in directories)
+    lines.append(f"{REMOTE_MKDIR_PATH} -p -- {quoted_directories}")
+
+    for path in files:
+        remote_path = remote_file_path(target, path).as_posix()
+        content = (REPO_ROOT / path).read_text(encoding="utf-8")
+        delimiter = heredoc_delimiter(path, content)
+        lines.append(f"{REMOTE_CAT_PATH} > {shlex.quote(remote_path)} <<'{delimiter}'")
+        lines.append(content)
+        if not content.endswith("\n"):
+            lines.append("")
+        lines.append(delimiter)
+
+    return "\n".join(lines) + "\n"
+
+
+def sync_python_files(session: RemoteSession, files: list[Path]) -> None:
+    script = build_remote_sync_script(session.target, files)
+    run_checked(
         [
             "ssh",
             *ssh_connection_options(session.control_path),
             session.target.ssh_destination,
-            remote_command,
+            REMOTE_SH_PATH,
         ],
         password=None,
-        stdin_bytes=archive_bytes,
+        stdin_text=script,
     )
 
 
@@ -336,7 +337,7 @@ def print_check_plan(target: RemoteTarget, files: list[Path]) -> None:
 def print_synced_files(target: RemoteTarget, files: list[Path]) -> None:
     print(f"Updated {target.name.value}:")
     for path in files:
-        print(f"  {path.as_posix()}")
+        print(f"  {path.as_posix()} -> {remote_file_path(target, path).as_posix()}")
 
 
 def restart_remote(session: RemoteSession) -> None:
@@ -379,9 +380,9 @@ def main() -> int:
     args = parse_args()
     require_program("git")
 
-    files = tracked_python_files()
+    files = tracked_python_files() if args.all_tracked else changed_python_files()
     targets = configured_targets(args.targets)
-    print(f"Preparing to sync {len(files)} tracked Python files")
+    print(f"Preparing to sync {len(files)} Python files")
 
     if args.dry:
         report_path = write_dry_run_report(targets, files)
@@ -396,7 +397,6 @@ def main() -> int:
     require_program("sshpass")
     require_program("ssh")
 
-    archive_bytes = build_tar_archive(files)
     run_token = f"{os.getpid()}-{time.time_ns():x}"
     sessions_by_name: dict[TargetName, RemoteSession] = {}
 
@@ -405,7 +405,7 @@ def main() -> int:
             print(f"==> {target.name.value} ({target.host})")
             session = open_remote_session(target, run_token)
             sessions_by_name[target.name] = session
-            sync_python_files(session, archive_bytes)
+            sync_python_files(session, files)
             print_synced_files(target, files)
 
         if args.restart:
