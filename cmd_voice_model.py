@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+# pyright: reportUninitializedInstanceVariable=false
+
 import contextlib
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -13,6 +16,8 @@ import requests
 
 import config
 from cmd_voice_common import HUGGINGFACE_HOSTS, HFRepoRef, PiperPythonVoiceRuntime, PronunciationFormat, log
+
+tts_log = logging.getLogger(config.LOGGER_TTS)
 
 
 class VoiceTTSModelMixin:
@@ -570,7 +575,7 @@ class VoiceTTSModelMixin:
             if cls._hf_is_piper_model_config(raw):
                 candidates.append(onnx_file)
 
-        log.info(
+        tts_log.info(
             f"TTS HF candidate scan repo={repo_id!r} revision={revision!r} "
             f"files={len(files)} onnx_files={len(onnx_files)} candidates={len(candidates)}"
         )
@@ -580,7 +585,7 @@ class VoiceTTSModelMixin:
     def _hf_is_piper_file_candidate(cls, repo_id: str, revision: str, onnx_file: str) -> bool:
         clean = onnx_file.strip()
         if not clean or not clean.lower().endswith(".onnx"):
-            log.info(
+            tts_log.info(
                 f"TTS HF direct candidate rejected repo={repo_id!r} revision={revision!r} "
                 f"file={onnx_file!r} reason=invalid_extension"
             )
@@ -588,7 +593,7 @@ class VoiceTTSModelMixin:
 
         raw = cls._hf_load_json_file(repo_id, revision, f"{clean}.json")
         if raw and cls._hf_is_piper_model_config(raw):
-            log.info(
+            tts_log.info(
                 f"TTS HF direct candidate accepted repo={repo_id!r} revision={revision!r} "
                 f"file={clean!r} source=config_json"
             )
@@ -596,13 +601,13 @@ class VoiceTTSModelMixin:
 
         if repo_id == "rhasspy/piper-voices":
             in_index = cls._hf_repo_index_lists_piper_file(repo_id, revision, clean)
-            log.info(
+            tts_log.info(
                 f"TTS HF direct candidate fallback repo={repo_id!r} revision={revision!r} "
                 f"file={clean!r} source=voices_json accepted={in_index}"
             )
             return in_index
 
-        log.info(
+        tts_log.info(
             f"TTS HF direct candidate rejected repo={repo_id!r} revision={revision!r} "
             f"file={clean!r} reason=missing_or_invalid_config"
         )
@@ -612,9 +617,7 @@ class VoiceTTSModelMixin:
     def _hf_repo_index_lists_piper_file(cls, repo_id: str, revision: str, onnx_file: str) -> bool:
         raw = cls._hf_load_json_file(repo_id, revision, "voices.json")
         if not isinstance(raw, dict):
-            log.info(
-                f"TTS HF voices index unavailable repo={repo_id!r} revision={revision!r} file={onnx_file!r}"
-            )
+            tts_log.info(f"TTS HF voices index unavailable repo={repo_id!r} revision={revision!r} file={onnx_file!r}")
             return False
 
         config_file = f"{onnx_file}.json"
@@ -629,9 +632,8 @@ class VoiceTTSModelMixin:
                 matched = True
                 break
 
-        log.info(
-            f"TTS HF voices index lookup repo={repo_id!r} revision={revision!r} "
-            f"file={onnx_file!r} matched={matched}"
+        tts_log.info(
+            f"TTS HF voices index lookup repo={repo_id!r} revision={revision!r} file={onnx_file!r} matched={matched}"
         )
         return matched
 

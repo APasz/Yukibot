@@ -1,20 +1,32 @@
 {
     "survival": {
         "friendly_name": "MineSurvival",
-        "directory": "{APPS}/mc",
+        "directory": "{APPS}/mc_survival",
         "mods_dir": "{WD}/mods",
-        "port": 25565
+        "port": 25565,
+        "enabled": false,
+        "version": {
+            "main": "1.20.1",
+            "framework": "47.4.0",
+            "loader": "forge"
+        }
     },
     "creative": {
         "friendly_name": "MineCreative",
         "directory": "{APPS}/mc_creative",
         "mods_dir": "{WD}/mods",
-        "port": 25565
+        "port": 25565,
+        "version": {
+            "main": "1.20.1",
+            "framework": "47.4.0",
+            "loader": "forge"
+        }
     },
     "all_fabric": {
         "friendly_name": "AllTheFabric",
         "directory": "{APPS}/allfabric",
         "mods_dir": "{WD}/mods",
-        "port": 25565
+        "port": 25565,
+        "enabled": false
     }
 }

@@ -3,8 +3,9 @@ import logging
 import os
 import shutil
 import zipfile
-from collections.abc import Collection
+from collections.abc import AsyncIterator, Collection
 from pathlib import Path
+from typing import cast
 
 import aiofiles
 import hikari
@@ -15,6 +16,16 @@ log = logging.getLogger(__name__)
 
 
 class File_Utils:
+    @staticmethod
+    def _symlink_target(src: Path, dst: Path) -> Path:
+        if not src.is_absolute():
+            return src
+
+        try:
+            return Path(os.path.relpath(src, start=dst.parent))
+        except ValueError:
+            return src
+
     @staticmethod
     def append_num(pointer: Path) -> Path:
         for i in range(1, 100):
@@ -60,13 +71,12 @@ class File_Utils:
                 dst = cls.append_num(dst)
             elif dst.exists():
                 raise FileExistsError(f"Can't link to existing {dst=}")
-            target = src  # pathlib is pov from symlink
             pointer = dst
-            pointer.symlink_to(target.resolve(), pointer.is_dir())
+            pointer.symlink_to(cls._symlink_target(src, pointer), src.is_dir())
         except Exception:
             log.exception(f"link failed: {overwrite=}\n{src}\n{dst}")
             raise
-        return target
+        return src
 
     @classmethod
     def move(cls, src: Path, target: Path, overwrite: bool | None = True) -> Path:
@@ -162,7 +172,7 @@ class File_Utils:
     @classmethod
     def compress_dir(cls, directory: Path, zip_path: Path, arc_base: Path | None = None):
         base = arc_base or directory
-        seen = set()
+        seen: set[tuple[int, int]] = set()
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in directory.walk(follow_symlinks=True):
                 root = Path(root)
@@ -183,7 +193,7 @@ class File_Utils:
 
     @classmethod
     def compress_dirs(cls, dirs: Collection[Path], zip_path: Path, arc_base: Path | None = None):
-        seen = set()
+        seen: set[tuple[int, int]] = set()
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             for directory in dirs:
                 if not directory.is_dir():
@@ -196,6 +206,37 @@ class File_Utils:
                     if key in seen:
                         continue
                     seen.add(key)
+                    for subdir in subdirs:
+                        dir_path = root / subdir
+                        arcname = dir_path.relative_to(base)
+                        zipf.writestr(str(arcname) + "/", "")
+
+                    for file in files:
+                        full_path = root / file
+                        arcname = full_path.relative_to(base)
+                        zipf.write(full_path, arcname)
+
+    @classmethod
+    def compress_paths(cls, paths: Collection[Path], zip_path: Path, arc_base: Path | None = None):
+        seen_dirs: set[tuple[int, int]] = set()
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for path in paths:
+                if path.is_file():
+                    arcname = path.relative_to(arc_base) if arc_base else path.name
+                    zipf.write(path, arcname)
+                    continue
+
+                if not path.is_dir():
+                    raise ValueError(f"Unsupported path type: {path}")
+
+                base = arc_base or path
+                for root, subdirs, files in path.walk(follow_symlinks=True):
+                    root = Path(root)
+                    stat = root.stat()
+                    key = (stat.st_dev, stat.st_ino)
+                    if key in seen_dirs:
+                        continue
+                    seen_dirs.add(key)
                     for subdir in subdirs:
                         dir_path = root / subdir
                         arcname = dir_path.relative_to(base)
@@ -234,7 +275,7 @@ class File_Utils:
                 await asyncio.to_thread(cls.compress_dir, target, zip_path, arc_base)
             else:
                 raise ValueError(f"Unsupported path type: {target}")
-        elif isinstance(target, Collection):
+        else:
             paths = list(target)
             for p in paths:
                 cls.ensure_valid_path(p)
@@ -244,9 +285,7 @@ class File_Utils:
             elif all(p.is_dir() for p in paths):
                 await asyncio.to_thread(cls.compress_dirs, paths, zip_path, arc_base)
             else:
-                raise ValueError("Mixed or invalid collection passed to compress()")
-        else:
-            raise TypeError("target must be a Path or Collection[Path]")  # pyright: ignore[reportUnreachable]
+                await asyncio.to_thread(cls.compress_paths, paths, zip_path, arc_base)
 
         return zip_path
 
@@ -262,7 +301,10 @@ class File_Utils:
         try:
             if pointer.is_symlink():
                 # Follow symlinks for files, not dirs
-                resolved = pointer.resolve(strict=True)
+                try:
+                    resolved = pointer.resolve(strict=True)
+                except FileNotFoundError:
+                    return 0
                 if resolved.is_file():
                     return resolved.stat().st_size
                 elif resolved.is_dir():
@@ -286,8 +328,9 @@ class File_Utils:
         path = config.DIR_TMP / attachment.filename
         async with aiofiles.open(path, "wb") as f:
             async with attachment.stream() as stream:
-                async for chunk in stream:
-                    await f.write(chunk)
+                byte_stream = cast(AsyncIterator[bytes], cast(object, stream))
+                async for chunk_bytes in byte_stream:
+                    await f.write(chunk_bytes)
         return path
 
     @staticmethod

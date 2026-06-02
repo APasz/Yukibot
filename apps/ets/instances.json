@@ -3,6 +3,9 @@
         "friendly_name": "ETS2",
         "directory": "{APPS}/ets",
         "server_log_file": "{WD}/home_data/Euro Truck Simulator 2/server.log.txt",
-        "port": 27015
+        "port": 27015,
+        "version": {
+            "main": "1.55s"
+        }
     }
 }

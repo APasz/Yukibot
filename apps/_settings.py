@@ -1,15 +1,19 @@
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
+from logging import Logger
 from pathlib import Path
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, TypeAlias, TypeVar, cast
 
 import hikari
 
 from _security import Power_Level
+from _audit import audit_log
 from apps._config import App_Config
 
-log = logging.getLogger(__name__)
+log: Logger = logging.getLogger(__name__)
+HideRevealLevel: TypeAlias = Power_Level | None
 
 
 class Setting_Label(StrEnum):
@@ -23,127 +27,429 @@ class Setting_Label(StrEnum):
     difficulty = "Difficulty"
 
 
-T = TypeVar("T")
+T = TypeVar("T", default=object)
 
 
-class Setting(Generic[T]):
-    """Represents a config option with metadata, casting, and validation"""
+def _is_non_negative_int_text(raw_value: str) -> bool:
+    return raw_value.isdigit()
 
-    value_type: Callable[[Any], T]
-    label: str
-    key: str
-    path: list[str]
-    value: T | hikari.UndefinedType
-    choices: list[str] | dict[str, str]
-    strict_choice: bool
-    validator: Callable[[str], bool] | None
-    power_level: Power_Level
-    desc: str | None
+
+def _is_signed_int_text(raw_value: str) -> bool:
+    if raw_value.startswith("-"):
+        return raw_value[1:].isdigit()
+    return raw_value.isdigit()
+
+
+def _compose_raw_validator(
+    primary: Callable[[str], bool],
+    secondary: Callable[[str], bool] | None,
+) -> Callable[[str], bool]:
+    if secondary is None:
+        return primary
+    return lambda raw_value: primary(raw_value) and secondary(raw_value)
+
+
+@dataclass(frozen=True, slots=True)
+class ChoiceOption:
+    value: str
+    label: str = ""
+
+    def __init__(self, value: str, label: str = "") -> None:
+        if not value:
+            raise ValueError("ChoiceOption requires at least value")
+
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "label", label or value)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ChoiceSpec:
+    options: tuple[ChoiceOption, ...]
+    strict: bool = True
+
+    def __init__(self, *options: ChoiceOption, strict: bool = True) -> None:
+        if not options:
+            raise ValueError("ChoiceSpec requires at least one option")
+
+        object.__setattr__(self, "options", tuple[ChoiceOption, ...](options))
+        object.__setattr__(self, "strict", strict)
+
+    def normalise_input(self, value: str) -> str:
+        for option in self.options:
+            if option.label == value:
+                return option.value
+        return value
+
+    def choice_items(self) -> tuple[tuple[str, str], ...]:
+        return tuple[tuple[str, str], ...]((option.label, option.value) for option in self.options)
+
+    def raw_values(self) -> frozenset[str]:
+        return frozenset[str](option.value for option in self.options)
+
+
+class SettingSpec(Generic[T]):
+    """Shared parsing, validation, and UI metadata for a setting type."""
 
     def __init__(
         self,
-        value_type: Callable[[Any], T],
+        python_type: type[T],
+        choice_spec: ChoiceSpec | None = None,
+        *,
+        allow_blank: bool = False,
+        is_sensitive: bool = False,
+        do_hide: HideRevealLevel = None,
+        raw_validator: Callable[[str], bool] | None = None,
+    ) -> None:
+        self.python_type: type[T] = python_type
+        self.allow_blank: bool = allow_blank
+        self.is_sensitive: bool = is_sensitive
+        self.do_hide: HideRevealLevel = do_hide
+        self.choice_spec: ChoiceSpec | None = choice_spec
+        self.raw_validator: Callable[[str], bool] | None = raw_validator
+
+    @property
+    def type_name(self) -> str:
+        return getattr(self.python_type, "__name__", type(self.python_type).__name__)
+
+    @property
+    def supports_recent_inputs(self) -> bool:
+        return self.python_type in {str, int} and (self.choice_spec is None or not self.choice_spec.strict)
+
+    @property
+    def strict_choice(self) -> bool:
+        return self.choice_spec.strict if self.choice_spec is not None else False
+
+    @property
+    def choices(self) -> ChoiceSpec | None:
+        return self.choice_spec
+
+    def normalise_input(self, value: str) -> str:
+        if self.choice_spec is None:
+            return value
+        return self.choice_spec.normalise_input(value)
+
+    def choice_items(self) -> tuple[tuple[str, str], ...]:
+        if self.choice_spec is None:
+            return ()
+        return self.choice_spec.choice_items()
+
+    def parse_input(self, raw_value: str) -> T:
+        value = self.normalise_input(raw_value)
+        if value == "" and self.allow_blank:
+            return self.blank_value()
+        if self.raw_validator is not None and not self.raw_validator(value):
+            raise ValueError(f"`{value}` not valid")
+        if self.choice_spec is not None and self.choice_spec.strict and value not in self.choice_spec.raw_values():
+            raise IndexError(f"{value} must match provided choices")
+        parsed = self.parse(value)
+        self.validate_value(parsed)
+        return parsed
+
+    def choice_label_for_value(self, value: T | hikari.UndefinedType) -> str | None:
+        if self.choice_spec is None or isinstance(value, hikari.UndefinedType):
+            return None
+        for option in self.choice_spec.options:
+            try:
+                if self.parse(option.value) == value:
+                    return option.label
+            except Exception:
+                continue
+        return None
+
+    def display_value(self, value: T | hikari.UndefinedType) -> str:
+        if isinstance(value, hikari.UndefinedType):
+            return "undefined"
+        label = self.choice_label_for_value(value)
+        raw_value = str(value)
+        if label is None or label == raw_value:
+            return raw_value
+        return f"{label} ({raw_value})"
+
+    def serialise_value(self, value: T | hikari.UndefinedType) -> str:
+        if isinstance(value, hikari.UndefinedType):
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    def blank_value(self) -> T:
+        raise ValueError("Blank input is not supported for this setting type.")
+
+    def parse(self, raw_value: str) -> T:
+        raise NotImplementedError
+
+    def validate_value(self, value: T) -> None:
+        del value
+
+
+class StringSettingSpec(SettingSpec[str]):
+    def __init__(
+        self,
+        choice_spec: ChoiceSpec | None = None,
+        *,
+        allow_blank: bool = False,
+        is_sensitive: bool = False,
+        do_hide: HideRevealLevel = None,
+        raw_validator: Callable[[str], bool] | None = None,
+    ) -> None:
+        super().__init__(
+            str,
+            choice_spec,
+            allow_blank=allow_blank,
+            is_sensitive=is_sensitive,
+            do_hide=do_hide,
+            raw_validator=raw_validator,
+        )
+
+    def blank_value(self) -> str:
+        return ""
+
+    def parse(self, raw_value: str) -> str:
+        return raw_value
+
+
+_DEFAULT_BOOL_CHOICE_SPEC = ChoiceSpec(
+    ChoiceOption("true", "Enabled"),
+    ChoiceOption("false", "Disabled"),
+)
+
+
+class BoolSettingSpec(SettingSpec[bool]):
+    def __init__(
+        self,
+        choice_spec: ChoiceSpec | None = None,
+        *,
+        is_sensitive: bool = False,
+        do_hide: HideRevealLevel = None,
+        raw_validator: Callable[[str], bool] | None = None,
+    ) -> None:
+        super().__init__(
+            bool,
+            choice_spec or _DEFAULT_BOOL_CHOICE_SPEC,
+            is_sensitive=is_sensitive,
+            do_hide=do_hide,
+            raw_validator=raw_validator,
+        )
+
+    def parse(self, raw_value: str) -> bool:
+        lowered = raw_value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"{raw_value} is not recognisable bool equivalent")
+
+
+class IntSettingSpec(SettingSpec[int]):
+    def __init__(
+        self,
+        choice_spec: ChoiceSpec | None = None,
+        *,
+        min_value: int | None = None,
+        max_value: int | None = None,
+        allow_negative: bool = False,
+        is_sensitive: bool = False,
+        do_hide: HideRevealLevel = None,
+        raw_validator: Callable[[str], bool] | None = None,
+    ) -> None:
+        self.allow_negative = allow_negative
+        builtin_validator = _is_signed_int_text if allow_negative else _is_non_negative_int_text
+        super().__init__(
+            int,
+            choice_spec,
+            is_sensitive=is_sensitive,
+            do_hide=do_hide,
+            raw_validator=_compose_raw_validator(builtin_validator, raw_validator),
+        )
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def parse(self, raw_value: str) -> int:
+        return int(raw_value)
+
+    def validate_value(self, value: int) -> None:
+        if self.min_value is not None and value < self.min_value:
+            raise ValueError(f"{value} must be at least {self.min_value}")
+        if self.max_value is not None and value > self.max_value:
+            raise ValueError(f"{value} must be at most {self.max_value}")
+
+
+class FloatSettingSpec(SettingSpec[float]):
+    def __init__(
+        self,
+        choice_spec: ChoiceSpec | None = None,
+        *,
+        min_value: float | None = None,
+        max_value: float | None = None,
+        is_sensitive: bool = False,
+        do_hide: HideRevealLevel = None,
+        raw_validator: Callable[[str], bool] | None = None,
+    ) -> None:
+        super().__init__(
+            float,
+            choice_spec,
+            is_sensitive=is_sensitive,
+            do_hide=do_hide,
+            raw_validator=raw_validator,
+        )
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def parse(self, raw_value: str) -> float:
+        return float(raw_value)
+
+    def validate_value(self, value: float) -> None:
+        if self.min_value is not None and value < self.min_value:
+            raise ValueError(f"{value} must be at least {self.min_value}")
+        if self.max_value is not None and value > self.max_value:
+            raise ValueError(f"{value} must be at most {self.max_value}")
+
+
+class Setting(Generic[T]):
+    """Represents a config option with metadata, current value, and a typed spec."""
+
+    label: str
+    key: str
+    path: tuple[str, ...]
+    spec: SettingSpec[T]
+    value: T | hikari.UndefinedType
+    default: T
+    power_level: Power_Level
+    desc: str | None
+    _recent_inputs: list[str]
+
+    def __init__(
+        self,
+        value_type: SettingSpec[T],
         label: str | Setting_Label,
         key: str,
-        path: list[str],
-        value: T | hikari.UndefinedType = hikari.UNDEFINED,
+        path: Sequence[str],
         *,
-        choices: list[str] | dict[str, str] | None = None,
-        strict_choice: bool = True,
-        validator: Callable[[str], bool] | None = None,
-        power_level: Power_Level = Power_Level.guest,
+        default: T,
+        value: T | hikari.UndefinedType = hikari.UNDEFINED,
+        power_level: Power_Level = Power_Level.admin,
         desc: str | None = None,
-    ):
-        if not callable(value_type):
-            raise TypeError("Type must be a callable that casts input to the expected type")  # pyright: ignore[reportUnreachable]
-        self.value_type = value_type
-        self.path = path
+    ) -> None:
+        self.spec = value_type
+        self.path = tuple(path)
         self.key = key
+        self.default = self._normalise_value(default)
         if not isinstance(value, hikari.UndefinedType):
-            self.update(str(value))
+            self.value = self._normalise_value(value)
         else:
             self.value = value
-        self.choices = choices or []
         if isinstance(label, Setting_Label):
             label = label.value
-        self.strict_choice = strict_choice
         self.label = label.title()
-        self.validator = validator
         self.power_level = power_level
         self.desc = desc
+        self._recent_inputs = []
 
-    def get(self, data: dict) -> T | hikari.UndefinedType:
+    @property
+    def value_type(self) -> type[T]:
+        return self.spec.python_type
+
+    def _normalise_value(self, value: T) -> T:
+        return self.spec.parse_input(self.spec.serialise_value(value))
+
+    def get(self, data: dict[str, Any]) -> T | hikari.UndefinedType:
         try:
             for key in self.path:
                 data = data[key]
-            value = data.get(self.key, hikari.UNDEFINED)
+            raw_value = data.get(self.key, hikari.UNDEFINED)
         except KeyError:
-            log.error(f"App Setting not found @ {'/'.join(self.path + [self.key])}")
-            value = hikari.UNDEFINED
+            log.warning("App setting missing, using default @ %s", "/".join((*self.path, self.key)))
+            self.value = self.default
+            return self.default
+        if isinstance(raw_value, hikari.UndefinedType):
+            log.warning("App setting missing, using default @ %s", "/".join((*self.path, self.key)))
+            self.value = self.default
+            return self.default
+        try:
+            value = self._normalise_value(cast(T, raw_value))
+        except Exception as xcp:
+            log.exception("Loading setting value failed: %s > %s", type(raw_value), self.type_name)
+            raise ValueError(f"Invalid stored value for {self.label}: {xcp}") from xcp
         self.value = value
         return value
 
-    def set(self, data: dict):
+    def set(self, data: dict[str, Any]) -> None:
         for key in self.path:
             data = data.setdefault(key, {})
         data[self.key] = self.value
 
     def normalise_input(self, value: str) -> str:
-        if isinstance(self.choices, dict):
-            return self.choices.get(value, value)
-        return value
+        return self.spec.normalise_input(value)
 
     def choice_items(self) -> tuple[tuple[str, str], ...]:
-        if isinstance(self.choices, dict):
-            return tuple(self.choices.items())
-        return tuple((choice, choice) for choice in self.choices)
+        return self.spec.choice_items()
 
     def choice_label_for_value(self, value: T | hikari.UndefinedType | None = None) -> str | None:
         current_value = self.value if value is None else value
-        if isinstance(current_value, hikari.UndefinedType):
+        if current_value is None:
             return None
-
-        for label, raw_value in self.choice_items():
-            try:
-                if self._cast_value(raw_value) == current_value:
-                    return label
-            except Exception:
-                continue
-        return None
+        return self.spec.choice_label_for_value(current_value)
 
     def display_value(self) -> str:
-        if isinstance(self.value, hikari.UndefinedType):
-            return "undefined"
+        return self.spec.display_value(self.value)
 
-        label = self.choice_label_for_value(self.value)
-        raw_value = str(self.value)
-        if label is None or label == raw_value:
-            return raw_value
-        return f"{label} ({raw_value})"
+    def serialise_value(self) -> str:
+        return self.spec.serialise_value(self.value)
 
-    def _cast_value(self, value: str) -> T:
-        if self.value_type is bool:
-            lowered = value.strip().lower()
-            if lowered in {"1", "true", "yes", "on"}:
-                return cast(T, True)
-            if lowered in {"0", "false", "no", "off"}:
-                return cast(T, False)
-            raise ValueError(f"{value} is not recognisable bool equivalent")
-        return self.value_type(value)
+    @property
+    def recent_inputs(self) -> tuple[str, ...]:
+        return tuple(self._recent_inputs)
 
-    def update(self, value: str):
-        value = self.normalise_input(value)
-        if self.validator:
-            if not self.validator(value):
-                raise ValueError(f"`{value}` not valid")
-        if self.choices and self.strict_choice:
-            if value not in self.choices.values() if isinstance(self.choices, dict) else value not in self.choices:
-                raise IndexError(f"{value} must match provided choices")
+    @property
+    def supports_recent_inputs(self) -> bool:
+        return self.spec.supports_recent_inputs and self.do_hide is None
+
+    @property
+    def allows_blank_input(self) -> bool:
+        return self.spec.allow_blank
+
+    @property
+    def is_sensitive(self) -> bool:
+        return self.spec.is_sensitive
+
+    @property
+    def do_hide(self) -> HideRevealLevel:
+        return self.spec.do_hide
+
+    @property
+    def strict_choice(self) -> bool:
+        return self.spec.strict_choice
+
+    @property
+    def choices(self) -> ChoiceSpec | None:
+        return self.spec.choices
+
+    @property
+    def validator(self) -> Callable[[str], bool] | None:
+        return self.spec.raw_validator
+
+    @property
+    def type_name(self) -> str:
+        return self.spec.type_name
+
+    def _remember_input(self, value: str) -> None:
+        if not self.supports_recent_inputs:
+            return
+        recent_value = value.strip()
+        if not recent_value:
+            return
+        self._recent_inputs = [item for item in self._recent_inputs if item != recent_value]
+        self._recent_inputs.insert(0, recent_value)
+        del self._recent_inputs[25:]
+
+    def update(self, value: str, *, remember_input: bool = False) -> None:
         try:
-            self.value = self._cast_value(value)
+            self.value = self.spec.parse_input(value)
         except Exception as xcp:
-            log.exception(f"Casting Setting value Failed: {type(value)} > {self.value_type}")
+            log.exception(f"Casting Setting value Failed: {type(value)} > {self.type_name}")
             raise ValueError(f"Invalid value for {self.label}: {xcp}")
+        if remember_input:
+            self._remember_input(self.serialise_value())
 
     def __str__(self) -> str:
         return self.label
@@ -153,7 +459,7 @@ class Setting(Generic[T]):
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Setting):
-            raise TypeError(f"'==' not supported between instances of '{type(self)}' and '{type(other)}'")
+            return NotImplemented
         return self.value == other.value
 
     def __lt__(self, other: object) -> bool:
@@ -167,15 +473,15 @@ class Setting(Generic[T]):
 
 
 class App_Settings:
-    _lookup: dict[str, Setting]
+    _lookup: dict[str, Setting[Any]]
 
-    def __init__(self, pointer: Path, options: list[Setting]) -> None:
+    def __init__(self, pointer: Path, options: list[Setting[Any]]) -> None:
         self.pointer = pointer
         if not pointer.exists():
             raise FileNotFoundError("App_Settings file missing")
         self._lookup = {}
 
-        self.options: list[Setting] = sorted(options)
+        self.options: list[Setting[Any]] = sorted(options)
         for setting in options:
             self._lookup[setting.label.lower()] = setting
             self._lookup[setting.key.lower()] = setting
@@ -191,7 +497,7 @@ class App_Settings:
     def friendly_options(self) -> list[str]:
         return [s.label for s in self.options]
 
-    def get_setting(self, ident: str) -> Setting | None:
+    def get_setting(self, ident: str) -> Setting[Any] | None:
         ident = ident.lower()
         if ident not in self._lookup:
             return None
@@ -216,6 +522,149 @@ class Settings_Manager:
     def __init__(self, config: App_Config, settings: App_Settings) -> None:
         self.config = config
         self.app = settings
+        self._drafts: dict[int, dict[str, object | hikari.UndefinedType]] = {}
+
+    def _actor_key(self, actor_user_id: int) -> int:
+        return int(actor_user_id)
+
+    def _draft_bucket(self, actor_user_id: int) -> dict[str, object | hikari.UndefinedType]:
+        actor_key = self._actor_key(actor_user_id)
+        return self._drafts.setdefault(actor_key, {})
+
+    def _delete_empty_bucket(self, actor_user_id: int) -> None:
+        actor_key = self._actor_key(actor_user_id)
+        if not self._drafts.get(actor_key):
+            self._drafts.pop(actor_key, None)
+
+    def _prune_redundant_drafts(self) -> None:
+        for actor_key, drafts in tuple(self._drafts.items()):
+            for setting in self.app.options:
+                draft_value = drafts.get(setting.key, hikari.UNDEFINED)
+                if isinstance(draft_value, hikari.UndefinedType):
+                    continue
+                if draft_value == setting.value:
+                    drafts.pop(setting.key, None)
+            if not drafts:
+                self._drafts.pop(actor_key, None)
+
+    def has_pending_changes(self, actor_user_id: int) -> bool:
+        return bool(self._drafts.get(self._actor_key(actor_user_id)))
+
+    def pending_change_count(self, actor_user_id: int) -> int:
+        return len(self._drafts.get(self._actor_key(actor_user_id), {}))
+
+    def has_pending_value(self, actor_user_id: int, setting: Setting[Any]) -> bool:
+        return setting.key in self._drafts.get(self._actor_key(actor_user_id), {})
+
+    def pending_change_level(self, actor_user_id: int) -> Power_Level | None:
+        drafts = self._drafts.get(self._actor_key(actor_user_id), {})
+        if not drafts:
+            return None
+        highest_level: Power_Level | None = None
+        for setting in self.app.options:
+            if setting.key not in drafts:
+                continue
+            if highest_level is None or setting.power_level > highest_level:
+                highest_level = setting.power_level
+        return highest_level
+
+    def required_save_level(self, actor_user_id: int) -> Power_Level:
+        return self.pending_change_level(actor_user_id) or Power_Level.user
+
+    def required_reload_level(self, actor_user_id: int) -> Power_Level:
+        return self.pending_change_level(actor_user_id) or Power_Level.user
+
+    def value_for(self, setting: Setting[T], actor_user_id: int) -> T | hikari.UndefinedType:
+        drafts = self._drafts.get(self._actor_key(actor_user_id), {})
+        draft_value = drafts.get(setting.key, hikari.UNDEFINED)
+        if isinstance(draft_value, hikari.UndefinedType):
+            return setting.value
+        return cast(T, draft_value)
+
+    def current_input_value(self, setting: Setting[T], actor_user_id: int) -> str:
+        value = self.value_for(setting, actor_user_id)
+        label = setting.spec.choice_label_for_value(value)
+        if label is not None:
+            return label
+        if isinstance(value, hikari.UndefinedType):
+            return ""
+        return str(value)
+
+    def display_value(self, setting: Setting[T], actor_user_id: int) -> str:
+        return setting.spec.display_value(self.value_for(setting, actor_user_id))
+
+    def label_text(self, setting: Setting[T], actor_user_id: int) -> str:
+        value = self.value_for(setting, actor_user_id)
+        choice_label = setting.spec.choice_label_for_value(value)
+        if choice_label is not None:
+            return choice_label
+        return setting.spec.display_value(value)
+
+    def update_setting(
+        self,
+        actor_user_id: int,
+        setting: Setting[T],
+        value: str,
+        *,
+        remember_input: bool = False,
+    ) -> None:
+        try:
+            parsed_value = setting.spec.parse_input(value)
+        except Exception as xcp:
+            log.exception(f"Casting Setting value Failed: {type(value)} > {setting.type_name}")
+            raise ValueError(f"Invalid value for {setting.label}: {xcp}")
+        draft_bucket = self._draft_bucket(actor_user_id)
+        if parsed_value == setting.value:
+            draft_bucket.pop(setting.key, None)
+            self._delete_empty_bucket(actor_user_id)
+        else:
+            draft_bucket[setting.key] = parsed_value
+        if remember_input:
+            setting._remember_input(setting.spec.serialise_value(parsed_value))
+        audit_log(
+            "setting.draft_updated",
+            actor_user_id=self._actor_key(actor_user_id),
+            app_name=self.config.name,
+            setting_key=setting.key,
+            setting_label=setting.label,
+            power_level=setting.power_level.name,
+            has_pending_value=self.has_pending_value(actor_user_id, setting),
+            pending_change_count=self.pending_change_count(actor_user_id),
+        )
+
+    def load(self, actor_user_id: int | None = None) -> None:
+        self.app.load()
+        self._prune_redundant_drafts()
+        if actor_user_id is None:
+            self._drafts.clear()
+            return
+        draft_count = self.pending_change_count(actor_user_id)
+        self._drafts.pop(self._actor_key(actor_user_id), None)
+        audit_log(
+            "setting.drafts_reloaded",
+            actor_user_id=self._actor_key(actor_user_id),
+            app_name=self.config.name,
+            discarded_draft_count=draft_count,
+        )
+
+    def save(self, actor_user_id: int) -> None:
+        actor_key = self._actor_key(actor_user_id)
+        drafts = dict(self._drafts.get(actor_key, {}))
+        for setting in self.app.options:
+            draft_value = drafts.get(setting.key, hikari.UNDEFINED)
+            if isinstance(draft_value, hikari.UndefinedType):
+                continue
+            setting.value = cast(Any, draft_value)
+        self.app.save()
+        self._drafts.pop(actor_key, None)
+        self._prune_redundant_drafts()
+        audit_log(
+            "setting.drafts_saved",
+            actor_user_id=actor_key,
+            app_name=self.config.name,
+            saved_setting_keys=sorted(drafts),
+            saved_setting_count=len(drafts),
+        )
 
 
 # AiviA APasz

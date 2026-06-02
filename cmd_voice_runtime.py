@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+# pyright: reportUninitializedInstanceVariable=false
+
 import asyncio
 import contextlib
 import io
+import logging
 import re
 import wave
 from collections import deque
+from collections.abc import Awaitable, Iterable, Mapping, Sized
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from collections.abc import Iterable, Mapping, Sized
-from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, cast
+from typing import TYPE_CHECKING, Callable, ClassVar, cast
 from urllib.parse import unquote, urlparse
 
 import emoji
@@ -23,8 +26,6 @@ from cmd_voice_common import (
     CHANNEL_MENTION_RE,
     DISCORD_CUSTOM_EMOJI_RE,
     EMOJI_TAG_RE,
-    PronunciationFormat,
-    PronunciationOverride,
     SUBSTITUTION_TOKEN_RE,
     TOKEN_RE,
     URL_RE,
@@ -32,6 +33,8 @@ from cmd_voice_common import (
     ActivePlayback,
     PiperPythonVoiceRuntime,
     PlaybackWaitResult,
+    PronunciationFormat,
+    PronunciationOverride,
     SpeechContent,
     SpeechToken,
     SpeechTokenKind,
@@ -44,6 +47,8 @@ from cmd_voice_common import (
     log,
 )
 from voice_common import wav_audio_duration_seconds
+
+tts_log = logging.getLogger(config.LOGGER_TTS)
 
 DISCORD_TIMESTAMP_RE = re.compile(r"<t:\d+(?::[A-Za-z])?>")
 DISCORD_HEADING_RE = re.compile(r"^(#{1,3}|-#)\s+(.*\S)\s*$", re.MULTILINE)
@@ -255,13 +260,13 @@ class VoiceTTSRuntimeMixin:
             return
 
         target = self.voice_target(event.guild_id)
-        if not target or event.channel_id != target.tts_channel:
+        if not target or not target.has_listening_tts_channel(event.channel_id):
             return
 
         content = (event.content or "").strip()
         if content.startswith(config.CHAT_IGNORE):
             preview = self._preview(content)
-            log.info(
+            tts_log.info(
                 f"TTS message {event.message_id=} {event.guild_id=} {event.channel_id=} {event.author_id=} "
                 f"attachments={len(event.message.attachments)} preview={preview!r} said=no reason=chat_ignore_prefix"
             )
@@ -282,18 +287,18 @@ class VoiceTTSRuntimeMixin:
         )
 
         if not event.is_human:
-            log.info(f"{base_log} said=no reason=not_human")
+            tts_log.info(f"{base_log} said=no reason=not_human")
             return
         if not self.is_user_listening(event.author_id):
-            log.info(f"{base_log} said=no reason=wrong_user")
+            tts_log.info(f"{base_log} said=no reason=wrong_user")
             return
         if reason := self._queue_preflight_reason(event.guild_id, require_enabled=True):
-            log.info(f"{base_log} said=no reason={reason}")
+            tts_log.info(f"{base_log} said=no reason={reason}")
             return
 
         spoken = await self._normalise_for_speech_async(raw, event)
         if not spoken:
-            log.info(f"{base_log} said=no reason=empty_after_normalise")
+            tts_log.info(f"{base_log} said=no reason=empty_after_normalise")
             return
 
         selected_voice, selected_variant = self.user_voice_variant(event.author_id)
@@ -310,7 +315,7 @@ class VoiceTTSRuntimeMixin:
         if queue_size is None:
             log.warning(f"{base_log} said=no reason=queue_full backlog={self._backlog_job_count}")
             return
-        log.info(
+        tts_log.info(
             f"{base_log} said=queued reason=accepted queue_size={queue_size} "
             f"voice={voice_spec} spoken={self._preview(spoken.render())!r}"
         )
@@ -454,8 +459,49 @@ class VoiceTTSRuntimeMixin:
         queue_size = self._try_enqueue_job(VoiceJob(guild, message, spoken, selected_voice, selected_variant))
         if queue_size is None:
             raise RuntimeError("Voice TTS backlog is full. Try again once the queue drains.")
-        log.info(
+        tts_log.info(
             f"TTS command queued guild={guild} message_id={message} "
+            f"queue_size={queue_size} voice={voice_spec} spoken={self._preview(spoken.render())!r}"
+        )
+        return spoken.render(), queue_size
+
+    async def queue_relay_message(
+        self,
+        guild_id: hikari.Snowflakeish,
+        channel_id: hikari.Snowflakeish,
+        message_id: hikari.Snowflakeish,
+        text: str,
+        *,
+        user_id: hikari.Snowflakeish | None,
+    ) -> tuple[str, int]:
+        guild = hikari.Snowflake(guild_id)
+        channel = hikari.Snowflake(channel_id)
+        if user_id is None:
+            raise RuntimeError("Relay author is not linked to a Discord user.")
+        target = self.voice_target(guild)
+        if target is None:
+            raise RuntimeError("Voice TTS is not configured for this server.")
+        if not target.has_listening_tts_channel(channel):
+            raise RuntimeError("Relay message was not posted in an active TTS channel.")
+        if not target.relay_tts_enabled:
+            raise RuntimeError("Relay TTS is disabled for this server.")
+        if not self.is_user_listening(user_id):
+            raise RuntimeError("Relay author is not listening to TTS.")
+        if reason := self._queue_preflight_reason(guild, require_enabled=True, require_worker=True):
+            raise RuntimeError(self._queue_preflight_error(reason))
+
+        spoken = await self._normalise_for_speech_async(text, user_id=user_id)
+        if not spoken:
+            raise ValueError("No speakable relay text after normalisation.")
+
+        selected_voice, selected_variant = self.user_voice_variant(user_id)
+        message = hikari.Snowflake(message_id)
+        voice_spec = self._voice_spec(selected_voice, selected_variant)
+        queue_size = self._try_enqueue_job(VoiceJob(guild, message, spoken, selected_voice, selected_variant))
+        if queue_size is None:
+            raise RuntimeError("Voice TTS backlog is full. Try again once the queue drains.")
+        tts_log.info(
+            f"TTS relay queued guild={guild} channel={channel} message_id={message} user_id={int(user_id)} "
             f"queue_size={queue_size} voice={voice_spec} spoken={self._preview(spoken.render())!r}"
         )
         return spoken.render(), queue_size
@@ -669,7 +715,7 @@ class VoiceTTSRuntimeMixin:
                     self._monitor_playback(playback),
                     name=f"voice-tts-playback-{job.message_id}",
                 )
-                log.info(
+                tts_log.info(
                     f"TTS job ducked-to-player {job.message_id=} batch_size={len(jobs)} "
                     f"voice={self._voice_spec(job.voice, job.variant)} spoken={self._preview(text)!r}"
                 )
@@ -703,7 +749,7 @@ class VoiceTTSRuntimeMixin:
             name=f"voice-tts-playback-{job.message_id}",
         )
 
-        log.info(
+        tts_log.info(
             f"TTS job queued-to-player {job.message_id=} queue_len={connection.player.queue} "
             f"batch_size={len(jobs)} voice={self._voice_spec(job.voice, job.variant)} "
             f"spoken={self._preview(text)!r}"
@@ -849,7 +895,7 @@ class VoiceTTSRuntimeMixin:
         music_channel = self._active_music_channel(guild_id)
 
         if music_channel is not None and music_channel != target_channel:
-            log.info(
+            tts_log.info(
                 f"TTS voice skip connect {guild_id=} channel={target_channel} "
                 f"reason=music_active_other_channel active_channel={music_channel}"
             )
@@ -860,21 +906,23 @@ class VoiceTTSRuntimeMixin:
             if self._connection_is_ready(connection):
                 self._clear_voice_connect_backoff(guild_id)
                 if listeners == 0:
-                    log.info(f"TTS voice not ready {guild_id=} channel={target_channel} mode=disconnect_empty_channel")
+                    tts_log.info(
+                        f"TTS voice not ready {guild_id=} channel={target_channel} mode=disconnect_empty_channel"
+                    )
                     with contextlib.suppress(Exception):
                         await self._voice_client.disconnect(channel_id=target_channel)
                     return None
-                log.info(f"TTS voice ready {guild_id=} channel={target_channel} mode=reuse state={state_name}")
+                tts_log.info(f"TTS voice ready {guild_id=} channel={target_channel} mode=reuse state={state_name}")
                 return connection
 
         if listeners == 0:
-            log.info(f"TTS voice skip connect {guild_id=} channel={target_channel} reason=channel_empty")
+            tts_log.info(f"TTS voice skip connect {guild_id=} channel={target_channel} reason=channel_empty")
             return None
 
         active_backoff = self._active_voice_connect_backoff(guild_id, listeners)
         if active_backoff is not None:
             remaining = active_backoff.retry_at_monotonic - asyncio.get_running_loop().time()
-            log.info(
+            tts_log.info(
                 f"TTS voice skip connect {guild_id=} channel={target_channel} "
                 f"reason={active_backoff.reason} cooldown_remaining={remaining:.1f}s "
                 f"detail={active_backoff.detail}"
@@ -891,7 +939,7 @@ class VoiceTTSRuntimeMixin:
 
         if connection:
             try:
-                log.info(
+                tts_log.info(
                     f"TTS moving voice {guild_id=} from={connection.channel_id} to={target_channel} "
                     f"mode=move timeout={self._VOICE_CONNECT_TIMEOUT_SECONDS:.1f}s"
                 )
@@ -901,7 +949,7 @@ class VoiceTTSRuntimeMixin:
                 )
                 if self._connection_is_ready(moved):
                     self._clear_voice_connect_backoff(guild_id)
-                    log.info(
+                    tts_log.info(
                         f"TTS voice moved {guild_id=} channel={target_channel} "
                         f"state={self._connection_state_name(moved)}"
                     )
@@ -931,7 +979,7 @@ class VoiceTTSRuntimeMixin:
         last_xcp: Exception | None = None
         for attempt in range(1, 4):
             try:
-                log.info(
+                tts_log.info(
                     f"TTS connecting voice {guild_id=} channel={target_channel} attempt={attempt} "
                     f"timeout={self._VOICE_CONNECT_TIMEOUT_SECONDS:.1f}s"
                 )
@@ -1061,7 +1109,7 @@ class VoiceTTSRuntimeMixin:
             try:
                 await self.bot.wait_for(hikariwave.AudioBeginEvent, playback.begin_timeout_seconds, pred)
                 playback.started_at = asyncio.get_running_loop().time()
-                log.info(f"TTS audio begin {job.message_id=} timeout={playback.timeout_seconds:.1f}s")
+                tts_log.info(f"TTS audio begin {job.message_id=} timeout={playback.timeout_seconds:.1f}s")
             except asyncio.TimeoutError:
                 begin_timed_out = True
                 log.warning(f"TTS audio begin timeout {job.message_id=} continuing wait_for_end")
@@ -1069,7 +1117,7 @@ class VoiceTTSRuntimeMixin:
             try:
                 end_timeout = playback.timeout_seconds + (playback.begin_timeout_seconds if begin_timed_out else 0.0)
                 await self.bot.wait_for(hikariwave.AudioEndEvent, end_timeout, pred)
-                log.info(f"TTS job completed {job.message_id=} batch_size={len(playback.jobs)} said=yes")
+                tts_log.info(f"TTS job completed {job.message_id=} batch_size={len(playback.jobs)} said=yes")
             except asyncio.TimeoutError:
                 state = getattr(playback.connection.player.state, "name", str(playback.connection.player.state))
                 log.warning(
@@ -1380,12 +1428,12 @@ class VoiceTTSRuntimeMixin:
             return (normalised_host, normalised_host.removeprefix("www."))
         return (normalised_host,)
 
-    @staticmethod
-    def _render_link_rule_template(template: str, hostname: str, match: re.Match[str]) -> str | None:
-        values: dict[str, str] = {"host": VoiceTTSRuntimeMixin._spoken_link_host(hostname)}
+    @classmethod
+    def _render_link_rule_template(cls, template: str, hostname: str, match: re.Match[str]) -> str | None:
+        values: dict[str, str] = {"host": cls._spoken_link_host(hostname)}
         for key, value in match.groupdict().items():
             decoded = unquote(value).strip() if value is not None else ""
-            normalised = VoiceTTSRuntimeMixin._normalise_link_template_value(decoded)
+            normalised = cls._normalise_link_template_value(decoded)
             values[key] = decoded
             values[f"{key}_norm"] = normalised
             values[f"{key}_words"] = normalised

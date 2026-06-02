@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 group_saves = lightbulb.Group("saves", "Commands related to app saves")  # type: ignore
 
 
-async def ac_app_configs(ctx: lightbulb.AutocompleteContext, manager: App_Manager):
+async def ac_app_configs(ctx: lightbulb.AutocompleteContext[str], manager: App_Manager) -> None:
     await ctx.respond([a.friendly for a in manager.apps.values() if a.saves])
 
 
@@ -21,7 +21,7 @@ class CMD_SavesDownload(
     description="Retrieve save for app",
     hooks=[lightbulb.prefab.sliding_window(15, 1, "user")],
 ):
-    app = lightbulb.string("app", "What to get save for", autocomplete=ac_app_configs)  # type: ignore
+    app = lightbulb.string("app", "What to get save for", autocomplete=ac_app_configs)  # pyright: ignore[reportArgumentType]
 
     @lightbulb.invoke
     async def invoke(self, ctx: lightbulb.Context, acl: Access_Control):

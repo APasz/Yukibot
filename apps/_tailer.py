@@ -5,11 +5,13 @@ from asyncio import StreamReader
 from collections.abc import Awaitable, Callable
 from io import TextIOWrapper
 from pathlib import Path
-from typing import IO, BinaryIO, TextIO
+from typing import IO, Any, BinaryIO, TextIO
 
 import config
 
 log = logging.getLogger(__name__)
+
+type AppAliveResult = bool | asyncio.Event | Awaitable[bool | asyncio.Event]
 
 
 class Tailer:
@@ -18,8 +20,8 @@ class Tailer:
 
     def __new__(
         cls,
-        app_alive: Callable[[], bool | Awaitable[bool | asyncio.Event]],
-        pointer: Path | StreamReader | TextIO | BinaryIO | IO,
+        app_alive: Callable[[], AppAliveResult],
+        pointer: Path | StreamReader | TextIO | BinaryIO | IO[Any],
         output: Path | None = None,
     ):
         if isinstance(pointer, Path):
@@ -43,8 +45,8 @@ class Tailer:
 
     def __init__(
         self,
-        app_alive: Callable[[], bool | Awaitable[bool] | Awaitable[asyncio.Event]],
-        pointer: Path | StreamReader | TextIO | BinaryIO | IO,
+        app_alive: Callable[[], AppAliveResult],
+        pointer: Path | StreamReader | TextIO | BinaryIO | IO[Any],
         output: Path | None = None,
     ):
         if getattr(self, "_initialised", False):
@@ -70,8 +72,8 @@ class Tailer:
         else:
             log.error(f"Tail Pointer Invalid: {pointer}")
 
-        self._read_task: asyncio.Task | None = None
-        self._log_clear_task: asyncio.Task | None = None
+        self._read_task: asyncio.Task[None] | None = None
+        self._log_clear_task: asyncio.Task[None] | None = None
         self._matchers: dict[str, Callable[[str], Awaitable[None]]] = {}
 
         self._log: dict[int, str] = {}
@@ -84,33 +86,30 @@ class Tailer:
 
         self._running: bool = False
 
-    async def start(self, matchers: set):
+    async def _resolve_app_alive(self) -> bool | asyncio.Event:
+        result = self.app_alive()
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def start(self, matchers: set[Callable[[str], Awaitable[None]]]) -> None:
         log.info(f"{__name__}.start")
         for matcher in matchers:
             self.register_matcher(matcher)
 
-        result = self.app_alive()
+        result = await self._resolve_app_alive()
 
         if isinstance(result, asyncio.Event):
             log.info(f"{__name__}.wait: Event")
             await result.wait()
-        elif inspect.isawaitable(result):
-            value = await result
-            if isinstance(value, asyncio.Event):
-                log.info(f"{__name__}.wait: Async")
-                await value.wait()
-            elif value is True:
-                pass
-            else:
-                while not value:
-                    log.info(f"{__name__}.wait: Sync1")
-                    await asyncio.sleep(1)
-                    value = await self.app_alive()  # type: ignore
         else:
             while not result:
                 log.info(f"{__name__}.wait: Sync2")
                 await asyncio.sleep(1)
-                result = self.app_alive()
+                result = await self._resolve_app_alive()
+                if isinstance(result, asyncio.Event):
+                    await result.wait()
+                    break
 
         if not self._read_task or self._read_task.done():
             self._read_task = asyncio.create_task(self._reader_loop())
@@ -163,7 +162,10 @@ class Tailer:
 
     async def _reader_loop(self):
         count = 0
-        stdout = self.output.open("w") if self.output else None
+        stdout = None
+        if self.output:
+            self.output.parent.mkdir(parents=True, exist_ok=True)
+            stdout = self.output.open("w", encoding=config.STR_ENCODE, buffering=1)
         try:
             while True:
                 await asyncio.sleep(0.01)
@@ -203,8 +205,9 @@ class Tailer:
                 self._log[count] = line
                 count += 1
 
-                if stdout and stdout.writable:
+                if stdout and stdout.writable():
                     stdout.write(f"{line}\n")
+                    stdout.flush()
 
                 for func, matcher in self._matchers.items():
                     if not config.SILENT_DEBUG:
@@ -236,7 +239,7 @@ class Tailer:
             log.warning(f"Matcher {name} already registered — overwriting")
         self._matchers[name] = func
 
-    def unregister_matcher(self, func: Callable):
+    def unregister_matcher(self, func: Callable[[str], Awaitable[None]]) -> None:
         name = f"{func.__module__}.{func.__name__}"
         log.warning(f"Matcher {name} deregistered")
         self._matchers.pop(name, None)

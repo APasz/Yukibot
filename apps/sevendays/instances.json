@@ -5,13 +5,21 @@
         "mods_dir": "{WD}/Mods",
         "server_log_file": "{WD}/server_stdout.log",
         "port": 26900,
-        "chat_channel": "1380014541466767360"
+        "chat_channel": "1380014541466767360",
+        "version": {
+            "main": "1.4b8"
+        },
+        "enabled": true
     },
     "beta": {
         "friendly_name": "7D2D-2",
         "directory": "{APPS}/sevendays2",
         "mods_dir": "{WD}/Mods",
         "server_log_file": "{WD}/server_stdout.log",
-        "port": 26900
+        "port": 26900,
+        "version": {
+            "main": "1.4b8"
+        },
+        "enabled": false
     }
 }

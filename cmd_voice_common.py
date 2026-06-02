@@ -7,7 +7,8 @@ import re
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, cast
+from collections.abc import Iterable
+from typing import Any, Callable, cast
 
 import hikari
 import hikariwave
@@ -247,12 +248,76 @@ class VoiceConnectBackoff:
     detail: str
 
 
+class VoiceLinkRuleMode(enum.StrEnum):
+    SIMPLE = "simple"
+    REGEX = "regex"
+
+
 @dataclass(slots=True, frozen=True)
-class VoiceLinkRule:
+class VoiceLinkRuleDraft:
+    mode: VoiceLinkRuleMode
+    host: str
+    example_url: str
+    input_pattern: str
+    compiled_path_regex: str
+    template: str
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceLinkRegexRuleSpec:
     host: str
     path_regex: str
-    path_pattern: re.Pattern[str]
     template: str
+    example_url: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceLinkSimpleRuleSpec:
+    host: str
+    path_shape: str
+    template: str
+    example_url: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class VoiceLinkRule:
+    spec: VoiceLinkRegexRuleSpec | VoiceLinkSimpleRuleSpec
+    compiled_path_regex: str
+    path_pattern: re.Pattern[str]
+
+    @property
+    def host(self) -> str:
+        return self.spec.host
+
+    @property
+    def template(self) -> str:
+        return self.spec.template
+
+    @property
+    def example_url(self) -> str | None:
+        return self.spec.example_url
+
+    @property
+    def mode(self) -> VoiceLinkRuleMode:
+        if isinstance(self.spec, VoiceLinkSimpleRuleSpec):
+            return VoiceLinkRuleMode.SIMPLE
+        return VoiceLinkRuleMode.REGEX
+
+    @property
+    def path_regex(self) -> str:
+        return self.compiled_path_regex
+
+    @property
+    def path_shape(self) -> str | None:
+        if isinstance(self.spec, VoiceLinkSimpleRuleSpec):
+            return self.spec.path_shape
+        return None
+
+    @property
+    def input_pattern(self) -> str:
+        if isinstance(self.spec, VoiceLinkSimpleRuleSpec):
+            return self.spec.path_shape
+        return self.spec.path_regex
 
 
 @dataclass(slots=True, frozen=True, init=False)

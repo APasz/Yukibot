@@ -303,8 +303,8 @@ class PresenceSnapshot:
 
 
 class Online_Tracker(metaclass=config.Singleton):
-    def __init__(self, pointer: Path = Path("online_watch.json")):
-        self.pointer = pointer
+    def __init__(self, pointer: Path | None = None):
+        self.pointer = pointer or Path("online_watch.json")
         self.rules: dict[hikari.Snowflake, dict[hikari.Snowflake, WatchRule]] = {}
         self._watchers_by_target: dict[hikari.Snowflake, set[hikari.Snowflake]] = {}
         self.ignored_user_ids: set[hikari.Snowflake] = set(IGNORED_USER_IDS)

@@ -1,0 +1,1451 @@
+from __future__ import annotations
+
+from .runtime_imports import (
+    App,
+    App_Manager,
+    AuthorityEndpoint,
+    AuthorityResource,
+    Awaitable,
+    BadgeTone,
+    BotMetadataModWeb,
+    BotMetadataSnapshot,
+    Callable,
+    Iterable,
+    Literal,
+    ManagedApp,
+    Mapping,
+    ModWebUser,
+    NodeAccessGrant,
+    NodeApiScope,
+    NodeAppEntry,
+    NodeAppRuntimeSummary,
+    NodeAppTransitionState,
+    NodeConfigContent,
+    NodeConfigList,
+    NodeConsoleActionExecutionResult,
+    NodeConsoleActionList,
+    NodeModList,
+    NodeModUploadResult,
+    NodeSaveList,
+    NodeSaveMutationResult,
+    NodeSettingList,
+    NodeSettingMutationResult,
+    NodeSettingsActionResult,
+    NodeSystemSummary,
+    Path,
+    Power_Level,
+    RedirectResponse,
+    Request,
+    Response,
+    Timer,
+    Utilities,
+    asyncio,
+    cast,
+    config,
+    issue_node_token,
+    quote,
+    read_json_object,
+    requests,
+    tempfile,
+    time,
+    urlencode,
+    urlunsplit,
+)
+from .constants import (
+    _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
+    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    _REMOTE_NODE_TOKEN_TTL_SECONDS,
+    _SAME_ORIGIN_NODE_API_BASE,
+    _SAME_ORIGIN_NODE_PROXY_BASE,
+    _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
+    log,
+    traffic_log,
+)
+from .json_helpers import _json_object, _json_request_object
+from .nicegui_protocols import AsyncRefresh, ModWebUi, RefreshableValue
+from .types import (
+    ModWebHomeNodeSummary,
+    ModWebNodeAppSection,
+    ModWebNodeLink,
+    ModWebOverviewPageModel,
+    ModWebPageModel,
+    ModWebTitleStat,
+    ModWebTitleStatLine,
+)
+from .utils import _http_exception, _is_executor_shutdown_error
+
+from .home import ModWebHomeMixin
+from .service_base import ModWebServiceSupport
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nicegui.elements.upload_files import FileUpload
+
+class ModWebModelsMixin(ModWebServiceSupport):
+    async def _build_page_model(self, app: App, *, user: ModWebUser) -> ModWebPageModel:
+        can_manage_app: bool = self._user_has_level(user, Power_Level.user)
+        mods: NodeModList = await self._node_api.build_mod_list(app)
+        supports_configs: bool = app.supports_config_files
+        config_read_level: Power_Level = app.lowest_config_file_read_level
+        config_write_level: Power_Level = app.config_file_write_level
+        supports_save_uploads: bool = app.supports_save_uploads
+        supports_save_rename: bool = app.supports_save_rename
+        save_write_level: Power_Level = app.save_file_write_level
+        configs: NodeConfigList = (
+            self._node_api.build_config_list(app, actor_user_id=user.discord_id)
+            if supports_configs and self._user_has_level(user, config_read_level)
+            else self._empty_config_list(
+                app_name=app.name, app_friendly=app.friendly, node_name=config.MOD_WEB_SERVER.node_name
+            )
+        )
+        saves: NodeSaveList | None = (
+            self._node_api.build_save_list(app) if app.supports_save_files and can_manage_app else None
+        )
+        settings: NodeSettingList | None = (
+            self._node_api.build_setting_list(app=app, actor_user_id=user.discord_id)
+            if app.supports_settings
+            else None
+            if can_manage_app
+            else None
+        )
+        console_actions: NodeConsoleActionList | None = (
+            self._node_api.build_console_action_list(app=app, actor_user_id=user.discord_id)
+            if app.supports_console_actions and can_manage_app
+            else None
+        )
+        app_start_blocked: bool = self._app_start_blocked_local(app)
+        traffic_log.info(
+            "Mod web page model built: app=%s mods=%s configs=%s saves=%s settings=%s",
+            app.name,
+            mods.summary.total_count,
+            len(configs.configs),
+            len(saves.saves) if saves is not None else 0,
+            len(settings.settings) if settings is not None else 0,
+        )
+        return ModWebPageModel(
+            node_name=config.MOD_WEB_SERVER.node_name,
+            app_name=app.name,
+            app_friendly=app.friendly,
+            app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
+            supports_configs=supports_configs,
+            config_read_level=config_read_level,
+            config_write_level=config_write_level,
+            supports_save_uploads=supports_save_uploads,
+            supports_save_rename=supports_save_rename,
+            save_write_level=save_write_level,
+            mods=mods,
+            configs=configs,
+            saves=saves,
+            app_stats=mods.app_stats,
+            app_start_blocked=app_start_blocked,
+            settings=settings,
+            console_actions=console_actions,
+            supports_chat=app.supports_chat_relay,
+            chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
+            download_all_url=self._node_api.mod_download_url(
+                app.name,
+                enabled_only=False,
+                base_url=_SAME_ORIGIN_NODE_API_BASE,
+            ),
+            download_enabled_url=self._node_api.mod_download_url(
+                app.name,
+                enabled_only=True,
+                base_url=_SAME_ORIGIN_NODE_API_BASE,
+            ),
+            mod_download_urls={
+                mod.name: self._node_api.single_mod_download_url(
+                    app.name,
+                    mod.name,
+                    base_url=_SAME_ORIGIN_NODE_API_BASE,
+                )
+                for mod in mods.mods
+                if mod.downloadable
+            },
+        )
+
+    async def _build_overview_page_model(self, app: App, *, user: ModWebUser) -> ModWebOverviewPageModel:
+        can_manage_app: bool = self._user_has_level(user, Power_Level.user)
+        supports_configs: bool = app.supports_config_files
+        config_read_level: Power_Level = app.lowest_config_file_read_level
+        config_write_level: Power_Level = app.config_file_write_level
+        supports_save_uploads: bool = app.supports_save_uploads
+        supports_save_rename: bool = app.supports_save_rename
+        save_write_level: Power_Level = app.save_file_write_level
+        configs: NodeConfigList = (
+            self._node_api.build_config_list(app, actor_user_id=user.discord_id)
+            if supports_configs and self._user_has_level(user, config_read_level)
+            else self._empty_config_list(
+                app_name=app.name, app_friendly=app.friendly, node_name=config.MOD_WEB_SERVER.node_name
+            )
+        )
+        saves: NodeSaveList | None = (
+            self._node_api.build_save_list(app) if app.supports_save_files and can_manage_app else None
+        )
+        settings: NodeSettingList | None = (
+            self._node_api.build_setting_list(app=app, actor_user_id=user.discord_id)
+            if app.supports_settings
+            else None
+            if can_manage_app
+            else None
+        )
+        console_actions: NodeConsoleActionList | None = (
+            self._node_api.build_console_action_list(app=app, actor_user_id=user.discord_id)
+            if app.supports_console_actions and can_manage_app
+            else None
+        )
+        app_stats: NodeAppRuntimeSummary = await self._node_api.build_app_runtime_summary(app)
+        app_start_blocked: bool = self._app_start_blocked_local(app)
+        traffic_log.info(
+            "Mod web overview model built: app=%s configs=%s saves=%s settings=%s",
+            app.name,
+            len(configs.configs),
+            len(saves.saves) if saves is not None else 0,
+            len(settings.settings) if settings is not None else 0,
+        )
+        return ModWebOverviewPageModel(
+            node_name=config.MOD_WEB_SERVER.node_name,
+            app_name=app.name,
+            app_friendly=app.friendly,
+            app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
+            supports_configs=supports_configs,
+            config_read_level=config_read_level,
+            config_write_level=config_write_level,
+            supports_save_uploads=supports_save_uploads,
+            supports_save_rename=supports_save_rename,
+            save_write_level=save_write_level,
+            configs=configs,
+            saves=saves,
+            app_stats=app_stats,
+            app_start_blocked=app_start_blocked,
+            settings=settings,
+            console_actions=console_actions,
+            supports_chat=app.supports_chat_relay,
+            chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
+        )
+
+    def _remote_page_model(
+        self,
+        *,
+        node: ModWebNodeLink,
+        mods: NodeModList,
+        supports_configs: bool,
+        config_read_level: Power_Level,
+        config_write_level: Power_Level,
+        supports_save_uploads: bool,
+        supports_save_rename: bool,
+        save_write_level: Power_Level,
+        configs: NodeConfigList,
+        saves: NodeSaveList | None,
+        settings: NodeSettingList | None,
+        console_actions: NodeConsoleActionList | None,
+        supports_chat: bool,
+        chat_url: str | None,
+        app_start_blocked: bool,
+        app_color_hex: str | None,
+    ) -> ModWebPageModel:
+        node_path: str = f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node.node_name, safe='')}"
+        app_path: str = f"{node_path}/apps/{quote(mods.app_name, safe='')}"
+        return ModWebPageModel(
+            node_name=node.node_name,
+            app_name=mods.app_name,
+            app_friendly=mods.app_friendly,
+            app_color_hex=app_color_hex,
+            supports_configs=supports_configs,
+            config_read_level=config_read_level,
+            config_write_level=config_write_level,
+            supports_save_uploads=supports_save_uploads,
+            supports_save_rename=supports_save_rename,
+            save_write_level=save_write_level,
+            mods=mods,
+            configs=configs,
+            saves=saves,
+            app_stats=mods.app_stats,
+            app_start_blocked=app_start_blocked,
+            settings=settings,
+            console_actions=console_actions,
+            supports_chat=supports_chat,
+            chat_url=chat_url,
+            download_all_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'false'})}",
+            download_enabled_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'true'})}",
+            mod_download_urls={
+                mod.name: f"{app_path}/mods/{quote(mod.name, safe='')}/download"
+                for mod in mods.mods
+                if mod.downloadable
+            },
+        )
+
+    def _remote_overview_page_model(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        app_friendly: str,
+        app_color_hex: str | None,
+        supports_configs: bool,
+        config_read_level: Power_Level,
+        config_write_level: Power_Level,
+        supports_save_uploads: bool,
+        supports_save_rename: bool,
+        save_write_level: Power_Level,
+        configs: NodeConfigList,
+        saves: NodeSaveList | None,
+        settings: NodeSettingList | None,
+        console_actions: NodeConsoleActionList | None,
+        supports_chat: bool,
+        chat_url: str | None,
+        app_stats: NodeAppRuntimeSummary | None,
+        app_start_blocked: bool,
+    ) -> ModWebOverviewPageModel:
+        return ModWebOverviewPageModel(
+            node_name=node.node_name,
+            app_name=app_name,
+            app_friendly=app_friendly,
+            app_color_hex=app_color_hex,
+            supports_configs=supports_configs,
+            config_read_level=config_read_level,
+            config_write_level=config_write_level,
+            supports_save_uploads=supports_save_uploads,
+            supports_save_rename=supports_save_rename,
+            save_write_level=save_write_level,
+            configs=configs,
+            saves=saves,
+            app_stats=app_stats,
+            app_start_blocked=app_start_blocked,
+            settings=settings,
+            console_actions=console_actions,
+            supports_chat=supports_chat,
+            chat_url=chat_url,
+        )
+
+    def _node_links(self) -> tuple[ModWebNodeLink, ...]:
+        links: dict[str, ModWebNodeLink] = {}
+        current: ModWebNodeLink = ModWebNodeLink(
+            node_name=config.MOD_WEB_SERVER.node_name,
+            label=self._current_node_label(),
+            url=self.index_path(),
+            api_base_url=_SAME_ORIGIN_NODE_API_BASE,
+            api_url=self._node_api.apps_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
+            is_current=True,
+        )
+        links[current.node_name.casefold()] = current
+
+        for snapshot in self._known_bot_snapshots():
+            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
+            if mod_web is None:
+                continue
+            node_name: str = mod_web.node_name
+            key: str = node_name.casefold()
+            if key in links:
+                continue
+            links[key] = ModWebNodeLink(
+                node_name=node_name,
+                label=snapshot.profile.label or node_name,
+                url=f"/mod-web/nodes/{quote(node_name, safe='')}",
+                api_base_url=mod_web.node_api_base_url.rstrip("/"),
+                api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
+                is_current=False,
+            )
+        return tuple(links.values())
+
+    def _current_node_label(self) -> str:
+        node_name: str = config.MOD_WEB_SERVER.node_name
+        key: str = node_name.casefold()
+        for snapshot in self._known_bot_snapshots():
+            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
+            if mod_web is None or mod_web.node_name.casefold() != key:
+                continue
+            if snapshot.profile.label:
+                return snapshot.profile.label
+        if key == config.ACTIVE_BOT_PROFILE.name.value.casefold():
+            return config.ACTIVE_BOT_PROFILE.name.value.title()
+        return node_name
+
+    def _remote_node_link(self, node_name: str) -> ModWebNodeLink:
+        key: str = node_name.casefold()
+        for node in self._node_links():
+            if node.node_name.casefold() == key:
+                if node.is_current:
+                    raise _http_exception(400, f"{node.node_name} is the current node; use the local node API.")
+                return node
+        raise _http_exception(404, f"Unknown node: {node_name}")
+
+    def _remote_apps(self, node: ModWebNodeLink, user: ModWebUser) -> tuple[NodeAppEntry, ...]:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=None,
+            path="/apps",
+            scopes=(NodeApiScope.APPS_READ,),
+            user=user,
+            timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
+        )
+        raw_apps: object | None = payload.get("apps")
+        if not isinstance(raw_apps, list):
+            raise RuntimeError("Remote node apps response did not include an apps list.")
+        apps: list[NodeAppEntry] = []
+        for raw_app in cast(Iterable[object], raw_apps):
+            apps.append(NodeAppEntry.from_mapping(_json_object(raw_app, context="Remote node apps response entry")))
+        return tuple[NodeAppEntry, ...](sorted(apps, key=lambda app: app.friendly.casefold()))
+
+    def _remote_app_entry(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeAppEntry:
+        key: str = app_name.casefold()
+        for entry in self._remote_apps(node, user):
+            if entry.name.casefold() == key:
+                return entry
+        raise RuntimeError(f"Remote node did not expose app {app_name!r}.")
+
+    def _remote_mod_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeModList:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/mods",
+            scopes=(NodeApiScope.MODS_READ,),
+            user=user,
+        )
+        return NodeModList.from_mapping(payload)
+
+    def _remote_mod_upload(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        upload_path: Path,
+        upload_name: str,
+        user: ModWebUser,
+    ) -> NodeModUploadResult:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+        )
+        url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/upload"
+        try:
+            with upload_path.open("rb") as handle:
+                response: Response = requests.post(
+                    url,
+                    data={"filename": upload_name},
+                    files={"upload": (upload_name, handle, "application/octet-stream")},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+                )
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return NodeModUploadResult.from_mapping(_json_object(payload, context="Remote node response"))
+
+    def _remote_config_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeConfigList:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/configs",
+            scopes=(NodeApiScope.CONFIGS_READ,),
+            user=user,
+        )
+        return NodeConfigList.from_mapping(payload)
+
+    def _remote_save_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeSaveList:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/saves",
+            scopes=(NodeApiScope.SAVES_READ,),
+            user=user,
+        )
+        return NodeSaveList.from_mapping(payload)
+
+    def _remote_save_upload(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        root_id: str,
+        upload_path: Path,
+        upload_name: str,
+        user: ModWebUser,
+    ) -> NodeSaveMutationResult:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=(NodeApiScope.SAVES_WRITE,),
+            user=user,
+        )
+        url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/saves/upload"
+        try:
+            with upload_path.open("rb") as handle:
+                response: Response = requests.post(
+                    url,
+                    data={"root_id": root_id, "filename": upload_name},
+                    files={"upload": (upload_name, handle, "application/octet-stream")},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+                )
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return NodeSaveMutationResult.from_mapping(_json_object(payload, context="Remote node response"))
+
+    def _remote_save_rename(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        save_id: str,
+        new_name: str,
+        user: ModWebUser,
+    ) -> NodeSaveMutationResult:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}/rename",
+            scopes=(NodeApiScope.SAVES_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"new_name": new_name},
+        )
+        return NodeSaveMutationResult.from_mapping(payload)
+
+    def _remote_app_runtime_summary(
+        self, node: ModWebNodeLink, app_name: str, user: ModWebUser
+    ) -> NodeAppRuntimeSummary:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/runtime",
+            scopes=(NodeApiScope.MODS_READ,),
+            user=user,
+        )
+        return NodeAppRuntimeSummary.from_mapping(payload)
+
+    def _remote_node_system_summary(self, node: ModWebNodeLink, user: ModWebUser) -> NodeSystemSummary:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=None,
+            path="/system",
+            scopes=(NodeApiScope.APPS_READ,),
+            user=user,
+            timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
+        )
+        return NodeSystemSummary.from_mapping(payload)
+
+    @staticmethod
+    def _app_start_blocked_remote(
+        *, app_friendly: str, app_stats: NodeAppRuntimeSummary | None, running_names: tuple[str, ...]
+    ) -> bool:
+        if app_stats is not None and app_stats.running:
+            return False
+        if not running_names:
+            return False
+        return app_friendly not in running_names
+
+    def _remote_config_content(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        config_id: str,
+        user: ModWebUser,
+    ) -> NodeConfigContent:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/configs/{quote(config_id, safe='/')}",
+            scopes=(NodeApiScope.CONFIGS_READ,),
+            user=user,
+        )
+        return NodeConfigContent.from_mapping(payload)
+
+    def _remote_config_write(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        config_id: str,
+        content: str,
+        user: ModWebUser,
+    ) -> NodeConfigContent:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/configs/{quote(config_id, safe='/')}",
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={"content": content},
+        )
+        return NodeConfigContent.from_mapping(payload)
+
+    def _remote_setting_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeSettingList:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/settings",
+            scopes=(NodeApiScope.SETTINGS_READ,),
+            user=user,
+        )
+        return NodeSettingList.from_mapping(payload)
+
+    def _remote_setting_write(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        setting_key: str,
+        value: str,
+        user: ModWebUser,
+    ) -> NodeSettingMutationResult:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/settings/{quote(setting_key, safe='')}",
+            scopes=(NodeApiScope.SETTINGS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={"value": value},
+        )
+        return NodeSettingMutationResult.from_mapping(payload)
+
+    def _remote_settings_save(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeSettingsActionResult:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/settings/save",
+            scopes=(NodeApiScope.SETTINGS_WRITE,),
+            user=user,
+            method="POST",
+        )
+        return NodeSettingsActionResult.from_mapping(payload)
+
+    def _remote_settings_reload(
+        self, node: ModWebNodeLink, app_name: str, user: ModWebUser
+    ) -> NodeSettingsActionResult:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/settings/reload",
+            scopes=(NodeApiScope.SETTINGS_WRITE,),
+            user=user,
+            method="POST",
+        )
+        return NodeSettingsActionResult.from_mapping(payload)
+
+    def _remote_console_action_list(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeConsoleActionList:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/console-actions",
+            scopes=(NodeApiScope.APP_CONTROL,),
+            user=user,
+        )
+        return NodeConsoleActionList.from_mapping(payload)
+
+    def _remote_execute_console_action(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        action_key: str,
+        raw_value: str | None,
+        user: ModWebUser,
+    ) -> NodeConsoleActionExecutionResult:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/console-actions/{quote(action_key, safe='')}",
+            scopes=(NodeApiScope.APP_CONTROL,),
+            user=user,
+            method="POST",
+            json_payload={"value": raw_value},
+        )
+        return NodeConsoleActionExecutionResult.from_mapping(payload)
+
+    def _remote_json(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str | None,
+        path: str,
+        scopes: tuple[NodeApiScope, ...],
+        user: ModWebUser,
+        method: str = "GET",
+        json_payload: Mapping[str, object] | None = None,
+        timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> dict[str, object]:
+        token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
+        url: str = f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        try:
+            if method == "GET":
+                response = requests.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=timeout,
+                )
+            elif method == "PUT":
+                response = requests.put(
+                    url,
+                    json=_json_request_object(json_payload),
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=timeout,
+                )
+            elif method == "POST":
+                response: Response = requests.post(
+                    url,
+                    json=_json_request_object(json_payload),
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=timeout,
+                )
+            else:
+                raise ValueError(f"Unsupported remote node request method: {method}")
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return _json_object(payload, context="Remote node response")
+
+    @staticmethod
+    async def _persist_uploaded_file(upload_file: "FileUpload") -> Path:
+        suffix: str = Path(upload_file.name).suffix
+        with tempfile.NamedTemporaryFile(prefix="yukibot-save-web-", suffix=suffix, delete=False) as handle:
+            temp_path: Path = Path(handle.name)
+        await upload_file.save(temp_path)
+        return temp_path
+
+    def _remote_download_redirect(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        path: str,
+        query: Mapping[str, object],
+        user: ModWebUser,
+        scopes: tuple[NodeApiScope, ...] = (NodeApiScope.MODS_DOWNLOAD,),
+    ) -> RedirectResponse:
+        return RedirectResponse(
+            self._remote_download_url(node=node, app_name=app_name, path=path, query=query, user=user, scopes=scopes),
+            status_code=302,
+        )
+
+    def _remote_download_url(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        path: str,
+        query: Mapping[str, object],
+        user: ModWebUser,
+        scopes: tuple[NodeApiScope, ...] = (NodeApiScope.MODS_DOWNLOAD,),
+    ) -> str:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=scopes,
+            user=user,
+        )
+        query_with_token: dict[str, object] = dict[str, object](query)
+        query_with_token["access_token"] = token
+        return f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}?{urlencode(query_with_token, doseq=True)}"
+
+    def _remote_token(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str | None,
+        scopes: tuple[NodeApiScope, ...],
+        user: ModWebUser,
+    ) -> str:
+        secret: str | None = config.MOD_WEB_SERVER.token_secret
+        if secret is None:
+            raise RuntimeError("NODE_API_TOKEN_SECRET or DATA_AUTHORITY_TOKEN is required to proxy remote nodes.")
+        return issue_node_token(
+            secret=secret,
+            grant=NodeAccessGrant(
+                subject=f"web:{user.discord_id}",
+                node=node.node_name,
+                app=app_name,
+                scopes=frozenset[NodeApiScope](scopes),
+                expires_at=int(time.time()) + _REMOTE_NODE_TOKEN_TTL_SECONDS,
+            ),
+        )
+
+    def _require_http_user(self, *, request: Request, required_level: Power_Level) -> ModWebUser:
+        if not self._auth.enabled:
+            raise _http_exception(503, "Discord OAuth is not configured for the mod web UI.")
+        user: ModWebUser | None = self._auth.current_user(request)
+        if user is None:
+            raise _http_exception(401, "Discord login is required.")
+        if self._acl is None:
+            raise _http_exception(503, "Mod web permissions are not available.")
+        if not self._acl.can(user.discord_id, required_level):
+            raise _http_exception(
+                403,
+                f"Insufficient level: {self._acl.level_of(user.discord_id).name.title()} < {required_level.name.title()}",
+            )
+        return user
+
+    @staticmethod
+    def _download_query(*, enabled_only: bool, selected_only: bool, mod_names: tuple[str, ...]) -> dict[str, object]:
+        query: dict[str, object] = {
+            "enabled_only": str(enabled_only).lower(),
+            "selected_only": str(selected_only).lower(),
+        }
+        if mod_names:
+            query["mod_name"] = list[str](mod_names)
+        return query
+
+    def _remote_portal_redirect(self, request: Request) -> RedirectResponse | None:
+        if config.DATA_AUTHORITY_MODE is not config.DataAuthorityMode.REMOTE:
+            return None
+        if request.method not in {"GET", "HEAD"}:
+            return None
+
+        target_path: str | None = self._remote_portal_path(request.url.path)
+        if target_path is None:
+            return None
+        base_url: str | None = self._yuki_portal_base_url()
+        if base_url is None:
+            log.warning("Remote mod web redirect skipped because Yuki mod web URL is unknown.")
+            return None
+        query: str = request.url.query
+        if query and "?" in target_path:
+            suffix = f"&{query}"
+        elif query:
+            suffix: str = f"?{query}"
+        else:
+            suffix = ""
+        return RedirectResponse(f"{base_url.rstrip('/')}{target_path}{suffix}", status_code=302)
+
+    def _remote_portal_path(self, path: str) -> str | None:
+        if path.startswith("/api/node"):
+            return None
+        if path.startswith("/_nicegui") or path.startswith("/static"):
+            return None
+
+        node_path: str = f"/mod-web/nodes/{quote(config.MOD_WEB_SERVER.node_name, safe='')}"
+        if path in {"", "/", "/mod-web"}:
+            return node_path
+
+        chat_app_name: str | None = self._chat_app_name_from_remote_ui_path(path)
+        if chat_app_name is not None:
+            return f"{node_path}/chat/{quote(chat_app_name, safe='')}"
+
+        app_name: str | None = self._app_name_from_remote_ui_path(path)
+        if app_name is not None:
+            return f"{node_path}/mods/{quote(app_name, safe='')}"
+
+        if path.startswith("/auth/"):
+            return f"/auth/login?{urlencode({'next_path': node_path})}"
+
+        if (
+            path.startswith("/mod-web")
+            or path.startswith("/apps/")
+            or path.startswith("/app/")
+            or path.startswith("/mods/")
+        ):
+            return node_path
+        return None
+
+    @staticmethod
+    def _app_name_from_remote_ui_path(path: str) -> str | None:
+        prefixes: tuple[
+            Literal["/apps/"], Literal["/app/"], Literal["/mods/"], Literal["/mod-web/apps/"], Literal["/mod-web/mods/"]
+        ] = (
+            "/apps/",
+            "/app/",
+            "/mods/",
+            "/mod-web/apps/",
+            "/mod-web/mods/",
+        )
+        for prefix in prefixes:
+            if path.startswith(prefix):
+                app_name = path[len(prefix) :].strip("/")
+                return app_name or None
+        return None
+
+    @staticmethod
+    def _chat_app_name_from_remote_ui_path(path: str) -> str | None:
+        prefixes: tuple[Literal["/chat/"], Literal["/mod-web/chat/"]] = (
+            "/chat/",
+            "/mod-web/chat/",
+        )
+        for prefix in prefixes:
+            if path.startswith(prefix):
+                app_name = path[len(prefix) :].strip("/")
+                return app_name or None
+        return None
+
+    def _yuki_portal_base_url(self) -> str | None:
+        for snapshot in self._known_bot_snapshots():
+            if snapshot.profile.bot_profile is not config.BotProfileName.YUKI:
+                continue
+            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
+            if mod_web is not None:
+                return mod_web.public_base_url
+
+        endpoint: AuthorityEndpoint | None = config.DATA_AUTHORITY_ENDPOINT
+        if endpoint is not None:
+            return urlunsplit((endpoint.scheme, f"{endpoint.host}:{endpoint.port}", "", "", ""))
+        return None
+
+    @staticmethod
+    def _response_detail(response: requests.Response) -> str:
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError:
+            return response.text or response.reason
+        if isinstance(payload, Mapping):
+            detail: object | None = cast(Mapping[object, object], payload).get("detail")
+            if isinstance(detail, str) and detail:
+                return detail
+        return response.text or response.reason
+
+    @staticmethod
+    def _known_bot_snapshots() -> tuple[config.BotMetadataSnapshot, ...]:
+        snapshots: list[config.BotMetadataSnapshot] = []
+        try:
+            snapshots.extend(config.load_bot_configuration(Path("configuration.json")).known_bots.values())
+        except Exception as xcp:
+            log.warning("Mod web failed to load local bot registry: %s", xcp)
+
+        cache_path: Path = config.authority_cache_path(AuthorityResource.BOTS)
+        if cache_path.exists():
+            try:
+                raw_cache: dict[str, object] = read_json_object(cache_path)
+                snapshots.extend(
+                    config.BotMetadataSnapshot.model_validate(snapshot)
+                    for snapshot in raw_cache.values()
+                    if isinstance(snapshot, dict)
+                )
+            except Exception as xcp:
+                log.warning("Mod web failed to load cached bot registry: %s", xcp)
+
+        unique: dict[str, config.BotMetadataSnapshot] = {}
+        for snapshot in snapshots:
+            unique[snapshot.profile.id] = snapshot
+        return tuple[BotMetadataSnapshot, ...](unique.values())
+
+    def _app_start_blocked_local(self, app: App) -> bool:
+        manager: App_Manager | None = self._manager
+        if manager is None:
+            return False
+        current: ManagedApp | None = manager.get_current
+        if current is None or not current.check_running():
+            return False
+        return current.name != app.name
+
+    @staticmethod
+    def _percent_tone(percent: int) -> BadgeTone:
+        if percent >= 90:
+            return "red"
+        if percent >= 75:
+            return "warn"
+        if percent >= 40:
+            return "purple"
+        return "grey"
+
+    @classmethod
+    def _running_tone(cls, running_count: int, total_count: int) -> BadgeTone:
+        if total_count <= 0 or running_count <= 0:
+            return "warn"
+        if running_count < total_count:
+            return "grey"
+        return "purple"
+
+    @staticmethod
+    def _running_value(running_names: tuple[str, ...]) -> str:
+        if not running_names:
+            return "None"
+        preview: tuple[str, ...] = running_names[:2]
+        if len(running_names) <= len(preview):
+            return ", ".join(preview)
+        return f"{', '.join(preview)} +{len(running_names) - len(preview)}"
+
+    @staticmethod
+    def _storage_value(*, percent: int, free_bytes: int, total_bytes: int) -> str:
+        free_text: str = Utilities.humanise_bytes(free_bytes, precision=1)
+        total_text: str = Utilities.humanise_bytes(total_bytes, precision=1)
+        return f"{percent}% · {free_text} / {total_text}"
+
+    @staticmethod
+    def _app_footprint_value(size_bytes: int) -> str:
+        return f"{Utilities.humanise_bytes(size_bytes, precision=1)} total"
+
+    @staticmethod
+    def _ram_value(*, percent: int, used_bytes: int, total_bytes: int) -> str:
+        used_text: str = Utilities.humanise_bytes(used_bytes, precision=1)
+        total_text: str = Utilities.humanise_bytes(total_bytes, precision=1)
+        return f"{percent}% · {used_text} / {total_text}"
+
+    @classmethod
+    def _system_running_entry(
+        cls, *, system_summary: NodeSystemSummary | None, app_count: int
+    ) -> tuple[str, BadgeTone]:
+        if system_summary is None:
+            return ("Unavailable", "red")
+        running_names = system_summary.running_names
+        return (cls._running_value(running_names), cls._running_tone(len(running_names), app_count))
+
+    @classmethod
+    def _system_cpu_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+        if system_summary is None:
+            return ("Unavailable", "red")
+        if system_summary.cpu_percent is None:
+            return ("Unavailable", "grey")
+        return (f"{system_summary.cpu_percent}%", cls._percent_tone(system_summary.cpu_percent))
+
+    @classmethod
+    def _system_ram_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+        if system_summary is None:
+            return ("Unavailable", "red")
+        if (
+            system_summary.ram_percent is None
+            or system_summary.ram_used_bytes is None
+            or system_summary.ram_total_bytes is None
+        ):
+            return ("Unavailable", "grey")
+        return (
+            cls._ram_value(
+                percent=system_summary.ram_percent,
+                used_bytes=system_summary.ram_used_bytes,
+                total_bytes=system_summary.ram_total_bytes,
+            ),
+            cls._percent_tone(system_summary.ram_percent),
+        )
+
+    @classmethod
+    def _system_storage_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+        if system_summary is None:
+            return ("Unavailable", "red")
+        if (
+            system_summary.storage_percent is None
+            or system_summary.storage_free_bytes is None
+            or system_summary.storage_total_bytes is None
+        ):
+            return ("Unavailable", "grey")
+        return (
+            cls._storage_value(
+                percent=system_summary.storage_percent,
+                free_bytes=system_summary.storage_free_bytes,
+                total_bytes=system_summary.storage_total_bytes,
+            ),
+            cls._percent_tone(system_summary.storage_percent),
+        )
+
+    @classmethod
+    def _system_uptime_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+        if system_summary is None:
+            return ("Unavailable", "red")
+        bot_uptime_seconds: int | None = system_summary.bot_uptime_seconds
+        system_uptime_seconds: int | None = system_summary.uptime_seconds
+        if bot_uptime_seconds is None and system_uptime_seconds is None:
+            return ("Unavailable", "grey")
+        if bot_uptime_seconds is None:
+            if system_uptime_seconds is None:
+                raise RuntimeError("System uptime unexpectedly missing.")
+            return (cls._format_uptime_seconds(system_uptime_seconds), "black")
+        if system_uptime_seconds is None:
+            return (cls._format_uptime_seconds(bot_uptime_seconds), "black")
+        return (
+            f"{cls._format_uptime_seconds(bot_uptime_seconds)} | {cls._format_uptime_seconds(system_uptime_seconds)}",
+            "black",
+        )
+
+    @staticmethod
+    def _format_uptime_seconds(total_seconds: int) -> str:
+        remaining = max(0, int(total_seconds))
+        days, remaining = divmod(remaining, 24 * 60 * 60)
+        hours, remaining = divmod(remaining, 60 * 60)
+        minutes, _seconds = divmod(remaining, 60)
+        if days == 0 and hours == 0 and minutes == 0:
+            return "<1m"
+        parts: list[str] = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0 or parts:
+            parts.append(f"{hours}h")
+        if minutes > 0 or parts:
+            parts.append(f"{minutes}m")
+        return " ".join(parts)
+
+    @staticmethod
+    def _dominant_tone(tones: tuple[BadgeTone, ...]) -> BadgeTone:
+        if not tones:
+            return "grey"
+        rank: dict[BadgeTone, int] = {
+            "black": 0,
+            "grey": 1,
+            "purple": 2,
+            "warn": 3,
+            "red": 4,
+        }
+        return max(tones, key=lambda tone: rank[tone])
+
+    @classmethod
+    def _build_system_title_stats(cls, system_summary: NodeSystemSummary | None) -> tuple[ModWebTitleStat, ...]:
+        cpu_value, cpu_tone = cls._system_cpu_entry(system_summary)
+        ram_value, ram_tone = cls._system_ram_entry(system_summary)
+        storage_value, storage_tone = cls._system_storage_entry(system_summary)
+
+        return (
+            ModWebTitleStat(label="CPU", value=cpu_value, tone=cpu_tone),
+            ModWebTitleStat(label="RAM", value=ram_value, tone=ram_tone),
+            ModWebTitleStat(label="Storage", value=storage_value, tone=storage_tone),
+        )
+
+    async def _home_node_summaries(
+        self,
+        *,
+        sections: tuple[ModWebNodeAppSection, ...],
+        user: ModWebUser,
+    ) -> tuple[ModWebHomeNodeSummary, ...]:
+        summaries: list[ModWebHomeNodeSummary | None] = [None] * len(sections)
+        remote_jobs: list[tuple[int, ModWebNodeAppSection]] = []
+        for index, section in enumerate[ModWebNodeAppSection](sections):
+            if section.node.is_current:
+                summaries[index] = ModWebHomeNodeSummary(
+                    node=section.node,
+                    app_count=len(section.app_links),
+                    system_summary=self._node_api.build_system_summary(),
+                )
+            elif section.error is None:
+                remote_jobs.append((index, section))
+            else:
+                summaries[index] = ModWebHomeNodeSummary(
+                    node=section.node,
+                    app_count=len(section.app_links),
+                    system_summary=None,
+                )
+
+        async def _remote_summary(index: int, section: ModWebNodeAppSection) -> tuple[int, ModWebHomeNodeSummary]:
+            try:
+                system_summary: NodeSystemSummary | None = await asyncio.to_thread(
+                    self._remote_node_system_summary, section.node, user
+                )
+            except Exception as xcp:
+                if not (self._shutting_down or config.IS_SHUTTINGDOWN):
+                    log.warning(
+                        "Remote mod web home system summary failed: node=%s error=%s", section.node.node_name, xcp
+                    )
+                system_summary = None
+            return (
+                index,
+                ModWebHomeNodeSummary(
+                    node=section.node,
+                    app_count=len(section.app_links),
+                    system_summary=system_summary,
+                ),
+            )
+
+        for index, summary in await asyncio.gather(
+            *(_remote_summary(index, section) for index, section in remote_jobs)
+        ):
+            summaries[index] = summary
+
+        return tuple[ModWebHomeNodeSummary, ...](summary for summary in summaries if summary is not None)
+
+    @classmethod
+    def _build_home_title_stats(cls, node_summaries: tuple[ModWebHomeNodeSummary, ...]) -> tuple[ModWebTitleStat, ...]:
+        running_lines: list[ModWebTitleStatLine] = []
+        running_tones: list[BadgeTone] = []
+        cpu_lines: list[ModWebTitleStatLine] = []
+        cpu_tones: list[BadgeTone] = []
+        ram_lines: list[ModWebTitleStatLine] = []
+        ram_tones: list[BadgeTone] = []
+        storage_lines: list[ModWebTitleStatLine] = []
+        storage_tones: list[BadgeTone] = []
+        uptime_lines: list[ModWebTitleStatLine] = []
+        uptime_tones: list[BadgeTone] = []
+
+        for node_summary in node_summaries:
+            node_label: str = node_summary.node.label
+            running_value, running_tone = cls._system_running_entry(
+                system_summary=node_summary.system_summary,
+                app_count=node_summary.app_count,
+            )
+            cpu_value, cpu_tone = cls._system_cpu_entry(node_summary.system_summary)
+            ram_value, ram_tone = cls._system_ram_entry(node_summary.system_summary)
+            storage_value, storage_tone = cls._system_storage_entry(node_summary.system_summary)
+            uptime_value, uptime_tone = cls._system_uptime_entry(node_summary.system_summary)
+
+            running_lines.append(ModWebTitleStatLine(label=node_label, value=running_value))
+            running_tones.append(running_tone)
+            cpu_lines.append(ModWebTitleStatLine(label=None, value=cpu_value))
+            cpu_tones.append(cpu_tone)
+            ram_lines.append(ModWebTitleStatLine(label=None, value=ram_value))
+            ram_tones.append(ram_tone)
+            storage_lines.append(ModWebTitleStatLine(label=None, value=storage_value))
+            storage_tones.append(storage_tone)
+            uptime_lines.append(ModWebTitleStatLine(label=None, value=uptime_value))
+            uptime_tones.append(uptime_tone)
+
+        return (
+            ModWebTitleStat(
+                label="Running",
+                value="Unavailable",
+                tone=cls._dominant_tone(tuple[BadgeTone, ...](running_tones)),
+                lines=tuple[ModWebTitleStatLine, ...](running_lines),
+            ),
+            ModWebTitleStat(
+                label="CPU",
+                value="Unavailable",
+                tone=cls._dominant_tone(tuple[BadgeTone, ...](cpu_tones)),
+                lines=tuple[ModWebTitleStatLine, ...](cpu_lines),
+            ),
+            ModWebTitleStat(
+                label="RAM",
+                value="Unavailable",
+                tone=cls._dominant_tone(tuple[BadgeTone, ...](ram_tones)),
+                lines=tuple[ModWebTitleStatLine, ...](ram_lines),
+            ),
+            ModWebTitleStat(
+                label="Storage",
+                value="Unavailable",
+                tone=cls._dominant_tone(tuple[BadgeTone, ...](storage_tones)),
+                lines=tuple[ModWebTitleStatLine, ...](storage_lines),
+            ),
+            ModWebTitleStat(
+                label="Uptime",
+                value="Unavailable",
+                tone=cls._dominant_tone(tuple[BadgeTone, ...](uptime_tones)),
+                lines=tuple[ModWebTitleStatLine, ...](uptime_lines),
+            ),
+        )
+
+    @classmethod
+    def _build_app_title_stats(cls, app_stats: NodeAppRuntimeSummary | None) -> tuple[ModWebTitleStat, ...]:
+        if app_stats is None:
+            status_value = "Unknown"
+            status_tone: BadgeTone = "grey"
+            relay_value = "Unknown"
+            relay_tone: BadgeTone = "grey"
+            version_value = "Unknown"
+            storage_value = "Unavailable"
+            storage_tone: BadgeTone = "grey"
+        else:
+            if app_stats.running:
+                status_value = "Running"
+                status_tone = "purple"
+            elif app_stats.enabled:
+                status_value = "Stopped"
+                status_tone = "warn"
+            else:
+                status_value = "Disabled"
+                status_tone = "red"
+
+            relay_value = app_stats.relay_support.display_value
+            relay_tone = "grey"
+            version_value = app_stats.version or "Unknown"
+            if app_stats.transition_state is NodeAppTransitionState.STOPPING:
+                status_value = "Stopping"
+                status_tone = "warn"
+            else:
+                player_snapshot_text: str | None = ModWebHomeMixin._player_count_snapshot_text(
+                    player_count=app_stats.player_count,
+                    player_capacity=app_stats.player_capacity,
+                )
+                if app_stats.running and player_snapshot_text is not None:
+                    if app_stats.player_count is None:
+                        raise RuntimeError("Player count unexpectedly missing for running app snapshot.")
+                    status_value: str = player_snapshot_text
+                    status_tone = "purple" if app_stats.player_count > 0 else "grey"
+            if app_stats.transition_state is NodeAppTransitionState.STARTING:
+                status_value = "Starting"
+                status_tone = "purple"
+            if app_stats.footprint_bytes is not None:
+                storage_value: str = cls._app_footprint_value(app_stats.footprint_bytes)
+                storage_tone = "grey"
+            else:
+                storage_value = "Unavailable"
+                storage_tone = "grey"
+
+        return (
+            ModWebTitleStat(label="Status", value=status_value, tone=status_tone),
+            ModWebTitleStat(label="Relay", value=relay_value, tone=relay_tone),
+            ModWebTitleStat(label="Version", value=version_value, tone="black"),
+            ModWebTitleStat(label="Storage", value=storage_value, tone=storage_tone),
+        )
+
+    def _render_live_title_stats_renderer(
+        self,
+        *,
+        ui: ModWebUi,
+        initial_stats: tuple[ModWebTitleStat, ...],
+    ) -> Callable[[tuple[ModWebTitleStat, ...]], None]:
+        @ui.refreshable
+        def _render_stats(stats: tuple[ModWebTitleStat, ...]) -> None:
+            with ui.row().classes("mod-stat-grid w-full gap-2 flex-wrap"):
+                for stat in stats:
+                    with ui.card().classes(f"mod-stat-card {stat.tone} min-w-36 grow"):
+                        with ui.column().classes("gap-1 p-2"):
+                            ui.label(stat.label).classes("mod-stat-label")
+                            if stat.lines:
+                                with ui.column().classes("gap-1"):
+                                    for line in stat.lines:
+                                        if line.label is None:
+                                            ui.label(line.value).classes("mod-stat-line-value break-all")
+                                        else:
+                                            with ui.row().classes(
+                                                "mod-stat-line w-full items-start justify-between gap-3"
+                                            ):
+                                                ui.label(line.label).classes("mod-stat-line-label")
+                                                ui.label(line.value).classes("mod-stat-line-value break-all text-right")
+                            else:
+                                ui.label(stat.value).classes("mod-stat-value break-all")
+
+        _render_stats(initial_stats)
+        return _render_stats.refresh
+
+    def _render_live_title_stats(
+        self,
+        *,
+        ui: ModWebUi,
+        initial_stats: tuple[ModWebTitleStat, ...],
+        refresh_stats: Callable[[], tuple[ModWebTitleStat, ...]] | None = None,
+        refresh_async_stats: Callable[[], Awaitable[tuple[ModWebTitleStat, ...]]] | None = None,
+    ) -> Callable[[tuple[ModWebTitleStat, ...]], None]:
+        if refresh_stats is not None and refresh_async_stats is not None:
+            raise ValueError("Only one title stats refresh callback may be provided.")
+
+        apply_stats: Callable[[tuple[ModWebTitleStat, ...]], None] = self._render_live_title_stats_renderer(
+            ui=ui, initial_stats=initial_stats
+        )
+
+        if refresh_stats is not None:
+            refresh_timer: Timer = ui.timer(
+                _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
+                lambda: apply_stats(refresh_stats()),
+            )
+            self._register_timer_cleanup(ui=ui, timer=refresh_timer)
+        if refresh_async_stats is not None:
+            refresh_async: AsyncRefresh = self._build_async_refreshable_updater(
+                refresh_async_value=refresh_async_stats,
+                apply_value=apply_stats,
+                error_context="Mod web title stats",
+            )
+            refresh_async_timer: Timer = ui.timer(
+                _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
+                lambda: asyncio.create_task(refresh_async()),
+            )
+            self._register_timer_cleanup(ui=ui, timer=refresh_async_timer)
+        return apply_stats
+
+    def _build_async_refreshable_updater(
+        self,
+        *,
+        refresh_async_value: Callable[[], Awaitable[RefreshableValue]],
+        apply_value: Callable[[RefreshableValue], None],
+        error_context: str,
+    ) -> AsyncRefresh:
+        refresh_in_flight = False
+
+        async def _refresh_async() -> None:
+            nonlocal refresh_in_flight
+            if self._shutting_down or config.IS_SHUTTINGDOWN:
+                return
+            if refresh_in_flight:
+                return
+            refresh_in_flight = True
+            try:
+                apply_value(await refresh_async_value())
+            except Exception as xcp:
+                if self._shutting_down or config.IS_SHUTTINGDOWN:
+                    return
+                if _is_executor_shutdown_error(xcp):
+                    return
+                log.warning("%s refresh failed: %s", error_context, xcp)
+            finally:
+                refresh_in_flight = False
+
+        return _refresh_async
+
+    @staticmethod
+    def _build_async_title_stats_refresher(
+        *,
+        refresh_async_stats: Callable[[], Awaitable[tuple[ModWebTitleStat, ...]]],
+        apply_stats: Callable[[tuple[ModWebTitleStat, ...]], None],
+    ) -> AsyncRefresh:
+        refresh_in_flight = False
+
+        async def _refresh_async() -> None:
+            nonlocal refresh_in_flight
+            if refresh_in_flight:
+                return
+            refresh_in_flight = True
+            try:
+                apply_stats(await refresh_async_stats())
+            except Exception as xcp:
+                log.warning("Mod web title stats refresh failed: %s", xcp)
+            finally:
+                refresh_in_flight = False
+
+        return _refresh_async
+
+    @staticmethod
+    def _hero_card_classes() -> str:
+        return "mod-card mod-card-hero w-full"
+
+    @staticmethod
+    def _hero_shell_classes() -> str:
+        return "mod-hero-shell gap-2 px-2 pb-2 pt-2 md:px-5 md:pb-5 md:pt-4"
+
+    @staticmethod
+    def _app_page_classes() -> str:
+        return "mod-page mod-page-app w-full gap-5 px-3 py-6 md:px-5"
+
+    @staticmethod
+    def _app_page_hero_shell_classes() -> str:
+        return "mod-hero-shell gap-2 px-2 pb-2 pt-2 md:px-4 md:pb-4 md:pt-3"
+
+    @staticmethod
+    def _hero_header_classes() -> str:
+        return "mod-hero-header w-full items-start justify-between gap-3"
+
+    @staticmethod
+    def _hero_header_main_classes() -> str:
+        return "mod-hero-header-main gap-1 mod-hero-app-title-block"
+
+    @staticmethod
+    def _hero_badges_classes(*, wide: bool = False) -> str:
+        classes = "mod-corner-badges"
+        if wide:
+            return f"{classes} mod-corner-badges-wide"
+        return classes
+
+    @staticmethod
+    def _hero_badge_row_classes(*, fill: bool = False) -> str:
+        classes = "mod-corner-badge-row"
+        if fill:
+            return f"{classes} mod-corner-badge-row-fill"
+        return classes
+
+    @staticmethod
+    def _hero_title_classes() -> str:
+        return "mod-title text-3xl md:text-5xl font-black tracking-tight"
+
+    @staticmethod
+    def _hero_support_classes() -> str:
+        return "mod-hero-support text-base mod-subtitle"
+
+    @staticmethod
+    def _hero_action_row_classes() -> str:
+        return "mod-hero-actions"

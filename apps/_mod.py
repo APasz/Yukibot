@@ -2,22 +2,53 @@ import asyncio
 import hashlib
 import json
 import logging
-from abc import abstractmethod
+import re
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import aiofiles
 
 import config
 from _file import File_Utils
-from apps._config import App_Config, Mod_Config
+from apps._config import App_Config, Mod_Config, ModDownloadBlockReason, ModType
 
 log = logging.getLogger(__name__)
+_MOD_SEPARATOR_RE = re.compile(r"[_\-\s]+")
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
-class Mod:
+def _split_camel_words(raw: str) -> tuple[str, ...]:
+    return tuple(part for part in _CAMEL_BOUNDARY_RE.split(raw) if part)
+
+
+def humanise_mod_identifier(raw: str, *, split_single_camel: bool) -> str:
+    pieces: list[str] = []
+    for chunk in _MOD_SEPARATOR_RE.split(raw.strip()):
+        if not chunk:
+            continue
+        camel_parts = _split_camel_words(chunk)
+        if len(camel_parts) > 1 and (split_single_camel or len(camel_parts) > 2):
+            pieces.extend(camel_parts)
+            continue
+        pieces.append(chunk)
+
+    rendered: list[str] = []
+    for piece in pieces:
+        if piece.isupper():
+            rendered.append(piece)
+        elif piece.islower():
+            rendered.append(piece.title())
+        else:
+            rendered.append(piece)
+    return " ".join(rendered)
+
+
+class Mod(ABC):
     def __init__(self, cfg: Mod_Config, nice_name: str | None = None):
         self.cfg = cfg
+        self._explicit_friendly = nice_name is not None
         "Mod_Config"
         self.name = cfg.name
         "Name of mod"
@@ -26,6 +57,10 @@ class Mod:
         "Hopefully more user friendly name"
         self.directory = cfg.directory
         "Directory of app's mods folder"
+        if cfg.mod_type is ModType.REGULAR:
+            cfg.mod_type = self.default_mod_type()
+        if cfg.download_block_reason is None:
+            cfg.download_block_reason = self.default_download_block_reason()
 
     @property
     def enabled_path(self) -> Path:
@@ -39,8 +74,99 @@ class Mod:
     def path(self) -> Path:
         return self.enabled_path if self.cfg.enabled else self.disabled_path
 
+    @classmethod
+    def iter_candidates(cls, folder: Path) -> tuple[Path, ...]:
+        return tuple(sorted(folder.iterdir(), key=lambda pointer: pointer.name.casefold()))
+
+    @classmethod
+    def config_from_candidate(
+        cls,
+        candidate: Path,
+        modcf_cls: type[Mod_Config],
+        *,
+        folder: Path,
+    ) -> Mod_Config | None:
+        if candidate.name.endswith(".disabled"):
+            return modcf_cls(name=candidate.with_suffix("").name, directory=folder, enabled=False)
+        return modcf_cls(name=candidate.name, directory=folder)
+
+    @property
+    def downloadable(self) -> bool:
+        return self.cfg.download_block_reason is None
+
+    @property
+    def mod_type(self) -> ModType:
+        return self.cfg.mod_type
+
+    @property
+    def is_coremod_type(self) -> bool:
+        return self.cfg.mod_type is ModType.COREMOD
+
+    @property
+    def is_builtin(self) -> bool:
+        return self.cfg.mod_type is ModType.BUILTIN
+
+    @property
+    def is_server_only(self) -> bool:
+        return self.cfg.mod_type is ModType.SERVER_ONLY
+
+    @property
+    def is_client(self) -> bool:
+        return self.cfg.mod_type is ModType.CLIENT
+
+    @property
+    def is_protected(self) -> bool:
+        return self.cfg.mod_type in (ModType.COREMOD, ModType.BUILTIN)
+
+    @property
+    def counts_as_coremod(self) -> bool:
+        return self.cfg.mod_type in (ModType.COREMOD, ModType.BUILTIN)
+
+    @property
+    def download_block_label(self) -> str | None:
+        if self.cfg.download_block_reason is None:
+            return None
+        return self.cfg.download_block_reason.label
+
+    def default_mod_type(self) -> ModType:
+        return ModType.REGULAR
+
+    def default_download_block_reason(self) -> ModDownloadBlockReason | None:
+        if self.is_builtin:
+            return ModDownloadBlockReason.BUILTIN
+        if self.is_server_only:
+            return ModDownloadBlockReason.SERVER_ONLY
+        return None
+
+    def exists(self) -> bool:
+        return self.enabled_path.exists() or self.disabled_path.exists()
+
+    def sync_enabled_state(self) -> None:
+        enabled_exists = self.enabled_path.exists()
+        disabled_exists = self.disabled_path.exists()
+        if enabled_exists and not disabled_exists:
+            self.cfg.enabled = True
+        elif disabled_exists and not enabled_exists:
+            self.cfg.enabled = False
+
+    def detect_version(self) -> str | None:
+        return None
+
+    def detect_friendly(self) -> str | None:
+        return None
+
+    def sync_metadata(self) -> None:
+        self.sync_enabled_state()
+        detected_version = self.detect_version()
+        if detected_version is not None or self.cfg.version is None:
+            self.cfg.version = detected_version
+        if not self._explicit_friendly:
+            detected_friendly = self.detect_friendly()
+            if detected_friendly is not None and detected_friendly.strip():
+                self.friendly = detected_friendly.strip()
+
     def is_coremod(self, silent: bool = False) -> bool:
-        if not self.cfg.coremod:
+        if not self.is_protected:
             return False
         if silent:
             return True
@@ -72,6 +198,9 @@ class Mod:
         return target
 
     async def enable(self, override_coremod: bool = False) -> bool:
+        self.sync_enabled_state()
+        if self.cfg.enabled:
+            return True
         return bool(await self._enable_file(override_coremod))
 
     async def _disable_file(self, override_coremod: bool = False) -> Path:
@@ -83,6 +212,9 @@ class Mod:
         return target
 
     async def disable(self, override_coremod: bool = False) -> bool:
+        self.sync_enabled_state()
+        if not self.cfg.enabled:
+            return True
         return bool(await self._disable_file(override_coremod))
 
     async def toggle(self, state: bool, override_coremod: bool = False) -> bool:
@@ -199,7 +331,7 @@ class Mod_Manager:
                 content = await f.readlines()
             for index, line in enumerate(content):
                 try:
-                    data: dict = json.loads(line.strip())
+                    data: dict[str, Any] = json.loads(line.strip())
                     if not data:
                         log.warning(f"Bad Input index{index + 1}: {line}")
                         continue
@@ -208,17 +340,27 @@ class Mod_Manager:
                     log.exception("ModCF Load")
                     continue
                 mod = self.mod_cls(cfg)
-                if mod.path.exists():
+                mod.sync_metadata()
+                if mod.exists():
                     self.index[cfg.name] = mod
                 elif cfg.name in self.index:
                     del self.index[cfg.name]
 
-        known_files = {mod.path.name for mod in self.index.values()}
-        for file in self.folder.iterdir():
-            if file.name in known_files:
+        known_files = set(self.index)
+        known_candidate_names = {mod.path.name for mod in self.index.values()}
+        for candidate in self.mod_cls.iter_candidates(self.folder):
+            if candidate.name in known_candidate_names:
                 continue
-            self.index[file.name] = self.mod_cls(self.modcf_cls(name=file.name, directory=self.folder))
-            known_files.add(file.name)
+            cfg = self.mod_cls.config_from_candidate(candidate, self.modcf_cls, folder=self.folder)
+            if cfg is None or cfg.name in known_files:
+                continue
+            mod = self.mod_cls(cfg)
+            mod.sync_metadata()
+            if not mod.exists():
+                continue
+            self.index[mod.name] = mod
+            known_files.add(mod.name)
+            known_candidate_names.add(candidate.name)
 
         self._rebuild_lookup()
         await self.save_mods()
@@ -238,6 +380,7 @@ class Mod_Manager:
             raise ValueError(f"src must be Path not: {type(src)}")  # pyright: ignore[reportUnreachable]
         mod = self.mod_cls(self.modcf_cls(name=src.name, directory=self.folder))
         await mod.install(src, atomic)
+        mod.sync_metadata()
         self.index[mod.name] = mod
         self._rebuild_lookup()
         await self.save_mods()
@@ -253,19 +396,38 @@ class Mod_Manager:
 
     async def set_enabled(self, mod_name: str | Mod, state: bool, *, override_coremod: bool = False) -> Mod:
         mod = self.get(mod_name)
+        mod.sync_metadata()
+        if mod.cfg.enabled == state:
+            return mod
         await mod.toggle(state, override_coremod)
+        mod.sync_metadata()
         await self.save_mods()
         return mod
 
     async def toggle(self, mod_name: str | Mod, *, override_coremod: bool = False) -> Mod:
         mod = self.get(mod_name)
+        mod.sync_metadata()
         await mod.toggle(not mod.cfg.enabled, override_coremod)
+        mod.sync_metadata()
         await self.save_mods()
         return mod
 
     async def set_coremod(self, mod_name: str | Mod, state: bool) -> Mod:
         mod = self.get(mod_name)
-        mod.cfg.coremod = state
+        if state:
+            mod.cfg.mod_type = ModType.COREMOD
+        elif mod.is_coremod_type:
+            mod.cfg.mod_type = ModType.REGULAR
+        await self.save_mods()
+        return mod
+
+    async def set_download_block_reason(
+        self,
+        mod_name: str | Mod,
+        reason: ModDownloadBlockReason | None,
+    ) -> Mod:
+        mod = self.get(mod_name)
+        mod.cfg.download_block_reason = reason
         await self.save_mods()
         return mod
 

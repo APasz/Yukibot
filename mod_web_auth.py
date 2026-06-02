@@ -1,0 +1,366 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import secrets
+import threading
+import time
+from dataclasses import dataclass
+from typing import cast
+from urllib.parse import urlencode
+
+import requests
+from fastapi import Request  # pyright: ignore[reportMissingImports]
+from starlette.responses import RedirectResponse, Response  # pyright: ignore[reportMissingImports]
+
+import config
+from _audit import audit_log
+from _security import Access_Control, Power_Level
+
+log = logging.getLogger(__name__)
+
+_DISCORD_AUTHORIZE_URL = "https://discord.com/oauth2/authorize"
+_DISCORD_TOKEN_URL = "https://discord.com/api/v10/oauth2/token"
+_DISCORD_ME_URL = "https://discord.com/api/v10/users/@me"
+_SESSION_COOKIE_NAME = "yukibot_mod_web_session"
+_OAUTH_STATE_COOKIE_NAME = "yukibot_mod_web_oauth_state"
+_BYPASS_SUPPRESS_COOKIE_NAME = "yukibot_mod_web_bypass_suppressed"
+_OAUTH_STATE_TTL_SECONDS = 10 * 60
+_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+_DISCORD_REQUEST_TIMEOUT_SECONDS = 10.0
+_DEV_BYPASS_ACCOUNT_NAMES: dict[Power_Level, str] = {
+    Power_Level.guest: "Dev Guest",
+    Power_Level.visitor: "Dev Visitor",
+    Power_Level.user: "Dev User",
+    Power_Level.admin: "Dev Admin",
+    Power_Level.sudo: "Dev Sudo",
+    Power_Level.root: "Dev Root",
+}
+_DEV_BYPASS_DISPLAY_NAMES: dict[Power_Level, str] = {
+    Power_Level.guest: "Tourist",
+    Power_Level.visitor: "Lost Peeper",
+    Power_Level.user: "Jane Doe",
+    Power_Level.admin: "Agent Smith",
+    Power_Level.sudo: "Finch",
+    Power_Level.root: "Unimatrix 01",
+}
+
+
+class ModWebAuthError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebUser:
+    discord_id: int
+    username: str
+    global_name: str | None
+    avatar_hash: str | None
+
+    @property
+    def display_name(self) -> str:
+        return self.global_name or self.username
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebSession:
+    session_id: str
+    user: ModWebUser
+    created_at: int
+    expires_at: int
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOAuthState:
+    state: str
+    next_path: str
+    expires_at: int
+
+
+class ModWebAuthService:
+    def __init__(self, auth_config: config.ModWebAuthConfig | None = None) -> None:
+        self._config = auth_config or config.MOD_WEB_AUTH
+        self._sessions: dict[str, ModWebSession] = {}
+        self._pending_states: dict[str, PendingOAuthState] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return self._config.enabled
+
+    @property
+    def bypass_enabled(self) -> bool:
+        return self._config.bypass_enabled
+
+    @property
+    def bypass_user(self) -> ModWebUser:
+        return self.dev_bypass_user(Power_Level.user)
+
+    @property
+    def bypass_levels(self) -> tuple[Power_Level, ...]:
+        return (
+            Power_Level.guest,
+            Power_Level.visitor,
+            Power_Level.user,
+            Power_Level.admin,
+            Power_Level.sudo,
+            Power_Level.root,
+        )
+
+    def dev_bypass_user(self, level: Power_Level) -> ModWebUser:
+        return ModWebUser(
+            discord_id=Access_Control.dev_bypass_user_id(level),
+            username=_DEV_BYPASS_ACCOUNT_NAMES[level],
+            global_name=_DEV_BYPASS_DISPLAY_NAMES[level],
+            avatar_hash=None,
+        )
+
+    @property
+    def redirect_url(self) -> str:
+        return self._config.redirect_url
+
+    def login_redirect(self, *, next_path: str = "/") -> RedirectResponse:
+        if self.bypass_enabled:
+            return self.dev_login_response(level=Power_Level.user, next_path=next_path)
+        self._require_configured()
+        state = secrets.token_urlsafe(32)
+        pending = PendingOAuthState(
+            state=state,
+            next_path=self._safe_next_path(next_path),
+            expires_at=self._now() + _OAUTH_STATE_TTL_SECONDS,
+        )
+        with self._lock:
+            self._prune_locked()
+            self._pending_states[state] = pending
+
+        authorize_url = self._authorize_url(state)
+        log.info(
+            "Mod web login redirect created: redirect_uri=%s next_path=%s secure_cookies=%s",
+            self._config.redirect_url,
+            pending.next_path,
+            self._secure_cookies(),
+        )
+        response = RedirectResponse(authorize_url)
+        response.set_cookie(
+            _OAUTH_STATE_COOKIE_NAME,
+            state,
+            max_age=_OAUTH_STATE_TTL_SECONDS,
+            httponly=True,
+            secure=self._secure_cookies(),
+            samesite="lax",
+        )
+        return response
+
+    async def callback_response(self, *, request: Request, code: str | None, state: str | None) -> RedirectResponse:
+        self._require_configured()
+        if not code:
+            raise ModWebAuthError("Discord OAuth callback did not include a code.")
+        log.info(
+            "Mod web OAuth callback received: path=%s query=%s redirect_uri=%s",
+            request.url.path,
+            request.url.query,
+            self._config.redirect_url,
+        )
+        pending = self._consume_state(request=request, state=state)
+        token = await asyncio.to_thread(self._exchange_code, code)
+        user = await asyncio.to_thread(self._fetch_user, token)
+
+        response = RedirectResponse(pending.next_path)
+        self._set_session_cookie(response, self._create_session(user))
+        response.delete_cookie(_OAUTH_STATE_COOKIE_NAME)
+        response.delete_cookie(_BYPASS_SUPPRESS_COOKIE_NAME)
+        log.info("Mod web login accepted: user_id=%s username=%s", user.discord_id, user.username)
+        audit_log(
+            "security.mod_web_login",
+            user_id=user.discord_id,
+            username=user.username,
+            auth_kind="discord_oauth",
+        )
+        return response
+
+    def logout_response(self) -> RedirectResponse:
+        response = RedirectResponse("/")
+        response.delete_cookie(_SESSION_COOKIE_NAME)
+        response.delete_cookie(_OAUTH_STATE_COOKIE_NAME)
+        response.delete_cookie(_BYPASS_SUPPRESS_COOKIE_NAME)
+        return response
+
+    def logout_request(self, request: Request) -> None:
+        session_id = request.cookies.get(_SESSION_COOKIE_NAME)
+        if not session_id:
+            return
+        with self._lock:
+            self._sessions.pop(session_id, None)
+
+    def current_session(self, request: Request) -> ModWebSession | None:
+        session_id = request.cookies.get(_SESSION_COOKIE_NAME)
+        if not session_id:
+            return None
+        with self._lock:
+            self._prune_locked()
+            return self._sessions.get(session_id)
+
+    def current_user(self, request: Request) -> ModWebUser | None:
+        session = self.current_session(request)
+        return session.user if session is not None else None
+
+    def dev_login_response(self, *, level: Power_Level, next_path: str = "/") -> RedirectResponse:
+        if not self.bypass_enabled:
+            raise ModWebAuthError("Dev bypass login is not enabled.")
+        user = self.dev_bypass_user(level)
+        response = RedirectResponse(self._safe_next_path(next_path))
+        self._set_session_cookie(response, self._create_session(user))
+        response.delete_cookie(_BYPASS_SUPPRESS_COOKIE_NAME)
+        audit_log(
+            "security.mod_web_login",
+            user_id=user.discord_id,
+            username=user.username,
+            auth_kind="dev_bypass",
+            level=level.name,
+        )
+        return response
+
+    def _authorize_url(self, state: str) -> str:
+        client_id = self._config.discord_client_id
+        if client_id is None:
+            raise ModWebAuthError("Discord OAuth client ID is not configured.")
+        return f"{_DISCORD_AUTHORIZE_URL}?" + urlencode(
+            {
+                "client_id": client_id,
+                "redirect_uri": self._config.redirect_url,
+                "response_type": "code",
+                "scope": "identify",
+                "state": state,
+            }
+        )
+
+    def _exchange_code(self, code: str) -> str:
+        client_id = self._config.discord_client_id
+        client_secret = self._config.discord_client_secret
+        if client_id is None or client_secret is None:
+            raise ModWebAuthError("Discord OAuth credentials are not configured.")
+        try:
+            response = requests.post(
+                _DISCORD_TOKEN_URL,
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": self._config.redirect_url,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=_DISCORD_REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.RequestException as xcp:
+            raise ModWebAuthError(f"Discord OAuth token exchange failed: {type(xcp).__name__}: {xcp}") from xcp
+
+        payload = self._json_object(response)
+        access_token = payload.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            raise ModWebAuthError("Discord OAuth token response did not include an access token.")
+        return access_token
+
+    def _fetch_user(self, access_token: str) -> ModWebUser:
+        try:
+            response = requests.get(
+                _DISCORD_ME_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=_DISCORD_REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+        except requests.RequestException as xcp:
+            raise ModWebAuthError(f"Discord user lookup failed: {type(xcp).__name__}: {xcp}") from xcp
+
+        payload = self._json_object(response)
+        raw_id = payload.get("id")
+        username = payload.get("username")
+        global_name = payload.get("global_name")
+        avatar_hash = payload.get("avatar")
+        if not isinstance(raw_id, str) or not raw_id.isdecimal():
+            raise ModWebAuthError("Discord user response did not include a valid user id.")
+        if not isinstance(username, str) or not username:
+            raise ModWebAuthError("Discord user response did not include a username.")
+        return ModWebUser(
+            discord_id=int(raw_id),
+            username=username,
+            global_name=global_name if isinstance(global_name, str) and global_name else None,
+            avatar_hash=avatar_hash if isinstance(avatar_hash, str) and avatar_hash else None,
+        )
+
+    def _consume_state(self, *, request: Request, state: str | None) -> PendingOAuthState:
+        if not state:
+            raise ModWebAuthError("Discord OAuth callback did not include a state.")
+        cookie_state = request.cookies.get(_OAUTH_STATE_COOKIE_NAME)
+        if cookie_state != state:
+            raise ModWebAuthError("Discord OAuth state did not match this browser session.")
+        with self._lock:
+            self._prune_locked()
+            pending = self._pending_states.pop(state, None)
+        if pending is None:
+            raise ModWebAuthError("Discord OAuth state expired or was not started by this server.")
+        return pending
+
+    def _create_session(self, user: ModWebUser) -> ModWebSession:
+        now = self._now()
+        session = ModWebSession(
+            session_id=secrets.token_urlsafe(32),
+            user=user,
+            created_at=now,
+            expires_at=now + _SESSION_TTL_SECONDS,
+        )
+        with self._lock:
+            self._prune_locked()
+            self._sessions[session.session_id] = session
+        return session
+
+    def _set_session_cookie(self, response: Response, session: ModWebSession) -> None:
+        response.set_cookie(
+            _SESSION_COOKIE_NAME,
+            session.session_id,
+            max_age=max(0, session.expires_at - self._now()),
+            httponly=True,
+            secure=self._secure_cookies(),
+            samesite="lax",
+        )
+
+    def _prune_locked(self) -> None:
+        now = self._now()
+        self._sessions = {
+            session_id: session for session_id, session in self._sessions.items() if session.expires_at > now
+        }
+        self._pending_states = {
+            state: pending for state, pending in self._pending_states.items() if pending.expires_at > now
+        }
+
+    def _require_configured(self) -> None:
+        if not self.enabled or self._config.discord_client_id is None or self._config.discord_client_secret is None:
+            raise ModWebAuthError("Discord OAuth is not configured for the mod web UI.")
+
+    def _secure_cookies(self) -> bool:
+        return self._config.redirect_url.startswith("https://")
+
+    @staticmethod
+    def _bypass_suppressed(request: Request) -> bool:
+        return request.cookies.get(_BYPASS_SUPPRESS_COOKIE_NAME) == "1"
+
+    @staticmethod
+    def _safe_next_path(next_path: str) -> str:
+        if next_path.startswith("/") and not next_path.startswith("//"):
+            return next_path
+        return "/"
+
+    @staticmethod
+    def _now() -> int:
+        return int(time.time())
+
+    @staticmethod
+    def _json_object(response: requests.Response) -> dict[str, object]:
+        try:
+            payload = response.json()
+        except ValueError as xcp:
+            raise ModWebAuthError("Discord returned invalid JSON.") from xcp
+        if not isinstance(payload, dict):
+            raise ModWebAuthError(f"Discord response must be a JSON object, got {type(payload).__name__}.")
+        return cast(dict[str, object], payload)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -54,6 +55,22 @@ class NameCacheTests(unittest.TestCase):
             self.assertNotIn("names", payload["1"])
             self.assertEqual(payload["1"]["global_name"], "global-name")
             self.assertEqual(payload["1"]["guild_names"], {"100": "guild-name"})
+
+    def test_serializable_includes_game_profiles_and_platform_ids(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                games={"minecraft": ("Alice", "123e4567-e89b-12d3-a456-426614174000")},
+                platform_ids={"steam": "76561198000000001"},
+            )
+
+            payload = cast(dict[str, dict[str, Any]], cache.serializable())
+
+            self.assertEqual(
+                payload["1"]["games"],
+                {"minecraft": ["Alice", "123e4567-e89b-12d3-a456-426614174000"]},
+            )
+            self.assertEqual(payload["1"]["platform_ids"], {"steam": "76561198000000001"})
 
     def test_normalise_user_rebuilds_known_names_from_sources(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -173,6 +190,108 @@ class NameCacheTests(unittest.TestCase):
             self.assertEqual(cache.cached_display_name(1), "primary-name")
             self.assertEqual(cache.cached_display_name(1, preferred_guild_id=200), "other-name")
 
+    def test_cached_display_name_can_use_discord_override(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="global-name",
+                names={"user-name", "global-name", "guild-name"},
+                guild_names={100: "guild-name"},
+                display_overrides=config.DisplayNameOverrides(discord="Relay Name"),
+            )
+
+            self.assertEqual(
+                cache.cached_display_name(1, category=config.DisplayNameCategory.DISCORD, preferred_guild_id=100),
+                "Relay Name",
+            )
+            self.assertEqual(cache.cached_display_name(1, preferred_guild_id=100), "guild-name")
+            self.assertEqual(cache.relay_mention_name(1, preferred_guild_id=100), "Relay Name")
+
+    def test_relay_mention_name_prefers_scope_alias(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="global-name",
+                names={"user-name", "global-name", "guild-name"},
+                guild_names={100: "guild-name"},
+                games={"minecraft": ("InGameName", None)},
+            )
+
+            resolved = cache.relay_mention_name(1, scope="minecraft", preferred_guild_id=100)
+
+        self.assertEqual(resolved, "InGameName")
+
+    def test_relay_display_name_prefers_scope_alias(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="global-name",
+                names={"user-name", "global-name", "guild-name"},
+                guild_names={100: "guild-name"},
+                games={"minecraft": ("InGameName", None)},
+            )
+
+            resolved = cache.relay_display_name(1, scope="minecraft", preferred_guild_id=100)
+
+        self.assertEqual(resolved, "InGameName")
+
+    def test_get_game_alias_returns_none_when_user_has_no_alias_in_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="global-name",
+                names={"user-name", "global-name"},
+            )
+
+            resolved = cache.get_game_alias(1, "minecraft")
+
+        self.assertIsNone(resolved)
+
+    def test_relay_mention_name_falls_back_to_preferred_guild_display_name(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="global-name",
+                names={"user-name", "global-name", "guild-one", "guild-two"},
+                guild_names={100: "guild-one", 200: "guild-two"},
+            )
+
+            resolved = cache.relay_mention_name(1, scope="minecraft", preferred_guild_id=200)
+
+        self.assertEqual(resolved, "guild-two")
+
+    def test_relay_display_name_falls_back_to_preferred_guild_display_name(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="global-name",
+                names={"user-name", "global-name", "guild-one", "guild-two"},
+                guild_names={100: "guild-one", 200: "guild-two"},
+            )
+
+            resolved = cache.relay_display_name(1, scope="minecraft", preferred_guild_id=200)
+
+        self.assertEqual(resolved, "guild-two")
+
+    def test_discord_fallback_name_prefers_username_after_scope_alias(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="nameA",
+                global_name="nameB",
+                names={"nameA", "nameB"},
+            )
+
+            resolved = cache.discord_fallback_name(1, scope="minecraft", fallback_display_name="nameB")
+
+        self.assertEqual(resolved, "nameA")
+
     def test_command_resolution_prefers_unique_global_name_when_alias_is_ambiguous(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = _make_cache(Path(tmp) / "discord_names.json")
@@ -194,6 +313,269 @@ class NameCacheTests(unittest.TestCase):
             self.assertEqual(cache.resolve_to_id("shared-name", prefer_global_name=True), 1)
             self.assertEqual(cache.resolve_name("shared-name").status, config.NameResolutionStatus.AMBIGUOUS)
             self.assertEqual(cache.resolve_name("shared-name", prefer_global_name=True).user_id, 1)
+
+    def test_numeric_alias_resolves_before_numeric_discord_user_id(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[123] = config.UserNames(account="discord-user", names={"discord-user"})
+            cache.by_id[456] = config.UserNames(account="alias-owner", names={"alias-owner"}, nicknames={"123"})
+            cache._rebuild_aliases()
+
+            result = cache.resolve_name("123")
+
+            self.assertEqual(result.status, config.NameResolutionStatus.UNIQUE)
+            self.assertEqual(result.user_id, 456)
+
+    def test_set_names_mutation_scoped_to_guild_preserves_other_guild_names(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="Erin",
+                names={"user-name", "Erin", "guild-one", "guild-two"},
+                guild_names={100: "guild-one", 200: "guild-two"},
+            )
+            cache._rebuild_aliases()
+
+            changed = cache.apply_mutation_event(
+                {
+                    "kind": config.NameMutationKind.SET_NAMES.value,
+                    "user_id": 1,
+                    "account": "user-name",
+                    "global_name": "Erin",
+                    "guild_id": 100,
+                    "guild_name": "guild-one-renamed",
+                }
+            )
+
+            self.assertTrue(changed)
+            self.assertEqual(cache.by_id[1].guild_names, {100: "guild-one-renamed", 200: "guild-two"})
+            self.assertEqual(cache.resolve_to_id("guild-one-renamed"), 1)
+            self.assertEqual(cache.resolve_to_id("guild-two"), 1)
+
+    def test_set_names_mutation_scoped_to_guild_can_clear_single_guild_name(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="Erin",
+                names={"user-name", "Erin", "guild-one", "guild-two"},
+                guild_names={100: "guild-one", 200: "guild-two"},
+            )
+            cache._rebuild_aliases()
+
+            changed = cache.apply_mutation_event(
+                {
+                    "kind": config.NameMutationKind.SET_NAMES.value,
+                    "user_id": 1,
+                    "guild_id": 100,
+                    "guild_name": None,
+                }
+            )
+
+            self.assertTrue(changed)
+            self.assertEqual(cache.by_id[1].guild_names, {200: "guild-two"})
+            self.assertIsNone(cache.resolve_to_id("guild-one"))
+            self.assertEqual(cache.resolve_to_id("guild-two"), 1)
+
+    def test_upsert_manual_user_creates_resolvable_display_and_game_alias(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+
+            changed = cache.upsert_manual_user(
+                123,
+                display_name="Web Alice",
+                game_aliases={"Minecraft": "AliceGame"},
+            )
+
+            self.assertTrue(changed)
+            self.assertTrue(cache.is_manual_user(123))
+            self.assertEqual(cache.cached_display_name(123), "Web Alice")
+            self.assertEqual(cache.resolve_to_id("Web Alice"), 123)
+            self.assertEqual(cache.resolve_to_id("AliceGame", scope="minecraft"), 123)
+
+    def test_upsert_manual_user_mutation_round_trips(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+
+            changed = cache.apply_mutation_event(
+                {
+                    "kind": config.NameMutationKind.UPSERT_MANUAL_USER.value,
+                    "user_id": 123,
+                    "display_name": "Web Alice",
+                    "nicknames": ["Alice"],
+                    "game_aliases": {"minecraft": "AliceGame"},
+                }
+            )
+
+            self.assertTrue(changed)
+            self.assertTrue(cache.is_manual_user(123))
+            self.assertEqual(cache.resolve_to_id("Alice"), 123)
+            self.assertEqual(cache.resolve_to_id("AliceGame", scope="minecraft"), 123)
+
+    def test_set_display_override_mutation_round_trips(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+
+            changed = cache.apply_mutation_event(
+                {
+                    "kind": config.NameMutationKind.SET_DISPLAY_OVERRIDE.value,
+                    "user_id": 123,
+                    "category": config.DisplayNameCategory.WEB.value,
+                    "display_name": "Portal Alice",
+                }
+            )
+
+            self.assertTrue(changed)
+            self.assertEqual(cache.get_display_override(123, config.DisplayNameCategory.WEB), "Portal Alice")
+
+    def test_add_name_rejects_alias_used_by_another_user(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(account="user-one", names={"user-one"}, nicknames={"shared"})
+            cache.by_id[2] = config.UserNames(account="user-two", names={"user-two"})
+            cache._rebuild_aliases()
+
+            with self.assertRaisesRegex(ValueError, r"General alias `shared` is already used by another user\."):
+                cache.add_name(2, "shared", False)
+
+    def test_set_game_alias_rejects_alias_used_by_another_user_in_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(games={"minecraft": ("shared", None)})
+            cache.by_id[2] = config.UserNames()
+
+            with self.assertRaisesRegex(ValueError, r"Minecraft alias `shared` is already used by another user\."):
+                cache.set_game_alias(2, "minecraft", "shared")
+
+    def test_set_platform_id_rejects_id_used_by_another_user(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(platform_ids={"steam": "76561198000000001"})
+            cache.by_id[2] = config.UserNames()
+            cache._rebuild_aliases()
+
+            with self.assertRaisesRegex(ValueError, r"Steam ID `76561198000000001` is already linked to another user\."):
+                cache.set_platform_id(2, "steam", "76561198000000001")
+
+    def test_set_platform_id_persists_to_disk_and_round_trips(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pointer = Path(tmp) / "discord_names.json"
+            cache = _make_cache(pointer)
+
+            changed = cache.set_platform_id(1, "steam", "76561198000000001")
+
+            self.assertTrue(changed)
+            payload = cast(dict[str, object], json.loads(pointer.read_text("utf-8")))
+            self.assertEqual(
+                cast(dict[str, object], payload["1"])["platform_ids"],
+                {"steam": "76561198000000001"},
+            )
+            reloaded = config.Name_Cache._entries_from_serialized(payload)
+            self.assertEqual(reloaded[1].platform_ids, {"steam": "76561198000000001"})
+
+    def test_set_game_alias_preserves_existing_uuid(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                games={"minecraft": ("OldName", "123e4567-e89b-12d3-a456-426614174000")}
+            )
+
+            cache.set_game_alias(1, "minecraft", "NewName")
+
+            self.assertEqual(
+                cache.by_id[1].games["minecraft"],
+                ("NewName", "123e4567-e89b-12d3-a456-426614174000"),
+            )
+
+    def test_get_game_uuid_returns_linked_uuid(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                games={"minecraft": ("Alice", "123e4567-e89b-12d3-a456-426614174000")}
+            )
+
+            self.assertEqual(cache.get_game_uuid(1, "minecraft"), "123e4567-e89b-12d3-a456-426614174000")
+
+    def test_resolve_game_alias_to_id_ignores_non_game_alias_fallbacks(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(nicknames={"Alice"})
+            cache.by_id[123] = config.UserNames()
+            cache.by_id[7] = config.UserNames(
+                games={"minecraft": ("Alice", "123e4567-e89b-12d3-a456-426614174000")}
+            )
+
+            self.assertEqual(cache.resolve_game_alias_to_id("Alice", "minecraft"), 7)
+            self.assertIsNone(cache.resolve_game_alias_to_id("123", "minecraft"))
+
+    def test_set_game_profile_normalises_minecraft_uuid(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+
+            changed = cache.set_game_profile(1, "minecraft", "Alice", "123E4567E89B12D3A456426614174000")
+
+            self.assertTrue(changed)
+            self.assertEqual(
+                cache.by_id[1].games["minecraft"],
+                ("Alice", "123e4567-e89b-12d3-a456-426614174000"),
+            )
+
+    def test_set_game_profile_persists_to_disk_and_round_trips(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pointer = Path(tmp) / "discord_names.json"
+            cache = _make_cache(pointer)
+
+            changed = cache.set_game_profile(1, "minecraft", "Alice", "123E4567E89B12D3A456426614174000")
+
+            self.assertTrue(changed)
+            payload = cast(dict[str, object], json.loads(pointer.read_text("utf-8")))
+            self.assertEqual(
+                cast(dict[str, object], payload["1"])["games"],
+                {"minecraft": ["Alice", "123e4567-e89b-12d3-a456-426614174000"]},
+            )
+            reloaded = config.Name_Cache._entries_from_serialized(payload)
+            self.assertEqual(
+                reloaded[1].games["minecraft"],
+                ("Alice", "123e4567-e89b-12d3-a456-426614174000"),
+            )
+
+    def test_set_game_uuid_persists_without_alias(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pointer = Path(tmp) / "discord_names.json"
+            cache = _make_cache(pointer)
+
+            changed = cache.set_game_uuid(1, "minecraft", "123E4567E89B12D3A456426614174000")
+
+            self.assertTrue(changed)
+            self.assertEqual(
+                cache.by_id[1].games["minecraft"],
+                (None, "123e4567-e89b-12d3-a456-426614174000"),
+            )
+            payload = cast(dict[str, object], json.loads(pointer.read_text("utf-8")))
+            self.assertEqual(
+                cast(dict[str, object], payload["1"])["games"],
+                {"minecraft": [None, "123e4567-e89b-12d3-a456-426614174000"]},
+            )
+            reloaded = config.Name_Cache._entries_from_serialized(payload)
+            self.assertEqual(
+                reloaded[1].games["minecraft"],
+                (None, "123e4567-e89b-12d3-a456-426614174000"),
+            )
+
+    def test_set_game_profile_rejects_duplicate_minecraft_uuid(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                games={"minecraft": ("Alice", "123e4567-e89b-12d3-a456-426614174000")}
+            )
+            cache.by_id[2] = config.UserNames()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                r"Minecraft UUID `123e4567-e89b-12d3-a456-426614174000` is already used by another user\.",
+            ):
+                cache.set_game_profile(2, "minecraft", "Bob", "123e4567-e89b-12d3-a456-426614174000")
 
 
 if __name__ == "__main__":

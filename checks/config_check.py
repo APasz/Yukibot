@@ -1,11 +1,36 @@
 from __future__ import annotations
 
+import logging
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import hikari
+from hikari import applications
 
 import config
+from restart_targets import RestartTarget
+
+
+class ConfigLoggingTests(unittest.TestCase):
+    def test_noisy_loggers_use_dedicated_non_propagating_files(self) -> None:
+        expected_files = {
+            config.LOGGER_TRAFFIC: "Traffic.log",
+            config.LOGGER_TTS: "TTS.log",
+            config.LOGGER_AUDIT: "Audit.log",
+        }
+
+        for logger_name, filename in expected_files.items():
+            with self.subTest(logger_name=logger_name):
+                logger = logging.getLogger(logger_name)
+                file_names = {
+                    Path(handler.baseFilename).name
+                    for handler in logger.handlers
+                    if isinstance(handler, logging.FileHandler)
+                }
+                self.assertIn(filename, file_names)
+                self.assertFalse(logger.propagate)
 
 
 class ConfigPublicUrlTests(unittest.TestCase):
@@ -25,6 +50,39 @@ class ConfigPublicUrlTests(unittest.TestCase):
             "https://wakusei.apasz.com/uploads/",
         )
 
+    def test_resolve_mod_web_public_base_url_defaults_to_public_base_url(self) -> None:
+        self.assertEqual(
+            config.resolve_mod_web_public_base_url(
+                None,
+                public_base_url="https://wakusei.apasz.com",
+            ),
+            "https://wakusei.apasz.com",
+        )
+
+    def test_resolve_mod_web_public_base_url_preserves_explicit_url(self) -> None:
+        self.assertEqual(
+            config.resolve_mod_web_public_base_url(
+                "http://mods.apasz.com:8088",
+                public_base_url="https://wakusei.apasz.com",
+            ),
+            "http://mods.apasz.com:8088",
+        )
+
+    def test_resolve_mod_web_public_base_url_defaults_bare_override_to_http(self) -> None:
+        self.assertEqual(
+            config.resolve_mod_web_public_base_url(
+                "10.0.0.173:3180",
+                public_base_url="https://wakusei.apasz.com",
+            ),
+            "http://10.0.0.173:3180",
+        )
+
+    def test_resolve_node_api_base_url_uses_mod_web_host(self) -> None:
+        self.assertEqual(
+            config.resolve_node_api_base_url("http://mods.apasz.com:8088"),
+            "http://mods.apasz.com:8088/api/node",
+        )
+
     def test_resolve_public_addr_uses_host_from_base_url(self) -> None:
         self.assertEqual(
             config.resolve_public_addr("https://wakusei.apasz.com", public_ip="203.0.113.10"),
@@ -35,6 +93,24 @@ class ConfigPublicUrlTests(unittest.TestCase):
         self.assertEqual(
             config.resolve_public_addr(None, public_ip="203.0.113.10"),
             "203.0.113.10",
+        )
+
+    def test_build_discord_oauth_url_for_guild_install(self) -> None:
+        self.assertEqual(
+            config.build_discord_oauth_url(
+                hikari.Snowflake(123456789012345678),
+                install_type=config.OAuthInstallType.GUILD,
+            ),
+            "https://discord.com/oauth2/authorize?client_id=123456789012345678&integration_type=0&scope=applications.commands+bot",
+        )
+
+    def test_build_discord_oauth_url_for_user_install(self) -> None:
+        self.assertEqual(
+            config.build_discord_oauth_url(
+                "123456789012345678",
+                install_type=config.OAuthInstallType.USER,
+            ),
+            "https://discord.com/oauth2/authorize?client_id=123456789012345678&integration_type=1&scope=applications.commands",
         )
 
 
@@ -55,19 +131,14 @@ class ConfigDataAuthorityTests(unittest.TestCase):
             config.AuthorityEndpoint(scheme="https", host="wakusei.apasz.com", port=443),
         )
 
-    def test_resolve_data_authority_endpoint_inherits_http_from_explicit_public_url_base(self) -> None:
-        endpoint = config.resolve_data_authority_endpoint(
-            "wakusei.apasz.com",
-            None,
-            mode=config.DataAuthorityMode.REMOTE,
-            public_base_url="http://wakusei.apasz.com",
-            raw_public_base_url="http://wakusei.apasz.com",
-        )
-
-        self.assertEqual(
-            endpoint,
-            config.AuthorityEndpoint(scheme="http", host="wakusei.apasz.com", port=80),
-        )
+    def test_resolve_data_authority_endpoint_rejects_http_host_in_remote_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Remote authority endpoints must use https."):
+            config.resolve_data_authority_endpoint(
+                "http://wakusei.apasz.com",
+                None,
+                mode=config.DataAuthorityMode.REMOTE,
+                public_base_url="https://ignored.example",
+            )
 
     def test_resolve_data_authority_endpoint_uses_public_url_base_for_yuki(self) -> None:
         endpoint = config.resolve_data_authority_endpoint(
@@ -83,18 +154,28 @@ class ConfigDataAuthorityTests(unittest.TestCase):
             config.AuthorityEndpoint(scheme="http", host="authority.apasz.com", port=80),
         )
 
-    def test_resolve_data_authority_endpoint_uses_explicit_public_url_base_for_remote_when_host_missing(self) -> None:
+    def test_resolve_data_authority_endpoint_rejects_http_public_base_fallback_in_remote_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Remote authority endpoints must use https."):
+            config.resolve_data_authority_endpoint(
+                None,
+                None,
+                mode=config.DataAuthorityMode.REMOTE,
+                public_base_url="http://wakusei.apasz.com",
+                raw_public_base_url="http://wakusei.apasz.com",
+            )
+
+    def test_resolve_data_authority_endpoint_allows_http_in_remote_mode_for_dev(self) -> None:
         endpoint = config.resolve_data_authority_endpoint(
-            None,
+            "http://127.0.0.1:8081",
             None,
             mode=config.DataAuthorityMode.REMOTE,
-            public_base_url="http://wakusei.apasz.com",
-            raw_public_base_url="http://wakusei.apasz.com",
+            public_base_url="https://ignored.example",
+            allow_insecure_remote=True,
         )
 
         self.assertEqual(
             endpoint,
-            config.AuthorityEndpoint(scheme="http", host="wakusei.apasz.com", port=80),
+            config.AuthorityEndpoint(scheme="http", host="127.0.0.1", port=8081),
         )
 
     def test_resolve_data_authority_endpoint_requires_remote_host_or_explicit_public_url_base(self) -> None:
@@ -116,12 +197,12 @@ class ConfigDataAuthorityTests(unittest.TestCase):
                 public_base_url="https://ignored.example",
             )
 
-    def test_resolve_data_authority_server_binding_defaults_to_endpoint(self) -> None:
+    def test_resolve_data_authority_server_binding_defaults_to_local_loopback(self) -> None:
         endpoint = config.AuthorityEndpoint(scheme="http", host="wakusei.apasz.com", port=80)
 
         binding = config.resolve_data_authority_server_binding(None, None, endpoint=endpoint)
 
-        self.assertEqual(binding, config.AuthorityServerBinding(host="wakusei.apasz.com", port=80))
+        self.assertEqual(binding, config.AuthorityServerBinding(host="127.0.0.1", port=8081))
 
     def test_resolve_data_authority_server_binding_allows_override(self) -> None:
         endpoint = config.AuthorityEndpoint(scheme="http", host="wakusei.apasz.com", port=80)
@@ -149,6 +230,214 @@ class ConfigDataAuthorityTests(unittest.TestCase):
                 payload = config.load_authority_json(config.AuthorityResource.USERS, local_path)
 
         self.assertEqual(payload, {"admin": [42]})
+
+
+class BotConfigurationTests(unittest.TestCase):
+    def test_persisted_oauth_links_omit_unsupported_install_type_when_serialized(self) -> None:
+        links = config.PersistedOAuthLinks(guild=None)
+
+        self.assertEqual(links.supported_install_types(), (config.OAuthInstallType.GUILD,))
+        self.assertEqual(links.serializable(), {"guild": None})
+
+    def test_load_bot_configuration_reads_capitalised_oauth_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            path.write_text(
+                ('{"OAuth":{"guild":null,"user":"https://discord.com/oauth2/authorize?client_id=123456789012345678"}}'),
+                encoding="utf-8",
+            )
+
+            loaded = config.load_bot_configuration(path)
+
+        self.assertIsNone(loaded.oauth.guild)
+        self.assertEqual(
+            loaded.oauth.user,
+            "https://discord.com/oauth2/authorize?client_id=123456789012345678",
+        )
+
+    def test_save_bot_configuration_preserves_capitalised_oauth_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+
+            config.save_bot_configuration(
+                path,
+                config.BotConfiguration(
+                    OAuth=config.PersistedOAuthLinks(
+                        guild=None,
+                        user="https://discord.com/oauth2/authorize?client_id=123456789012345678",
+                    )
+                ),
+            )
+
+            payload = path.read_text(encoding="utf-8")
+
+        self.assertIn('"OAuth"', payload)
+        self.assertIn('"guild": null', payload)
+        self.assertIn('"user": "https://discord.com/oauth2/authorize?client_id=123456789012345678"', payload)
+
+    def test_save_bot_configuration_omits_unsupported_oauth_key(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+
+            config.save_bot_configuration(
+                path,
+                config.BotConfiguration(
+                    OAuth=config.PersistedOAuthLinks(guild=None),
+                ),
+            )
+
+            payload = path.read_text(encoding="utf-8")
+
+        self.assertIn('"guild": null', payload)
+        self.assertNotIn('"user"', payload)
+
+    def test_upsert_known_bot_snapshot_persists_structured_registry(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            snapshot = config.BotMetadataSnapshot(
+                profile=config.BotMetadataProfile(
+                    id="123456789012345678",
+                    label="Erin",
+                    bot_profile=config.BotProfileName.ERIN,
+                ),
+                features=config.BotMetadataFeatures(
+                    oauth=config.PersistedOAuthLinks(guild=None, user="https://example.com/user")
+                ),
+            )
+
+            config.upsert_known_bot_snapshot(path, snapshot)
+            loaded = config.load_bot_configuration(path)
+
+        self.assertIn("123456789012345678", loaded.known_bots)
+        self.assertEqual(loaded.known_bots["123456789012345678"].profile.label, "Erin")
+        self.assertEqual(
+            loaded.known_bots["123456789012345678"].features.oauth,
+            config.PersistedOAuthLinks(guild=None, user="https://example.com/user"),
+        )
+
+    def test_load_bot_configuration_reads_maintenance_restart_schedules(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            path.write_text(
+                '{"maintenance":{"restart_schedules":{"bot":{"enabled":true,"hour":4,"minute":30}}}}',
+                encoding="utf-8",
+            )
+
+            loaded = config.load_bot_configuration(path)
+
+        schedule = loaded.maintenance.schedule_for(RestartTarget.BOT)
+        self.assertTrue(schedule.enabled)
+        self.assertEqual(schedule.hour, 4)
+        self.assertEqual(schedule.minute, 30)
+
+    def test_save_bot_configuration_persists_maintenance_restart_schedules(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+
+            config.save_bot_configuration(
+                path,
+                config.BotConfiguration(
+                    maintenance=config.PersistedMaintenanceSettings(
+                        restart_schedules={
+                            RestartTarget.SYSTEM: config.PersistedRestartSchedule(
+                                enabled=True,
+                                hour=2,
+                                minute=15,
+                            )
+                        }
+                    )
+                ),
+            )
+
+            payload = path.read_text(encoding="utf-8")
+
+        self.assertIn('"maintenance"', payload)
+        self.assertIn('"restart_schedules"', payload)
+        self.assertIn('"system"', payload)
+        self.assertIn('"hour": 2', payload)
+        self.assertIn('"minute": 15', payload)
+
+    def test_build_local_bot_metadata_snapshot_uses_profile_and_oauth(self) -> None:
+        snapshot = config.build_local_bot_metadata_snapshot(
+            bot_id="123456789012345678",
+            label="Yuki",
+            bot_profile=config.BotProfileName.YUKI,
+            oauth=config.PersistedOAuthLinks(guild="https://example.com/guild", user=None),
+            mod_web=config.BotMetadataModWeb(
+                node_name="yuki",
+                public_base_url="http://yuki.example:3180",
+                node_api_base_url="http://yuki.example:3180/api/node",
+            ),
+        )
+
+        self.assertEqual(snapshot.profile.id, "123456789012345678")
+        self.assertEqual(snapshot.profile.label, "Yuki")
+        self.assertIs(snapshot.profile.bot_profile, config.BotProfileName.YUKI)
+        self.assertEqual(snapshot.features.oauth, config.PersistedOAuthLinks(guild="https://example.com/guild"))
+        self.assertEqual(snapshot.features.mod_web.node_name if snapshot.features.mod_web is not None else None, "yuki")
+
+    def test_sync_remote_bot_metadata_posts_structured_snapshot(self) -> None:
+        snapshot = config.build_local_bot_metadata_snapshot(
+            bot_id="123456789012345678",
+            label="Erin",
+            bot_profile=config.BotProfileName.ERIN,
+            oauth=config.PersistedOAuthLinks(guild=None, user=None),
+        )
+        client = Mock()
+        client.post_json.return_value = {"data": snapshot.model_dump(mode="json")}
+
+        with patch.object(config, "authority_client", return_value=client):
+            synced = config.sync_remote_bot_metadata(snapshot)
+
+        client.post_json.assert_called_once_with(
+            "/authority/bots/sync",
+            {"data": snapshot.model_dump(mode="json")},
+        )
+        self.assertEqual(synced, snapshot)
+
+    def test_supported_oauth_install_types_parses_application_config(self) -> None:
+        application = Mock()
+        application.integration_types_config = {"0": {}, 1: {}}
+
+        supported = config.supported_oauth_install_types(application)
+
+        self.assertEqual(
+            supported,
+            frozenset({config.OAuthInstallType.GUILD, config.OAuthInstallType.USER}),
+        )
+
+    def test_supported_oauth_install_types_parses_hikari_enum_keys(self) -> None:
+        application = Mock()
+        application.integration_types_config = {
+            applications.ApplicationIntegrationType.GUILD_INSTALL: {},
+            applications.ApplicationIntegrationType.USER_INSTALL: {},
+        }
+
+        supported = config.supported_oauth_install_types(application)
+
+        self.assertEqual(
+            supported,
+            frozenset({config.OAuthInstallType.GUILD, config.OAuthInstallType.USER}),
+        )
+
+    def test_sync_local_oauth_configuration_removes_unsupported_install_type(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            config.save_bot_configuration(
+                path,
+                config.BotConfiguration(
+                    OAuth=config.PersistedOAuthLinks(guild=None, user="https://example.com/user"),
+                ),
+            )
+
+            synced = config.sync_local_oauth_configuration(
+                path,
+                supported_install_types=(config.OAuthInstallType.GUILD,),
+            )
+
+        self.assertEqual(synced.oauth.supported_install_types(), (config.OAuthInstallType.GUILD,))
+        self.assertIsNone(synced.oauth.guild)
+        self.assertFalse(synced.oauth.supports(config.OAuthInstallType.USER))
 
 
 if __name__ == "__main__":

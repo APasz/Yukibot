@@ -16,15 +16,16 @@ dependencies = [
     "hikari-wave>=0.7.0a1",
     "hikari[speedups]~=2.5.0",
     "modmux",
+    "nicegui",
     "pathvalidate",
     "piper-tts",
     "psutil",
     "pydantic",
+    "pydantic-settings",
     "python-dateutil",
-    "python-dotenv",
     "regex",
     "requests",
-    "satisfactory-api-client",
+    "satisfactory-api-client>=0.2.1",
     "tenorgrabber",
     "tomli_w",
     "uvloop; platform_system != 'Windows'",
@@ -42,6 +43,10 @@ default-groups = ["dev"]
 
 [tool.uv.sources]
 hikari-ui = { path = "../hikari_editor" }
+
+[tool.pytest.ini_options]
+python_files = ["*_check.py"]
+testpaths = ["checks"]
 
 [tool.basedpyright]
 include = [
@@ -67,9 +72,30 @@ pythonVersion = "3.14"
 pythonPlatform = "Linux"
 venvPath = "."
 venv = ".venv"
-typeCheckingMode = "standard"
+typeCheckingMode = "recommended"
 useLibraryCodeForTypes = true
 reportMissingImports = "error"
 reportMissingTypeStubs = "none"
 reportIgnoreCommentWithoutRule = "warning"
-reportUnreachable = "warning"
+reportUnreachable = "information"
+reportAny = "information"
+reportExplicitAny = "information"
+reportUnknownArgumentType = "information"
+reportUnknownLambdaType = "information"
+reportUnknownMemberType = "information"
+reportUnknownParameterType = "information"
+reportUnknownVariableType = "information"
+reportImplicitOverride = "none"
+reportImplicitStringConcatenation = "none"
+reportPrivateUsage = "none"
+reportUnannotatedClassAttribute = "none"
+reportUnusedCallResult = "none"
+reportMissingParameterType = "information"
+reportPrivateLocalImportUsage = "information"
+reportUnnecessaryCast = "information"
+reportUnnecessaryComparison = "information"
+reportUnnecessaryIsInstance = "information"
+reportUnnecessaryTypeIgnoreComment = "information"
+reportUnusedFunction = "information"
+reportUnusedParameter = "information"
+reportUnusedVariable = "information"

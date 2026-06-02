@@ -1,13 +1,17 @@
 import logging
 import re
 from pathlib import Path
-from typing import overload
+from typing import TypeAlias, cast, overload
 
 import hikari
 
 import config
 
 log = logging.getLogger(__name__)
+_SnowflakeCollection: TypeAlias = list[hikari.Snowflakeish] | dict[object, hikari.Snowflakeish]
+_ChannelLookupInput: TypeAlias = hikari.Snowflakeish | _SnowflakeCollection
+_MessageLookupInput: TypeAlias = hikari.Snowflakeish | _SnowflakeCollection
+_ResolvedChannel: TypeAlias = hikari.PartialChannel | hikari.PermissibleGuildChannel | hikari.GuildThreadChannel
 
 
 class Resolutator(metaclass=config.Singleton):
@@ -19,9 +23,7 @@ class Resolutator(metaclass=config.Singleton):
         self.bot = bot
 
     @staticmethod
-    def snow_check(
-        snow_type: str, snow: hikari.Snowflakeish | list[hikari.Snowflakeish] | dict[object, hikari.Snowflakeish]
-    ) -> bool:
+    def snow_check(snow_type: str, snow: object) -> bool:
         valid_types: tuple[type[object], ...] = (
             int,
             hikari.Snowflake,
@@ -33,19 +35,22 @@ class Resolutator(metaclass=config.Singleton):
         if not snow:
             log.warning("Invalid; Not Truthy: %s %s[%s]", snow_type, snow, type(snow))
             return False
-        if isinstance(snow, valid_types) and not config.SILENT_DEBUG:
-            log.debug("Valid; Is Truthy: %s %s[%s]", snow_type, snow, type(snow))
-            return True
         if isinstance(snow, dict):
-            k = all([isinstance(e, valid_types) for e in snow.values()])
+            snow_map = cast(dict[object, object], snow)
+            k = all(isinstance(e, valid_types) for e in snow_map.values())
             if not k:
-                log.warning("Invalid; dict: %s %s[%s]", snow_type, snow, type(snow))
+                log.warning("Invalid; dict: %s %s[%s]", snow_type, snow_map, type(snow_map))
             return k
         if isinstance(snow, list):
-            k = all([isinstance(e, valid_types) for e in snow])
+            snow_list = cast(list[object], snow)
+            k = all(isinstance(e, valid_types) for e in snow_list)
             if not k:
-                log.warning("Invalid; list: %s %s[%s]", snow_type, snow, type(snow))
+                log.warning("Invalid; list: %s %s[%s]", snow_type, snow_list, type(snow_list))
             return k
+        if isinstance(snow, valid_types):
+            if not config.SILENT_DEBUG:
+                log.debug("Valid; Is Truthy: %s %s[%s]", snow_type, snow, type(snow))
+            return True
         log.warning("Invalid; unknown: %s %s[%s]", snow_type, snow, type(snow))
         return False
 
@@ -78,54 +83,21 @@ class Resolutator(metaclass=config.Singleton):
     @overload
     async def channel(
         self, ident: hikari.Snowflakeish
-    ) -> (
-        hikari.PartialChannel
-        | hikari.PermissibleGuildChannel
-        | hikari.GuildThreadChannel
-        | hikari.DMChannel
-        | hikari.GroupDMChannel
-        | hikari.GuildTextChannel
-        | hikari.GuildVoiceChannel
-        | hikari.GuildNewsChannel
-        | None
-    ): ...
+    ) -> _ResolvedChannel | None: ...
 
     @overload
     async def channel(
         self, ident: list[hikari.Snowflakeish]
-    ) -> (
-        list[
-            hikari.PartialChannel
-            | hikari.PermissibleGuildChannel
-            | hikari.GuildThreadChannel
-            | hikari.DMChannel
-            | hikari.GroupDMChannel
-            | hikari.GuildTextChannel
-            | hikari.GuildVoiceChannel
-            | hikari.GuildNewsChannel
-        ]
-        | None
-    ): ...
+    ) -> list[_ResolvedChannel | None] | None: ...
 
     @overload
     async def channel(
         self, ident: dict[object, hikari.Snowflakeish]
-    ) -> (
-        dict[
-            object,
-            hikari.PartialChannel
-            | hikari.PermissibleGuildChannel
-            | hikari.GuildThreadChannel
-            | hikari.DMChannel
-            | hikari.GroupDMChannel
-            | hikari.GuildTextChannel
-            | hikari.GuildVoiceChannel
-            | hikari.GuildNewsChannel,
-        ]
-        | None
-    ): ...
+    ) -> dict[object, _ResolvedChannel | None] | None: ...
 
-    async def channel(self, ident):
+    async def channel(
+        self, ident: _ChannelLookupInput
+    ) -> _ResolvedChannel | list[_ResolvedChannel | None] | dict[object, _ResolvedChannel | None] | None:
         """Attempts to resolve ident to a Channel object
 
         Args;
@@ -137,13 +109,17 @@ class Resolutator(metaclass=config.Singleton):
         if not self.snow_check("channel_id", ident):
             return None
 
-        async def get(chan_id):
+        async def get(chan_id: hikari.Snowflakeish) -> _ResolvedChannel | None:
             chan = self.bot.cache.get_guild_channel(chan_id) or self.bot.cache.get_thread(chan_id)
             if not chan:
                 try:
                     if not config.SILENT_DEBUG:
                         log.debug("channel.FETCH: %s", chan_id)
                     chan = await self.bot.rest.fetch_channel(chan_id)
+                except hikari.ForbiddenError as xcp:
+                    log.debug("channel.FETCH forbidden: %s error=%s", chan_id, xcp)
+                except hikari.NotFoundError as xcp:
+                    log.debug("channel.FETCH missing: %s error=%s", chan_id, xcp)
                 except Exception as xcp:
                     log.exception("FETCH; %s: %s", xcp, chan_id)
             return chan
@@ -169,7 +145,11 @@ class Resolutator(metaclass=config.Singleton):
         self, ident: dict[object, hikari.Snowflakeish], chan_ident: hikari.Snowflakeish | None
     ) -> dict[object, hikari.Message | None] | None: ...
 
-    async def message(self, ident, chan_ident=None):
+    async def message(
+        self,
+        ident: _MessageLookupInput,
+        chan_ident: hikari.Snowflakeish | None = None,
+    ) -> hikari.Message | list[hikari.Message | None] | dict[object, hikari.Message | None] | None:
         """Attempts to resolve ident to a Message object
 
         Args;
@@ -182,7 +162,7 @@ class Resolutator(metaclass=config.Singleton):
         if not self.snow_check("message_id", ident):
             return None
 
-        async def get(mess_id):
+        async def get(mess_id: hikari.Snowflakeish) -> hikari.Message | None:
             mess = self.bot.cache.get_message(mess_id)
             if not mess and chan_ident:
                 try:
@@ -214,9 +194,6 @@ class Resolutator(metaclass=config.Singleton):
         Returns;
             Resolved string path
         """
-        if not isinstance(raw, str):
-            return raw  # pyright: ignore[reportUnreachable]
-
         raw = re.sub(r"\{ENV:([\w\d_]+)\}", lambda m: config.env_opt(m.group(1)) or "", raw)
 
         defaults = {

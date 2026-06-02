@@ -10,7 +10,17 @@ log = logging.getLogger(__name__)
 class TelnetClient:
     _instances: dict[tuple[int, str, int], "TelnetClient"] = {}
 
-    def __new__(cls, app_alive: Callable[[], bool], port: int, /, host: str = "localhost", **kwargs):
+    def __new__(
+        cls,
+        app_alive: Callable[[], bool],
+        port: int,
+        /,
+        host: str = "localhost",
+        max_attempts: int = 20,
+        prefix: str = "",
+        suffix: str = "\n",
+    ) -> "TelnetClient":
+        del max_attempts, prefix, suffix
         key = id(app_alive), host, port
         if key in cls._instances:
             return cls._instances[key]

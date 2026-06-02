@@ -1,0 +1,567 @@
+from __future__ import annotations
+
+from typing import overload
+
+from .backend import ModWebDashboardBackend
+from .nicegui_protocols import AsyncRefresh, WebChatRelayPublisher
+from .runtime_imports import (
+    Access_Control,
+    App_Manager,
+    Awaitable,
+    BadgeTone,
+    Callable,
+    Checkbox,
+    Label,
+    Literal,
+    ManagedApp,
+    ModWebAuthService,
+    ModWebUser,
+    NodeApiService,
+    NodeAppEntry,
+    NodeAppMutationAction,
+    NodeAppMutationResult,
+    NodeAppRuntimeSummary,
+    NodeConfigContent,
+    NodeConfigList,
+    NodeConsoleActionExecutionResult,
+    NodeConsoleActionList,
+    NodeModList,
+    NodeModUploadResult,
+    NodeSaveList,
+    NodeSaveMutationResult,
+    NodeSettingList,
+    NodeSettingMutationResult,
+    NodeSettingsActionResult,
+    NodeSystemSummary,
+    Path,
+    Power_Level,
+    RedirectResponse,
+    cast,
+    config,
+    threading,
+)
+from .types import (
+    ModWebAppLink,
+    ModWebBasePageModel,
+    ModWebHomeNodeSummary,
+    ModWebNodeAppSection,
+    ModWebNodeLink,
+    ModWebNodeStatus,
+    ModWebOverviewPageModel,
+    ModWebPageModel,
+    ModWebTitleStat,
+    _ModWebBadgeSpec,
+    _ModWebKillControlState,
+    _ModWebStartStopControlState,
+)
+from .utils import _http_exception
+
+
+class ModWebServiceSupport:
+    _backend: ModWebDashboardBackend = cast(ModWebDashboardBackend, cast(object, None))
+    _startup_signal: threading.Event = cast(threading.Event, cast(object, None))
+    _started: bool = False
+    _routes_registered: bool = False
+    _shutting_down: bool = False
+
+    @overload
+    def __getattr__(self, name: Literal["_action_link"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_action_pending_label"]) -> Callable[..., str | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_action_pending_message"]) -> Callable[..., str | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_enable_disable_action"]) -> Callable[..., NodeAppMutationAction]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_enable_disable_button_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_enable_disable_label"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_link_from_entry"]) -> Callable[..., ModWebAppLink]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_list_api_actions_enabled"]) -> Callable[..., bool]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_list_view_url"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_page_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_page_hero_shell_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_start_blocked_local"]) -> Callable[..., bool]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_start_blocked_remote"]) -> Callable[..., bool]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_apply_theme"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_attach_text_tooltip"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_authorised_page_user"]) -> Callable[..., ModWebUser | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_badge"]) -> Callable[..., Label]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_build_app_title_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_build_async_refreshable_updater"]) -> Callable[..., AsyncRefresh]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_build_framework_error_response"]) -> Callable[..., Awaitable[object]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_build_home_title_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_build_overview_page_model"]
+    ) -> Callable[..., Awaitable[ModWebOverviewPageModel]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_build_page_model"]) -> Callable[..., Awaitable[ModWebPageModel]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_build_system_title_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_chat_player_count_badge"]) -> Callable[..., _ModWebBadgeSpec | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_chat_room_app"]) -> Callable[..., object | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_config_card_description"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_console_action_count_badge_text"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_create_remote_app_state_subscription"]) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_create_remote_node_state_subscription"]) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_download_base_url"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_download_feedback_message"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_download_query"]) -> Callable[..., dict[str, object]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_download_selection_label"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_empty_config_list"]) -> Callable[..., NodeConfigList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_fake_chat_select_props"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_flat_tab_card_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_friendly_remote_node_error_text"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_action_row_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_badge_row_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_badges_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_card_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_card_style"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_header_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_header_main_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_shell_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_support_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_hero_title_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_home_app_sections"]
+    ) -> Callable[..., Awaitable[tuple[ModWebNodeAppSection, ...]]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_home_node_summaries"]
+    ) -> Callable[..., Awaitable[tuple[ModWebHomeNodeSummary, ...]]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_interactive_badge"]) -> Callable[..., Label]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_kill_control_state"]) -> Callable[..., _ModWebKillControlState]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_known_bot_snapshots"]
+    ) -> Callable[..., tuple[config.BotMetadataSnapshot, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_login_node_status_badge_text"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_login_node_status_badge_tone"]) -> Callable[..., BadgeTone]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_login_node_statuses"]) -> Callable[..., tuple[ModWebNodeStatus, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_model_with_runtime_state"]) -> Callable[..., ModWebBasePageModel]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_mutate_app"]) -> Callable[..., Awaitable[NodeAppMutationResult]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_badge_style"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_links"]) -> Callable[..., tuple[ModWebNodeLink, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_role_color_hex"]) -> Callable[..., str | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_text_style"]) -> Callable[..., str | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_on_startup"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_persist_uploaded_file"]) -> Callable[..., Awaitable[Path]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_refresh_runtime_model"]) -> Callable[..., Awaitable[ModWebBasePageModel]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_register_client_cleanup"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_register_timer_cleanup"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_app_entry"]) -> Callable[..., NodeAppEntry]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_app_runtime_summary"]) -> Callable[..., NodeAppRuntimeSummary]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_apps"]) -> Callable[..., tuple[NodeAppEntry, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_config_content"]) -> Callable[..., NodeConfigContent]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_config_list"]) -> Callable[..., NodeConfigList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_config_write"]) -> Callable[..., NodeConfigContent]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_console_action_list"]) -> Callable[..., NodeConsoleActionList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_download_redirect"]) -> Callable[..., RedirectResponse]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_download_url"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_execute_console_action"]
+    ) -> Callable[..., NodeConsoleActionExecutionResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_json"]) -> Callable[..., dict[str, object]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_mod_list"]) -> Callable[..., NodeModList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_mod_upload"]) -> Callable[..., NodeModUploadResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_node_link"]) -> Callable[..., ModWebNodeLink]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_node_system_summary"]) -> Callable[..., NodeSystemSummary]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_overview_page_model"]) -> Callable[..., ModWebOverviewPageModel]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_page_model"]) -> Callable[..., ModWebPageModel]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_portal_redirect"]) -> Callable[..., RedirectResponse | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_save_list"]) -> Callable[..., NodeSaveList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_save_rename"]) -> Callable[..., NodeSaveMutationResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_save_upload"]) -> Callable[..., NodeSaveMutationResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_setting_list"]) -> Callable[..., NodeSettingList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_setting_write"]) -> Callable[..., NodeSettingMutationResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_settings_reload"]) -> Callable[..., NodeSettingsActionResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_settings_save"]) -> Callable[..., NodeSettingsActionResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_token"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_app_node_badge"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_chat_event_group"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_chat_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_config_editor"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_render_console_editor"]
+    ) -> Callable[..., Callable[[ModWebBasePageModel], None] | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_error_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_flat_tab_empty_state"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_render_flat_tab_header"]
+    ) -> Callable[..., tuple[Label | None, Label | None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_framework_page_exception"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_home_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_render_live_title_stats"]
+    ) -> Callable[..., Callable[[tuple[ModWebTitleStat, ...]], None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_mod_download_row"]) -> Callable[..., Checkbox | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_mods_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_node_apps_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_node_mods_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_node_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_node_unavailable_card"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_overview_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_remote_chat_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_remote_node_unavailable_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_saves_editor"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_settings_editor"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_user_header"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_request_path"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_require_http_user"]) -> Callable[..., ModWebUser]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_resolve_exception_handler_result"]) -> Callable[..., Awaitable[object]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_selection_toggle_label"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_set_badge_state"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_set_optional_badge_state"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_settings_card_description"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_should_render_framework_error_page"]) -> Callable[..., bool]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_simulated_down_node_names"]) -> Callable[..., tuple[str, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_start_download"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_start_stop_control_state"]) -> Callable[..., _ModWebStartStopControlState]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_subscribe_local_app_state"]) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_tab_section_body_classes"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_toggle_simulated_down_node_url"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_upload_mod"]) -> Callable[..., Awaitable[NodeModUploadResult]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_user_avatar_markup"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_user_avatar_uri"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_user_level_label"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_user_level_tone"]) -> Callable[..., BadgeTone]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_web_chat_author_display_name"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_web_display_name"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["app_chat_path"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["app_path"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["index_path"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["node_app_chat_path"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["node_app_path"]) -> Callable[..., str]: ...
+
+    def __getattr__(self, name: str) -> Callable[..., object]:
+        raise AttributeError(name)
+
+    @property
+    def _manager(self) -> App_Manager | None:
+        return self._backend.manager
+
+    @_manager.setter
+    def _manager(self, manager: App_Manager | None) -> None:
+        self._backend.replace_manager(manager)
+
+    @property
+    def _acl(self) -> Access_Control | None:
+        return self._backend.acl
+
+    @_acl.setter
+    def _acl(self, acl: Access_Control | None) -> None:
+        self._backend.replace_acl(acl)
+
+    @property
+    def _auth(self) -> ModWebAuthService:
+        return self._backend.auth
+
+    @property
+    def _node_api(self) -> NodeApiService:
+        return self._backend.node_api
+
+    @property
+    def _chat_relay(self) -> WebChatRelayPublisher | None:
+        return self._backend.chat_relay
+
+    @_chat_relay.setter
+    def _chat_relay(self, chat_relay: WebChatRelayPublisher | None) -> None:
+        self._backend.replace_chat_relay_service(chat_relay)
+
+    def _resolve_app(self, app_name: str) -> ManagedApp:
+        return self._backend.resolve_app(app_name)
+
+    def _managed_apps(self) -> tuple[ManagedApp, ...]:
+        return self._backend.managed_apps()
+
+    def _user_has_level(self, user: ModWebUser, required_level: Power_Level) -> bool:
+        return self._backend.user_has_level(user_id=user.discord_id, required_level=required_level)
+
+    def _require_user_level(self, *, user: ModWebUser, required_level: Power_Level) -> None:
+        if not self._user_has_level(user, required_level):
+            raise _http_exception(
+                403,
+                f"Insufficient level: {self._user_level(user).name.title()} < {required_level.name.title()}",
+            )
+
+    def _user_level(self, user: ModWebUser) -> Power_Level:
+        return self._backend.user_level(user_id=user.discord_id)
+
+
+__all__: tuple[str, ...] = ("ModWebServiceSupport",)

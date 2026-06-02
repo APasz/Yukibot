@@ -9,6 +9,11 @@
             "host": "store.steampowered.com",
             "path_regex": "^/(?:agecheck/)?app/\\d+/(?P<title>[^/?#]+)",
             "template": "steam store {title_norm}"
+        },
+        {
+            "host": "cdn.discordapp.com",
+            "path_regex": "(?P<name>[^/?#]+?)(?:-\\d+)?\\.gif",
+            "template": "{name}"
         }
     ]
 }

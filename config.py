@@ -10,14 +10,17 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import cache
+from logging import Logger
 from pathlib import Path
 from typing import Literal, Protocol, overload
-from urllib.parse import SplitResult, urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlencode, urlsplit, urlunsplit
 
-import dotenv
 import hikari
 import requests
-from pydantic import BaseModel, ConfigDict, Field
+from hikari.snowflakes import Snowflake
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import DotEnvSettingsSource
 
 from _authority import (
     AuthorityClient,
@@ -29,21 +32,86 @@ from _authority import (
     response_data,
     write_json_object,
 )
+from restart_targets import RestartTarget
 
-NAME: str = "Omnibot"
+NAME: str = "Yukibot"
 UPLOAD_CLEAR_HOURS: int = 36
-DISCORD_UPLOAD_LIMIT: int = 10  # in MiB
-log = logging.getLogger(__name__)
+DISCORD_UPLOAD_LIMIT_MIB: int = 10
+DISCORD_UPLOAD_LIMIT: int = DISCORD_UPLOAD_LIMIT_MIB * 1024 * 1024
+log: Logger = logging.getLogger(__name__)
 ASYNCIO_ISCOROUTINEFUNCTION_DEPRECATION = (
     "'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; "
     "use inspect.iscoroutinefunction() instead"
 )
+LOGGER_TRAFFIC: str = "traffic"
+LOGGER_TTS: str = "tts"
+LOGGER_AUDIT: str = "audit"
+LOGGER_TENOR: str = "tenor"
+DEFAULT_DATA_AUTHORITY_BIND_HOST: str = "127.0.0.1"
+DEFAULT_DATA_AUTHORITY_BIND_PORT: int = 8081
 
 warnings.filterwarnings(
     action="ignore",
     message=r"'asyncio\.iscoroutinefunction' is deprecated and slated for removal in Python 3\.16; use inspect\.iscoroutinefunction\(\) instead",
     category=DeprecationWarning,
 )
+
+
+class EnvSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_ignore_empty=True,
+        extra="ignore",
+    )
+
+    bot_profile: str | None = None
+    indev: str | None = None
+    bypass_web_auth: str | None = None
+    data_authority_host: str | None = None
+    data_authority_token: str | None = None
+    data_authority_timeout_seconds: str | None = None
+    data_authority_cache_dir: str | None = None
+    data_authority_port: str | None = None
+    data_authority_bind_host: str | None = None
+    data_authority_bind_port: str | None = None
+    dir_app: str | None = None
+    discord_guild: str | None = None
+    started_channel: str | None = None
+    voice_channel: str | None = None
+    tts_channel: str | None = None
+    voice_targets: str | None = None
+    tts_engine: str | None = None
+    tts_voice: str | None = None
+    tts_variant: str | None = None
+    tts_piper_model: str | None = None
+    tts_piper_config: str | None = None
+    tts_piper_data_dir: str | None = None
+    music_ytdlp_cookie_file: str | None = None
+    music_ytdlp_youtube_extractor_args: str | None = None
+    public_base_url: str | None = None
+    node_name: str | None = None
+    node_api_token_secret: str | None = None
+    mod_web_bind_host: str | None = None
+    mod_web_port: str | None = None
+    mod_web_public_base_url: str | None = None
+    mod_web_discord_client_id: str | None = None
+    mod_web_discord_client_secret: str | None = None
+    mod_web_auth_redirect_url: str | None = None
+    remote_nodes_file: str | None = None
+    remote_nodes: str | None = None
+    dir_tmp: str | None = None
+    dir_opt: str | None = None
+    exg_token: str | None = None
+    bot_token: str | None = None
+    modrinth_api_key: str | None = None
+    curseforge_api_key: str | None = None
+    nexusmods_api_key: str | None = None
+    wube_api_key: str | None = None
+    modio_api_key: str | None = None
+    modio_user_id: str | None = None
+    steam_web_api_key: str | None = None
+    app_comm_pass: str | None = None
 
 
 class SuppressKnownWarningsFilter(logging.Filter):
@@ -86,41 +154,523 @@ if os.name == "nt":
     exit(2)
 
 
-dotenv.load_dotenv()
+def _load_env_settings() -> EnvSettings:
+    return EnvSettings()
+
+
+def _load_dotenv_env_vars() -> dict[str, str]:
+    source: DotEnvSettingsSource = DotEnvSettingsSource(
+        EnvSettings,
+        env_file=EnvSettings.model_config.get("env_file"),
+        env_file_encoding=EnvSettings.model_config.get("env_file_encoding"),
+        env_ignore_empty=EnvSettings.model_config.get("env_ignore_empty"),
+    )
+    raw_env_vars: Mapping[str, str | None] = source._load_env_vars()
+    return {key.casefold(): value for key, value in raw_env_vars.items() if value is not None}
+
+
+_env_settings: EnvSettings = _load_env_settings()
+_dotenv_env_vars: dict[str, str] = _load_dotenv_env_vars()
+
+
+def _refresh_env_state() -> None:
+    global _env_settings, _dotenv_env_vars
+    _env_settings = _load_env_settings()
+    _dotenv_env_vars = _load_dotenv_env_vars()
+
+
+def _require_loaded_setting(value: str | None, *, var_name: str) -> str:
+    if value is None:
+        raise ValueError(f"{var_name} must be set")
+    return value
+
+
+def _lookup_env_value(var: str) -> str | None:
+    env: str | None = os.getenv(var)
+    if env is not None:
+        stripped_env: str = env.strip()
+        return stripped_env or None
+    dotenv_env: str | None = _dotenv_env_vars.get(var.casefold())
+    if dotenv_env is None:
+        return None
+    stripped_dotenv: str = dotenv_env.strip()
+    return stripped_dotenv or None
 
 
 def env_req(var: str, force_reload: bool = False) -> str:
     if force_reload:
-        dotenv.load_dotenv()
-    env = os.getenv(var)
+        _refresh_env_state()
+    env = _lookup_env_value(var)
     if not env:
         raise ValueError(f"{var} must be set")
-    return env.strip()
+    return env
 
 
 def env_opt(var: str) -> str | None:
-    env = os.getenv(var)
-    if not env:
-        return None
-    return env.strip()
+    return _lookup_env_value(var)
+
+
+class VoiceTargetTtsChannelRole(enum.StrEnum):
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+
+    @property
+    def label(self) -> str:
+        return self.value
 
 
 @dataclass(frozen=True, slots=True)
 class VoiceTargetConfig:
     guild_id: hikari.Snowflake
     voice_channel: hikari.Snowflake
-    tts_channel: hikari.Snowflake
+    primary_tts_channel: hikari.Snowflake
+    primary_tts_listen_enabled: bool = True
+    secondary_tts_channel: hikari.Snowflake | None = None
+    secondary_tts_listen_enabled: bool = False
+    relay_tts_enabled: bool = False
+
+    @property
+    def tts_channel(self) -> hikari.Snowflake:
+        return self.primary_tts_channel
+
+    @property
+    def tts_channels(self) -> tuple[hikari.Snowflake, ...]:
+        if self.secondary_tts_channel is None or self.secondary_tts_channel == self.primary_tts_channel:
+            return (self.primary_tts_channel,)
+        return (self.primary_tts_channel, self.secondary_tts_channel)
+
+    @property
+    def listened_tts_channels(self) -> tuple[hikari.Snowflake, ...]:
+        channels: list[hikari.Snowflake] = []
+        if self.primary_tts_listen_enabled:
+            channels.append(self.primary_tts_channel)
+        if self.secondary_tts_channel is not None and self.secondary_tts_listen_enabled:
+            channels.append(self.secondary_tts_channel)
+        return tuple(channels)
+
+    def tts_channel_for_role(self, role: VoiceTargetTtsChannelRole) -> hikari.Snowflake | None:
+        if role is VoiceTargetTtsChannelRole.PRIMARY:
+            return self.primary_tts_channel
+        return self.secondary_tts_channel
+
+    def tts_channel_listen_enabled(self, role: VoiceTargetTtsChannelRole) -> bool:
+        if role is VoiceTargetTtsChannelRole.PRIMARY:
+            return self.primary_tts_listen_enabled
+        return self.secondary_tts_channel is not None and self.secondary_tts_listen_enabled
+
+    def has_tts_channel(self, channel_id: hikari.Snowflakeish) -> bool:
+        channel = hikari.Snowflake(channel_id)
+        return channel in self.tts_channels
+
+    def has_listening_tts_channel(self, channel_id: hikari.Snowflakeish) -> bool:
+        channel = hikari.Snowflake(channel_id)
+        return channel in self.listened_tts_channels
 
 
 class PersistedVoiceTarget(BaseModel):
     voice_channel: int
-    tts_channel: int
+    primary_tts_channel: int
+    primary_tts_listen_enabled: bool = True
+    secondary_tts_channel: int | None = None
+    secondary_tts_listen_enabled: bool = False
+    relay_tts_enabled: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_tts_channel(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+
+        payload = dict(value)
+        if payload.get("primary_tts_channel") is None and payload.get("tts_channel") is not None:
+            payload["primary_tts_channel"] = payload["tts_channel"]
+        if "primary_tts_listen_enabled" not in payload:
+            payload["primary_tts_listen_enabled"] = True
+        if "secondary_tts_listen_enabled" not in payload:
+            payload["secondary_tts_listen_enabled"] = payload.get("secondary_tts_channel") is not None
+        return payload
+
+
+def normalise_absolute_path_text(value: str, *, source: str) -> str:
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{source} must not be empty.")
+    path = Path(text)
+    if not path.is_absolute():
+        raise ValueError(f"{source} must be an absolute path.")
+    return str(path)
+
+
+class PersistedDiskPreferences(BaseModel):
+    activity_mounts: list[str] | None = None
+    labels: dict[str, str] = Field(default_factory=dict)
+    primary_mount: str | None = None
+
+    @field_validator("activity_mounts")
+    @classmethod
+    def _validate_activity_mounts(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+
+        seen: set[str] = set()
+        normalised: list[str] = []
+        for mountpoint in value:
+            mount_text = normalise_absolute_path_text(str(mountpoint), source="disk_preferences.activity_mounts")
+            if mount_text in seen:
+                continue
+            seen.add(mount_text)
+            normalised.append(mount_text)
+        return normalised
+
+    @field_validator("labels")
+    @classmethod
+    def _validate_labels(cls, value: dict[str, str]) -> dict[str, str]:
+        normalised: dict[str, str] = {}
+        for mountpoint, label in value.items():
+            mount_text = normalise_absolute_path_text(str(mountpoint), source="disk_preferences.labels")
+            label_text = str(label).strip()
+            if not label_text:
+                raise ValueError("disk_preferences.labels values must not be empty.")
+            normalised[mount_text] = label_text
+        return normalised
+
+    @field_validator("primary_mount")
+    @classmethod
+    def _validate_primary_mount(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalise_absolute_path_text(value, source="disk_preferences.primary_mount")
+
+
+class PersistedRestartSchedule(BaseModel):
+    enabled: bool = False
+    hour: int = 0
+    minute: int = 0
+    last_triggered_at: datetime | None = None
+
+    @field_validator("hour")
+    @classmethod
+    def _validate_hour(cls, value: int) -> int:
+        if value < 0 or value > 23:
+            raise ValueError("maintenance restart hour must be between 0 and 23.")
+        return value
+
+    @field_validator("minute")
+    @classmethod
+    def _validate_minute(cls, value: int) -> int:
+        if value < 0 or value > 59:
+            raise ValueError("maintenance restart minute must be between 0 and 59.")
+        return value
+
+
+class PersistedRestartWarning(BaseModel):
+    lead_minutes: int = 15
+
+    @field_validator("lead_minutes")
+    @classmethod
+    def _validate_lead_minutes(cls, value: int) -> int:
+        if value == 0:
+            return value
+        if value < 5 or value > 180:
+            raise ValueError("maintenance restart warning minutes must be 0 or between 5 and 180.")
+        return value
+
+
+class PersistedMaintenanceSettings(BaseModel):
+    restart_schedules: dict[RestartTarget, PersistedRestartSchedule] = Field(default_factory=dict)
+    restart_warning: PersistedRestartWarning = Field(default_factory=PersistedRestartWarning)
+
+    def schedule_for(self, target: RestartTarget) -> PersistedRestartSchedule:
+        return self.restart_schedules.get(target, PersistedRestartSchedule())
+
+
+class PersistedRestartState(BaseModel):
+    auto_start_app: str | None = None
+
+    @field_validator("auto_start_app", mode="before")
+    @classmethod
+    def _validate_auto_start_app(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
+def normalise_discord_id_text(value: object, *, source: str) -> str:
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{source} must not be empty.")
+    try:
+        return str(int(hikari.Snowflake(text)))
+    except ValueError as xcp:
+        raise ValueError(f"{source} must be a Discord snowflake.") from xcp
+
+
+class OAuthInstallType(enum.StrEnum):
+    GUILD = "guild"
+    USER = "user"
+
+    @property
+    def integration_type(self) -> str:
+        if self is OAuthInstallType.GUILD:
+            return "0"
+        return "1"
+
+    @property
+    def scopes(self) -> str:
+        if self is OAuthInstallType.GUILD:
+            return "applications.commands bot"
+        return "applications.commands"
+
+
+class PersistedOAuthLinks(BaseModel):
+    guild: str | None = None
+    user: str | None = None
+
+    @field_validator("guild", "user")
+    @classmethod
+    def _validate_optional_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        text = str(value).strip()
+        if not text:
+            raise ValueError("OAuth URLs must not be empty.")
+
+        parsed = urlsplit(text)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("OAuth URLs must use http or https.")
+        if not parsed.netloc:
+            raise ValueError("OAuth URLs must include a host.")
+        return text
+
+    def configured_url(self, install_type: OAuthInstallType) -> str | None:
+        if install_type is OAuthInstallType.GUILD:
+            return self.guild
+        return self.user
+
+    def supports(self, install_type: OAuthInstallType) -> bool:
+        return install_type.value in self.model_fields_set
+
+    def supported_install_types(self) -> tuple[OAuthInstallType, ...]:
+        return tuple(install_type for install_type in OAuthInstallType if self.supports(install_type))
+
+    def serializable(self) -> dict[str, str | None]:
+        payload: dict[str, str | None] = {}
+        for install_type in self.supported_install_types():
+            payload[install_type.value] = self.configured_url(install_type)
+        return payload
+
+    @model_serializer(mode="plain")
+    def _serialize(self) -> dict[str, str | None]:
+        return self.serializable()
+
+
+class BotMetadataProfile(BaseModel):
+    id: str
+    label: str | None = None
+    bot_profile: BotProfileName | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        return normalise_discord_id_text(value, source="bot metadata profile id")
+
+    @field_validator("label")
+    @classmethod
+    def _validate_label(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            raise ValueError("bot metadata profile label must not be empty.")
+        return text
+
+
+class BotMetadataModWeb(BaseModel):
+    node_name: str
+    public_base_url: str
+    node_api_base_url: str
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("node_name", "public_base_url", "node_api_base_url")
+    @classmethod
+    def _validate_required_text(cls, value: str) -> str:
+        text = str(value).strip()
+        if not text:
+            raise ValueError("bot metadata mod web fields must not be empty.")
+        return text
+
+
+class BotMetadataFeatures(BaseModel):
+    oauth: PersistedOAuthLinks | None = None
+    mod_web: BotMetadataModWeb | None = None
+
+
+class BotMetadataSnapshot(BaseModel):
+    profile: BotMetadataProfile
+    features: BotMetadataFeatures = Field(default_factory=BotMetadataFeatures)
+
+
+def build_discord_oauth_url(bot_id: hikari.Snowflakeish | int | str, *, install_type: OAuthInstallType) -> str:
+    return urlunsplit(
+        (
+            "https",
+            "discord.com",
+            "/oauth2/authorize",
+            urlencode(
+                {
+                    "client_id": str(int(hikari.Snowflake(bot_id))),
+                    "integration_type": install_type.integration_type,
+                    "scope": install_type.scopes,
+                }
+            ),
+            "",
+        )
+    )
+
+
+def normalise_oauth_links(
+    links: PersistedOAuthLinks,
+    *,
+    supported_install_types: Iterable[OAuthInstallType],
+) -> PersistedOAuthLinks:
+    payload: dict[str, str | None] = {}
+    for install_type in supported_install_types:
+        payload[install_type.value] = links.configured_url(install_type)
+    return PersistedOAuthLinks(**payload)
+
+
+def supported_oauth_install_types(application: object) -> frozenset[OAuthInstallType]:
+    raw_config = getattr(application, "integration_types_config", None)
+    if isinstance(raw_config, Mapping):
+        supported: set[OAuthInstallType] = set()
+        for raw_key in raw_config:
+            key_text = str(raw_key)
+            if isinstance(raw_key, int):
+                key_number = str(raw_key)
+            elif isinstance(raw_key, enum.Enum) and isinstance(raw_key.value, int):
+                key_number = str(raw_key.value)
+            else:
+                key_number = None
+            if key_text in {"GUILD_INSTALL", OAuthInstallType.GUILD.integration_type} or (
+                key_number == OAuthInstallType.GUILD.integration_type
+            ):
+                supported.add(OAuthInstallType.GUILD)
+            elif key_text in {"USER_INSTALL", OAuthInstallType.USER.integration_type} or (
+                key_number == OAuthInstallType.USER.integration_type
+            ):
+                supported.add(OAuthInstallType.USER)
+        if supported:
+            log.debug(
+                "Resolved supported OAuth install types from application config: raw_keys=%s resolved=%s",
+                [str(key) for key in raw_config],
+                [install_type.value for install_type in sorted(supported, key=lambda item: item.integration_type)],
+            )
+            return frozenset(supported)
+
+    # Discord defaults newly unmanaged apps to guild installs when no explicit config is surfaced.
+    log.debug(
+        "Falling back to guild-only OAuth install support; application integration_types_config=%r",
+        raw_config,
+    )
+    return frozenset({OAuthInstallType.GUILD})
 
 
 class BotConfiguration(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    disk_preferences: PersistedDiskPreferences = Field(default_factory=PersistedDiskPreferences)
+    maintenance: PersistedMaintenanceSettings = Field(default_factory=PersistedMaintenanceSettings)
+    restart_state: PersistedRestartState = Field(default_factory=PersistedRestartState)
     voice_targets: dict[str, PersistedVoiceTarget] = Field(default_factory=dict)
+    oauth: PersistedOAuthLinks = Field(default_factory=PersistedOAuthLinks, alias="OAuth")
+    known_bots: dict[str, BotMetadataSnapshot] = Field(default_factory=dict, alias="KnownBots")
+
+    @field_validator("oauth")
+    @classmethod
+    def _validate_oauth(cls, value: PersistedOAuthLinks) -> PersistedOAuthLinks:
+        return value
+
+    @field_validator("known_bots")
+    @classmethod
+    def _validate_known_bots(cls, value: dict[str, BotMetadataSnapshot]) -> dict[str, BotMetadataSnapshot]:
+        normalised: dict[str, BotMetadataSnapshot] = {}
+        for bot_id, snapshot in value.items():
+            bot_id_text = normalise_discord_id_text(bot_id, source="KnownBots key")
+            if snapshot.profile.id != bot_id_text:
+                raise ValueError("KnownBots keys must match snapshot.profile.id.")
+            normalised[bot_id_text] = snapshot
+        return normalised
+
+
+def load_bot_configuration(path: Path) -> BotConfiguration:
+    if not path.exists():
+        return BotConfiguration()
+
+    raw = json.loads(path.read_text(STR_ENCODE))
+    return BotConfiguration.model_validate(raw)
+
+
+def save_bot_configuration(path: Path, bot_config: BotConfiguration) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(bot_config.model_dump(mode="json", by_alias=True), sort_keys=True, indent=4),
+        STR_ENCODE,
+    )
+
+
+def upsert_known_bot_snapshot(path: Path, snapshot: BotMetadataSnapshot) -> BotConfiguration:
+    bot_config = BotConfiguration()
+    if path.exists():
+        bot_config = load_bot_configuration(path)
+    bot_config.known_bots[snapshot.profile.id] = snapshot
+    save_bot_configuration(path, bot_config)
+    return bot_config
+
+
+def sync_local_oauth_configuration(
+    path: Path,
+    *,
+    supported_install_types: Iterable[OAuthInstallType],
+) -> BotConfiguration:
+    bot_config = BotConfiguration()
+    if path.exists():
+        bot_config = load_bot_configuration(path)
+
+    normalised_oauth = normalise_oauth_links(
+        bot_config.oauth,
+        supported_install_types=supported_install_types,
+    )
+    if bot_config.oauth.serializable() != normalised_oauth.serializable():
+        log.info(
+            "Normalised OAuth config at %s: before=%s after=%s",
+            path,
+            bot_config.oauth.serializable(),
+            normalised_oauth.serializable(),
+        )
+        bot_config.oauth = normalised_oauth
+        save_bot_configuration(path, bot_config)
+    return bot_config
+
+
+def build_local_bot_metadata_snapshot(
+    *,
+    bot_id: hikari.Snowflakeish | int | str,
+    label: str,
+    bot_profile: BotProfileName,
+    oauth: PersistedOAuthLinks,
+    mod_web: BotMetadataModWeb | None = None,
+) -> BotMetadataSnapshot:
+    return BotMetadataSnapshot(
+        profile=BotMetadataProfile(
+            id=normalise_discord_id_text(bot_id, source="local bot metadata id"),
+            label=label,
+            bot_profile=bot_profile,
+        ),
+        features=BotMetadataFeatures(oauth=oauth, mod_web=mod_web),
+    )
 
 
 def parse_voice_targets_payload(
@@ -142,18 +692,43 @@ def parse_voice_targets_payload(
             raise ValueError(f"{source}[{guild_key!r}] must be an object.")
 
         voice_channel = value.get("voice_channel")
-        tts_channel = value.get("tts_channel")
-        if voice_channel is None or tts_channel is None:
-            raise ValueError(f"{source}[{guild_key!r}] must include both 'voice_channel' and 'tts_channel'.")
+        primary_tts_channel = value.get("primary_tts_channel", value.get("tts_channel"))
+        secondary_tts_channel = value.get("secondary_tts_channel")
+        primary_tts_listen_enabled = value.get("primary_tts_listen_enabled", True)
+        secondary_tts_listen_enabled = value.get(
+            "secondary_tts_listen_enabled",
+            secondary_tts_channel is not None,
+        )
+        if voice_channel is None or primary_tts_channel is None:
+            raise ValueError(f"{source}[{guild_key!r}] must include both 'voice_channel' and 'primary_tts_channel'.")
+        if not isinstance(primary_tts_listen_enabled, bool):
+            raise ValueError(f"{source}[{guild_key!r}].primary_tts_listen_enabled must be a boolean.")
+        if not isinstance(secondary_tts_listen_enabled, bool):
+            raise ValueError(f"{source}[{guild_key!r}].secondary_tts_listen_enabled must be a boolean.")
+        relay_tts_enabled = value.get("relay_tts_enabled", False)
+        if not isinstance(relay_tts_enabled, bool):
+            raise ValueError(f"{source}[{guild_key!r}].relay_tts_enabled must be a boolean.")
 
         try:
+            secondary_channel = (
+                hikari.Snowflake(str(secondary_tts_channel).strip()) if secondary_tts_channel is not None else None
+            )
             targets[guild_id] = VoiceTargetConfig(
                 guild_id=guild_id,
                 voice_channel=hikari.Snowflake(str(voice_channel).strip()),
-                tts_channel=hikari.Snowflake(str(tts_channel).strip()),
+                primary_tts_channel=hikari.Snowflake(str(primary_tts_channel).strip()),
+                primary_tts_listen_enabled=primary_tts_listen_enabled,
+                secondary_tts_channel=secondary_channel,
+                secondary_tts_listen_enabled=secondary_tts_listen_enabled if secondary_channel is not None else False,
+                relay_tts_enabled=relay_tts_enabled,
             )
         except ValueError as xcp:
             raise ValueError(f"{source}[{guild_key!r}] contains an invalid channel id.") from xcp
+        if (
+            targets[guild_id].secondary_tts_channel is not None
+            and targets[guild_id].secondary_tts_channel == targets[guild_id].primary_tts_channel
+        ):
+            raise ValueError(f"{source}[{guild_key!r}].secondary_tts_channel must differ from primary_tts_channel.")
 
     return targets
 
@@ -189,6 +764,10 @@ class DataAuthorityMode(enum.StrEnum):
     REMOTE = enum.auto()
 
 
+BotMetadataProfile.model_rebuild()
+BotMetadataSnapshot.model_rebuild()
+
+
 type HttpScheme = Literal["http", "https"]
 
 
@@ -207,6 +786,45 @@ class AuthorityEndpoint:
 class AuthorityServerBinding:
     host: str
     port: int
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebServerConfig:
+    node_name: str
+    host: str
+    port: int
+    public_base_url: str
+    node_api_base_url: str
+    token_secret: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebAuthConfig:
+    discord_client_id: str | None
+    discord_client_secret: str | None
+    redirect_url: str
+    bypass_enabled: bool = False
+
+    @property
+    def enabled(self) -> bool:
+        return self.bypass_enabled or (self.discord_client_id is not None and self.discord_client_secret is not None)
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteNodeSpec:
+    profile: BotProfileName
+    node_name: str
+    bot_token: str | None
+    mod_web_host: str
+    mod_web_port: int
+    public_base_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteNodeAutostartConfig:
+    enabled: bool
+    path: Path
+    nodes: tuple[RemoteNodeSpec, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +863,7 @@ def _parse_voice_targets(
             default_guild_id: VoiceTargetConfig(
                 guild_id=default_guild_id,
                 voice_channel=hikari.Snowflake(legacy_voice_channel),
-                tts_channel=hikari.Snowflake(legacy_tts_channel),
+                primary_tts_channel=hikari.Snowflake(legacy_tts_channel),
             )
         }
 
@@ -329,10 +947,116 @@ def _parse_timeout_seconds(raw: str | None, *, default: float) -> float:
     return value
 
 
+def _parse_env_flag(raw: str | None, *, var_name: str) -> bool:
+    if raw is None:
+        return False
+    value = raw.strip().casefold()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{var_name} must be a boolean flag such as true/false or 1/0")
+
+
+def _remote_node_text(payload: Mapping[str, object], key: str, *, default: str | None = None) -> str:
+    value = payload.get(key, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"REMOTE_NODES entries require non-empty string field {key!r}")
+    return value.strip()
+
+
+def _remote_node_optional_text(payload: Mapping[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"REMOTE_NODES field {key!r} must be a non-empty string when set")
+    return value.strip()
+
+
+def _remote_node_bot_token(payload: Mapping[str, object]) -> str | None:
+    token = _remote_node_optional_text(payload, "bot_token")
+    token_env = _remote_node_optional_text(payload, "bot_token_env")
+    if token is not None and token_env is not None:
+        raise ValueError("REMOTE_NODES entries must not set both 'bot_token' and 'bot_token_env'")
+    if token_env is None:
+        return token
+    resolved = env_opt(token_env)
+    if resolved is None:
+        raise ValueError(f"REMOTE_NODES bot_token_env {token_env!r} is not set in the environment")
+    return resolved
+
+
+def _remote_node_port(payload: Mapping[str, object], index: int) -> int:
+    value = payload.get("mod_web_port", MOD_WEB_PORT + index + 1)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("REMOTE_NODES field 'mod_web_port' must be an integer")
+    if value < 1 or value > 65535:
+        raise ValueError("REMOTE_NODES field 'mod_web_port' must be between 1 and 65535")
+    return value
+
+
+def _parse_remote_node_specs_payload(payload: object) -> tuple[RemoteNodeSpec, ...]:
+    if payload is None:
+        return ()
+    if not isinstance(payload, list):
+        raise ValueError("REMOTE_NODES must be a JSON array of node objects")
+
+    nodes: list[RemoteNodeSpec] = []
+    seen_names: set[str] = set()
+    seen_ports: set[int] = set()
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError("REMOTE_NODES entries must be JSON objects")
+        entry: Mapping[str, object] = item
+        profile = _parse_bot_profile(_remote_node_text(entry, "profile", default=BotProfileName.ERIN.value))
+        node_name = _remote_node_text(entry, "node_name", default=profile.value)
+        if node_name in seen_names:
+            raise ValueError(f"REMOTE_NODES contains duplicate node_name {node_name!r}")
+        seen_names.add(node_name)
+
+        port = _remote_node_port(entry, index)
+        if port in seen_ports:
+            raise ValueError(f"REMOTE_NODES contains duplicate mod_web_port {port}")
+        seen_ports.add(port)
+
+        public_base_url = resolve_mod_web_public_base_url(
+            _remote_node_optional_text(entry, "public_base_url") or f"http://127.0.0.1:{port}",
+            public_base_url=PUBLIC_BASE_URL,
+        )
+        nodes.append(
+            RemoteNodeSpec(
+                profile=profile,
+                node_name=node_name,
+                bot_token=_remote_node_bot_token(entry),
+                mod_web_host=_remote_node_optional_text(entry, "mod_web_host") or "127.0.0.1",
+                mod_web_port=port,
+                public_base_url=public_base_url,
+            )
+        )
+    return tuple(nodes)
+
+
+def load_remote_node_specs(path: Path) -> tuple[RemoteNodeSpec, ...]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as xcp:
+        raise ValueError(f"REMOTE_NODES_FILE does not exist: {path}") from xcp
+    except json.JSONDecodeError as xcp:
+        raise ValueError(f"REMOTE_NODES_FILE must contain valid JSON: {path}") from xcp
+    return _parse_remote_node_specs_payload(payload)
+
+
 def _default_port_for_scheme(scheme: HttpScheme) -> int:
     if scheme == "http":
         return 80
     return 443
+
+
+def _format_http_netloc(*, host: str, scheme: HttpScheme, port: int) -> str:
+    if port == _default_port_for_scheme(scheme):
+        return host
+    return f"{host}:{port}"
 
 
 def _parsed_http_scheme(parsed: SplitResult) -> HttpScheme:
@@ -402,16 +1126,18 @@ def _parse_bind_host(raw: str | None) -> str | None:
     return value
 
 
-ACTIVE_BOT_PROFILE = BOT_PROFILES[_parse_bot_profile(env_opt("BOT_PROFILE"))]
+ACTIVE_BOT_PROFILE = BOT_PROFILES[_parse_bot_profile(_env_settings.bot_profile)]
 DATA_AUTHORITY_MODE = _data_authority_mode(ACTIVE_BOT_PROFILE)
-DATA_AUTHORITY_HOST = env_opt("DATA_AUTHORITY_HOST")
-DATA_AUTHORITY_TOKEN = env_opt("DATA_AUTHORITY_TOKEN")
-DATA_AUTHORITY_TIMEOUT_SECONDS = _parse_timeout_seconds(env_opt("DATA_AUTHORITY_TIMEOUT_SECONDS"), default=2.0)
-DATA_AUTHORITY_CACHE_DIR = Path(env_opt("DATA_AUTHORITY_CACHE_DIR") or ".cache/authority")
-DATA_AUTHORITY_PORT = _parse_optional_port(env_opt("DATA_AUTHORITY_PORT"), var_name="DATA_AUTHORITY_PORT")
-DATA_AUTHORITY_BIND_HOST = env_opt("DATA_AUTHORITY_BIND_HOST")
+INDEV = bool(_env_settings.indev)
+BYPASS_WEB_AUTH = INDEV and _parse_env_flag(_env_settings.bypass_web_auth, var_name="BYPASS_WEB_AUTH")
+DATA_AUTHORITY_HOST = _env_settings.data_authority_host
+DATA_AUTHORITY_TOKEN = _env_settings.data_authority_token
+DATA_AUTHORITY_TIMEOUT_SECONDS = _parse_timeout_seconds(_env_settings.data_authority_timeout_seconds, default=2.0)
+DATA_AUTHORITY_CACHE_DIR = Path(_env_settings.data_authority_cache_dir or ".cache/authority")
+DATA_AUTHORITY_PORT = _parse_optional_port(_env_settings.data_authority_port, var_name="DATA_AUTHORITY_PORT")
+DATA_AUTHORITY_BIND_HOST = _env_settings.data_authority_bind_host
 DATA_AUTHORITY_BIND_PORT = _parse_optional_port(
-    env_opt("DATA_AUTHORITY_BIND_PORT"),
+    _env_settings.data_authority_bind_port,
     var_name="DATA_AUTHORITY_BIND_PORT",
 )
 
@@ -428,7 +1154,12 @@ def authority_client() -> AuthorityClient | None:
 
 
 def authority_cache_path(resource: AuthorityResource) -> Path:
-    filename = "discord_names.json" if resource is AuthorityResource.NAMES else "users.json"
+    if resource is AuthorityResource.NAMES:
+        filename = "discord_names.json"
+    elif resource is AuthorityResource.USERS:
+        filename = "users.json"
+    else:
+        filename = "bot_registry.json"
     return DATA_AUTHORITY_CACHE_DIR / filename
 
 
@@ -443,6 +1174,22 @@ def fetch_remote_resource(resource: AuthorityResource) -> dict[str, object]:
     payload = response_data(client.get_json(f"/authority/{resource.value}"))
     write_json_object(authority_cache_path(resource), payload)
     return payload
+
+
+def fetch_remote_bot_registry() -> dict[str, BotMetadataSnapshot]:
+    payload = fetch_remote_resource(AuthorityResource.BOTS)
+    return {bot_id: BotMetadataSnapshot.model_validate(snapshot) for bot_id, snapshot in payload.items()}
+
+
+def sync_remote_bot_metadata(snapshot: BotMetadataSnapshot) -> BotMetadataSnapshot:
+    client = authority_client()
+    if client is None:
+        raise RuntimeError("Remote authority client is not configured")
+    response = client.post_json(
+        "/authority/bots/sync",
+        {"data": snapshot.model_dump(mode="json")},
+    )
+    return BotMetadataSnapshot.model_validate(response_data(response))
 
 
 def load_authority_json(resource: AuthorityResource, local_path: Path) -> dict[str, object]:
@@ -523,29 +1270,28 @@ def queue_remote_name_mutation(event: dict[str, object]) -> None:
     append_pending(authority_pending_names_path(), event)
 
 
-APP_PATH = Path(env_req("DIR_APP"))
-DISCORD_GUILD = hikari.Snowflake(env_req("DISCORD_GUILD"))
-STARTED_CHANNEL = _parse_optional_snowflake("STARTED_CHANNEL")
-VOICE_CHANNEL = _parse_optional_snowflake("VOICE_CHANNEL")
-TTS_CHANNEL = _parse_optional_snowflake("TTS_CHANNEL")
+APP_PATH = Path(_require_loaded_setting(_env_settings.dir_app, var_name="DIR_APP"))
+DISCORD_GUILD = hikari.Snowflake(_require_loaded_setting(_env_settings.discord_guild, var_name="DISCORD_GUILD"))
+STARTED_CHANNEL = hikari.Snowflake(_env_settings.started_channel) if _env_settings.started_channel else None
+VOICE_CHANNEL = hikari.Snowflake(_env_settings.voice_channel) if _env_settings.voice_channel else None
+TTS_CHANNEL = hikari.Snowflake(_env_settings.tts_channel) if _env_settings.tts_channel else None
 VOICE_TARGETS = _parse_voice_targets(
-    env_opt("VOICE_TARGETS"),
+    _env_settings.voice_targets,
     default_guild_id=DISCORD_GUILD,
     legacy_voice_channel=VOICE_CHANNEL,
     legacy_tts_channel=TTS_CHANNEL,
 )
 
-TTS_ENGINE = (env_opt("TTS_ENGINE") or "auto").lower()
-TTS_VOICE = env_opt("TTS_VOICE") or "en-gb-x-rp"
-TTS_VARIANT = env_opt("TTS_VARIANT")
-TTS_PIPER_MODEL = env_opt("TTS_PIPER_MODEL")
-TTS_PIPER_CONFIG = env_opt("TTS_PIPER_CONFIG")
-TTS_PIPER_DATA_DIR = env_opt("TTS_PIPER_DATA_DIR")
-MUSIC_YTDLP_COOKIE_FILE = Path(value).expanduser() if (value := env_opt("MUSIC_YTDLP_COOKIE_FILE")) else None
-MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS = env_opt("MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS")
-
-DISCORD_UPLOAD_LIMIT = DISCORD_UPLOAD_LIMIT * 1024 * 1024
-"total byte size limit for uploads to discord"
+TTS_ENGINE = (_env_settings.tts_engine or "auto").lower()
+TTS_VOICE = _env_settings.tts_voice or "en-gb-x-rp"
+TTS_VARIANT = _env_settings.tts_variant
+TTS_PIPER_MODEL = _env_settings.tts_piper_model
+TTS_PIPER_CONFIG = _env_settings.tts_piper_config
+TTS_PIPER_DATA_DIR = _env_settings.tts_piper_data_dir
+MUSIC_YTDLP_COOKIE_FILE = (
+    Path(_env_settings.music_ytdlp_cookie_file).expanduser() if _env_settings.music_ytdlp_cookie_file else None
+)
+MUSIC_YTDLP_YOUTUBE_EXTRACTOR_ARGS = _env_settings.music_ytdlp_youtube_extractor_args
 
 
 def checksort_currencies(currencies: dict[Currency, set[str]]) -> dict[str, Currency]:
@@ -606,8 +1352,65 @@ def resolve_public_base_url(raw: str | None) -> str:
 
 
 def resolve_public_uploads_base_url(public_base_url: str) -> str:
-    parsed = _parse_http_reference(public_base_url, var_name="PUBLIC_BASE_URL", default_scheme="https", allow_path=False)
+    parsed = _parse_http_reference(
+        public_base_url, var_name="PUBLIC_BASE_URL", default_scheme="https", allow_path=False
+    )
     return urlunsplit((parsed.scheme, parsed.netloc, "/uploads/", "", ""))
+
+
+def resolve_mod_web_public_base_url(
+    raw: str | None,
+    *,
+    public_base_url: str,
+) -> str:
+    reference = raw if raw is not None else public_base_url
+    source_name = "MOD_WEB_PUBLIC_BASE_URL" if raw is not None else "PUBLIC_BASE_URL"
+    default_scheme: HttpScheme = "http" if raw is not None and "://" not in reference else "https"
+    parsed = _parse_http_reference(reference, var_name=source_name, default_scheme=default_scheme, allow_path=False)
+    host = parsed.hostname
+    if host is None:
+        raise ValueError(f"{source_name} must include a host.")
+    scheme = _parsed_http_scheme(parsed)
+    return urlunsplit(
+        (
+            scheme,
+            _format_http_netloc(host=host, scheme=scheme, port=parsed.port or _default_port_for_scheme(scheme)),
+            "",
+            "",
+            "",
+        )
+    )
+
+
+def resolve_node_api_base_url(mod_web_public_base_url: str) -> str:
+    parsed = _parse_http_reference(
+        mod_web_public_base_url,
+        var_name="MOD_WEB_PUBLIC_BASE_URL",
+        default_scheme="https",
+        allow_path=False,
+    )
+    return urlunsplit((parsed.scheme, parsed.netloc, "/api/node", "", ""))
+
+
+def resolve_mod_web_auth_redirect_url(raw: str | None, *, mod_web_public_base_url: str) -> str:
+    if raw is not None:
+        parsed = _parse_http_reference(
+            raw,
+            var_name="MOD_WEB_AUTH_REDIRECT_URL",
+            default_scheme="https",
+            allow_path=True,
+        )
+        if parsed.path in {"", "/"}:
+            raise ValueError("MOD_WEB_AUTH_REDIRECT_URL must include the Discord OAuth callback path.")
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+    parsed = _parse_http_reference(
+        mod_web_public_base_url,
+        var_name="MOD_WEB_PUBLIC_BASE_URL",
+        default_scheme="https",
+        allow_path=False,
+    )
+    return urlunsplit((parsed.scheme, parsed.netloc, "/auth/discord/callback", "", ""))
 
 
 def resolve_public_addr(raw: str | None, *, public_ip: str) -> str:
@@ -638,6 +1441,7 @@ def resolve_data_authority_endpoint(
     mode: DataAuthorityMode,
     public_base_url: str,
     raw_public_base_url: str | None = None,
+    allow_insecure_remote: bool = False,
 ) -> AuthorityEndpoint | None:
     resolved_reference = _resolve_authority_reference(
         raw_host,
@@ -662,6 +1466,8 @@ def resolve_data_authority_endpoint(
         raise ValueError(f"{source_name} must include a host.")
 
     scheme = _parsed_http_scheme(parsed)
+    if mode is DataAuthorityMode.REMOTE and scheme != "https" and not allow_insecure_remote:
+        raise ValueError("Remote authority endpoints must use https.")
     return AuthorityEndpoint(
         scheme=scheme,
         host=host,
@@ -678,22 +1484,58 @@ def resolve_data_authority_server_binding(
     if endpoint is None:
         return None
 
-    bind_host = _parse_bind_host(raw_host) or endpoint.host
-    bind_port = raw_port or endpoint.port
+    bind_host = _parse_bind_host(raw_host) or DEFAULT_DATA_AUTHORITY_BIND_HOST
+    bind_port = raw_port or DEFAULT_DATA_AUTHORITY_BIND_PORT
     return AuthorityServerBinding(host=bind_host, port=bind_port)
 
 
-RAW_PUBLIC_BASE_URL = env_opt("PUBLIC_BASE_URL")
+RAW_PUBLIC_BASE_URL = _env_settings.public_base_url
 PUBLIC_IP = public_ip()
 PUBLIC_ADDR = resolve_public_addr(RAW_PUBLIC_BASE_URL, public_ip=PUBLIC_IP)
 PUBLIC_BASE_URL = resolve_public_base_url(RAW_PUBLIC_BASE_URL)
 PUBLIC_UPLOADS_BASE_URL = resolve_public_uploads_base_url(PUBLIC_BASE_URL)
+NODE_NAME = _env_settings.node_name or ACTIVE_BOT_PROFILE.name.value
+NODE_API_TOKEN_SECRET = _env_settings.node_api_token_secret or DATA_AUTHORITY_TOKEN
+MOD_WEB_BIND_HOST = _parse_bind_host(_env_settings.mod_web_bind_host) or "0.0.0.0"
+MOD_WEB_PORT = _parse_optional_port(_env_settings.mod_web_port, var_name="MOD_WEB_PORT") or 3180
+MOD_WEB_PUBLIC_BASE_URL = resolve_mod_web_public_base_url(
+    _env_settings.mod_web_public_base_url,
+    public_base_url=PUBLIC_BASE_URL,
+)
+MOD_WEB_SERVER = ModWebServerConfig(
+    node_name=NODE_NAME,
+    host=MOD_WEB_BIND_HOST,
+    port=MOD_WEB_PORT,
+    public_base_url=MOD_WEB_PUBLIC_BASE_URL,
+    node_api_base_url=resolve_node_api_base_url(MOD_WEB_PUBLIC_BASE_URL),
+    token_secret=NODE_API_TOKEN_SECRET,
+)
+MOD_WEB_AUTH = ModWebAuthConfig(
+    discord_client_id=_env_settings.mod_web_discord_client_id,
+    discord_client_secret=_env_settings.mod_web_discord_client_secret,
+    redirect_url=resolve_mod_web_auth_redirect_url(
+        _env_settings.mod_web_auth_redirect_url,
+        mod_web_public_base_url=MOD_WEB_PUBLIC_BASE_URL,
+    ),
+    bypass_enabled=BYPASS_WEB_AUTH,
+)
+REMOTE_NODES_FILE = Path(_env_settings.remote_nodes_file or "remote_nodes.json")
+REMOTE_NODES_ENABLED = _parse_env_flag(_env_settings.remote_nodes, var_name="REMOTE_NODES")
+_REMOTE_NODE_SPECS = load_remote_node_specs(REMOTE_NODES_FILE) if REMOTE_NODES_ENABLED else ()
+REMOTE_NODE_AUTOSTART = RemoteNodeAutostartConfig(
+    enabled=(
+        INDEV and ACTIVE_BOT_PROFILE.name is BotProfileName.YUKI and REMOTE_NODES_ENABLED and bool(_REMOTE_NODE_SPECS)
+    ),
+    path=REMOTE_NODES_FILE,
+    nodes=_REMOTE_NODE_SPECS,
+)
 DATA_AUTHORITY_ENDPOINT = resolve_data_authority_endpoint(
     DATA_AUTHORITY_HOST,
     DATA_AUTHORITY_PORT,
     mode=DATA_AUTHORITY_MODE,
     public_base_url=PUBLIC_BASE_URL,
     raw_public_base_url=RAW_PUBLIC_BASE_URL,
+    allow_insecure_remote=INDEV,
 )
 DATA_AUTHORITY_SERVER_BINDING = resolve_data_authority_server_binding(
     DATA_AUTHORITY_BIND_HOST,
@@ -702,9 +1544,9 @@ DATA_AUTHORITY_SERVER_BINDING = resolve_data_authority_server_binding(
 )
 DATA_AUTHORITY_SERVER_ENABLED = DATA_AUTHORITY_MODE is DataAuthorityMode.LOCAL and DATA_AUTHORITY_TOKEN is not None
 DIR_LOG = Path("logs")
-DIR_TMP = Path(env_req("DIR_TMP"))
+DIR_TMP = Path(_require_loaded_setting(_env_settings.dir_tmp, var_name="DIR_TMP"))
 "/tmp/yukibot"
-DIR_OPT = Path(env_req("DIR_OPT"))  # nginx setup only opt/bot
+DIR_OPT = Path(_require_loaded_setting(_env_settings.dir_opt, var_name="DIR_OPT"))  # nginx setup only opt/bot
 "/opt/yukibot"
 DIR_UPLOAD = DIR_OPT / "uploads"
 "{opt}/uploads"
@@ -737,6 +1579,9 @@ logging.config.dictConfig(
             "standard": {
                 "format": "%(asctime)s | %(levelname).1s %(name)-25s - %(message)s",
             },
+            "json_line": {
+                "format": "%(message)s",
+            },
         },
         "filters": {
             "suppress_known_warnings": {
@@ -749,6 +1594,38 @@ logging.config.dictConfig(
                 "filename": str(DIR_LOG / "System.log"),
                 "mode": "w",  # 'a' if you want to append instead
                 "formatter": "standard",
+                "encoding": STR_ENCODE,
+                "filters": ["suppress_known_warnings"],
+            },
+            "traffic_file": {
+                "class": "logging.FileHandler",
+                "filename": str(DIR_LOG / "Traffic.log"),
+                "mode": "w",
+                "formatter": "standard",
+                "encoding": STR_ENCODE,
+                "filters": ["suppress_known_warnings"],
+            },
+            "tts_file": {
+                "class": "logging.FileHandler",
+                "filename": str(DIR_LOG / "TTS.log"),
+                "mode": "w",
+                "formatter": "standard",
+                "encoding": STR_ENCODE,
+                "filters": ["suppress_known_warnings"],
+            },
+            "audit_file": {
+                "class": "logging.FileHandler",
+                "filename": str(DIR_LOG / "Audit.log"),
+                "mode": "w",
+                "formatter": "standard",
+                "encoding": STR_ENCODE,
+                "filters": ["suppress_known_warnings"],
+            },
+            "tenor_file": {
+                "class": "logging.FileHandler",
+                "filename": str(DIR_LOG / "Tenor.jsonl"),
+                "mode": "w",
+                "formatter": "json_line",
                 "encoding": STR_ENCODE,
                 "filters": ["suppress_known_warnings"],
             },
@@ -783,6 +1660,31 @@ logging.config.dictConfig(
                 "handlers": ["file"],
                 "propagate": False,
             },
+            LOGGER_TRAFFIC: {
+                "level": root_lvl,
+                "handlers": ["traffic_file"],
+                "propagate": False,
+            },
+            "aiohttp.access": {
+                "level": root_lvl,
+                "handlers": ["traffic_file"],
+                "propagate": False,
+            },
+            LOGGER_TTS: {
+                "level": root_lvl,
+                "handlers": ["tts_file"],
+                "propagate": False,
+            },
+            LOGGER_AUDIT: {
+                "level": root_lvl,
+                "handlers": ["audit_file"],
+                "propagate": False,
+            },
+            LOGGER_TENOR: {
+                "level": root_lvl,
+                "handlers": ["tenor_file"],
+                "propagate": False,
+            },
         },
     }
 )
@@ -796,14 +1698,14 @@ CLEAR_CMDS = False
 
 
 if DATA_AUTHORITY_MODE is DataAuthorityMode.LOCAL and not FILE_USERS.exists():
-    FILE_USERS.write_text(json.dumps({"sudo": [], "user": []}, indent=4), STR_ENCODE)
+    FILE_USERS.write_text(json.dumps({"sudo": [], "user": [], "visitor": []}, indent=4), STR_ENCODE)
 
 
-GUESTS_ALLOWED = True
+GUESTS_ALLOWED = False
 "If unrecognised users should be allowed to use use the unrestricted commands"
 
 
-EXR_TOK = env_opt("EXG_TOKEN")
+EXR_TOK = _env_settings.exg_token
 
 
 class Singleton(type):
@@ -817,14 +1719,42 @@ class Singleton(type):
         return cls._instances[cls]
 
 
+class DisplayNameCategory(enum.StrEnum):
+    DISCORD = "discord"
+    WEB = "web"
+
+
+class DisplayNameOverrides(BaseModel):
+    discord: str | None = None
+    web: str | None = None
+
+    def get_for_category(self, category: DisplayNameCategory) -> str | None:
+        if category is DisplayNameCategory.DISCORD:
+            return self.discord
+        if category is DisplayNameCategory.WEB:
+            return self.web
+        raise ValueError(f"Unsupported display override category `{category}`.")
+
+    def set_for_category(self, category: DisplayNameCategory, value: str | None) -> None:
+        if category is DisplayNameCategory.DISCORD:
+            self.discord = value
+            return
+        if category is DisplayNameCategory.WEB:
+            self.web = value
+            return
+        raise ValueError(f"Unsupported display override category `{category}`.")
+
+
 class UserNames(BaseModel):
     account: str | None = None
     global_name: str | None = None
     names: set[str] = Field(default_factory=set)
     nicknames: set[str] = Field(default_factory=set)
-    games: dict[str, tuple[str, str | None]] = Field(default_factory=dict)
+    games: dict[str, tuple[str | None, str | None]] = Field(default_factory=dict)
     platform_ids: dict[str, str] = Field(default_factory=dict)
     guild_names: dict[int, str] = Field(default_factory=dict)
+    display_overrides: DisplayNameOverrides = Field(default_factory=DisplayNameOverrides)
+    is_manual: bool = False
 
 
 class NameResolutionStatus(enum.StrEnum):
@@ -930,22 +1860,137 @@ class Name_Cache(metaclass=Singleton):
     def _normalise_user(self, user: UserNames) -> bool:
         before = user.model_dump(mode="json")
         user.guild_names = {int(guild_id): name for guild_id, name in user.guild_names.items() if name}
+        for category in DisplayNameCategory:
+            normalised_override = self._normalised_optional_text(
+                user.display_overrides.get_for_category(category),
+                label=f"{category.value} display override",
+            )
+            user.display_overrides.set_for_category(category, normalised_override)
         self._sync_known_names(user)
         return user.model_dump(mode="json") != before
 
     @staticmethod
-    def _set_names_payload(user_id: int, user: UserNames) -> dict[str, object]:
-        return {
+    def _normalised_optional_text(value: object | None, *, label: str) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if "\n" in text or "\r" in text:
+            raise ValueError(f"{label} must be a single line")
+        return text
+
+    @staticmethod
+    def _normalised_alias_scope(scope: object) -> str:
+        text = str(scope).strip().lower()
+        if not text:
+            raise ValueError("game alias scope must not be empty")
+        return text
+
+    @classmethod
+    def _normalised_alias_mapping(cls, game_aliases: Mapping[str, object | None] | None) -> dict[str, str | None]:
+        if game_aliases is None:
+            return {}
+        aliases: dict[str, str | None] = {}
+        for scope, alias in game_aliases.items():
+            scope_key = cls._normalised_alias_scope(scope)
+            aliases[scope_key] = cls._normalised_optional_text(alias, label=f"{scope_key} alias")
+        return aliases
+
+    @staticmethod
+    def _normalised_display_name_category(category: object) -> DisplayNameCategory:
+        if isinstance(category, DisplayNameCategory):
+            return category
+        text = str(category).strip().lower()
+        if not text:
+            raise ValueError("display override category must not be empty")
+        try:
+            return DisplayNameCategory(text)
+        except ValueError as xcp:
+            raise ValueError(f"Unsupported display override category `{text}`.") from xcp
+
+    @staticmethod
+    def _alias_conflict_error(alias: str, *, scope: str | None = None) -> ValueError:
+        if scope is None:
+            return ValueError(f"General alias `{alias}` is already used by another user.")
+        return ValueError(f"{scope.title()} alias `{alias}` is already used by another user.")
+
+    @staticmethod
+    def _platform_id_conflict_error(platform: str, platform_id: str) -> ValueError:
+        label = "Steam ID" if platform == "steam" else f"{platform.title()} ID"
+        return ValueError(f"{label} `{platform_id}` is already linked to another user.")
+
+    @staticmethod
+    def _game_uuid_conflict_error(scope: str, game_uuid: str) -> ValueError:
+        return ValueError(f"{scope.title()} UUID `{game_uuid}` is already used by another user.")
+
+    def _assert_unique_general_alias(self, user_id: int, alias: str) -> None:
+        conflicting_ids = self.by_alias.get(alias.lower(), set()) - {user_id}
+        if conflicting_ids:
+            raise self._alias_conflict_error(alias)
+
+    def _assert_unique_game_alias(self, user_id: int, scope: str, alias: str) -> None:
+        normalised_scope = self._normalised_alias_scope(scope)
+        conflicting_ids = self._resolve_game_alias_ids(alias, normalised_scope) - {user_id}
+        if conflicting_ids:
+            raise self._alias_conflict_error(alias, scope=normalised_scope)
+
+    def _assert_unique_platform_id(self, user_id: int, platform: str, platform_id: str) -> None:
+        conflicting_user_id = self.by_platform_id.get(platform, {}).get(platform_id)
+        if conflicting_user_id is not None and conflicting_user_id != user_id:
+            raise self._platform_id_conflict_error(platform, platform_id)
+
+    def _assert_unique_game_uuid(self, user_id: int, scope: str, game_uuid: str) -> None:
+        conflicting_ids = self._resolve_game_uuid_ids(game_uuid, scope) - {user_id}
+        if conflicting_ids:
+            raise self._game_uuid_conflict_error(scope, game_uuid)
+
+    @classmethod
+    def _normalised_game_uuid(cls, scope: object, game_uuid: object | None) -> str | None:
+        scope_key = cls._normalised_alias_scope(scope)
+        value = cls._normalised_optional_text(game_uuid, label=f"{scope_key} uuid")
+        if value is None:
+            return None
+        if scope_key != "minecraft":
+            return value
+        compact_uuid = value.replace("-", "").lower()
+        if re.fullmatch(r"[0-9a-f]{32}", compact_uuid) is None:
+            raise ValueError("minecraft uuid must be 32 hex characters or 36 characters with hyphens")
+        return (
+            f"{compact_uuid[:8]}-{compact_uuid[8:12]}-{compact_uuid[12:16]}-{compact_uuid[16:20]}-{compact_uuid[20:]}"
+        )
+
+    @staticmethod
+    def _set_names_payload(
+        user_id: int,
+        user: UserNames,
+        *,
+        guild_id: hikari.Snowflakeish | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
             "user_id": user_id,
             "account": user.account,
             "global_name": user.global_name,
-            "guild_names": {str(guild_id): name for guild_id, name in sorted(user.guild_names.items())},
         }
+        if guild_id is not None:
+            scoped_guild_id = int(guild_id)
+            payload["guild_id"] = scoped_guild_id
+            payload["guild_name"] = user.guild_names.get(scoped_guild_id)
+        return payload
 
-    def _persist_identity_change(self, user_id: int, user: UserNames) -> None:
+    def _persist_identity_change(
+        self,
+        user_id: int,
+        user: UserNames,
+        *,
+        guild_id: hikari.Snowflakeish | None = None,
+    ) -> None:
         self._rebuild_aliases()
         self._dump()
-        self._queue_remote_mutation(NameMutationKind.SET_NAMES, **self._set_names_payload(user_id, user))
+        self._queue_remote_mutation(
+            NameMutationKind.SET_NAMES,
+            **self._set_names_payload(user_id, user, guild_id=guild_id),
+        )
 
     def _apply_discord_identity(self, user: UserNames, discord_user: hikari.User | hikari.Member) -> bool:
         before = user.model_dump(mode="json")
@@ -961,21 +2006,25 @@ class Name_Cache(metaclass=Singleton):
         return user.model_dump(mode="json") != before
 
     def sync_members(self, members: Iterable[hikari.Member]) -> int:
-        changed_user_ids: list[int] = []
+        changed_members: list[hikari.Member] = []
         for member in members:
             user_id = int(member.id)
             user = self.by_id.setdefault(user_id, UserNames())
             if self._apply_discord_identity(user, member):
-                changed_user_ids.append(user_id)
+                changed_members.append(member)
 
-        if not changed_user_ids:
+        if not changed_members:
             return 0
 
         self._rebuild_aliases()
         self._dump()
-        for user_id in changed_user_ids:
-            self._queue_remote_mutation(NameMutationKind.SET_NAMES, **self._set_names_payload(user_id, self.by_id[user_id]))
-        return len(changed_user_ids)
+        for member in changed_members:
+            user_id = int(member.id)
+            self._queue_remote_mutation(
+                NameMutationKind.SET_NAMES,
+                **self._set_names_payload(user_id, self.by_id[user_id], guild_id=member.guild_id),
+            )
+        return len(changed_members)
 
     def sync_cached_members(self, cache: hikari.api.Cache) -> int:
         members: list[hikari.Member] = []
@@ -994,7 +2043,97 @@ class Name_Cache(metaclass=Singleton):
         if user.model_dump(mode="json") == before:
             return False
 
-        self._persist_identity_change(user_id, user)
+        self._persist_identity_change(user_id, user, guild_id=guild_id)
+        return True
+
+    def upsert_manual_user(
+        self,
+        user_id: int,
+        *,
+        display_name: object | None = None,
+        account: object | None = None,
+        nicknames: Iterable[object] = (),
+        game_aliases: Mapping[str, object | None] | None = None,
+    ) -> bool:
+        if user_id <= 0:
+            raise ValueError("user_id must be positive")
+        nickname_values = tuple(nicknames)
+        alias_updates = self._normalised_alias_mapping(game_aliases)
+        normalised_nicknames: list[str] = []
+        for nickname in nickname_values:
+            alias = self._normalised_optional_text(nickname, label="nickname")
+            if alias is not None:
+                self._assert_unique_general_alias(user_id, alias)
+                normalised_nicknames.append(alias)
+        for scope, alias in alias_updates.items():
+            if alias is not None:
+                self._assert_unique_game_alias(user_id, scope, alias)
+
+        user = self.by_id.setdefault(user_id, UserNames())
+        before = user.model_dump(mode="json")
+        user.is_manual = True
+
+        account_name = self._normalised_optional_text(account, label="account")
+        display = self._normalised_optional_text(display_name, label="display_name")
+        if account_name is not None:
+            user.account = account_name
+        if display is not None:
+            user.global_name = display
+
+        for alias in normalised_nicknames:
+            user.nicknames.add(alias)
+
+        for scope, alias in alias_updates.items():
+            if alias is None:
+                user.games.pop(scope, None)
+            else:
+                user.games[scope] = (alias, user.games.get(scope, (None, None))[1])
+
+        self._sync_known_names(user)
+        if user.model_dump(mode="json") == before:
+            return False
+
+        self._rebuild_aliases()
+        self._dump()
+        self._queue_remote_mutation(
+            NameMutationKind.UPSERT_MANUAL_USER,
+            user_id=user_id,
+            display_name=display,
+            account=account_name,
+            nicknames=normalised_nicknames,
+            game_aliases=alias_updates,
+        )
+        return True
+
+    def is_manual_user(self, user_id: int) -> bool:
+        user = self.by_id.get(user_id)
+        return user.is_manual if user is not None else False
+
+    def get_display_override(self, user_id: int, category: DisplayNameCategory | str) -> str | None:
+        user = self.by_id.get(user_id)
+        if user is None:
+            return None
+        category_key = self._normalised_display_name_category(category)
+        return user.display_overrides.get_for_category(category_key)
+
+    def set_display_override(
+        self, user_id: int, category: DisplayNameCategory | str, display_name: object | None
+    ) -> bool:
+        category_key = self._normalised_display_name_category(category)
+        value = self._normalised_optional_text(display_name, label=f"{category_key.value} display override")
+        user = self.by_id.setdefault(user_id, UserNames())
+        before = user.model_dump(mode="json")
+        user.display_overrides.set_for_category(category_key, value)
+        if user.model_dump(mode="json") == before:
+            return False
+
+        self._dump()
+        self._queue_remote_mutation(
+            NameMutationKind.SET_DISPLAY_OVERRIDE,
+            user_id=user_id,
+            category=category_key.value,
+            display_name=value,
+        )
         return True
 
     def apply_mutation_event(self, event: dict[str, object]) -> bool:
@@ -1009,9 +2148,12 @@ class Name_Cache(metaclass=Singleton):
 
         before = user.model_dump(mode="json")
         if kind is NameMutationKind.ADD_NAME:
-            name = str(event["name"])
+            name = self._normalised_optional_text(event.get("name"), label="nickname")
+            if name is None:
+                raise ValueError("add_name mutation nickname must not be empty")
             is_name = bool(event.get("is_name", True))
             if not is_name:
+                self._assert_unique_general_alias(raw_user_id, name)
                 user.nicknames.add(name)
         elif kind is NameMutationKind.CLEAN_NAMES:
             names = event.get("names")
@@ -1021,49 +2163,118 @@ class Name_Cache(metaclass=Singleton):
             user.global_name = user.global_name if user.global_name in allowed_names else None
             user.guild_names = {guild_id: name for guild_id, name in user.guild_names.items() if name in allowed_names}
             self._sync_known_names(user)
+        elif kind is NameMutationKind.SET_DISPLAY_OVERRIDE:
+            category = self._normalised_display_name_category(event.get("category"))
+            display_name = self._normalised_optional_text(
+                event.get("display_name"),
+                label=f"{category.value} display override",
+            )
+            user.display_overrides.set_for_category(category, display_name)
         elif kind is NameMutationKind.REMOVE_GAME_ALIAS:
             user.games.pop(str(event["scope"]).lower(), None)
         elif kind is NameMutationKind.REMOVE_NAME:
             user.nicknames.discard(str(event["name"]))
         elif kind is NameMutationKind.SET_GAME_ALIAS:
-            user.games[str(event["scope"]).lower()] = (str(event["alias"]), None)
+            scope = self._normalised_alias_scope(event.get("scope"))
+            alias = self._normalised_optional_text(event.get("alias"), label=f"{scope} alias")
+            if alias is None:
+                raise ValueError("set_game_alias mutation alias must not be empty")
+            self._assert_unique_game_alias(raw_user_id, scope, alias)
+            user.games[scope] = (alias, user.games.get(scope, (None, None))[1])
         elif kind is NameMutationKind.SET_GAME_UUID:
-            scope = str(event["scope"]).lower()
-            uuid = str(event["uuid"])
+            scope = self._normalised_alias_scope(event.get("scope"))
+            uuid = self._normalised_game_uuid(scope, event.get("uuid"))
+            if uuid is not None:
+                self._assert_unique_game_uuid(raw_user_id, scope, uuid)
             name, _ = user.games.get(scope, (None, None))
-            if name:
+            if name is None and uuid is None:
+                user.games.pop(scope, None)
+            else:
                 user.games[scope] = (name, uuid)
         elif kind is NameMutationKind.SET_NAMES:
-            account = event.get("account")
-            user.account = str(account) if account is not None else None
-            global_name = event.get("global_name")
-            if global_name is not None or "global_name" in event:
-                user.global_name = str(global_name) if global_name is not None else None
+            account_in_event = "account" in event
+            global_name_in_event = "global_name" in event
+            raw_account = event.get("account")
+            if account_in_event:
+                user.account = str(raw_account) if raw_account is not None else None
+            raw_global_name = event.get("global_name")
+            if global_name_in_event:
+                user.global_name = str(raw_global_name) if raw_global_name is not None else None
+            raw_guild_id = event.get("guild_id")
             raw_guild_names = event.get("guild_names")
+            if raw_guild_id is not None and raw_guild_names is not None:
+                raise ValueError("set_names mutation can't include both guild_id and guild_names")
             if raw_guild_names is not None:
                 if not isinstance(raw_guild_names, dict):
                     raise ValueError("set_names mutation guild_names must be an object")
                 user.guild_names = {int(guild_id): str(name) for guild_id, name in raw_guild_names.items() if str(name)}
+            elif raw_guild_id is not None:
+                if not isinstance(raw_guild_id, int):
+                    raise ValueError("set_names mutation guild_id must be an integer")
+                raw_guild_name = event.get("guild_name")
+                if raw_guild_name is None:
+                    user.guild_names.pop(raw_guild_id, None)
+                else:
+                    guild_name = str(raw_guild_name)
+                    if guild_name:
+                        user.guild_names[raw_guild_id] = guild_name
+                    else:
+                        user.guild_names.pop(raw_guild_id, None)
+            elif "guild_name" in event:
+                raise ValueError("set_names mutation guild_name requires guild_id")
             legacy_names = event.get("names")
             if legacy_names is not None and not isinstance(legacy_names, list):
                 raise ValueError("set_names mutation names must be a list when provided")
-            if "account" in event or global_name is not None or "global_name" in event or raw_guild_names is not None:
+            if account_in_event or global_name_in_event or raw_guild_names is not None or raw_guild_id is not None:
                 self._sync_known_names(user)
             elif legacy_names is not None:
                 allowed_names = {str(name) for name in legacy_names if str(name)}
                 user.global_name = user.global_name if user.global_name in allowed_names else None
-                user.guild_names = {guild_id: name for guild_id, name in user.guild_names.items() if name in allowed_names}
+                user.guild_names = {
+                    guild_id: name for guild_id, name in user.guild_names.items() if name in allowed_names
+                }
                 self._sync_known_names(user)
         elif kind is NameMutationKind.SET_PLATFORM_ID:
-            platform = self._norm_platform_key(event.get("platform"))
-            platform_id = event.get("platform_id")
-            value = self._norm_steam_id(platform_id) if platform == "steam" else self._norm_platform_id(platform_id)
+            platform: str = self._norm_platform_key(event.get("platform"))
+            platform_id: object | None = event.get("platform_id")
+            value: str | None = (
+                self._norm_steam_id(platform_id) if platform == "steam" else self._norm_platform_id(platform_id)
+            )
             if value is None:
                 user.platform_ids.pop(platform, None)
             else:
+                self._assert_unique_platform_id(raw_user_id, platform, value)
                 user.platform_ids[platform] = value
+        elif kind is NameMutationKind.UPSERT_MANUAL_USER:
+            user.is_manual = True
+            account: str | None = self._normalised_optional_text(event.get("account"), label="account")
+            display_name: str | None = self._normalised_optional_text(event.get("display_name"), label="display_name")
+            if account is not None:
+                user.account = account
+            if display_name is not None:
+                user.global_name = display_name
 
-        changed = user.model_dump(mode="json") != before
+            raw_nicknames: object = event.get("nicknames", ())
+            if not isinstance(raw_nicknames, list):
+                raise ValueError("upsert_manual_user mutation nicknames must be a list")
+            for raw_nickname in raw_nicknames:
+                nickname = self._normalised_optional_text(raw_nickname, label="nickname")
+                if nickname is not None:
+                    self._assert_unique_general_alias(raw_user_id, nickname)
+                    user.nicknames.add(nickname)
+
+            raw_game_aliases: object = event.get("game_aliases", {})
+            if not isinstance(raw_game_aliases, dict):
+                raise ValueError("upsert_manual_user mutation game_aliases must be an object")
+            for scope, alias in self._normalised_alias_mapping(raw_game_aliases).items():
+                if alias is None:
+                    user.games.pop(scope, None)
+                else:
+                    self._assert_unique_game_alias(raw_user_id, scope, alias)
+                    user.games[scope] = (alias, user.games.get(scope, (None, None))[1])
+            self._sync_known_names(user)
+
+        changed: bool = user.model_dump(mode="json") != before
         if changed:
             self._rebuild_aliases()
             self._dump()
@@ -1072,33 +2283,38 @@ class Name_Cache(metaclass=Singleton):
     def add_name(self, user_id: int, name: str, is_name: bool = True):
         if is_name:
             raise ValueError("Known names are derived from Discord identity and cannot be added directly.")
-        user = self.by_id.setdefault(user_id, UserNames())
-        if name not in user.nicknames:
-            user.nicknames.add(name)
+        alias: str | None = self._normalised_optional_text(name, label="general alias")
+        if alias is None:
+            raise ValueError("general alias must not be empty")
+        self._assert_unique_general_alias(user_id, alias)
+        user: UserNames = self.by_id.setdefault(user_id, UserNames())
+        if alias not in user.nicknames:
+            user.nicknames.add(alias)
             self._rebuild_aliases()
             self._dump()
-            self._queue_remote_mutation(NameMutationKind.ADD_NAME, user_id=user_id, name=name, is_name=False)
+            self._queue_remote_mutation(NameMutationKind.ADD_NAME, user_id=user_id, name=alias, is_name=False)
 
-    def set_names(self, user: hikari.User | hikari.Member):
+    def set_names(self, user: hikari.User | hikari.Member) -> None:
         if not user:
             return  # pyright: ignore[reportUnreachable]
-        user_id = int(user.id)
-        userName = self.by_id.setdefault(user_id, UserNames())
+        user_id: int = int(user.id)
+        userName: UserNames = self.by_id.setdefault(user_id, UserNames())
         if not self._apply_discord_identity(userName, user):
             return
 
-        self._persist_identity_change(user_id, userName)
+        guild_id: Snowflake | None = user.guild_id if isinstance(user, hikari.Member) else None
+        self._persist_identity_change(user_id, userName, guild_id=guild_id)
 
-    def remove_game_alias(self, user_id: int, scope: str):
-        user = self.by_id.get(user_id)
+    def remove_game_alias(self, user_id: int, scope: str) -> None:
+        user: UserNames | None = self.by_id.get(user_id)
         if not user:
             return
         user.games.pop(scope.lower(), None)
         self._dump()
         self._queue_remote_mutation(NameMutationKind.REMOVE_GAME_ALIAS, user_id=user_id, scope=scope)
 
-    def remove_name(self, user_id: int, name: str):
-        user = self.by_id.get(user_id)
+    def remove_name(self, user_id: int, name: str) -> None:
+        user: UserNames | None = self.by_id.get(user_id)
         if not user:
             return
         user.nicknames.discard(name)
@@ -1106,15 +2322,25 @@ class Name_Cache(metaclass=Singleton):
         self._dump()
         self._queue_remote_mutation(NameMutationKind.REMOVE_NAME, user_id=user_id, name=name)
 
-    def set_game_alias(self, user_id: int, scope: str, alias: str):
-        user = self.by_id.setdefault(user_id, UserNames())
-        user.games[scope.lower()] = (alias, None)
+    def set_game_alias(self, user_id: int, scope: str, alias: str) -> None:
+        normalised_scope: str = self._normalised_alias_scope(scope)
+        normalised_alias: str | None = self._normalised_optional_text(alias, label=f"{normalised_scope} alias")
+        if normalised_alias is None:
+            raise ValueError("game alias must not be empty")
+        self._assert_unique_game_alias(user_id, normalised_scope, normalised_alias)
+        user: UserNames = self.by_id.setdefault(user_id, UserNames())
+        user.games[normalised_scope] = (normalised_alias, user.games.get(normalised_scope, (None, None))[1])
         self._dump()
-        self._queue_remote_mutation(NameMutationKind.SET_GAME_ALIAS, user_id=user_id, scope=scope, alias=alias)
+        self._queue_remote_mutation(
+            NameMutationKind.SET_GAME_ALIAS,
+            user_id=user_id,
+            scope=normalised_scope,
+            alias=normalised_alias,
+        )
 
     @staticmethod
     def _norm_platform_key(platform: object | None) -> str:
-        value = str(platform).strip().lower() if platform is not None else ""
+        value: str = str(platform).strip().lower() if platform is not None else ""
         if not value:
             raise ValueError("platform can't be empty")
         return value
@@ -1123,7 +2349,7 @@ class Name_Cache(metaclass=Singleton):
     def _norm_platform_id(platform_id: object | None) -> str | None:
         if platform_id is None:
             return None
-        value = str(platform_id).strip()
+        value: str = str(platform_id).strip()
         if not value:
             return None
         return value
@@ -1132,7 +2358,7 @@ class Name_Cache(metaclass=Singleton):
     def _norm_steam_id(steam_id: object | None) -> str | None:
         if steam_id is None:
             return None
-        value = str(steam_id).strip()
+        value: str = str(steam_id).strip()
         if not value:
             return None
         if not value.isdigit():
@@ -1143,16 +2369,18 @@ class Name_Cache(metaclass=Singleton):
         platform_key = self._norm_platform_key(platform)
         if platform_key == "steam":
             value = self._norm_steam_id(platform_id)
+            current = self._norm_steam_id(self.by_id.setdefault(user_id, UserNames()).platform_ids.get(platform_key))
         else:
             value = self._norm_platform_id(platform_id)
-        user = self.by_id.setdefault(user_id, UserNames())
-        current = self._norm_platform_id(user.platform_ids.get(platform_key))
+            current = self._norm_platform_id(self.by_id.setdefault(user_id, UserNames()).platform_ids.get(platform_key))
+        user: UserNames = self.by_id.setdefault(user_id, UserNames())
         if current == value:
             return False
 
         if value is None:
             user.platform_ids.pop(platform_key, None)
         else:
+            self._assert_unique_platform_id(user_id, platform_key, value)
             user.platform_ids[platform_key] = value
 
         self._rebuild_aliases()
@@ -1171,7 +2399,7 @@ class Name_Cache(metaclass=Singleton):
         except ValueError:
             return None
 
-        user = self.by_id.get(user_id)
+        user: UserNames | None = self.by_id.get(user_id)
         if not user:
             return None
 
@@ -1185,61 +2413,227 @@ class Name_Cache(metaclass=Singleton):
 
     def resolve_platform_to_id(self, platform: object, platform_id: object | None) -> int | None:
         try:
-            platform_key = self._norm_platform_key(platform)
+            platform_key: str = self._norm_platform_key(platform)
         except ValueError:
             return None
+        resolved_platform_id: str | None
         if platform_key == "steam":
             try:
-                value = self._norm_steam_id(platform_id)
+                resolved_platform_id = self._norm_steam_id(platform_id)
             except ValueError:
                 return None
         else:
-            value = self._norm_platform_id(platform_id)
-        if not value:
+            resolved_platform_id = self._norm_platform_id(platform_id)
+        if not resolved_platform_id:
             return None
-        return self.by_platform_id.get(platform_key, {}).get(value)
+        return self.by_platform_id.get(platform_key, {}).get(resolved_platform_id)
 
     def list_platform_ids(self, user_id: int) -> dict[str, str]:
-        user = self.by_id.get(user_id)
+        user: UserNames | None = self.by_id.get(user_id)
         if not user:
             return {}
 
         out: dict[str, str] = {}
         for platform, raw_id in user.platform_ids.items():
             try:
-                platform_key = self._norm_platform_key(platform)
+                platform_key: str = self._norm_platform_key(platform)
             except ValueError:
                 continue
+            resolved_platform_id: str | None
             if platform_key == "steam":
                 try:
-                    value = self._norm_steam_id(raw_id)
+                    resolved_platform_id = self._norm_steam_id(raw_id)
                 except ValueError:
                     continue
             else:
-                value = self._norm_platform_id(raw_id)
-            if value:
-                out[platform_key] = value
+                resolved_platform_id = self._norm_platform_id(raw_id)
+            if resolved_platform_id:
+                out[platform_key] = resolved_platform_id
 
-        return dict(sorted(out.items()))
+        return dict[str, str](sorted(out.items()))
 
-    def set_game_uuid(self, user_id: int, scope: str, uuid: str):
-        existing = self.by_id.get(user_id, UserNames()).games.get(scope, (None, None))
-        if existing and existing[1] and existing[1].lower() == uuid.lower():
-            return
-        scope = scope.lower()
-        user = self.by_id.setdefault(user_id, UserNames())
-        name, _ = user.games.get(scope, (None, None))
-        if name:
-            user.games[scope] = (name, uuid)
-            self._dump()
-            self._queue_remote_mutation(NameMutationKind.SET_GAME_UUID, user_id=user_id, scope=scope, uuid=uuid)
+    def set_game_uuid(self, user_id: int, scope: str, uuid: object | None) -> bool:
+        scope_key = self._normalised_alias_scope(scope)
+        value = self._normalised_game_uuid(scope_key, uuid)
+        existing: tuple[str | None, str | None] = self.by_id.get(user_id, UserNames()).games.get(
+            scope_key, (None, None)
+        )
+        if existing[1] == value:
+            return False
+        if value is not None:
+            self._assert_unique_game_uuid(user_id, scope_key, value)
+        user: UserNames = self.by_id.setdefault(user_id, UserNames())
+        name, _ = user.games.get(scope_key, (None, None))
+        if name is None and value is None:
+            user.games.pop(scope_key, None)
+        else:
+            user.games[scope_key] = (name, value)
+        self._dump()
+        self._queue_remote_mutation(NameMutationKind.SET_GAME_UUID, user_id=user_id, scope=scope_key, uuid=value)
+        return True
+
+    def set_game_profile(self, user_id: int, scope: object, alias: object, uuid: object | None = None) -> bool:
+        scope_key = self._normalised_alias_scope(scope)
+        alias_value = self._normalised_optional_text(alias, label=f"{scope_key} alias")
+        if alias_value is None:
+            raise ValueError("game alias must not be empty")
+        uuid_value = self._normalised_game_uuid(scope_key, uuid)
+        self._assert_unique_game_alias(user_id, scope_key, alias_value)
+        if uuid_value is not None:
+            self._assert_unique_game_uuid(user_id, scope_key, uuid_value)
+        user: UserNames = self.by_id.setdefault(user_id, UserNames())
+        current_value = user.games.get(scope_key)
+        next_value = (alias_value, uuid_value)
+        if current_value == next_value:
+            return False
+        user.games[scope_key] = next_value
+        self._dump()
+        self._queue_remote_mutation(
+            NameMutationKind.SET_GAME_ALIAS,
+            user_id=user_id,
+            scope=scope_key,
+            alias=alias_value,
+        )
+        self._queue_remote_mutation(
+            NameMutationKind.SET_GAME_UUID,
+            user_id=user_id,
+            scope=scope_key,
+            uuid=uuid_value,
+        )
+        return True
 
     def get_game_alias(self, user_id: int, scope: str) -> str | None:
-        user = self.by_id.get(user_id)
+        user: UserNames | None = self.by_id.get(user_id)
         if not user:
             return None
-        alias_data = user.games.get(scope.lower())
-        return alias_data[0] if alias_data else user.account
+        alias_data: tuple[str | None, str | None] | None = user.games.get(scope.lower())
+        return alias_data[0] if alias_data else None
+
+    def get_game_uuid(self, user_id: int, scope: str) -> str | None:
+        user: UserNames | None = self.by_id.get(user_id)
+        if not user:
+            return None
+        alias_data: tuple[str | None, str | None] | None = user.games.get(scope.lower())
+        return alias_data[1] if alias_data else None
+
+    def resolve_game_alias_to_id(self, alias: str, scope: str) -> int | None:
+        scope_key = self._normalised_alias_scope(scope)
+        alias_value = self._normalised_optional_text(alias, label=f"{scope_key} alias")
+        if alias_value is None:
+            return None
+        result = self._resolve_candidate_result(
+            self._resolve_game_alias_ids(alias_value, scope_key),
+            alias_value,
+            prefer_global_name=False,
+        )
+        return result.user_id
+
+    def relay_mention_name(
+        self,
+        user_id: int,
+        /,
+        *,
+        scope: str | None = None,
+        preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
+        default: str = "user",
+    ) -> str:
+        user: UserNames | None = self.by_id.get(user_id)
+        if scope and user is not None:
+            alias_data: tuple[str | None, str | None] | None = user.games.get(scope.lower())
+            if alias_data is not None and alias_data[0]:
+                return alias_data[0]
+
+        resolved: str = self.cached_display_name(
+            user_id,
+            default,
+            preferred_guild_id=preferred_guild_id,
+            category=DisplayNameCategory.DISCORD,
+        )
+        return resolved if resolved is not None else default
+
+    @overload
+    def relay_display_name(
+        self,
+        user_id: int,
+        default: None,
+        /,
+        *,
+        scope: str | None = None,
+        preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
+    ) -> str | None: ...
+
+    @overload
+    def relay_display_name(
+        self,
+        user_id: int,
+        default: str = "Unknown",
+        /,
+        *,
+        scope: str | None = None,
+        preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
+    ) -> str: ...
+
+    def relay_display_name(
+        self,
+        user_id: int,
+        default: str | None = "Unknown",
+        /,
+        *,
+        scope: str | None = None,
+        preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
+    ) -> str | None:
+        if scope is not None and (game_alias := self.get_game_alias(user_id, scope)) is not None:
+            return game_alias
+        return self.cached_display_name(user_id, default, preferred_guild_id=preferred_guild_id)
+
+    @overload
+    def discord_fallback_name(
+        self,
+        user_id: int,
+        default: None,
+        /,
+        *,
+        scope: str | None = None,
+        fallback_display_name: str | None = None,
+    ) -> str | None: ...
+
+    @overload
+    def discord_fallback_name(
+        self,
+        user_id: int,
+        default: str = "user",
+        /,
+        *,
+        scope: str | None = None,
+        fallback_display_name: str | None = None,
+    ) -> str: ...
+
+    def discord_fallback_name(
+        self,
+        user_id: int,
+        default: str | None = "user",
+        /,
+        *,
+        scope: str | None = None,
+        fallback_display_name: str | None = None,
+    ) -> str | None:
+        if scope is not None and (game_alias := self.get_game_alias(user_id, scope)) is not None:
+            return game_alias
+
+        user = self.by_id.get(user_id)
+        if user is not None and user.account:
+            return user.account
+
+        fallback_name = self._normalised_optional_text(
+            fallback_display_name,
+            label="discord fallback display name",
+        )
+        if fallback_name is not None:
+            return fallback_name
+
+        if user is not None and user.global_name:
+            return user.global_name
+        return default
 
     @staticmethod
     def _sorted_name_values(values: set[str]) -> list[str]:
@@ -1251,7 +2645,7 @@ class Name_Cache(metaclass=Singleton):
         preferred_guild_id: hikari.Snowflakeish | None = None,
     ) -> str | None:
         if preferred_guild_id is not None:
-            preferred_name = entry.guild_names.get(int(preferred_guild_id))
+            preferred_name: str | None = entry.guild_names.get(int(preferred_guild_id))
             if preferred_name:
                 return preferred_name
 
@@ -1268,6 +2662,7 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
+        category: DisplayNameCategory | None = None,
     ) -> str | None: ...
 
     @overload
@@ -1278,6 +2673,7 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
+        category: DisplayNameCategory | None = None,
     ) -> str: ...
 
     def cached_display_name(
@@ -1287,11 +2683,14 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
+        category: DisplayNameCategory | None = None,
     ) -> str | None:
-        user = self.by_id.get(user_id)
+        user: UserNames | None = self.by_id.get(user_id)
         if user is None:
             return default
 
+        if category is not None and (override := user.display_overrides.get_for_category(category)):
+            return override
         if preferred_name := self._preferred_guild_display_name(user, preferred_guild_id):
             return preferred_name
         if user.global_name:
@@ -1316,9 +2715,11 @@ class Name_Cache(metaclass=Singleton):
         if len(candidate_ids) == 1:
             return NameResolutionResult(NameResolutionStatus.UNIQUE, next(iter(candidate_ids)))
         if not prefer_global_name:
-            return NameResolutionResult(NameResolutionStatus.AMBIGUOUS, candidate_ids=tuple(sorted(candidate_ids)))
+            return NameResolutionResult(
+                NameResolutionStatus.AMBIGUOUS, candidate_ids=tuple[int, ...](sorted(candidate_ids))
+            )
 
-        matching_global_names = {
+        matching_global_names: set[int] = {
             user_id
             for user_id in candidate_ids
             if (
@@ -1329,7 +2730,9 @@ class Name_Cache(metaclass=Singleton):
         }
         if len(matching_global_names) == 1:
             return NameResolutionResult(NameResolutionStatus.UNIQUE, next(iter(matching_global_names)))
-        return NameResolutionResult(NameResolutionStatus.AMBIGUOUS, candidate_ids=tuple(sorted(candidate_ids)))
+        return NameResolutionResult(
+            NameResolutionStatus.AMBIGUOUS, candidate_ids=tuple[int, ...](sorted(candidate_ids))
+        )
 
     def resolve_name(
         self,
@@ -1339,33 +2742,52 @@ class Name_Cache(metaclass=Singleton):
         prefer_global_name: bool = False,
     ) -> NameResolutionResult:
         if scope:
-            candidate_ids = self._resolve_game_alias_ids(name, scope)
-            result = self._resolve_candidate_result(candidate_ids, name, prefer_global_name=prefer_global_name)
+            candidate_ids: set[int] = self._resolve_game_alias_ids(name, scope)
+            result: NameResolutionResult = self._resolve_candidate_result(
+                candidate_ids, name, prefer_global_name=prefer_global_name
+            )
             if result.status is not NameResolutionStatus.NOT_FOUND:
                 return result
-        if name.isnumeric():
-            if (ident := int(name)) in self.by_id:
-                return NameResolutionResult(NameResolutionStatus.UNIQUE, ident)
-        return self._resolve_candidate_result(
+        alias_result = self._resolve_candidate_result(
             self.by_alias.get(name.lower(), set()),
             name,
             prefer_global_name=prefer_global_name,
         )
+        if alias_result.status is not NameResolutionStatus.NOT_FOUND:
+            return alias_result
+        if name.isnumeric():
+            if (ident := int(name)) in self.by_id:
+                return NameResolutionResult(NameResolutionStatus.UNIQUE, ident)
+        return alias_result
 
     def resolve_to_id(self, name: str, scope: str | None = None, *, prefer_global_name: bool = False) -> int | None:
         return self.resolve_name(name, scope, prefer_global_name=prefer_global_name).user_id
 
     def _resolve_game_alias_ids(self, alias: str, scope: str | None) -> set[int]:
         matching_ids: set[int] = set()
-        alias_key = alias.lower()
-        scope_key = scope.lower() if scope else None
+        alias_key: str = alias.lower()
+        scope_key: str | None = scope.lower() if scope else None
         for uid, entry in self.by_id.items():
             if scope_key is None:
                 if any(alias_key in (name.lower() for name in data if name) for data in entry.games.values()):
                     matching_ids.add(uid)
             else:
-                data = entry.games.get(scope_key)
+                data: tuple[str | None, str | None] | None = entry.games.get(scope_key)
                 if data and alias_key in (name.lower() for name in data if name):
+                    matching_ids.add(uid)
+        return matching_ids
+
+    def _resolve_game_uuid_ids(self, game_uuid: str, scope: str | None) -> set[int]:
+        matching_ids: set[int] = set()
+        uuid_key = game_uuid.casefold()
+        scope_key: str | None = scope.lower() if scope else None
+        for uid, entry in self.by_id.items():
+            if scope_key is None:
+                if any(uuid_key == stored_uuid.casefold() for _, stored_uuid in entry.games.values() if stored_uuid):
+                    matching_ids.add(uid)
+            else:
+                data: tuple[str | None, str | None] | None = entry.games.get(scope_key)
+                if data is not None and data[1] is not None and data[1].casefold() == uuid_key:
                     matching_ids.add(uid)
         return matching_ids
 
@@ -1426,11 +2848,11 @@ class Name_Cache(metaclass=Singleton):
                 log.warning(f"User Fallback failed for {user_id}: {xcp}")
         return self.cached_display_name(user_id, default)
 
-    def clean(self, user_id: int, current_names: list[str]):
-        user = self.by_id.get(user_id)
+    def clean(self, user_id: int, current_names: list[str]) -> None:
+        user: UserNames | None = self.by_id.get(user_id)
         if not user:
             return
-        allowed_names = set(current_names)
+        allowed_names: set[str] = set[str](current_names)
         user.global_name = user.global_name if user.global_name in allowed_names else None
         user.guild_names = {guild_id: name for guild_id, name in user.guild_names.items() if name in allowed_names}
         self._sync_known_names(user)
@@ -1438,7 +2860,7 @@ class Name_Cache(metaclass=Singleton):
         self._dump()
         self._queue_remote_mutation(NameMutationKind.CLEAN_NAMES, user_id=user_id, names=sorted(user.names))
 
-    def _rebuild_aliases(self):
+    def _rebuild_aliases(self) -> None:
         self.by_alias.clear()
         self.by_platform_id.clear()
         for uid, entry in self.by_id.items():
@@ -1468,7 +2890,7 @@ class Name_Cache(metaclass=Singleton):
             - Modified string (if replace=True), original string otherwise
             - Set of resolved user IDs
         """
-        mentions: set[int] = set()
+        mentions: set[int] = set[int]()
 
         def repl(match):
             name = match.group(1)
@@ -1482,8 +2904,6 @@ class Name_Cache(metaclass=Singleton):
         return updated, mentions
 
 
-INDEV = bool(env_opt("INDEV"))
-
 AC_XCP = LookupError("Invalid input. Please use the autocomplete to select")
 "convience var for xcp to raise when using autocomplete options"
 
@@ -1491,7 +2911,7 @@ AC_XCP = LookupError("Invalid input. Please use the autocomplete to select")
 class Activity_Provider(Protocol):
     silent: bool = SILENT_DEBUG
     """Whether to log"""
-    prio = 50
+    prio: int = 50
     "0 = RAM | 2 = CPU | 4 = Player | 6 = Process | 10-79 = whatever | 80 >= Alerts"
 
     async def get(self) -> str | None:
@@ -1504,13 +2924,14 @@ class Activity_Manager(Protocol):
     last_update: datetime
     state: str | None
 
-    def register(self, provider: Activity_Provider):
+    def register(self, provider: Activity_Provider) -> None:
         return
 
-    def deregister(self, provider: Activity_Provider):
+    def deregister(self, provider: Activity_Provider) -> None:
         return
 
 
 IS_RESTARTING = False
+IS_SHUTTINGDOWN = False
 
 # AiviA APasz

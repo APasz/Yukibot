@@ -134,7 +134,7 @@ def _build_timezone_offsets() -> list[str]:
 TIMEZONE_OFFSETS = _build_timezone_offsets()
 
 
-async def ac_timezones(ctx: lightbulb.AutocompleteContext):
+async def ac_timezones(ctx: lightbulb.AutocompleteContext[str]) -> None:
     choices: dict[str, object] = {}
     user_tz = _user_tz_name(ctx.interaction.user.id)
     special = sorted({str(tz_loc) for tz_loc in USER_TZ.values()})
@@ -935,7 +935,7 @@ async def _ac_pairs_for_guild(user_id: hikari.Snowflakeish, guild_id: hikari.Sno
     return pairs
 
 
-async def ac_use_saved(ctx: lightbulb.AutocompleteContext):
+async def ac_use_saved(ctx: lightbulb.AutocompleteContext[str]) -> None:
     uid = ctx.interaction.user.id
     gid = ctx.interaction.guild_id
 

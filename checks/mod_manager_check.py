@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from apps._config import App_Config
+from _mod_ops import NonDownloadableModError, download_paths
+from apps._config import App_Config, ModDownloadBlockReason, ModType
 from apps._mod import Mod, Mod_Manager
 
 
@@ -36,7 +37,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
             directory=self.app_dir,
             apps_dir=self.apps_dir,
             mods_dir=self.mods_dir,
-            address="127.0.0.1",
+            join_host="127.0.0.1",
             scope="test",
         )
         return Mod_Manager(app_cfg, mod_cls=_FileMod, db_path=self.db_path)
@@ -77,6 +78,25 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reloaded.path.name, "example.disabled")
         self.assertEqual(manager.list_names(False), ["example.zip"])
 
+    async def test_set_enabled_is_idempotent_when_mod_is_already_enabled(self) -> None:
+        manager = self._build_manager()
+        await manager.add(self._write_source_file())
+
+        updated = await manager.set_enabled("example.zip", True)
+
+        self.assertTrue(updated.cfg.enabled)
+        self.assertTrue((self.mods_dir / "example.zip").exists())
+
+    async def test_set_enabled_is_idempotent_when_mod_is_already_disabled(self) -> None:
+        manager = self._build_manager()
+        await manager.add(self._write_source_file())
+        await manager.set_enabled("example.zip", False)
+
+        updated = await manager.set_enabled("example.zip", False)
+
+        self.assertFalse(updated.cfg.enabled)
+        self.assertTrue((self.mods_dir / "example.disabled").exists())
+
     async def test_remove_updates_index_and_db(self) -> None:
         manager = self._build_manager()
         await manager.add(self._write_source_file())
@@ -100,6 +120,74 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
 
         reloaded = manager.get("example.zip")
         self.assertTrue(reloaded.cfg.coremod)
+        self.assertEqual(reloaded.cfg.mod_type, ModType.COREMOD)
+
+    async def test_legacy_builtin_block_reason_migrates_to_builtin_mod_type(self) -> None:
+        (self.mods_dir / "builtin.zip").write_text("payload", encoding="utf-8")
+        self.db_path.write_text(
+            (
+                '{"name":"builtin.zip","directory":"%s","enabled":true,"version":null,"origin":"manual",'
+                '"coremod":false,"download_block_reason":"builtin"}'
+            )
+            % self.mods_dir,
+            encoding="utf-8",
+        )
+        manager = self._build_manager()
+
+        await manager.reload_mods()
+
+        reloaded = manager.get("builtin.zip")
+        self.assertEqual(reloaded.cfg.mod_type, ModType.BUILTIN)
+
+    async def test_legacy_server_only_block_reason_stays_regular_mod_type(self) -> None:
+        (self.mods_dir / "server-only.zip").write_text("payload", encoding="utf-8")
+        self.db_path.write_text(
+            (
+                '{"name":"server-only.zip","directory":"%s","enabled":true,"version":null,"origin":"manual",'
+                '"coremod":false,"download_block_reason":"server_only"}'
+            )
+            % self.mods_dir,
+            encoding="utf-8",
+        )
+        manager = self._build_manager()
+
+        await manager.reload_mods()
+
+        reloaded = manager.get("server-only.zip")
+        self.assertEqual(reloaded.cfg.mod_type, ModType.REGULAR)
+
+    async def test_set_download_block_reason_persists_across_reload(self) -> None:
+        manager = self._build_manager()
+        await manager.add(self._write_source_file())
+
+        updated = await manager.set_download_block_reason("example.zip", ModDownloadBlockReason.SERVER_ONLY)
+
+        self.assertFalse(updated.downloadable)
+        self.assertEqual(updated.download_block_label, "Server only")
+
+        await manager.reload_mods()
+
+        reloaded = manager.get("example.zip")
+        self.assertFalse(reloaded.downloadable)
+        self.assertEqual(reloaded.cfg.download_block_reason, ModDownloadBlockReason.SERVER_ONLY)
+
+    async def test_download_paths_skip_blocked_mods_for_batch_downloads(self) -> None:
+        manager = self._build_manager()
+        downloadable = await manager.add(self._write_source_file("downloadable.zip"))
+        blocked = await manager.add(self._write_source_file("server-only.zip"))
+        await manager.set_download_block_reason(blocked, ModDownloadBlockReason.SERVER_ONLY)
+
+        paths = download_paths(manager, default_enabled_only=False)
+
+        self.assertEqual(paths, (downloadable.path,))
+
+    async def test_download_paths_reject_blocked_direct_download(self) -> None:
+        manager = self._build_manager()
+        blocked = await manager.add(self._write_source_file("server-only.zip"))
+        await manager.set_download_block_reason(blocked, ModDownloadBlockReason.SERVER_ONLY)
+
+        with self.assertRaises(NonDownloadableModError):
+            download_paths(manager, (blocked.name,), default_enabled_only=False)
 
 
 if __name__ == "__main__":

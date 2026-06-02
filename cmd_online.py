@@ -25,6 +25,7 @@ from hikari_ui import (
 )
 
 import config
+from _editor_session import startup_editor_prefix
 from _file import File_Utils
 from _security import Access_Control
 from config import Name_Cache
@@ -32,8 +33,8 @@ from online import (
     ACTIVITY_TYPES,
     NICKNAME_MODES,
     NICKNAME_PLATFORMS,
-    Online_Tracker,
     STATUS_TYPES,
+    Online_Tracker,
     WatchRule,
 )
 
@@ -288,12 +289,12 @@ class OnlineEditorService:
         self._action_codec = PagedActionCodec(OnlineActionKind)
         self._pending_nickname_rules: dict[hikari.Snowflake, PendingNicknameRule] = {}
         self._editor = Editor(
-            prefix=_ONLINE_EDITOR_PREFIX,
+            prefix=startup_editor_prefix(_ONLINE_EDITOR_PREFIX),
             on_action=self._on_editor_action,
             authoriser=self._authorise_editor_action,
         )
         self._watch_game_modal = ModalKit(
-            prefix=_ONLINE_WATCH_GAME_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_ONLINE_WATCH_GAME_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -306,7 +307,7 @@ class OnlineEditorService:
             ),
         )
         self._drink_game_modal = ModalKit(
-            prefix=_ONLINE_DRINK_GAME_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_ONLINE_DRINK_GAME_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -319,7 +320,7 @@ class OnlineEditorService:
             ),
         )
         self._nick_modal = ModalKit(
-            prefix=_ONLINE_NICK_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_ONLINE_NICK_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -333,7 +334,7 @@ class OnlineEditorService:
             ),
         )
         self._steam_modal = ModalKit(
-            prefix=_ONLINE_STEAM_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_ONLINE_STEAM_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(

@@ -28,6 +28,7 @@ from hikari_ui import (
 )
 
 import config
+from _editor_session import startup_editor_prefix
 from _security import Access_Control
 from cmd_voice_common import (
     DISCORD_CUSTOM_EMOJI_RE,
@@ -37,6 +38,8 @@ from cmd_voice_common import (
     PronunciationFormat,
     PronunciationOverride,
     TextSubstitutionRule,
+    VoiceLinkRule,
+    VoiceLinkRuleMode,
 )
 from cmd_voice_service import (
     HFRepoRef,
@@ -82,6 +85,7 @@ _VOICE_ADMIN_PRONUNCIATION_VOICE_FIELD_ID = "voice"
 _VOICE_ADMIN_PRONUNCIATION_FORMAT_FIELD_ID = "format"
 _VOICE_ADMIN_HOST_FIELD_ID = "host"
 _VOICE_ADMIN_LABEL_FIELD_ID = "label"
+_VOICE_ADMIN_LINK_RULE_URL_FIELD_ID = "rule_url"
 _VOICE_ADMIN_PATH_REGEX_FIELD_ID = "path_regex"
 _VOICE_ADMIN_TEMPLATE_FIELD_ID = "template"
 _VOICE_ADMIN_STATE_VALUE_SEPARATOR = "~"
@@ -170,6 +174,7 @@ class VoiceAdminActionKind(enum.StrEnum):
     SHOW_SECTION = "ss"
     SHOW_OVERVIEW = "so"
     SHOW_CHANNELS = "sh"
+    SHOW_CHANNEL_CONFIG = "cf"
     SHOW_SUBSTITUTION_CATEGORY = "sc"
     SHOW_LINKS_VIEW = "sl"
     SHOW_PRONUNCIATION_CREATE = "sp"
@@ -203,11 +208,19 @@ class VoiceAdminActionKind(enum.StrEnum):
     EDIT_LINK_HOST = "eh"
     REMOVE_LINK_HOST = "dh"
     SELECT_LINK_RULE = "lr"
-    ADD_LINK_RULE = "ar"
+    ADD_SIMPLE_LINK_RULE = "ar"
+    ADD_COMPLEX_LINK_RULE = "ac"
     EDIT_LINK_RULE = "er"
     REMOVE_LINK_RULE = "dr"
     SELECT_GUILD_VOICE_CHANNEL = "gv"
-    SELECT_GUILD_TTS_CHANNEL = "gt"
+    SELECT_GUILD_PRIMARY_TTS_CHANNEL = "gt"
+    SELECT_GUILD_SECONDARY_TTS_CHANNEL = "gs"
+    TOGGLE_PRIMARY_TTS_LISTENING = "tp"
+    TOGGLE_SECONDARY_TTS_LISTENING = "ts"
+    CLEAR_GUILD_VOICE_CHANNEL = "cv"
+    CLEAR_PRIMARY_TTS_CHANNEL = "cpc"
+    CLEAR_SECONDARY_TTS_CHANNEL = "csc"
+    TOGGLE_RELAY_TTS = "rt"
 
 
 class VoiceAdminSection(enum.StrEnum):
@@ -244,6 +257,11 @@ class VoiceAdminPronunciationView(enum.StrEnum):
     CREATE = "create"
 
 
+class VoiceAdminChannelsView(enum.StrEnum):
+    SUMMARY = "summary"
+    CONFIG = "config"
+
+
 @dataclass(slots=True)
 class PendingGlobalPronunciation:
     voice: str | None = None
@@ -269,6 +287,7 @@ class VoiceAdminState:
     substitution_category: VoiceAdminSubstitutionCategory = VoiceAdminSubstitutionCategory.SLANG
     links_view: VoiceAdminLinksView = VoiceAdminLinksView.HOSTS
     pronunciation_view: VoiceAdminPronunciationView = VoiceAdminPronunciationView.LIST
+    channels_view: VoiceAdminChannelsView = VoiceAdminChannelsView.SUMMARY
 
 
 @dataclass(slots=True)
@@ -287,7 +306,8 @@ class VoiceAdminSelectionState:
     link_host: str | None = None
     link_rule_index: int | None = None
     pending_voice_channel_id: int | None = None
-    pending_tts_channel_id: int | None = None
+    pending_primary_tts_channel_id: int | None = None
+    pending_secondary_tts_channel_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +363,23 @@ def _parse_case_sensitive_value(raw: str) -> bool:
 
 def _format_case_sensitive_value(case_sensitive: bool) -> str:
     return "true" if case_sensitive else "false"
+
+
+def _format_voice_link_rule_mode(mode: VoiceLinkRuleMode) -> str:
+    return mode.value
+
+
+def _voice_link_rule_pattern_label(rule: VoiceLinkRule) -> str:
+    return f"{'shape' if rule.mode is VoiceLinkRuleMode.SIMPLE else 'regex'}: {rule.input_pattern}"
+
+
+def _voice_link_rule_value(rule: VoiceLinkRule) -> str:
+    example = f" | example: {rule.example_url}" if rule.example_url else ""
+    return f"{rule.mode.value} | {_voice_link_rule_pattern_label(rule)} | say: {rule.template}{example}"
+
+
+def _voice_link_rule_modal_title(mode: VoiceLinkRuleMode) -> str:
+    return "Add Simple Link Rule" if mode is VoiceLinkRuleMode.SIMPLE else "Add Complex Link Rule"
 
 
 def _parse_mention_override_target(raw: str) -> hikari.Snowflake:
@@ -444,6 +481,41 @@ def _voice_connection_status(
     return ", ".join(f"`{connection.guild_id}` -> <#{connection.channel_id}>" for connection in connections)
 
 
+def _channel_reference(channel_id: hikari.Snowflake | None, *, missing: str) -> str:
+    if channel_id is None:
+        return missing
+    return f"<#{int(channel_id)}>"
+
+
+def _voice_target_saved_status(guild_id: hikari.Snowflake, target: config.VoiceTargetConfig) -> str:
+    secondary = (
+        f", secondary TTS <#{int(target.secondary_tts_channel)}>"
+        if target.secondary_tts_channel is not None
+        else ", secondary TTS not set"
+    )
+    return (
+        f"Saved channels for `{guild_id}`: voice <#{int(target.voice_channel)}>, "
+        f"primary TTS <#{int(target.primary_tts_channel)}>{secondary}."
+    )
+
+
+def _reset_voice_admin_channel_selection(selection_state: VoiceAdminSelectionState) -> None:
+    selection_state.pending_voice_channel_id = None
+    selection_state.pending_primary_tts_channel_id = None
+    selection_state.pending_secondary_tts_channel_id = None
+
+
+def _sync_voice_admin_channel_selection(
+    selection_state: VoiceAdminSelectionState,
+    target: config.VoiceTargetConfig,
+) -> None:
+    selection_state.pending_voice_channel_id = int(target.voice_channel)
+    selection_state.pending_primary_tts_channel_id = int(target.primary_tts_channel)
+    selection_state.pending_secondary_tts_channel_id = (
+        int(target.secondary_tts_channel) if target.secondary_tts_channel is not None else None
+    )
+
+
 def _voice_settings_state_value(state: VoiceSettingsState) -> str:
     return state.section.value
 
@@ -466,6 +538,7 @@ def _voice_admin_state_value(state: VoiceAdminState) -> str:
             state.substitution_category.value,
             state.links_view.value,
             state.pronunciation_view.value,
+            state.channels_view.value,
         )
     )
 
@@ -481,10 +554,10 @@ def _voice_admin_state_from_action(action: object) -> VoiceAdminState | None:
         return None
 
     parts = raw_value.split(_VOICE_ADMIN_STATE_VALUE_SEPARATOR)
-    if len(parts) != 4:
+    if len(parts) != 5:
         return None
 
-    raw_section, raw_category, raw_links_view, raw_pronunciation_view = parts
+    raw_section, raw_category, raw_links_view, raw_pronunciation_view, raw_channels_view = parts
     try:
         return VoiceAdminState(
             section=VoiceAdminSection(raw_section),
@@ -492,6 +565,7 @@ def _voice_admin_state_from_action(action: object) -> VoiceAdminState | None:
             substitution_category=VoiceAdminSubstitutionCategory(raw_category),
             links_view=VoiceAdminLinksView(raw_links_view),
             pronunciation_view=VoiceAdminPronunciationView(raw_pronunciation_view),
+            channels_view=VoiceAdminChannelsView(raw_channels_view),
         )
     except ValueError:
         return None
@@ -516,7 +590,7 @@ def _parse_voice_pronunciation_value(raw: str) -> tuple[str, str] | None:
     return loaded[0], loaded[1]
 
 
-async def ac_tts_voices(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTTSService):
+async def ac_tts_voices(ctx: lightbulb.AutocompleteContext[str], voice_tts: VoiceTTSService) -> None:
     if not isinstance(ctx.focused.value, str):
         await ctx.respond([])
         return
@@ -527,7 +601,7 @@ async def ac_tts_voices(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTTSS
     await ctx.respond(voices)
 
 
-async def ac_tts_variants(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTTSService):
+async def ac_tts_variants(ctx: lightbulb.AutocompleteContext[str], voice_tts: VoiceTTSService) -> None:
     if not isinstance(ctx.focused.value, str):
         await ctx.respond([])
         return
@@ -550,7 +624,7 @@ async def ac_tts_variants(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTT
     await ctx.respond(voice_tts.variant_autocomplete_choices(selected_voice, variants, needle))
 
 
-async def ac_tts_substitution_sources(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTTSService):
+async def ac_tts_substitution_sources(ctx: lightbulb.AutocompleteContext[str], voice_tts: VoiceTTSService) -> None:
     if not isinstance(ctx.focused.value, str):
         await ctx.respond([])
         return
@@ -562,7 +636,7 @@ async def ac_tts_substitution_sources(ctx: lightbulb.AutocompleteContext, voice_
     await ctx.respond(sources[:25])
 
 
-async def ac_tts_pronunciation_sources(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTTSService):
+async def ac_tts_pronunciation_sources(ctx: lightbulb.AutocompleteContext[str], voice_tts: VoiceTTSService) -> None:
     if not isinstance(ctx.focused.value, str):
         await ctx.respond([])
         return
@@ -575,7 +649,10 @@ async def ac_tts_pronunciation_sources(ctx: lightbulb.AutocompleteContext, voice
     await ctx.respond(sources[:25])
 
 
-async def ac_tts_global_substitution_sources(ctx: lightbulb.AutocompleteContext, voice_tts: VoiceTTSService):
+async def ac_tts_global_substitution_sources(
+    ctx: lightbulb.AutocompleteContext[str],
+    voice_tts: VoiceTTSService,
+) -> None:
     if not isinstance(ctx.focused.value, str):
         await ctx.respond([])
         return
@@ -659,12 +736,12 @@ class VoiceSettingsEditorService:
         self._action_codec = PagedActionCodec(VoiceSettingsActionKind)
         self._selection_state: dict[hikari.Snowflake, VoiceSettingsSelectionState] = {}
         self._editor = Editor(
-            prefix=_VOICE_SETTINGS_EDITOR_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_SETTINGS_EDITOR_PREFIX),
             on_action=self._on_editor_action,
             authoriser=self._authorise_editor_action,
         )
         self._substitution_modal = ModalKit(
-            prefix=_VOICE_SETTINGS_SUBSTITUTION_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_SETTINGS_SUBSTITUTION_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -692,7 +769,7 @@ class VoiceSettingsEditorService:
             ),
         )
         self._mention_modal = ModalKit(
-            prefix=_VOICE_SETTINGS_MENTION_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_SETTINGS_MENTION_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -706,7 +783,7 @@ class VoiceSettingsEditorService:
             ),
         )
         self._pronunciation_modal = ModalKit(
-            prefix=_VOICE_SETTINGS_PRONUNCIATION_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_SETTINGS_PRONUNCIATION_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -1940,13 +2017,13 @@ class VoiceAdminEditorService:
         self._pending_pronunciations: dict[hikari.Snowflake, PendingGlobalPronunciation] = {}
         self._selection_state: dict[hikari.Snowflake, VoiceAdminSelectionState] = {}
         self._editor = Editor(
-            prefix=_VOICE_ADMIN_EDITOR_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_EDITOR_PREFIX),
             on_action=self._on_editor_action,
             authoriser=self._authorise_editor_action,
             defer_resolver=self._defer_editor_action,
         )
         self._model_modal = ModalKit(
-            prefix=_VOICE_ADMIN_MODEL_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_MODEL_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -1960,7 +2037,7 @@ class VoiceAdminEditorService:
             ),
         )
         self._substitution_modal = ModalKit(
-            prefix=_VOICE_ADMIN_SUBSTITUTION_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_SUBSTITUTION_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -1988,7 +2065,7 @@ class VoiceAdminEditorService:
             ),
         )
         self._entry_modal = ModalKit(
-            prefix=_VOICE_ADMIN_ENTRY_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_ENTRY_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -2009,7 +2086,7 @@ class VoiceAdminEditorService:
             ),
         )
         self._mention_modal = ModalKit(
-            prefix=_VOICE_ADMIN_MENTION_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_MENTION_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -2023,7 +2100,7 @@ class VoiceAdminEditorService:
             ),
         )
         self._token_modal = ModalKit(
-            prefix=_VOICE_ADMIN_TOKEN_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_TOKEN_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -2037,7 +2114,7 @@ class VoiceAdminEditorService:
             ),
         )
         self._pronunciation_modal = ModalKit(
-            prefix=_VOICE_ADMIN_PRONUNCIATION_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_PRONUNCIATION_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -2072,7 +2149,7 @@ class VoiceAdminEditorService:
             ),
         )
         self._link_host_modal = ModalKit(
-            prefix=_VOICE_ADMIN_LINK_HOST_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_LINK_HOST_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
@@ -2093,29 +2170,32 @@ class VoiceAdminEditorService:
             ),
         )
         self._link_rule_modal = ModalKit(
-            prefix=_VOICE_ADMIN_LINK_RULE_MODAL_PREFIX,
+            prefix=startup_editor_prefix(_VOICE_ADMIN_LINK_RULE_MODAL_PREFIX),
             schema=ModalSchema(
                 [
                     ModalTextField(
-                        id=_VOICE_ADMIN_HOST_FIELD_ID,
-                        label="Host",
+                        id=_VOICE_ADMIN_LINK_RULE_URL_FIELD_ID,
+                        label="Example URL",
                         style=hikari.TextInputStyle.SHORT,
                         required=True,
-                        max_length=120,
+                        max_length=200,
+                        placeholder="https://store.steampowered.com/app/3493540/Transport_Fever_2/",
                     ),
                     ModalTextField(
                         id=_VOICE_ADMIN_PATH_REGEX_FIELD_ID,
-                        label="Path Regex",
+                        label="Path Pattern",
                         style=hikari.TextInputStyle.SHORT,
-                        required=True,
+                        required=False,
                         max_length=200,
+                        placeholder="simple: /app/{id}/{title} | regex: ^/app/\\d+/(?P<title>[^/?#]+)",
                     ),
                     ModalTextField(
                         id=_VOICE_ADMIN_TEMPLATE_FIELD_ID,
-                        label="Template",
+                        label="Speak As",
                         style=hikari.TextInputStyle.PARAGRAPH,
                         required=True,
                         max_length=200,
+                        placeholder="steam store {title_norm}",
                     ),
                 ]
             ),
@@ -2240,6 +2320,7 @@ class VoiceAdminEditorService:
         if action.kind in {
             VoiceAdminActionKind.SHOW_OVERVIEW,
             VoiceAdminActionKind.SHOW_CHANNELS,
+            VoiceAdminActionKind.SHOW_CHANNEL_CONFIG,
             VoiceAdminActionKind.SHOW_SECTION,
             VoiceAdminActionKind.SHOW_SUBSTITUTION_CATEGORY,
             VoiceAdminActionKind.SHOW_LINKS_VIEW,
@@ -2252,7 +2333,19 @@ class VoiceAdminEditorService:
             if action.kind is VoiceAdminActionKind.SHOW_OVERVIEW:
                 state = self._state_with(state, section=VoiceAdminSection.OVERVIEW, page=0)
             elif action.kind is VoiceAdminActionKind.SHOW_CHANNELS:
-                state = self._state_with(state, section=VoiceAdminSection.CHANNELS, page=0)
+                state = self._state_with(
+                    state,
+                    section=VoiceAdminSection.CHANNELS,
+                    channels_view=VoiceAdminChannelsView.SUMMARY,
+                    page=0,
+                )
+            elif action.kind is VoiceAdminActionKind.SHOW_CHANNEL_CONFIG:
+                state = self._state_with(
+                    state,
+                    section=VoiceAdminSection.CHANNELS,
+                    channels_view=VoiceAdminChannelsView.CONFIG,
+                    page=0,
+                )
             elif action.kind is VoiceAdminActionKind.SHOW_SECTION and req.values:
                 try:
                     selected_section = VoiceAdminSection(req.values[0])
@@ -2262,6 +2355,11 @@ class VoiceAdminEditorService:
                     state,
                     section=selected_section,
                     page=0,
+                    channels_view=(
+                        VoiceAdminChannelsView.SUMMARY
+                        if selected_section is VoiceAdminSection.CHANNELS
+                        else state.channels_view
+                    ),
                     pronunciation_view=(
                         VoiceAdminPronunciationView.LIST
                         if selected_section is VoiceAdminSection.PRONUNCIATIONS
@@ -2299,6 +2397,7 @@ class VoiceAdminEditorService:
                 in {
                     VoiceAdminActionKind.SHOW_OVERVIEW,
                     VoiceAdminActionKind.SHOW_CHANNELS,
+                    VoiceAdminActionKind.SHOW_CHANNEL_CONFIG,
                     VoiceAdminActionKind.SHOW_SECTION,
                     VoiceAdminActionKind.SHOW_SUBSTITUTION_CATEGORY,
                     VoiceAdminActionKind.SHOW_LINKS_VIEW,
@@ -2477,14 +2576,58 @@ class VoiceAdminEditorService:
             )
 
         if action.kind in {
+            VoiceAdminActionKind.TOGGLE_PRIMARY_TTS_LISTENING,
+            VoiceAdminActionKind.TOGGLE_SECONDARY_TTS_LISTENING,
+        }:
+            if guild_id is None:
+                return EditorResponse.ephemeral("Open this editor in a server to manage channels.")
+            target = voice_tts.voice_target(guild_id)
+            if target is None:
+                return EditorResponse.ephemeral("Configure voice and TTS channels first.")
+            role = (
+                config.VoiceTargetTtsChannelRole.PRIMARY
+                if action.kind is VoiceAdminActionKind.TOGGLE_PRIMARY_TTS_LISTENING
+                else config.VoiceTargetTtsChannelRole.SECONDARY
+            )
+            if role is config.VoiceTargetTtsChannelRole.SECONDARY and target.secondary_tts_channel is None:
+                return EditorResponse.ephemeral("Configure a secondary TTS channel first.")
+            updated_target = voice_tts.set_voice_target_tts_listen_enabled(
+                guild_id,
+                role,
+                not target.tts_channel_listen_enabled(role),
+            )
+            if session_message_id is not None:
+                _sync_voice_admin_channel_selection(
+                    self._selection_state_for_message(session_message_id),
+                    updated_target,
+                )
+            return await self._build_editor_response(
+                actor_user_id=actor_user_id,
+                locale=req.locale,
+                guild_id=guild_id,
+                voice_tts=voice_tts,
+                state=self._state_with(state, section=VoiceAdminSection.CHANNELS, page=0),
+                session_message_id=session_message_id,
+                status=f"{role.label.capitalize()} TTS listening {'enabled' if updated_target.tts_channel_listen_enabled(role) else 'disabled'}.",
+            )
+
+        if action.kind in {
             VoiceAdminActionKind.SELECT_GUILD_VOICE_CHANNEL,
-            VoiceAdminActionKind.SELECT_GUILD_TTS_CHANNEL,
+            VoiceAdminActionKind.SELECT_GUILD_PRIMARY_TTS_CHANNEL,
+            VoiceAdminActionKind.SELECT_GUILD_SECONDARY_TTS_CHANNEL,
+            VoiceAdminActionKind.CLEAR_GUILD_VOICE_CHANNEL,
+            VoiceAdminActionKind.CLEAR_PRIMARY_TTS_CHANNEL,
+            VoiceAdminActionKind.CLEAR_SECONDARY_TTS_CHANNEL,
         }:
             if guild_id is None:
                 return EditorResponse.ephemeral("Open this editor in a server to manage channels.")
             if session_message_id is None:
                 return EditorResponse.ephemeral("Voice admin message is unavailable.")
-            if not req.values:
+            if action.kind in {
+                VoiceAdminActionKind.SELECT_GUILD_VOICE_CHANNEL,
+                VoiceAdminActionKind.SELECT_GUILD_PRIMARY_TTS_CHANNEL,
+                VoiceAdminActionKind.SELECT_GUILD_SECONDARY_TTS_CHANNEL,
+            } and not req.values:
                 prompt = (
                     "Choose a voice channel first."
                     if action.kind is VoiceAdminActionKind.SELECT_GUILD_VOICE_CHANNEL
@@ -2493,52 +2636,147 @@ class VoiceAdminEditorService:
                 return EditorResponse.ephemeral(prompt)
 
             selection_state = self._selection_state_for_message(session_message_id)
-            selected_channel_id = hikari.Snowflake(req.values[0])
             current_target = voice_tts.voice_target(guild_id)
 
-            if action.kind is VoiceAdminActionKind.SELECT_GUILD_VOICE_CHANNEL:
-                selection_state.pending_voice_channel_id = int(selected_channel_id)
-                tts_channel_id = (
-                    hikari.Snowflake(selection_state.pending_tts_channel_id)
-                    if selection_state.pending_tts_channel_id is not None
-                    else current_target.tts_channel if current_target is not None else None
-                )
-                if tts_channel_id is None:
-                    return await self._build_editor_response(
-                        actor_user_id=actor_user_id,
-                        locale=req.locale,
-                        guild_id=guild_id,
-                        voice_tts=voice_tts,
-                        state=self._state_with(state, section=VoiceAdminSection.CHANNELS, page=0),
-                        session_message_id=session_message_id,
-                        status="Voice channel selected. Choose a TTS channel to finish setup.",
-                    )
-
-                target = voice_tts.set_voice_target_config(
-                    guild_id,
-                    voice_channel=selected_channel_id,
-                    tts_channel=tts_channel_id,
-                )
-                selection_state.pending_voice_channel_id = int(target.voice_channel)
-                selection_state.pending_tts_channel_id = int(target.tts_channel)
+            if action.kind is VoiceAdminActionKind.CLEAR_GUILD_VOICE_CHANNEL:
+                voice_tts.remove_voice_target_config(guild_id)
+                _reset_voice_admin_channel_selection(selection_state)
                 return await self._build_editor_response(
                     actor_user_id=actor_user_id,
                     locale=req.locale,
                     guild_id=guild_id,
                     voice_tts=voice_tts,
-                    state=self._state_with(state, section=VoiceAdminSection.CHANNELS, page=0),
-                    session_message_id=session_message_id,
-                    status=(
-                        f"Saved channels for `{guild_id}`: "
-                        f"voice <#{int(target.voice_channel)}>, TTS <#{int(target.tts_channel)}>."
+                    state=self._state_with(
+                        state,
+                        section=VoiceAdminSection.CHANNELS,
+                        channels_view=VoiceAdminChannelsView.CONFIG,
+                        page=0,
                     ),
+                    session_message_id=session_message_id,
+                    status="Cleared voice channel. Voice TTS config removed for this guild.",
                 )
 
-            selection_state.pending_tts_channel_id = int(selected_channel_id)
+            if action.kind is VoiceAdminActionKind.CLEAR_PRIMARY_TTS_CHANNEL:
+                voice_tts.remove_voice_target_config(guild_id)
+                _reset_voice_admin_channel_selection(selection_state)
+                return await self._build_editor_response(
+                    actor_user_id=actor_user_id,
+                    locale=req.locale,
+                    guild_id=guild_id,
+                    voice_tts=voice_tts,
+                    state=self._state_with(
+                        state,
+                        section=VoiceAdminSection.CHANNELS,
+                        channels_view=VoiceAdminChannelsView.CONFIG,
+                        page=0,
+                    ),
+                    session_message_id=session_message_id,
+                    status="Cleared primary TTS channel. Voice TTS config removed for this guild.",
+                )
+
+            if action.kind is VoiceAdminActionKind.CLEAR_SECONDARY_TTS_CHANNEL:
+                selection_state.pending_secondary_tts_channel_id = None
+                if current_target is not None:
+                    updated_target = voice_tts.set_voice_target_config(
+                        guild_id,
+                        voice_channel=current_target.voice_channel,
+                        primary_tts_channel=current_target.primary_tts_channel,
+                        secondary_tts_channel=None,
+                    )
+                    _sync_voice_admin_channel_selection(selection_state, updated_target)
+                return await self._build_editor_response(
+                    actor_user_id=actor_user_id,
+                    locale=req.locale,
+                    guild_id=guild_id,
+                    voice_tts=voice_tts,
+                    state=self._state_with(
+                        state,
+                        section=VoiceAdminSection.CHANNELS,
+                        channels_view=VoiceAdminChannelsView.CONFIG,
+                        page=0,
+                    ),
+                    session_message_id=session_message_id,
+                    status="Secondary TTS channel cleared.",
+                )
+
+            selected_channel_id = hikari.Snowflake(req.values[0])
+
+            if action.kind is VoiceAdminActionKind.SELECT_GUILD_VOICE_CHANNEL:
+                selection_state.pending_voice_channel_id = int(selected_channel_id)
+                primary_tts_channel_id = (
+                    hikari.Snowflake(selection_state.pending_primary_tts_channel_id)
+                    if selection_state.pending_primary_tts_channel_id is not None
+                    else current_target.primary_tts_channel if current_target is not None else None
+                )
+                secondary_tts_channel_id = (
+                    hikari.Snowflake(selection_state.pending_secondary_tts_channel_id)
+                    if selection_state.pending_secondary_tts_channel_id is not None
+                    else current_target.secondary_tts_channel if current_target is not None else None
+                )
+                if primary_tts_channel_id is None:
+                    return await self._build_editor_response(
+                        actor_user_id=actor_user_id,
+                        locale=req.locale,
+                        guild_id=guild_id,
+                        voice_tts=voice_tts,
+                        state=self._state_with(
+                            state,
+                            section=VoiceAdminSection.CHANNELS,
+                            channels_view=VoiceAdminChannelsView.CONFIG,
+                            page=0,
+                        ),
+                        session_message_id=session_message_id,
+                        status="Voice channel selected. Choose a primary TTS channel to finish setup.",
+                    )
+
+                try:
+                    target = voice_tts.set_voice_target_config(
+                        guild_id,
+                        voice_channel=selected_channel_id,
+                        primary_tts_channel=primary_tts_channel_id,
+                        secondary_tts_channel=secondary_tts_channel_id,
+                    )
+                except ValueError as xcp:
+                    return EditorResponse.ephemeral(str(xcp))
+                _sync_voice_admin_channel_selection(selection_state, target)
+                return await self._build_editor_response(
+                    actor_user_id=actor_user_id,
+                    locale=req.locale,
+                    guild_id=guild_id,
+                    voice_tts=voice_tts,
+                    state=self._state_with(
+                        state,
+                        section=VoiceAdminSection.CHANNELS,
+                        channels_view=VoiceAdminChannelsView.CONFIG,
+                        page=0,
+                    ),
+                    session_message_id=session_message_id,
+                    status=_voice_target_saved_status(guild_id, target),
+                )
+
+            if action.kind is VoiceAdminActionKind.SELECT_GUILD_PRIMARY_TTS_CHANNEL:
+                selection_state.pending_primary_tts_channel_id = int(selected_channel_id)
+            else:
+                selection_state.pending_secondary_tts_channel_id = int(selected_channel_id)
             voice_channel_id = (
                 hikari.Snowflake(selection_state.pending_voice_channel_id)
                 if selection_state.pending_voice_channel_id is not None
                 else current_target.voice_channel if current_target is not None else None
+            )
+            primary_tts_channel_id = (
+                hikari.Snowflake(selection_state.pending_primary_tts_channel_id)
+                if selection_state.pending_primary_tts_channel_id is not None
+                else current_target.primary_tts_channel if current_target is not None else None
+            )
+            secondary_tts_channel_id = (
+                hikari.Snowflake(selection_state.pending_secondary_tts_channel_id)
+                if selection_state.pending_secondary_tts_channel_id is not None
+                else current_target.secondary_tts_channel if current_target is not None else None
+            )
+            role_label = (
+                "primary"
+                if action.kind is VoiceAdminActionKind.SELECT_GUILD_PRIMARY_TTS_CHANNEL
+                else "secondary"
             )
             if voice_channel_id is None:
                 return await self._build_editor_response(
@@ -2546,18 +2784,68 @@ class VoiceAdminEditorService:
                     locale=req.locale,
                     guild_id=guild_id,
                     voice_tts=voice_tts,
-                    state=self._state_with(state, section=VoiceAdminSection.CHANNELS, page=0),
+                    state=self._state_with(
+                        state,
+                        section=VoiceAdminSection.CHANNELS,
+                        channels_view=VoiceAdminChannelsView.CONFIG,
+                        page=0,
+                    ),
                     session_message_id=session_message_id,
-                    status="TTS channel selected. Choose a voice channel to finish setup.",
+                    status=f"{role_label.capitalize()} TTS channel selected. Choose a voice channel to finish setup.",
                 )
 
-            target = voice_tts.set_voice_target_config(
-                guild_id,
-                voice_channel=voice_channel_id,
-                tts_channel=selected_channel_id,
+            if primary_tts_channel_id is None:
+                return await self._build_editor_response(
+                    actor_user_id=actor_user_id,
+                    locale=req.locale,
+                    guild_id=guild_id,
+                    voice_tts=voice_tts,
+                    state=self._state_with(
+                        state,
+                        section=VoiceAdminSection.CHANNELS,
+                        channels_view=VoiceAdminChannelsView.CONFIG,
+                        page=0,
+                    ),
+                    session_message_id=session_message_id,
+                    status="Choose a primary TTS channel to finish setup.",
+                )
+
+            try:
+                target = voice_tts.set_voice_target_config(
+                    guild_id,
+                    voice_channel=voice_channel_id,
+                    primary_tts_channel=primary_tts_channel_id,
+                    secondary_tts_channel=secondary_tts_channel_id,
+                )
+            except ValueError as xcp:
+                return EditorResponse.ephemeral(str(xcp))
+            _sync_voice_admin_channel_selection(selection_state, target)
+            return await self._build_editor_response(
+                actor_user_id=actor_user_id,
+                locale=req.locale,
+                guild_id=guild_id,
+                voice_tts=voice_tts,
+                state=self._state_with(
+                    state,
+                    section=VoiceAdminSection.CHANNELS,
+                    channels_view=VoiceAdminChannelsView.CONFIG,
+                    page=0,
+                ),
+                session_message_id=session_message_id,
+                status=_voice_target_saved_status(guild_id, target),
             )
-            selection_state.pending_voice_channel_id = int(target.voice_channel)
-            selection_state.pending_tts_channel_id = int(target.tts_channel)
+
+        if action.kind is VoiceAdminActionKind.TOGGLE_RELAY_TTS:
+            if guild_id is None:
+                return EditorResponse.ephemeral("Open this editor in a server to manage channels.")
+            target = voice_tts.voice_target(guild_id)
+            if target is None:
+                return EditorResponse.ephemeral("Configure voice and TTS channels first.")
+            updated_target = voice_tts.set_voice_target_relay_tts_enabled(guild_id, not target.relay_tts_enabled)
+            if session_message_id is not None:
+                selection_state = self._selection_state_for_message(session_message_id)
+                _sync_voice_admin_channel_selection(selection_state, updated_target)
+            enabled = updated_target.relay_tts_enabled
             return await self._build_editor_response(
                 actor_user_id=actor_user_id,
                 locale=req.locale,
@@ -2566,8 +2854,10 @@ class VoiceAdminEditorService:
                 state=self._state_with(state, section=VoiceAdminSection.CHANNELS, page=0),
                 session_message_id=session_message_id,
                 status=(
-                    f"Saved channels for `{guild_id}`: "
-                    f"voice <#{int(target.voice_channel)}>, TTS <#{int(target.tts_channel)}>."
+                    "Relay TTS enabled. Linked users with Listen On will use their own voices when game relay "
+                    "messages land in either configured TTS channel."
+                    if enabled
+                    else "Relay TTS disabled for this guild."
                 ),
             )
 
@@ -2976,30 +3266,47 @@ class VoiceAdminEditorService:
                 status="Selected link rule.",
             )
 
-        if action.kind in {VoiceAdminActionKind.ADD_LINK_RULE, VoiceAdminActionKind.EDIT_LINK_RULE}:
-            title = "Add Link Rule"
-            values = None
+        if action.kind in {VoiceAdminActionKind.ADD_SIMPLE_LINK_RULE, VoiceAdminActionKind.ADD_COMPLEX_LINK_RULE}:
+            mode = (
+                VoiceLinkRuleMode.SIMPLE
+                if action.kind is VoiceAdminActionKind.ADD_SIMPLE_LINK_RULE
+                else VoiceLinkRuleMode.REGEX
+            )
             modal_action = self._action_codec.build(
                 action.kind,
                 page=state.page,
                 value=f"{_voice_admin_state_value(state)}{_VOICE_ADMIN_STATE_VALUE_SEPARATOR}{int(session_message_id)}",
             )
-            if action.kind is VoiceAdminActionKind.EDIT_LINK_RULE:
-                index = self._selection_state_for_message(session_message_id).link_rule_index
-                if index is None:
-                    return EditorResponse.ephemeral("Choose a link rule first.")
-                rules = voice_tts.voice_link_rules()
-                if index <= 0 or index > len(rules):
-                    return EditorResponse.ephemeral(f"index must be between 1 and {len(rules)}")
-                rule = rules[index - 1]
-                title = "Edit Link Rule"
-                values = {
-                    _VOICE_ADMIN_HOST_FIELD_ID: rule.host,
-                    _VOICE_ADMIN_PATH_REGEX_FIELD_ID: rule.path_regex,
-                    _VOICE_ADMIN_TEMPLATE_FIELD_ID: rule.template,
-                }
+            values = {
+                _VOICE_ADMIN_TEMPLATE_FIELD_ID: "link {host} {title_norm}",
+            }
             await req.interaction.create_modal_response(
-                title,
+                _voice_link_rule_modal_title(mode),
+                self._link_rule_modal.build_id(modal_action, scope_id=actor_user_id, user_id=actor_user_id),
+                components=self._link_rule_modal.rows(values),
+            )
+            return None
+
+        if action.kind is VoiceAdminActionKind.EDIT_LINK_RULE:
+            modal_action = self._action_codec.build(
+                action.kind,
+                page=state.page,
+                value=f"{_voice_admin_state_value(state)}{_VOICE_ADMIN_STATE_VALUE_SEPARATOR}{int(session_message_id)}",
+            )
+            index = self._selection_state_for_message(session_message_id).link_rule_index
+            if index is None:
+                return EditorResponse.ephemeral("Choose a link rule first.")
+            rules = voice_tts.voice_link_rules()
+            if index <= 0 or index > len(rules):
+                return EditorResponse.ephemeral(f"index must be between 1 and {len(rules)}")
+            rule = rules[index - 1]
+            values = {
+                _VOICE_ADMIN_LINK_RULE_URL_FIELD_ID: rule.example_url or "",
+                _VOICE_ADMIN_PATH_REGEX_FIELD_ID: rule.input_pattern,
+                _VOICE_ADMIN_TEMPLATE_FIELD_ID: rule.template,
+            }
+            await req.interaction.create_modal_response(
+                "Edit Link Rule",
                 self._link_rule_modal.build_id(modal_action, scope_id=actor_user_id, user_id=actor_user_id),
                 components=self._link_rule_modal.rows(values),
             )
@@ -3021,10 +3328,7 @@ class VoiceAdminEditorService:
                 voice_tts=voice_tts,
                 state=state,
                 session_message_id=session_message_id,
-                status=(
-                    f"Removed link rule `{rule_index}`: `{removed.host}` | "
-                    f"`{removed.path_regex}` | `{removed.template}`"
-                ),
+                status=f"Removed link rule `{rule_index}`: `{removed.host}` | `{_voice_link_rule_value(removed)}`",
             )
 
         return EditorResponse.ephemeral("Unsupported voice admin action.")
@@ -3426,29 +3730,48 @@ class VoiceAdminEditorService:
             return EditorResponse.ephemeral("Voice admin state is invalid.")
         session_message_id = self._selection_message_id_from_extra(extra)
 
-        host = req.values.get(_VOICE_ADMIN_HOST_FIELD_ID, "").strip()
+        example_url = req.values.get(_VOICE_ADMIN_LINK_RULE_URL_FIELD_ID, "").strip()
         path_regex = req.values.get(_VOICE_ADMIN_PATH_REGEX_FIELD_ID, "").strip()
         template = req.values.get(_VOICE_ADMIN_TEMPLATE_FIELD_ID, "").strip()
-        if not host:
-            return EditorResponse.ephemeral("Host must not be empty.")
-        if not path_regex:
-            return EditorResponse.ephemeral("Path regex must not be empty.")
+        if not example_url:
+            return EditorResponse.ephemeral("Example URL must not be empty.")
         if not template:
-            return EditorResponse.ephemeral("Template must not be empty.")
+            return EditorResponse.ephemeral("Speak As must not be empty.")
 
         try:
-            if action.kind is VoiceAdminActionKind.ADD_LINK_RULE:
-                rule_index, rule = voice_tts.add_voice_link_rule(host, path_regex, template)
+            if action.kind is VoiceAdminActionKind.ADD_SIMPLE_LINK_RULE:
+                rule_index, rule = voice_tts.add_voice_link_rule(
+                    "",
+                    path_regex,
+                    template,
+                    mode=VoiceLinkRuleMode.SIMPLE,
+                    example_url=example_url,
+                )
+                existed = False
+            elif action.kind is VoiceAdminActionKind.ADD_COMPLEX_LINK_RULE:
+                rule_index, rule = voice_tts.add_voice_link_rule(
+                    "",
+                    path_regex,
+                    template,
+                    mode=VoiceLinkRuleMode.REGEX,
+                    example_url=example_url,
+                )
                 existed = False
             elif action.kind is VoiceAdminActionKind.EDIT_LINK_RULE:
                 previous_index = self._selection_state_for_message(session_message_id).link_rule_index
                 if previous_index is None:
                     return EditorResponse.ephemeral("Link rule index is invalid.")
+                rules = voice_tts.voice_link_rules()
+                if previous_index <= 0 or previous_index > len(rules):
+                    return EditorResponse.ephemeral(f"index must be between 1 and {len(rules)}")
+                existing_rule = rules[previous_index - 1]
                 rule_index, rule = voice_tts.update_voice_link_rule(
                     previous_index,
-                    host=host,
+                    host="" if example_url else existing_rule.host,
                     path_regex=path_regex,
                     template=template,
+                    mode=existing_rule.mode,
+                    example_url=example_url,
                 )
                 existed = True
             else:
@@ -3459,6 +3782,10 @@ class VoiceAdminEditorService:
         rule_numbers = [str(index) for index in range(1, len(voice_tts.voice_link_rules()) + 1)]
         page = _page_for_value(rule_numbers, str(rule_index))
         self._selection_state_for_message(session_message_id).link_rule_index = rule_index
+        preview = voice_tts.preview_voice_link_rule(rule)
+        status = f"{'Updated' if existed else 'Added'} link rule `{rule_index}`: `{rule.host}` | `{_voice_link_rule_value(rule)}`"
+        if preview is not None:
+            status += f" | preview: `{preview}`"
         return await self._build_editor_response(
             actor_user_id=hikari.Snowflake(req.user_id),
             locale=self._editor.resolve_locale(req.interaction),
@@ -3471,10 +3798,7 @@ class VoiceAdminEditorService:
                 page=page,
             ),
             session_message_id=session_message_id,
-            status=(
-                f"{'Updated' if existed else 'Added'} link rule `{rule_index}`: "
-                f"`{rule.host}` | `{rule.path_regex}` | `{rule.template}`"
-            ),
+            status=status,
         )
 
     async def _build_editor_response(
@@ -3534,7 +3858,11 @@ class VoiceAdminEditorService:
         )
         editor_ctx = self._editor.context(scope_id=actor_user_id, user_id=actor_user_id, locale=locale)
         layout = EditorLayout(editor_ctx)
-        self._add_section_selector(layout=layout, state=state)
+        if not (
+            state.section is VoiceAdminSection.CHANNELS
+            and state.channels_view is VoiceAdminChannelsView.CONFIG
+        ):
+            self._add_section_selector(layout=layout, state=state)
 
         if state.section is VoiceAdminSection.OVERVIEW:
             embed.add_field(
@@ -3584,9 +3912,19 @@ class VoiceAdminEditorService:
                             else "voice: not configured"
                         ),
                         (
-                            f"tts: <#{int(current_target.tts_channel)}>"
+                            f"primary tts: <#{int(current_target.primary_tts_channel)}>"
                             if current_target is not None
-                            else "tts: not configured"
+                            else "primary tts: not configured"
+                        ),
+                        (
+                            f"secondary tts: <#{int(current_target.secondary_tts_channel)}>"
+                            if current_target is not None and current_target.secondary_tts_channel is not None
+                            else "secondary tts: not configured"
+                        ),
+                        (
+                            f"relay tts: {'enabled' if current_target.relay_tts_enabled else 'disabled'}"
+                            if current_target is not None
+                            else "relay tts: disabled"
                         ),
                     ]
                     if guild_id is not None
@@ -3615,31 +3953,109 @@ class VoiceAdminEditorService:
                 if selection_state is not None and selection_state.pending_voice_channel_id is not None
                 else current_target.voice_channel if current_target is not None else None
             )
-            pending_tts_channel_id = (
-                hikari.Snowflake(selection_state.pending_tts_channel_id)
-                if selection_state is not None and selection_state.pending_tts_channel_id is not None
-                else current_target.tts_channel if current_target is not None else None
+            pending_primary_tts_channel_id = (
+                hikari.Snowflake(selection_state.pending_primary_tts_channel_id)
+                if selection_state is not None and selection_state.pending_primary_tts_channel_id is not None
+                else current_target.primary_tts_channel if current_target is not None else None
+            )
+            pending_secondary_tts_channel_id = (
+                hikari.Snowflake(selection_state.pending_secondary_tts_channel_id)
+                if selection_state is not None and selection_state.pending_secondary_tts_channel_id is not None
+                else current_target.secondary_tts_channel if current_target is not None else None
+            )
+            primary_tts_listen_enabled = current_target.primary_tts_listen_enabled if current_target is not None else False
+            secondary_tts_listen_enabled = (
+                current_target.secondary_tts_listen_enabled if current_target is not None else False
             )
             embed.add_field(
                 name="Current Guild Channels",
                 value=_display_value(
                     [
                         f"guild: `{guild_id}`" if guild_id is not None else "guild: not opened from a server",
+                        f"voice channel: {_channel_reference(pending_voice_channel_id, missing='not selected')}",
                         (
-                            f"voice channel: <#{int(pending_voice_channel_id)}>"
-                            if pending_voice_channel_id is not None
-                            else "voice channel: not selected"
+                            "primary tts channel: "
+                            f"{_channel_reference(pending_primary_tts_channel_id, missing='not selected')} "
+                            f"({'listening' if primary_tts_listen_enabled else 'muted'})"
                         ),
-                        (
-                            f"tts channel: <#{int(pending_tts_channel_id)}>"
-                            if pending_tts_channel_id is not None
-                            else "tts channel: not selected"
-                        ),
-                        (
-                            "Pick either channel to update immediately when the other channel is already known."
+                        "secondary tts channel: "
+                        f"{_channel_reference(pending_secondary_tts_channel_id, missing='not selected')} "
+                        f"({'listening' if secondary_tts_listen_enabled else 'muted'})",
+                        f"relay tts: {'enabled' if current_target and current_target.relay_tts_enabled else 'disabled'}",
+                    ]
+                ),
+                inline=False,
+            )
+            if state.channels_view is VoiceAdminChannelsView.SUMMARY:
+                embed.add_field(
+                    name="Channels",
+                    value=_display_value(
+                        [
+                            "Open channel config to choose or clear the voice, primary TTS, and secondary TTS channels."
                             if guild_id is not None
-                            else "Open this editor in a server to select voice and TTS channels."
+                            else "Open this editor in a server to manage channels.",
+                            "Relay TTS only applies when a game relay posts into a configured TTS channel and the linked Discord user has Listen On."
+                            if guild_id is not None
+                            else "Relay TTS is unavailable outside a server context.",
+                        ]
+                    ),
+                    inline=False,
+                )
+                if guild_id is not None:
+                    layout.add_buttons(
+                        EditorButton(
+                            self._build_state_action(VoiceAdminActionKind.SHOW_CHANNEL_CONFIG, state),
+                            "Channel Config",
+                            style=hikari.ButtonStyle.PRIMARY,
                         ),
+                        EditorButton(
+                            self._build_state_action(VoiceAdminActionKind.TOGGLE_PRIMARY_TTS_LISTENING, state),
+                            "Primary On" if primary_tts_listen_enabled else "Primary Off",
+                            style=(
+                                hikari.ButtonStyle.SUCCESS if primary_tts_listen_enabled else hikari.ButtonStyle.SECONDARY
+                            ),
+                            is_disabled=current_target is None,
+                        ),
+                        EditorButton(
+                            self._build_state_action(VoiceAdminActionKind.TOGGLE_SECONDARY_TTS_LISTENING, state),
+                            "Secondary On" if secondary_tts_listen_enabled else "Secondary Off",
+                            style=(
+                                hikari.ButtonStyle.SUCCESS if secondary_tts_listen_enabled else hikari.ButtonStyle.SECONDARY
+                            ),
+                            is_disabled=current_target is None or current_target.secondary_tts_channel is None,
+                        ),
+                        EditorButton(
+                            self._build_state_action(VoiceAdminActionKind.TOGGLE_RELAY_TTS, state),
+                            "Relay TTS On" if current_target and current_target.relay_tts_enabled else "Relay TTS Off",
+                            style=(
+                                hikari.ButtonStyle.SUCCESS
+                                if current_target and current_target.relay_tts_enabled
+                                else hikari.ButtonStyle.DANGER
+                            ),
+                            is_disabled=current_target is None,
+                        ),
+                    )
+                layout.page_footer(
+                    self._action_codec.build(VoiceAdminActionKind.CLOSE, page=0),
+                    page_state=EditorPageState(page=0, total_pages=1, is_subpage=True),
+                    back_action=self._build_state_action(
+                        VoiceAdminActionKind.SHOW_OVERVIEW,
+                        self._state_with(state, section=VoiceAdminSection.OVERVIEW, page=0),
+                    ),
+                    extra_buttons=(EditorButton(self._build_state_action(VoiceAdminActionKind.REFRESH, state), "Refresh"),),
+                )
+                return embed, layout.build()
+
+            embed.add_field(
+                name="Channel Config",
+                value=_display_value(
+                    [
+                        "Choose channels below. Clearing voice or primary TTS removes the saved voice config for this guild."
+                        if guild_id is not None
+                        else "Open this editor in a server to configure channels.",
+                        "Secondary TTS is optional and can be cleared independently."
+                        if guild_id is not None
+                        else "Secondary TTS is optional when configured from a server.",
                     ]
                 ),
                 inline=False,
@@ -3651,13 +4067,52 @@ class VoiceAdminEditorService:
                     placeholder="Choose the current guild voice channel",
                 )
                 layout.add_channel_select(
-                    self._build_state_action(VoiceAdminActionKind.SELECT_GUILD_TTS_CHANNEL, state),
+                    self._build_state_action(
+                        VoiceAdminActionKind.SELECT_GUILD_PRIMARY_TTS_CHANNEL,
+                        self._state_with(state, channels_view=VoiceAdminChannelsView.CONFIG),
+                    ),
                     channel_types=_VOICE_ADMIN_TTS_CHANNEL_TYPES,
-                    placeholder="Choose the current guild TTS channel",
+                    placeholder="Choose the primary guild TTS channel",
+                )
+                layout.add_channel_select(
+                    self._build_state_action(
+                        VoiceAdminActionKind.SELECT_GUILD_SECONDARY_TTS_CHANNEL,
+                        self._state_with(
+                            state,
+                            channels_view=VoiceAdminChannelsView.CONFIG,
+                            page=0,
+                        ),
+                    ),
+                    channel_types=_VOICE_ADMIN_TTS_CHANNEL_TYPES,
+                    placeholder="Choose the secondary guild TTS channel",
+                )
+                layout.next_row().add_buttons(
+                    EditorButton(
+                        self._build_state_action(VoiceAdminActionKind.CLEAR_GUILD_VOICE_CHANNEL, state),
+                        "Clear Voice",
+                        style=hikari.ButtonStyle.DANGER,
+                        is_disabled=pending_voice_channel_id is None and current_target is None,
+                    ),
+                    EditorButton(
+                        self._build_state_action(VoiceAdminActionKind.CLEAR_PRIMARY_TTS_CHANNEL, state),
+                        "Clear Primary",
+                        style=hikari.ButtonStyle.DANGER,
+                        is_disabled=pending_primary_tts_channel_id is None and current_target is None,
+                    ),
+                    EditorButton(
+                        self._build_state_action(VoiceAdminActionKind.CLEAR_SECONDARY_TTS_CHANNEL, state),
+                        "Clear Secondary",
+                        style=hikari.ButtonStyle.SECONDARY,
+                        is_disabled=pending_secondary_tts_channel_id is None,
+                    ),
                 )
             layout.page_footer(
                 self._action_codec.build(VoiceAdminActionKind.CLOSE, page=0),
                 page_state=EditorPageState(page=0, total_pages=1, is_subpage=True),
+                back_action=self._build_state_action(
+                    VoiceAdminActionKind.SHOW_CHANNELS,
+                    self._state_with(state, channels_view=VoiceAdminChannelsView.SUMMARY, page=0),
+                ),
                 extra_buttons=(EditorButton(self._build_state_action(VoiceAdminActionKind.REFRESH, state), "Refresh"),),
             )
             return embed, layout.build()
@@ -3929,28 +4384,13 @@ class VoiceAdminEditorService:
             )
             return embed, layout.build()
 
-        self._render_selected_mapping_section(
+        self._render_link_rules_section(
             embed=embed,
             layout=layout,
             state=state,
-            items={str(index): rule for index, rule in enumerate(link_rules, start=1)},
-            section_title="Link Rules",
-            summary_lines=(
-                f"view: {state.links_view.label}",
-                "template fields: use raw captures like `{title}` or normalized speech text like `{title_norm}` (`_words` also works)",
-            ),
-            selected_key=(
-                str(selection_state.link_rule_index)
-                if selection_state is not None and selection_state.link_rule_index is not None
-                else None
-            ),
-            select_action=VoiceAdminActionKind.SELECT_LINK_RULE,
-            add_action=VoiceAdminActionKind.ADD_LINK_RULE,
-            edit_action=VoiceAdminActionKind.EDIT_LINK_RULE,
-            remove_action=VoiceAdminActionKind.REMOVE_LINK_RULE,
-            add_label="Add Rule",
-            item_description=lambda rule: f"{rule.path_regex} | {rule.template}",
-            item_label=lambda source, rule: f"{source}. {rule.host}",
+            link_rules=link_rules,
+            selected_index=selection_state.link_rule_index if selection_state is not None else None,
+            voice_tts=voice_tts,
         )
         return embed, layout.build()
 
@@ -4108,6 +4548,136 @@ class VoiceAdminEditorService:
                     is_disabled=selected_value is None,
                 ),
             ),
+        )
+
+    def _render_link_rules_section(
+        self,
+        *,
+        embed: hikari.Embed,
+        layout: EditorLayout,
+        state: VoiceAdminState,
+        link_rules: Sequence[VoiceLinkRule],
+        selected_index: int | None,
+        voice_tts: VoiceTTSService,
+    ) -> None:
+        rule_map = {str(index): rule for index, rule in enumerate(link_rules, start=1)}
+        paged = _paginate(list(rule_map.items()), state.page)
+        selected_key = str(selected_index) if selected_index is not None else None
+        selected_rule = rule_map.get(selected_key) if selected_key is not None else None
+
+        embed.add_field(
+            name="Link Rules",
+            value=_display_value(
+                (
+                    f"view: {state.links_view.label}",
+                    f"entries: {len(link_rules)}",
+                    f"simple rules: {sum(1 for rule in link_rules if rule.mode is VoiceLinkRuleMode.SIMPLE)}",
+                    f"regex rules: {sum(1 for rule in link_rules if rule.mode is VoiceLinkRuleMode.REGEX)}",
+                    "Add Simple or Add Complex starts from a full example URL.",
+                    "template fields: `{title}` is raw and `{title_norm}` is speech-normalized (`_words` also works)",
+                )
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Selected Rule",
+            value=_display_value(self._link_rule_detail_lines(selected_key, selected_rule, voice_tts=voice_tts)),
+            inline=False,
+        )
+
+        if paged.visible:
+            embed.add_field(
+                name=f"Current Page ({paged.total_count})",
+                value=_display_value(
+                    [
+                        f"{source}. {rule.host} ({rule.mode.value}): {_component_text(_voice_link_rule_value(rule), limit=120)}"
+                        for source, rule in paged.visible
+                    ]
+                ),
+                inline=False,
+            )
+            layout.add_text_select(
+                self._action_codec.build(
+                    VoiceAdminActionKind.SELECT_LINK_RULE,
+                    page=paged.page_state.page,
+                    value=_voice_admin_state_value(state),
+                ),
+                options=[
+                    EditorSelectOption(
+                        label=_component_text(f"{source}. {rule.host} ({rule.mode.value})"),
+                        value=source,
+                        description=_component_text(_voice_link_rule_value(rule)),
+                        is_default=source == selected_key,
+                    )
+                    for source, rule in paged.visible
+                ],
+                placeholder="Choose link rules",
+            )
+
+        self._add_page_footer(
+            layout=layout,
+            state=state,
+            page_state=paged.page_state,
+            extra_buttons=(
+                EditorButton(
+                    self._action_codec.build(
+                        VoiceAdminActionKind.ADD_SIMPLE_LINK_RULE,
+                        page=paged.page_state.page,
+                        value=_voice_admin_state_value(state),
+                    ),
+                    "Add Simple",
+                    style=hikari.ButtonStyle.PRIMARY,
+                ),
+                EditorButton(
+                    self._action_codec.build(
+                        VoiceAdminActionKind.ADD_COMPLEX_LINK_RULE,
+                        page=paged.page_state.page,
+                        value=_voice_admin_state_value(state),
+                    ),
+                    "Add Complex",
+                    style=hikari.ButtonStyle.PRIMARY,
+                ),
+                EditorButton(
+                    self._action_codec.build(
+                        VoiceAdminActionKind.EDIT_LINK_RULE,
+                        page=paged.page_state.page,
+                        value=_voice_admin_state_value(state),
+                    ),
+                    "Edit",
+                    style=hikari.ButtonStyle.PRIMARY,
+                    is_disabled=selected_rule is None,
+                ),
+                EditorButton(
+                    self._action_codec.build(
+                        VoiceAdminActionKind.REMOVE_LINK_RULE,
+                        page=paged.page_state.page,
+                        value=_voice_admin_state_value(state),
+                    ),
+                    "Remove",
+                    style=hikari.ButtonStyle.DANGER,
+                    is_disabled=selected_rule is None,
+                ),
+            ),
+        )
+
+    def _link_rule_detail_lines(
+        self,
+        selected_key: str | None,
+        selected_rule: VoiceLinkRule | None,
+        *,
+        voice_tts: VoiceTTSService,
+    ) -> Sequence[str]:
+        if selected_key is None or selected_rule is None:
+            return ("selected: none",)
+        preview = voice_tts.preview_voice_link_rule(selected_rule) or "unavailable"
+        pattern_label = "shape" if selected_rule.mode is VoiceLinkRuleMode.SIMPLE else "regex"
+        return (
+            f"selected: {selected_key}. {selected_rule.host} ({selected_rule.mode.value})",
+            f"url: {selected_rule.example_url or 'none'}",
+            f"{pattern_label}: {selected_rule.input_pattern}",
+            f"compiled regex: {selected_rule.path_regex}",
+            f"say: {selected_rule.template}",
+            f"resolved output: {preview}",
         )
 
     def _render_global_pronunciations_section(
@@ -4283,15 +4853,29 @@ class VoiceAdminEditorService:
                 VoiceAdminActionKind.PAGE,
                 self._state_with(state, page=min(page_state.total_pages - 1, page_state.page + 1)),
             )
+        refresh_button = EditorButton(self._build_state_action(VoiceAdminActionKind.REFRESH, state), "Refresh")
+        footer_button_count = 1
+        if page_state.is_subpage:
+            footer_button_count += 1
+        if prev_action is not None:
+            footer_button_count += 1
+        if next_action is not None:
+            footer_button_count += 1
+
+        footer_capacity = max(0, 5 - footer_button_count)
+        footer_extra_buttons: tuple[EditorButton, ...]
+        if len(extra_buttons) + 1 <= footer_capacity:
+            footer_extra_buttons = (*extra_buttons, refresh_button)
+        else:
+            if extra_buttons:
+                layout.add_buttons(*extra_buttons)
+            footer_extra_buttons = (refresh_button,) if footer_capacity > 0 else ()
         layout.page_footer(
             self._action_codec.build(VoiceAdminActionKind.CLOSE, page=page_state.page),
             page_state=page_state,
             prev_action=prev_action,
             next_action=next_action,
-            extra_buttons=(
-                *extra_buttons,
-                EditorButton(self._build_state_action(VoiceAdminActionKind.REFRESH, state), "Refresh"),
-            ),
+            extra_buttons=footer_extra_buttons,
         )
 
     def _build_state_action(self, kind: VoiceAdminActionKind, state: VoiceAdminState) -> str:
@@ -4326,6 +4910,7 @@ class VoiceAdminEditorService:
         substitution_category: VoiceAdminSubstitutionCategory | None = None,
         links_view: VoiceAdminLinksView | None = None,
         pronunciation_view: VoiceAdminPronunciationView | None = None,
+        channels_view: VoiceAdminChannelsView | None = None,
     ) -> VoiceAdminState:
         return VoiceAdminState(
             section=state.section if section is None else section,
@@ -4335,6 +4920,7 @@ class VoiceAdminEditorService:
             ),
             links_view=state.links_view if links_view is None else links_view,
             pronunciation_view=state.pronunciation_view if pronunciation_view is None else pronunciation_view,
+            channels_view=state.channels_view if channels_view is None else channels_view,
         )
 
     @staticmethod

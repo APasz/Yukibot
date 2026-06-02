@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 
+from pydantic import ValidationError
+
 from apps._app import App
+from apps._config import AppVersion
+from apps._settings import Setting
 from apps.satisfactory import (
     Satisfactory_Config,
     SatisfactoryNetworkQuality,
@@ -15,8 +20,8 @@ from apps.satisfactory import (
     SatisfactorySettings,
     SatisfactorySettingsSnapshot,
     _parse_api_endpoint,
+    detect_satisfactory_version,
 )
-from apps._settings import Setting
 
 
 class _FakeBridge:
@@ -83,6 +88,21 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._temp_dir = TemporaryDirectory()
         self.temp_path = Path(self._temp_dir.name)
+        self.apps_path = self.temp_path / "apps"
+        self.apps_path.mkdir()
+        self.instances_path = self.apps_path / "instances.json"
+        self.instances_path.write_text(
+            json.dumps(
+                {
+                    "alpha": {
+                        "friendly_name": "Satisfactory",
+                        "directory": "{APPS}/server",
+                        "admin_password": "secret",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
         self.cache_path = self.temp_path / "settings.json"
         self.cache_path.write_text(
             """{
@@ -97,7 +117,26 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.bridge = _FakeBridge()
         self._running = False
-        self.settings = SatisfactorySettings(self.cache_path, self.bridge, lambda: self._running)
+        self.cfg = Satisfactory_Config.model_validate(
+            {
+                "name": "satisfactory_alpha",
+                "instance_key": "alpha",
+                "friendly_name": "Satisfactory",
+                "directory": self.temp_path / "server",
+                "apps_dir": self.apps_path,
+                "scope": "satisfactory",
+                "api_host": "127.0.0.1",
+                "join_port": 7777,
+                "admin_password": "secret",
+            }
+        )
+        self.settings = SatisfactorySettings(
+            self.cache_path,
+            self.bridge,
+            lambda: self._running,
+            self.cfg,
+            self.instances_path,
+        )
 
     def tearDown(self) -> None:
         self._temp_dir.cleanup()
@@ -114,6 +153,7 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self._setting("FG.DSAutoSaveOnDisconnect").value, False)
         self.assertEqual(self._setting("FG.AutosaveInterval").value, 600)
         self.assertEqual(self._setting("FG.NetworkQuality").value, 3)
+        self.assertEqual(self._setting("admin_password").value, "secret")
 
     def test_config_uses_instance_fields_for_connection_settings(self) -> None:
         cfg = Satisfactory_Config.model_validate(
@@ -148,23 +188,73 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
                 "apps_dir": self.temp_path / "apps",
                 "scope": "satisfactory",
                 "address": "127.0.0.1",
+                "admin_password": "secret",
             }
         )
 
         self.assertEqual(cfg.effective_api_host, "127.0.0.1")
         self.assertEqual(cfg.effective_api_port, 7777)
 
+    def test_admin_password_is_required(self) -> None:
+        with self.assertRaises(ValidationError):
+            Satisfactory_Config.model_validate(
+                {
+                    "name": "satisfactory_alpha",
+                    "instance_key": "alpha",
+                    "friendly_name": "Satisfactory",
+                    "directory": self.temp_path / "server",
+                    "apps_dir": self.temp_path / "apps",
+                    "scope": "satisfactory",
+                }
+            )
+
+        with self.assertRaises(ValidationError):
+            Satisfactory_Config.model_validate(
+                {
+                    "name": "satisfactory_alpha",
+                    "instance_key": "alpha",
+                    "friendly_name": "Satisfactory",
+                    "directory": self.temp_path / "server",
+                    "apps_dir": self.temp_path / "apps",
+                    "scope": "satisfactory",
+                    "admin_password": "   ",
+                }
+            )
+
     def test_parse_api_endpoint_handles_default_port_and_ipv6(self) -> None:
         self.assertEqual(_parse_api_endpoint("127.0.0.1"), ("127.0.0.1", 7777))
         self.assertEqual(_parse_api_endpoint("[::1]:7778"), ("::1", 7778))
 
+    def test_detect_satisfactory_version_from_log(self) -> None:
+        logs_dir = self.temp_path / "server" / "FactoryGame" / "Saved" / "Logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "FactoryGame.log").write_text(
+            "LogInit: Build: ++FactoryGame+rel-main-1.1.0-CL-463028\n",
+            encoding="utf-8",
+        )
+        sml_dir = self.temp_path / "server" / "FactoryGame" / "Mods" / "SML"
+        sml_dir.mkdir(parents=True)
+        (sml_dir / "SML.uplugin").write_text(
+            json.dumps({"VersionName": "3.0.0"}),
+            encoding="utf-8",
+        )
+
+        version = detect_satisfactory_version(directory=self.temp_path / "server", server_log=None)
+
+        self.assertEqual(version, AppVersion(main="1.1.0", framework="3.0.0", loader="sml"))
+
     async def test_save_persists_cache_without_bridge_when_stopped(self) -> None:
         self._setting("FG.AutosaveInterval").update("900")
+        self._setting("admin_password").update("new-secret")
 
         payload = self.settings.save()
 
         self.assertEqual(payload["autosave_interval_seconds"], 900)
+        self.assertNotIn("admin_password", payload)
         self.assertEqual(self.bridge.applied, [])
+        self.assertEqual(self.cfg.admin_password, "new-secret")
+        instances_payload = json.loads(self.instances_path.read_text(encoding="utf-8"))
+        self.assertEqual(instances_payload["alpha"]["admin_password"], "new-secret")
         self.assertIn('"autosave_interval_seconds": 900', self.cache_path.read_text(encoding="utf-8"))
 
     async def test_refresh_and_apply_round_trip_through_bridge(self) -> None:
@@ -172,6 +262,7 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._setting("auto_load_session_name").value, "SERVER-SESSION")
         self.assertIs(self._setting("FG.DSAutoPause").value, False)
         self.assertEqual(self._setting("FG.NetworkQuality").value, 1)
+        self.assertEqual(self._setting("admin_password").value, "secret")
 
         self._running = True
         self._setting("auto_load_session_name").update("BETA")

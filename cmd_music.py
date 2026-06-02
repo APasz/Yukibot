@@ -169,7 +169,7 @@ class ConfiguredYouTubeAudioSource(YouTubeAudioSource):
 
     @staticmethod
     def _extract_info_dict(ydl: YT, url: str) -> dict[str, Any]:
-        return cast(dict[str, Any], ydl.extract_info(url, False))
+        return cast(dict[str, Any], cast(object, ydl.extract_info(url, False)))
 
     @staticmethod
     def _info_duration(info: Mapping[str, Any]) -> float | None:

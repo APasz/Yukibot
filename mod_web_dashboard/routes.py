@@ -1,0 +1,365 @@
+# pyright: reportUnusedFunction=false
+
+from __future__ import annotations
+
+from .runtime_imports import (
+    Access_Control,
+    Awaitable,
+    Callable,
+    ModWebAuthError,
+    NodeApiScope,
+    Power_Level,
+    RedirectResponse,
+    Request,
+    StarletteResponse,
+    asyncio,
+    quote,
+)
+from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
+from .nicegui_protocols import ModWebFastApiApp, ModWebRouteUi
+from .utils import _http_exception
+
+from .service_base import ModWebServiceSupport
+
+class ModWebRoutesMixin(ModWebServiceSupport):
+    def _register_routes(self, *, nicegui_app: ModWebFastApiApp, ui: ModWebRouteUi) -> None:
+        @nicegui_app.middleware("http")
+        async def _log_mod_web_request(
+            request: Request,
+            call_next: Callable[[Request], Awaitable[StarletteResponse]],
+        ) -> StarletteResponse | RedirectResponse:
+            redirect = self._remote_portal_redirect(request)
+            if redirect is not None:
+                traffic_log.info(
+                    "Remote mod web redirect: method=%s path=%s target=%s",
+                    request.method,
+                    request.url.path,
+                    redirect.headers.get("location", ""),
+                )
+                return redirect
+
+            response = await call_next(request)
+            path = request.url.path
+            if path == "/" or path.startswith("/mod-web") or path.startswith("/api/node"):
+                traffic_log.info(
+                    "Mod web request: method=%s path=%s status=%s",
+                    request.method,
+                    path,
+                    response.status_code,
+                )
+            return response
+
+        previous_404_handler = nicegui_app.exception_handlers.get(404)
+        previous_exception_handler = nicegui_app.exception_handlers.get(Exception)
+
+        @nicegui_app.exception_handler(404)
+        async def _framework_http_404(request: Request, exception: Exception) -> object:
+            if self._should_render_framework_error_page(
+                method=request.method,
+                path=request.url.path,
+                accept_header=request.headers.get("accept"),
+            ):
+                return await self._build_framework_error_response(
+                    ui=ui,
+                    request=request,
+                    status_code=404,
+                    exception=exception,
+                )
+            if previous_404_handler is None:
+                raise exception
+            return await self._resolve_exception_handler_result(previous_404_handler(request, exception))
+
+        @nicegui_app.exception_handler(Exception)
+        async def _framework_http_exception(request: Request, exception: Exception) -> object:
+            if request.scope.get("nicegui_page_path") and self._should_render_framework_error_page(
+                method=request.method,
+                path=request.url.path,
+                accept_header=request.headers.get("accept"),
+            ):
+                return await self._build_framework_error_response(
+                    ui=ui,
+                    request=request,
+                    status_code=500,
+                    exception=exception,
+                )
+            if previous_exception_handler is None:
+                raise exception
+            return await self._resolve_exception_handler_result(previous_exception_handler(request, exception))
+
+        def _handle_page_exception(xcp: Exception) -> object:
+            return self._render_framework_page_exception(ui=ui, exception=xcp)
+
+        nicegui_app.on_page_exception(_handle_page_exception)
+        nicegui_app.on_startup(self._on_startup)
+        self._backend.register_node_api_routes(nicegui_app)
+
+        @nicegui_app.get("/auth/login")
+        def _login(request: Request, next_path: str | None = None) -> RedirectResponse:
+            del request
+            return self._auth.login_redirect(next_path=next_path or self.index_path())
+
+        @nicegui_app.get("/auth/dev-login")
+        def _dev_login(level: str, next_path: str | None = None) -> RedirectResponse:
+            if not self._auth.bypass_enabled:
+                raise _http_exception(404, "Dev login is not available.")
+            dev_level = Access_Control.parse_level(level)
+            if dev_level is None:
+                raise _http_exception(400, f"Unknown dev login level: {level}")
+            return self._auth.dev_login_response(level=dev_level, next_path=next_path or self.index_path())
+
+        @nicegui_app.get("/auth/discord/callback")
+        async def _discord_callback(
+            request: Request, code: str | None = None, state: str | None = None
+        ) -> RedirectResponse:
+            try:
+                return await self._auth.callback_response(request=request, code=code, state=state)
+            except ModWebAuthError as xcp:
+                log.warning("Mod web Discord OAuth callback rejected: %s", xcp)
+                raise _http_exception(400, str(xcp)) from xcp
+
+        @nicegui_app.get("/auth/logout")
+        def _logout(request: Request) -> RedirectResponse:
+            self._auth.logout_request(request)
+            return self._auth.logout_response()
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps")
+        async def _proxy_apps(node_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            apps = await asyncio.to_thread(self._remote_apps, node, user)
+            return {"node": node.node_name, "apps": [entry.to_mapping() for entry in apps]}
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods")
+        async def _proxy_mods(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            mods = await asyncio.to_thread(self._remote_mod_list, node, app_name, user)
+            return mods.to_mapping()
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods/download")
+        def _proxy_mods_download(
+            node_name: str,
+            app_name: str,
+            request: Request,
+            enabled_only: bool = False,
+            selected_only: bool = False,
+        ) -> RedirectResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            mod_names = tuple(request.query_params.getlist("mod_name"))
+            query = self._download_query(enabled_only=enabled_only, selected_only=selected_only, mod_names=mod_names)
+            return self._remote_download_redirect(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/mods/download",
+                query=query,
+                user=user,
+            )
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/configs")
+        async def _proxy_configs(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            app_entry = await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+            self._require_user_level(user=user, required_level=app_entry.config_read_level)
+            configs = await asyncio.to_thread(self._remote_config_list, node, app_name, user)
+            return configs.to_mapping()
+
+        @nicegui_app.get(
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/configs/roots/{{root_id}}/download"
+        )
+        def _proxy_config_root_download(
+            node_name: str,
+            app_name: str,
+            root_id: str,
+            request: Request,
+        ) -> RedirectResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            return self._remote_download_redirect(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/configs/roots/{quote(root_id, safe='')}/download",
+                query={},
+                user=user,
+                scopes=(NodeApiScope.CONFIGS_READ,),
+            )
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/saves")
+        async def _proxy_saves(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            saves = await asyncio.to_thread(self._remote_save_list, node, app_name, user)
+            return saves.to_mapping()
+
+        @nicegui_app.get(
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/saves/{{save_id:path}}/download"
+        )
+        def _proxy_save_download(
+            node_name: str,
+            app_name: str,
+            save_id: str,
+            request: Request,
+        ) -> RedirectResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            return self._remote_download_redirect(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}/download",
+                query={},
+                user=user,
+                scopes=(NodeApiScope.SAVES_DOWNLOAD,),
+            )
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/configs/{{config_id:path}}")
+        async def _proxy_config_read(
+            node_name: str, app_name: str, config_id: str, request: Request
+        ) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            app_entry = await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+            self._require_user_level(user=user, required_level=app_entry.config_read_level)
+            content = await asyncio.to_thread(self._remote_config_content, node, app_name, config_id, user)
+            return content.to_mapping()
+
+        @nicegui_app.put(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/configs/{{config_id:path}}")
+        async def _proxy_config_write(
+            node_name: str,
+            app_name: str,
+            config_id: str,
+            payload: dict[str, object],
+            request: Request,
+        ) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            app_entry = await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+            self._require_user_level(user=user, required_level=app_entry.config_write_level)
+            content = payload.get("content")
+            if not isinstance(content, str):
+                raise _http_exception(400, "Config content is invalid.")
+            updated = await asyncio.to_thread(self._remote_config_write, node, app_name, config_id, content, user)
+            return updated.to_mapping()
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/settings")
+        async def _proxy_settings(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            settings = await asyncio.to_thread(self._remote_setting_list, node, app_name, user)
+            return settings.to_mapping()
+
+        @nicegui_app.put(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/settings/{{setting_key}}")
+        async def _proxy_setting_write(
+            node_name: str,
+            app_name: str,
+            setting_key: str,
+            payload: dict[str, object],
+            request: Request,
+        ) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            value = payload.get("value")
+            if not isinstance(value, str):
+                raise _http_exception(400, "Setting value is invalid.")
+            updated = await asyncio.to_thread(self._remote_setting_write, node, app_name, setting_key, value, user)
+            return updated.to_mapping()
+
+        @nicegui_app.post(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/settings/save")
+        async def _proxy_settings_save(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            result = await asyncio.to_thread(self._remote_settings_save, node, app_name, user)
+            return result.to_mapping()
+
+        @nicegui_app.post(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/settings/reload")
+        async def _proxy_settings_reload(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            result = await asyncio.to_thread(self._remote_settings_reload, node, app_name, user)
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods/{{mod_name}}/download")
+        def _proxy_mod_download(node_name: str, app_name: str, mod_name: str, request: Request) -> RedirectResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            return self._remote_download_redirect(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/mods/{quote(mod_name, safe='')}/download",
+                query={},
+                user=user,
+            )
+
+        @ui.page("/")
+        async def _home_page(request: Request) -> None:
+            traffic_log.info("Rendering mod web home page")
+            user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
+            if user is not None:
+                await self._render_home_page(
+                    ui=ui,
+                    user=user,
+                    request=request,
+                    show_api_actions=self._app_list_api_actions_enabled(request),
+                )
+
+        @ui.page("/mod-web")
+        async def _mod_web_home_page(request: Request) -> None:
+            traffic_log.info("Rendering mod web home page: path=/mod-web")
+            user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
+            if user is not None:
+                await self._render_home_page(
+                    ui=ui,
+                    user=user,
+                    request=request,
+                    show_api_actions=self._app_list_api_actions_enabled(request),
+                )
+
+        @ui.page("/apps/{app_name}")
+        async def _app_alias_page(app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering app alias page: app=%s", app_name)
+            await self._render_mods_page(ui=ui, app_name=app_name, request=request)
+
+        @ui.page("/app/{app_name}")
+        async def _single_app_alias_page(app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering app alias page: app=%s", app_name)
+            await self._render_mods_page(ui=ui, app_name=app_name, request=request)
+
+        @ui.page("/mods/{app_name}")
+        async def _mods_alias_page(app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering mods alias page: app=%s", app_name)
+            await self._render_mods_page(ui=ui, app_name=app_name, request=request)
+
+        @ui.page("/mod-web/apps/{app_name}")
+        async def _mod_web_apps_alias_page(app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering mod web apps alias page: app=%s", app_name)
+            await self._render_mods_page(ui=ui, app_name=app_name, request=request)
+
+        @ui.page("/chat/{app_name}")
+        async def _chat_alias_page(app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering chat alias page: app=%s", app_name)
+            await self._render_chat_page(ui=ui, app_name=app_name, request=request)
+
+        @ui.page("/mod-web/chat/{app_name}")
+        async def _mod_web_chat_page(app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering mod web chat page: app=%s", app_name)
+            await self._render_chat_page(ui=ui, app_name=app_name, request=request)
+
+        @ui.page(_MOD_WEB_PAGE_PATH)
+        async def _mods_page(app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering mod web mods page: app=%s", app_name)
+            await self._render_mods_page(ui=ui, app_name=app_name, request=request)
+
+        @ui.page("/mod-web/nodes/{node_name}")
+        async def _node_page(node_name: str, request: Request) -> None:
+            traffic_log.info("Rendering mod web node page: node=%s", node_name)
+            await self._render_node_page(ui=ui, node_name=node_name, request=request)
+
+        @ui.page("/mod-web/nodes/{node_name}/mods/{app_name}")
+        async def _node_mods_page(node_name: str, app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering mod web node mods page: node=%s app=%s", node_name, app_name)
+            await self._render_node_mods_page(ui=ui, node_name=node_name, app_name=app_name, request=request)
+
+        @ui.page("/mod-web/nodes/{node_name}/chat/{app_name}")
+        async def _node_chat_page(node_name: str, app_name: str, request: Request) -> None:
+            traffic_log.info("Rendering mod web node chat page: node=%s app=%s", node_name, app_name)
+            await self._render_remote_chat_page(ui=ui, node_name=node_name, app_name=app_name, request=request)

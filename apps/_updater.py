@@ -1,21 +1,23 @@
 from __future__ import annotations
+
 import logging
-
 import re
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from apps._app import App
+from typing import Protocol
 
 import _errors
 
 log = logging.getLogger(__name__)
 
 
+class UpdateManagerApp(Protocol):
+    @property
+    def mods(self) -> object | None: ...
+
+
 class Update_Manager:
     version: tuple[int, ...] | None = None
 
-    def __init__(self, app: "App", *, base: bool = False, mods: bool = False) -> None:
+    def __init__(self, app: UpdateManagerApp, *, base: bool = False, mods: bool = False) -> None:
         self.app = app
         self.can_base = base
         self.can_mods = mods if app.mods else False

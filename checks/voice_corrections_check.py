@@ -3,34 +3,32 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import time
 from types import SimpleNamespace
 from typing import cast
-import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import hikari
+from modmux import SteamCreds
+from modmux.providers.curseforge import CurseforgeCreds
+from modmux.providers.modio import ModioCreds
+from modmux.providers.modrinth import ModrinthCreds
+from modmux.providers.nexusmods import NexusCreds
+from modmux.providers.wube import WubeCreds
+from pydantic import SecretStr
 
 import config
-import hikari
-from cmd_voice_common import (
-    HFRepoRef,
-    MAX_TTS_VOICES,
-    PronunciationFormat,
-    PronunciationOverride,
-    TextCorrectionCatalog,
-    TextSubstitutionRule,
-    UserVoiceSettings,
-    VoiceLinkRules,
-)
-from cmd_voice_core import VoiceTTSCoreMixin
-from cmd_voice_model import VoiceTTSModelMixin
 from cmd_voice import (
     VoiceAdminActionKind,
+    VoiceAdminChannelsView,
     VoiceAdminEditorService,
     VoiceAdminLinksView,
-    VoiceAdminSection,
     VoiceAdminPronunciationView,
+    VoiceAdminSection,
+    VoiceAdminSelectionState,
     VoiceAdminState,
     VoiceAdminSubstitutionCategory,
     VoiceSettingsActionKind,
@@ -44,15 +42,21 @@ from cmd_voice import (
     _voice_settings_state_from_action,
     _voice_settings_state_value,
 )
+from cmd_voice_common import (
+    MAX_TTS_VOICES,
+    HFRepoRef,
+    PronunciationFormat,
+    PronunciationOverride,
+    TextCorrectionCatalog,
+    TextSubstitutionRule,
+    UserVoiceSettings,
+    VoiceLinkRule,
+    VoiceLinkRules,
+)
+from cmd_voice_core import VoiceTTSCoreMixin
+from cmd_voice_model import VoiceTTSModelMixin
 from cmd_voice_runtime import VoiceTTSRuntimeMixin
 from cmd_voice_service import VoiceTTSService
-from modmux.providers.curseforge import CurseforgeCreds
-from modmux.providers.modio import ModioCreds
-from modmux.providers.modrinth import ModrinthCreds
-from modmux.providers.nexusmods import NexusCreds
-from modmux.providers.wube import WubeCreds
-from modmux import SteamCreds
-from pydantic import SecretStr
 
 
 class _CorrectionRuntime(VoiceTTSRuntimeMixin):
@@ -200,6 +204,71 @@ def _substitution_rules(*entries: tuple[str, str, bool]) -> dict[str, TextSubsti
     }
 
 
+class _VoiceAdminRenderStub(VoiceTTSService):
+    def __init__(
+        self,
+        *,
+        target: config.VoiceTargetConfig | None = None,
+        substitutions: dict[str, dict[str, TextSubstitutionRule]] | None = None,
+        link_rules: tuple[VoiceLinkRule, ...] = (),
+    ) -> None:
+        self.voice = "default-voice"
+        self.variant = None
+        self._target = target
+        self._substitutions = substitutions or {}
+        self._link_rules = link_rules
+
+    def _engine_display(self) -> str:
+        return "stub"
+
+    def available_custom_voices(self) -> list[str]:
+        return []
+
+    async def available_voices(self, force_refresh: bool = False) -> list[str]:
+        return [self.voice]
+
+    def global_mention_overrides(self) -> dict[int, str]:
+        return {}
+
+    def global_text_substitutions(self, category: str | None = None) -> dict[str, TextSubstitutionRule]:
+        if category is None:
+            return {}
+        return self._substitutions.get(category, {})
+
+    def all_global_pronunciations(self) -> dict[str, dict[str, PronunciationOverride]]:
+        return {}
+
+    def global_protected_text_tokens(self) -> list[str]:
+        return []
+
+    def voice_link_host_labels(self) -> dict[str, str]:
+        return {}
+
+    def voice_link_rules(self) -> tuple[VoiceLinkRule, ...]:
+        return self._link_rules
+
+    def voice_target(self, guild_id: hikari.Snowflakeish) -> config.VoiceTargetConfig | None:
+        return self._target
+
+
+class _VoiceNoticeRuntime(VoiceTTSService):
+    def __init__(
+        self,
+        *,
+        targets: dict[hikari.Snowflake, config.VoiceTargetConfig],
+        connections: list[SimpleNamespace],
+    ) -> None:
+        self.bot = SimpleNamespace(rest=SimpleNamespace(create_message=AsyncMock()))
+        self._targets = targets
+        self._connections = connections
+
+    def active_voice_connections(self) -> list[SimpleNamespace]:
+        return list(self._connections)
+
+    def voice_target(self, guild_id: hikari.Snowflakeish) -> config.VoiceTargetConfig | None:
+        return self._targets.get(hikari.Snowflake(guild_id))
+
+
 class VoiceCorrectionTests(unittest.TestCase):
     def test_command_source_normalises_unicode_emoji(self) -> None:
         source = _normalise_voice_source("😭")
@@ -260,6 +329,43 @@ class VoiceCorrectionTests(unittest.TestCase):
         )
 
         self.assertEqual(runtime._normalise_for_speech("w/").render(), "with")
+
+    def test_notify_connected_tts_channels_targets_primary_channel_for_each_connected_guild(self) -> None:
+        runtime = _VoiceNoticeRuntime(
+            targets={
+                hikari.Snowflake(1): config.VoiceTargetConfig(
+                    guild_id=hikari.Snowflake(1),
+                    voice_channel=hikari.Snowflake(11),
+                    primary_tts_channel=hikari.Snowflake(101),
+                ),
+                hikari.Snowflake(2): config.VoiceTargetConfig(
+                    guild_id=hikari.Snowflake(2),
+                    voice_channel=hikari.Snowflake(22),
+                    primary_tts_channel=hikari.Snowflake(202),
+                ),
+            },
+            connections=[
+                SimpleNamespace(guild_id=hikari.Snowflake(1), channel_id=hikari.Snowflake(11)),
+                SimpleNamespace(guild_id=hikari.Snowflake(2), channel_id=hikari.Snowflake(22)),
+                SimpleNamespace(guild_id=hikari.Snowflake(1), channel_id=hikari.Snowflake(11)),
+            ],
+        )
+
+        sent_count = asyncio.run(runtime.notify_connected_tts_channels("Scheduled maintenance: restart in 1m."))
+        create_message = runtime.bot.rest.create_message
+
+        self.assertEqual(sent_count, 2)
+        self.assertEqual(create_message.await_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in create_message.await_args_list],
+            [hikari.Snowflake(101), hikari.Snowflake(202)],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["flags"] == hikari.MessageFlag.SUPPRESS_NOTIFICATIONS
+                for call in create_message.await_args_list
+            )
+        )
 
     def test_user_substitution_applies_to_emoji_name(self) -> None:
         runtime = _CorrectionRuntime(
@@ -785,12 +891,160 @@ class VoiceCorrectionTests(unittest.TestCase):
             page=state.page,
             value=f"{_voice_admin_state_value(state)}~{int(user_id)}",
         )
+        add_simple_action = service._action_codec.build(
+            VoiceAdminActionKind.ADD_SIMPLE_LINK_RULE,
+            page=state.page,
+            value=f"{_voice_admin_state_value(state)}~{int(user_id)}",
+        )
+        add_complex_action = service._action_codec.build(
+            VoiceAdminActionKind.ADD_COMPLEX_LINK_RULE,
+            page=state.page,
+            value=f"{_voice_admin_state_value(state)}~{int(user_id)}",
+        )
 
         self.assertLessEqual(len(editor_ctx.custom_id(select_action)), 100)
+        self.assertLessEqual(len(editor_ctx.custom_id(add_simple_action)), 100)
+        self.assertLessEqual(len(editor_ctx.custom_id(add_complex_action)), 100)
         self.assertLessEqual(
             len(service._link_rule_modal.build_id(edit_action, scope_id=user_id, user_id=user_id)),
             100,
         )
+        self.assertLessEqual(
+            len(service._link_rule_modal.build_id(add_simple_action, scope_id=user_id, user_id=user_id)),
+            100,
+        )
+        self.assertLessEqual(
+            len(service._link_rule_modal.build_id(add_complex_action, scope_id=user_id, user_id=user_id)),
+            100,
+        )
+
+    def test_voice_admin_channels_subpage_renders_with_back_action(self) -> None:
+        service = VoiceAdminEditorService()
+        state = VoiceAdminState(section=VoiceAdminSection.CHANNELS, page=0)
+        voice_tts = _VoiceAdminRenderStub(
+            target=config.VoiceTargetConfig(
+                guild_id=hikari.Snowflake(123),
+                voice_channel=hikari.Snowflake(456),
+                primary_tts_channel=hikari.Snowflake(789),
+                secondary_tts_channel=hikari.Snowflake(790),
+                relay_tts_enabled=True,
+            )
+        )
+
+        embed, components = asyncio.run(
+            service._render_editor(
+                actor_user_id=hikari.Snowflake(123456789012345678),
+                locale=hikari.Locale.EN_GB,
+                guild_id=hikari.Snowflake(123),
+                voice_tts=voice_tts,
+                state=state,
+            )
+        )
+
+        self.assertEqual(embed.title, "Voice Admin")
+        self.assertGreaterEqual(len(components), 1)
+        self.assertLessEqual(len(components), 5)
+        self.assertTrue(all(len(getattr(row, "components", ())) <= 5 for row in components))
+        self.assertEqual(embed.fields[0].name, "Current Guild Channels")
+        self.assertIn("primary tts channel: <#789> (listening)", embed.fields[0].value)
+        self.assertIn("secondary tts channel: <#790>", embed.fields[0].value)
+        self.assertIn("relay tts: enabled", embed.fields[0].value)
+
+    def test_voice_admin_channel_config_subpage_renders_within_discord_component_limits(self) -> None:
+        service = VoiceAdminEditorService()
+        state = VoiceAdminState(
+            section=VoiceAdminSection.CHANNELS,
+            page=0,
+            channels_view=VoiceAdminChannelsView.CONFIG,
+        )
+        voice_tts = _VoiceAdminRenderStub(
+            target=config.VoiceTargetConfig(
+                guild_id=hikari.Snowflake(123),
+                voice_channel=hikari.Snowflake(456),
+                primary_tts_channel=hikari.Snowflake(789),
+                secondary_tts_channel=hikari.Snowflake(790),
+                relay_tts_enabled=True,
+            )
+        )
+
+        embed, components = asyncio.run(
+            service._render_editor(
+                actor_user_id=hikari.Snowflake(123456789012345678),
+                locale=hikari.Locale.EN_GB,
+                guild_id=hikari.Snowflake(123),
+                voice_tts=voice_tts,
+                state=state,
+            )
+        )
+
+        self.assertEqual(embed.title, "Voice Admin")
+        self.assertLessEqual(len(components), 5)
+        self.assertTrue(all(len(getattr(row, "components", ())) <= 5 for row in components))
+        self.assertEqual(embed.fields[1].name, "Channel Config")
+
+    def test_voice_admin_paginated_substitutions_render_without_footer_overflow(self) -> None:
+        service = VoiceAdminEditorService()
+        session_message_id = hikari.Snowflake(987654321012345678)
+        state = VoiceAdminState(
+            section=VoiceAdminSection.SUBSTITUTIONS,
+            page=0,
+            substitution_category=VoiceAdminSubstitutionCategory.SLANG,
+        )
+        substitutions = {
+            f"term-{index:02d}": _substitution_rule(f"term-{index:02d}", f"value-{index:02d}") for index in range(26)
+        }
+        voice_tts = _VoiceAdminRenderStub(substitutions={VoiceAdminSubstitutionCategory.SLANG.value: substitutions})
+        service._selection_state[session_message_id] = VoiceAdminSelectionState(substitution_source="term-00")
+
+        embed, components = asyncio.run(
+            service._render_editor(
+                actor_user_id=hikari.Snowflake(123456789012345678),
+                locale=hikari.Locale.EN_GB,
+                guild_id=hikari.Snowflake(123),
+                voice_tts=voice_tts,
+                state=state,
+                session_message_id=session_message_id,
+            )
+        )
+
+        self.assertEqual(embed.title, "Voice Admin")
+        self.assertGreaterEqual(len(components), 1)
+
+    def test_voice_admin_link_rules_render_selected_rule_field(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = _CorrectionCore(Path(tmp) / "voice_corrections.json")
+            _, rule = runtime.add_voice_link_rule(
+                "",
+                "",
+                "link {host} {title_norm}",
+                mode="simple",
+                example_url="https://example.com/games/test",
+            )
+
+            service = VoiceAdminEditorService()
+            session_message_id = hikari.Snowflake(987654321012345678)
+            state = VoiceAdminState(
+                section=VoiceAdminSection.LINKS,
+                page=0,
+                links_view=VoiceAdminLinksView.RULES,
+            )
+            voice_tts = _VoiceAdminRenderStub(link_rules=(rule,))
+            service._selection_state[session_message_id] = VoiceAdminSelectionState(link_rule_index=1)
+
+            embed, components = asyncio.run(
+                service._render_editor(
+                    actor_user_id=hikari.Snowflake(123456789012345678),
+                    locale=hikari.Locale.EN_GB,
+                    guild_id=hikari.Snowflake(123),
+                    voice_tts=voice_tts,
+                    state=state,
+                    session_message_id=session_message_id,
+                )
+            )
+
+        field_names = [field.name for field in embed.fields]
+        self.assertIn("Selected Rule", field_names)
+        self.assertGreaterEqual(len(components), 1)
 
     def test_steam_store_link_uses_store_title(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -866,11 +1120,83 @@ class VoiceCorrectionTests(unittest.TestCase):
         self.assertEqual(rule.host, "example.com")
         self.assertEqual(rule.path_regex, r"^/games/(?P<title>[^/?#]+)")
         self.assertEqual(rule.template, "link example games {title_norm}")
-        self.assertEqual(payload["rules"][1], {
-            "host": "example.com",
-            "path_regex": r"^/games/(?P<title>[^/?#]+)",
-            "template": "link example games {title_norm}",
-        })
+        self.assertEqual(
+            payload["rules"][1],
+            {
+                "host": "example.com",
+                "mode": "regex",
+                "path_regex": r"^/games/(?P<title>[^/?#]+)",
+                "template": "link example games {title_norm}",
+            },
+        )
+
+    def test_simple_link_rule_edits_are_persisted(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = _CorrectionCore(Path(tmp) / "voice_corrections.json")
+
+            index, rule = runtime.add_voice_link_rule(
+                "",
+                "",
+                "link {host} {title_norm}",
+                mode="simple",
+                example_url="https://example.com/games/Transport_Fever_2",
+            )
+            payload = json.loads(runtime._voice_link_rules_path.read_text())
+
+        self.assertEqual(index, 2)
+        self.assertEqual(rule.host, "example.com")
+        self.assertEqual(rule.path_shape, "/games/{title}")
+        self.assertEqual(rule.template, "link {host} {title_norm}")
+        self.assertEqual(
+            payload["rules"][1],
+            {
+                "example_url": "https://example.com/games/Transport_Fever_2",
+                "host": "example.com",
+                "mode": "simple",
+                "path_shape": "/games/{title}",
+                "template": "link {host} {title_norm}",
+            },
+        )
+
+    def test_simple_link_rule_speaks_derived_example_url(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = _CorrectionLinkRuntime(Path(tmp) / "voice_corrections.json")
+            runtime.add_voice_link_rule(
+                "",
+                "",
+                "link {host} {title_norm}",
+                mode="simple",
+                example_url="https://example.com/games/Transport_Fever_2",
+            )
+
+            spoken = runtime._describe_link("example.com", "/games/Transport_Fever_2")
+
+        self.assertEqual(spoken, "link example Transport Fever 2")
+
+    def test_simple_link_rule_payload_loads(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = _CorrectionLinkRuntime(Path(tmp) / "voice_corrections.json")
+            runtime._voice_link_rules_path.write_text(
+                json.dumps(
+                    {
+                        "hosts": {},
+                        "rules": [
+                            {
+                                "host": "example.com",
+                                "mode": "simple",
+                                "path_shape": "/games/{title}",
+                                "template": "link {host} {title_norm}",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runtime._refresh_voice_link_rules_if_needed()
+
+            spoken = runtime._describe_link("example.com", "/games/Transport_Fever_2")
+
+        self.assertEqual(spoken, "link example Transport Fever 2")
 
     def test_link_rule_template_norm_alias_matches_words_alias(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -910,16 +1236,117 @@ class VoiceCorrectionTests(unittest.TestCase):
             runtime = _CorrectionCore(Path(tmp) / "voice_corrections.json")
             runtime._bot_configuration_path.write_text(json.dumps({"keep": "me"}), encoding="utf-8")
 
-            target = runtime.set_voice_target_config(123, voice_channel=456, tts_channel=789)
+            target = runtime.set_voice_target_config(
+                123,
+                voice_channel=456,
+                primary_tts_channel=789,
+                secondary_tts_channel=790,
+                relay_tts_enabled=True,
+            )
             payload = json.loads(runtime._bot_configuration_path.read_text(encoding="utf-8"))
 
         self.assertEqual(target.guild_id, 123)
         self.assertEqual(target.voice_channel, 456)
-        self.assertEqual(target.tts_channel, 789)
+        self.assertEqual(target.primary_tts_channel, 789)
+        self.assertEqual(target.secondary_tts_channel, 790)
+        self.assertTrue(target.primary_tts_listen_enabled)
+        self.assertTrue(target.secondary_tts_listen_enabled)
+        self.assertTrue(target.relay_tts_enabled)
         self.assertEqual(payload["keep"], "me")
-        self.assertEqual(payload["voice_targets"], {"123": {"voice_channel": 456, "tts_channel": 789}})
+        self.assertEqual(
+            payload["voice_targets"],
+            {
+                "123": {
+                    "voice_channel": 456,
+                    "primary_tts_channel": 789,
+                    "primary_tts_listen_enabled": True,
+                    "secondary_tts_channel": 790,
+                    "secondary_tts_listen_enabled": True,
+                    "relay_tts_enabled": True,
+                }
+            },
+        )
 
-    def test_voice_targets_are_loaded_from_bot_configuration(self) -> None:
+    def test_voice_target_channel_edits_preserve_relay_tts_setting(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = _CorrectionCore(Path(tmp) / "voice_corrections.json")
+
+            runtime.set_voice_target_config(
+                123,
+                voice_channel=456,
+                primary_tts_channel=789,
+                secondary_tts_channel=790,
+                relay_tts_enabled=True,
+            )
+            updated = runtime.set_voice_target_config(
+                123,
+                voice_channel=654,
+                primary_tts_channel=987,
+                secondary_tts_channel=988,
+            )
+
+        self.assertEqual(updated.voice_channel, 654)
+        self.assertEqual(updated.primary_tts_channel, 987)
+        self.assertEqual(updated.secondary_tts_channel, 988)
+        self.assertTrue(updated.primary_tts_listen_enabled)
+        self.assertTrue(updated.secondary_tts_listen_enabled)
+        self.assertTrue(updated.relay_tts_enabled)
+
+    def test_voice_target_listen_toggles_are_persisted(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = _CorrectionCore(Path(tmp) / "voice_corrections.json")
+            runtime.set_voice_target_config(
+                123,
+                voice_channel=456,
+                primary_tts_channel=789,
+                secondary_tts_channel=790,
+            )
+
+            updated = runtime.set_voice_target_tts_listen_enabled(
+                123,
+                config.VoiceTargetTtsChannelRole.PRIMARY,
+                False,
+            )
+            updated = runtime.set_voice_target_tts_listen_enabled(
+                123,
+                config.VoiceTargetTtsChannelRole.SECONDARY,
+                False,
+            )
+            payload = json.loads(runtime._bot_configuration_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(updated.primary_tts_listen_enabled)
+        self.assertFalse(updated.secondary_tts_listen_enabled)
+        self.assertEqual(
+            payload["voice_targets"]["123"],
+            {
+                "voice_channel": 456,
+                "primary_tts_channel": 789,
+                "primary_tts_listen_enabled": False,
+                "secondary_tts_channel": 790,
+                "secondary_tts_listen_enabled": False,
+                "relay_tts_enabled": False,
+            },
+        )
+
+    def test_voice_target_config_can_be_removed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = _CorrectionCore(Path(tmp) / "voice_corrections.json")
+            runtime.set_voice_target_config(
+                123,
+                voice_channel=456,
+                primary_tts_channel=789,
+                secondary_tts_channel=790,
+                relay_tts_enabled=True,
+            )
+
+            removed = runtime.remove_voice_target_config(123)
+            payload = json.loads(runtime._bot_configuration_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(removed)
+        self.assertIsNone(runtime.voice_target(123))
+        self.assertEqual(payload["voice_targets"], {})
+
+    def test_voice_targets_are_loaded_from_legacy_bot_configuration(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = _CorrectionCore(Path(tmp) / "voice_corrections.json")
             runtime._bot_configuration_path.write_text(
@@ -929,6 +1356,7 @@ class VoiceCorrectionTests(unittest.TestCase):
                             "123": {
                                 "voice_channel": 456,
                                 "tts_channel": 789,
+                                "relay_tts_enabled": True,
                             }
                         }
                     }
@@ -944,10 +1372,24 @@ class VoiceCorrectionTests(unittest.TestCase):
                 hikari.Snowflake(123): config.VoiceTargetConfig(
                     guild_id=hikari.Snowflake(123),
                     voice_channel=hikari.Snowflake(456),
-                    tts_channel=hikari.Snowflake(789),
+                    primary_tts_channel=hikari.Snowflake(789),
+                    primary_tts_listen_enabled=True,
+                    relay_tts_enabled=True,
                 )
             },
         )
+
+    def test_voice_target_config_rejects_duplicate_primary_and_secondary_tts_channels(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = _CorrectionCore(Path(tmp) / "voice_corrections.json")
+
+            with self.assertRaisesRegex(ValueError, "Secondary TTS channel must differ"):
+                runtime.set_voice_target_config(
+                    123,
+                    voice_channel=456,
+                    primary_tts_channel=789,
+                    secondary_tts_channel=789,
+                )
 
     def test_modmux_creds_are_loaded_from_env_with_secretstr(self) -> None:
         with TemporaryDirectory() as tmp:

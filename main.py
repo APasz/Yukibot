@@ -2,10 +2,11 @@ import asyncio
 import inspect
 import logging
 import os
-import sys
 import traceback
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
 import hikari
 import hikariwave
@@ -21,17 +22,21 @@ from _manager import App_Manager, Provider_Player, Provider_Process
 from _security import Access_Control
 from _sys import Stats_System
 from _utils import File_Cleaner, Utilities
+from apps._app import App
 from cmd_alias import AliasEditorService, CMD_Alias
-from cmd_app import AppManageService, group_app
+from cmd_app import AppConsoleService, AppManageService, group_app
 from cmd_dashboard import CMD_Dashboard, DashboardEditorService
 from cmd_misc import group_misc
 from cmd_music import MusicService, group_music
 from cmd_online import CMD_Online, OnlineEditorService
-from cmd_ops import group_ops
-from cmd_saves import group_saves  # noqa: F401
+from cmd_ops import available_restart_targets, group_ops, reset_voice_runtime_services, voice_runtime_reset_lines
 from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, VoiceTTSService, group_voice
 from config import Activity_Provider, Name_Cache
+from maintenance import MaintenanceService
+from node_api import RemoteRelayTTSForwarder
 from online import Online_Tracker
+from remote_node import RemoteNodeSupervisor
+from restart_targets import RestartTarget
 
 log = logging.getLogger("system")
 
@@ -51,9 +56,85 @@ activities: list[type[Activity_Provider]] = [
     Provider_DISK,
 ]
 start_time = datetime.now()
+_RESTART_AUTO_LAUNCH_DELAY_SECONDS = 7.0
+
+
+@dataclass(frozen=True, slots=True)
+class RestartAutoLaunchSelection:
+    app: App | None
+    error_text: str | None = None
+
+    @property
+    def started_notice_line(self) -> str | None:
+        if self.app is None:
+            return None
+        return f"\tAuto-Launch Scheduled: {self.app.friendly}"
+
+
+def _consume_restart_auto_launch_selection(app_manager: App_Manager) -> RestartAutoLaunchSelection:
+    try:
+        auto_start_app_name = app_manager.consume_restart_auto_start_app()
+        if auto_start_app_name is None:
+            return RestartAutoLaunchSelection(app=None)
+        return RestartAutoLaunchSelection(app=app_manager.get(auto_start_app_name))
+    except Exception as xcp:
+        return RestartAutoLaunchSelection(app=None, error_text=str(xcp))
+
+
+async def _launch_restart_auto_app(
+    app_manager: App_Manager,
+    auto_app: App,
+    *,
+    delay_seconds: float = _RESTART_AUTO_LAUNCH_DELAY_SECONDS,
+) -> None:
+    log.info("Auto-launch scheduled for %s in %.1fs", auto_app.friendly, delay_seconds)
+    await asyncio.sleep(delay_seconds)
+    log.info("Auto-launching: %s", auto_app.friendly)
+    await app_manager.launch(auto_app)
+    log.info("Auto-launched: %s", auto_app.friendly)
+
+
+class _CleanupDisk(Protocol):
+    @property
+    def percent(self) -> int: ...
+
+    @property
+    def mountpoint_text(self) -> str: ...
+
+
+class _CleanupStats(Protocol):
+    def disk_for_path(self, path: Path) -> _CleanupDisk | None: ...
+
+
+class _ManagedFileCleaner(Protocol):
+    @property
+    def folders_to_clear(self) -> dict[Path, timedelta]: ...
+
+    def clear(self, paths: set[Path], threshold: timedelta | None = None) -> set[Path]: ...
+
+
+def _clear_managed_files_once(
+    cleaner: _ManagedFileCleaner,
+    stats: _CleanupStats,
+    *,
+    profile: config.BotProfileConfig,
+) -> None:
+    if not profile.has_service(config.BotService.FILE_CLEANER):
+        return
+
+    for folder, threshold in cleaner.folders_to_clear.items():
+        if not config.SILENT_DEBUG:
+            log.debug("Clearing %s", folder)
+        disk = stats.disk_for_path(folder)
+        effective_threshold = threshold
+        if config.IS_DEBUG and disk is not None and disk.percent > 90:
+            log.info("Clearing immediately as disk > 90%% for %s", disk.mountpoint_text)
+            effective_threshold = timedelta(seconds=1)
+        cleaner.clear(set(folder.iterdir()), effective_threshold)
 
 
 def main():
+    config.IS_SHUTTINGDOWN = False
     log.info(f"Running {os.getpid()}")
     profile = config.ACTIVE_BOT_PROFILE
     log.info(
@@ -85,12 +166,15 @@ def main():
     name_cache = Name_Cache()
     alias_editor = AliasEditorService()
     app_editor = AppManageService()
+    app_console = AppConsoleService()
     dashboard_editor = DashboardEditorService()
     online_editor = OnlineEditorService()
     voice_admin_editor = VoiceAdminEditorService()
     voice_editor = VoiceSettingsEditorService()
     online_tracker = Online_Tracker()
     stats = Stats_System()
+    file_cleaner = File_Cleaner()
+    maintenance = MaintenanceService()
     client: lightbulb.Client
 
     if deg := config.env_opt("INDEV"):
@@ -104,6 +188,7 @@ def main():
     utilities = Utilities()
     resolutator = Resolutator(bot)
     authority_server = AuthorityServer(name_cache)
+    remote_node = RemoteNodeSupervisor()
     registry = client.di.registry_for(lightbulb.di.Contexts.DEFAULT)
     acl = Access_Control()
     registry.register_value(Access_Control, acl)
@@ -113,6 +198,8 @@ def main():
     registry.register_value(Distils, Distils())
     registry.register_value(Resolutator, resolutator)
     dc_relay = DC_Relay(bot)
+    if profile.has_service(config.BotService.GAME_RELAY):
+        app_editor.set_chat_relay_service(dc_relay)
     voice_client: hikariwave.VoiceClient | None = None
     voice_tts: VoiceTTSService | None = None
     music: MusicService | None = None
@@ -128,6 +215,11 @@ def main():
             raise RuntimeError("Voice TTS service requires a voice client")
         voice_tts = VoiceTTSService(bot, voice_client)
         registry.register_value(VoiceTTSService, voice_tts)
+        dc_relay.set_voice_tts_service(voice_tts)
+        app_editor.set_relay_tts_service(voice_tts)
+        app_editor.set_voice_target_service(voice_tts)
+    elif profile.has_service(config.BotService.GAME_RELAY):
+        dc_relay.set_voice_tts_service(RemoteRelayTTSForwarder())
     if music and voice_tts:
         voice_tts.set_music_active_channel_provider(music.active_channel_id)
         voice_tts.set_music_duck_handler(music.duck_tts_playback)
@@ -137,13 +229,15 @@ def main():
     registry.register_value(Name_Cache, name_cache)
     registry.register_value(AliasEditorService, alias_editor)
     registry.register_value(AppManageService, app_editor)
+    registry.register_value(AppConsoleService, app_console)
     registry.register_value(DashboardEditorService, dashboard_editor)
     registry.register_value(OnlineEditorService, online_editor)
     registry.register_value(VoiceAdminEditorService, voice_admin_editor)
     registry.register_value(VoiceSettingsEditorService, voice_editor)
     registry.register_value(Online_Tracker, online_tracker)
     registry.register_value(Stats_System, stats)
-    registry.register_value(File_Cleaner, File_Cleaner())
+    registry.register_value(MaintenanceService, maintenance)
+    registry.register_value(File_Cleaner, file_cleaner)
 
     command_groups: dict[config.CommandGroup, lightbulb.Group | type[lightbulb.SlashCommand]] = {
         config.CommandGroup.APP: group_app,
@@ -190,23 +284,36 @@ def main():
         log.info("Starting")
         try:
             await client.start()
+            _clear_managed_files_once(file_cleaner, stats, profile=profile)
             am = await di_inject_providers()
             await app_manager.post_init(bot, am)
+            if profile.has_service(config.BotService.GAME_RELAY):
+                dc_relay.set_event_loop()
+            log.info("Starting mod web service")
+            await app_editor.start_web(app_manager, acl)
+            log.info("Mod web service startup returned")
 
             if profile.has_service(config.BotService.GAME_RELAY):
+                log.info("Starting Discord relay service")
                 await dc_relay.setup()
                 bot.subscribe(hikari.MessageCreateEvent, dc_relay.on_dcdm_message)  # type: ignore
                 bot.subscribe(hikari.GuildMessageCreateEvent, dc_relay.on_gddm_message)  # type: ignore
+                log.info("Discord relay service ready")
             if music:
+                log.info("Starting music service")
                 await music.setup(client)
                 bot.subscribe(hikari.VoiceStateUpdateEvent, music.on_voice_state_update)  # type: ignore
                 bot.subscribe(hikariwave.AudioBeginEvent, music.on_audio_begin)  # type: ignore
                 bot.subscribe(hikariwave.AudioEndEvent, music.on_audio_end)  # type: ignore
+                log.info("Music service ready")
             if voice_tts:
+                log.info("Starting voice TTS service")
                 await voice_tts.setup(client)
                 bot.subscribe(hikari.GuildMessageCreateEvent, voice_tts.on_message)  # type: ignore
                 bot.subscribe(hikari.VoiceStateUpdateEvent, voice_tts.on_voice_state_update)  # type: ignore
+                log.info("Voice TTS service ready")
             await authority_server.start()
+            await remote_node.start()
         except Exception as xcp:
             starting_xcp.append(str(xcp))
             raise xcp
@@ -249,17 +356,9 @@ def main():
             return
         await actor.update()
 
-    @client.task(lightbulb.uniformtrigger(hours=1, wait_first=False), max_failures=100)
+    @client.task(lightbulb.uniformtrigger(hours=1), max_failures=100)
     async def task_clear_uploads(cleaner: File_Cleaner, stats: Stats_System):
-        if not profile.has_service(config.BotService.FILE_CLEANER):
-            return
-        for folder, td in cleaner.folders_to_clear.items():
-            if not config.SILENT_DEBUG:
-                log.debug(f"Clearing {folder}")
-            if config.IS_DEBUG and stats.disk.percent > 90:
-                log.info("Clearing immediately as disk > 90%")
-                td = timedelta(seconds=1)
-            cleaner.clear(set(folder.iterdir()), td)
+        _clear_managed_files_once(cleaner, stats, profile=profile)
 
     @client.task(lightbulb.uniformtrigger(minutes=5, wait_first=False), max_failures=100)
     async def task_online_drink_reminders(tracker: Online_Tracker):
@@ -267,42 +366,174 @@ def main():
             return
         await tracker.send_drink_reminders(bot)
 
-    @client.task(lightbulb.uniformtrigger(minutes=1, wait_first=False), max_failures=100)
-    async def task_authority_refresh(acl: Access_Control, names: Name_Cache):
-        if config.DATA_AUTHORITY_MODE is not config.DataAuthorityMode.REMOTE:
-            return
-        await asyncio.to_thread(names.flush_pending_mutations)
-        await asyncio.to_thread(acl.reload)
-        await asyncio.to_thread(names.refresh_from_authority)
+    async def sync_bot_metadata(bot: hikari.GatewayBot, *, initial: bool) -> None:
+        try:
+            application = await bot.rest.fetch_application()
+            supported_install_types = config.supported_oauth_install_types(application)
+            install_types_text = ",".join(
+                install_type.value
+                for install_type in sorted(supported_install_types, key=lambda item: item.integration_type)
+            )
+            if initial:
+                log.info(
+                    "Initial OAuth install types for %s: %s",
+                    config.ACTIVE_BOT_PROFILE.name.value,
+                    install_types_text,
+                )
+            elif not config.SILENT_DEBUG:
+                log.debug(
+                    "OAuth install types for %s: %s",
+                    config.ACTIVE_BOT_PROFILE.name.value,
+                    install_types_text,
+                )
+            bot_config = await asyncio.to_thread(
+                config.sync_local_oauth_configuration,
+                Path("configuration.json"),
+                supported_install_types=supported_install_types,
+            )
+        except Exception as xcp:
+            prefix = "Initial bot OAuth support refresh" if initial else "Bot OAuth support refresh"
+            log.warning(f"{prefix} failed; using current local configuration: {xcp}")
+            bot_config = config.load_bot_configuration(Path("configuration.json"))
 
-    auto_app = None  # noqa: F841
+        me = bot.get_me()
+        if me is None:
+            log.warning("Skipping bot metadata sync because the current bot user is unavailable")
+            return
+
+        snapshot = config.build_local_bot_metadata_snapshot(
+            bot_id=me.id,
+            label=me.display_name or me.username,
+            bot_profile=profile.name,
+            oauth=bot_config.oauth,
+            mod_web=config.BotMetadataModWeb(
+                node_name=config.MOD_WEB_SERVER.node_name,
+                public_base_url=config.MOD_WEB_SERVER.public_base_url,
+                node_api_base_url=config.MOD_WEB_SERVER.node_api_base_url,
+            ),
+        )
+        if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.LOCAL:
+            try:
+                await asyncio.to_thread(config.upsert_known_bot_snapshot, Path("configuration.json"), snapshot)
+            except Exception as xcp:
+                log.warning(f"Local bot metadata persist failed; node switcher may miss this node: {xcp}")
+            return
+
+        try:
+            await asyncio.to_thread(config.fetch_remote_bot_registry)
+        except Exception as xcp:
+            log.warning(f"Bot registry refresh failed; node switcher may use stale cache: {xcp}")
+        try:
+            await asyncio.to_thread(config.sync_remote_bot_metadata, snapshot)
+        except Exception as xcp:
+            log.warning(f"Bot metadata sync failed; keeping local snapshot only: {xcp}")
+
+    @client.task(lightbulb.uniformtrigger(minutes=1, wait_first=False), max_failures=100)
+    async def task_authority_refresh(acl: Access_Control, names: Name_Cache, bot: hikari.GatewayBot):
+        if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
+            await asyncio.to_thread(names.flush_pending_mutations)
+            await asyncio.to_thread(acl.reload)
+            await asyncio.to_thread(names.refresh_from_authority)
+        await sync_bot_metadata(bot, initial=False)
+
+    @client.task(lightbulb.uniformtrigger(minutes=1, wait_first=False), max_failures=100)
+    async def task_maintenance_restarts(maintenance: MaintenanceService, manager: App_Manager):
+        maintenance.reload()
+        available_targets = available_restart_targets(profile)
+        now = datetime.now().astimezone()
+        due_warnings = maintenance.due_restart_warnings(now=now, available_targets=available_targets)
+        for warning in due_warnings:
+            warning_notice = maintenance.format_restart_warning_notice(warning)
+            sent_count = await manager.notify_running_app_relays(
+                warning_notice,
+            )
+            auto_start_app: str | None = None
+            tts_notice_count = 0
+            if warning.lead_minutes == 1:
+                auto_start_app = manager.set_current_restart_auto_start_app()
+                if voice_tts is not None:
+                    tts_notice_count = await voice_tts.notify_connected_tts_channels(warning_notice)
+            log.info(
+                "Maintenance.Warning; effective=%s due=%s lead=%sm slot=%s relays=%s auto_start=%s tts=%s",
+                warning.effective_target.value,
+                ",".join(target.value for target in warning.matched_targets),
+                warning.lead_minutes,
+                warning.scheduled_for.isoformat(),
+                sent_count,
+                auto_start_app,
+                tts_notice_count,
+            )
+
+        due_targets = maintenance.due_restart_targets(now=now, available_targets=available_targets)
+        if not due_targets:
+            return
+
+        effective_target = maintenance.due_restart_target(now=now, available_targets=available_targets)
+        if effective_target is None:
+            return
+
+        maintenance.mark_triggered(due_targets, triggered_at=now)
+        schedule = maintenance.schedule_for(effective_target)
+        due_names = ", ".join(target.value for target in due_targets)
+        log.critical(
+            "Maintenance.Restart; effective=%s due=%s slot=%02d:%02d",
+            effective_target.value,
+            due_names,
+            schedule.hour,
+            schedule.minute,
+        )
+
+        if effective_target is RestartTarget.VOICE:
+            if voice_tts is None:
+                log.warning("Skipping scheduled voice restart because the voice service is unavailable")
+                return
+            summary = await reset_voice_runtime_services(voice_tts, music)
+            if config.STARTED_CHANNEL:
+                lines = [
+                    f"Scheduled maintenance completed: `{effective_target.value}` at `{schedule.hour:02d}:{schedule.minute:02d}`.",
+                    f"Matched targets: `{due_names}`",
+                    *voice_runtime_reset_lines(summary),
+                ]
+                await bot.rest.create_message(
+                    config.STARTED_CHANNEL,
+                    "\n".join(lines),
+                    flags=hikari.MessageFlag.SUPPRESS_NOTIFICATIONS,
+                )
+            return
+
+        await _sys.scheduled_restart(
+            bot=bot,
+            manager=manager,
+            restart_type=effective_target.value,
+            reason=(
+                f"Scheduled maintenance restarting `{effective_target.value}`"
+                f" at `{schedule.hour:02d}:{schedule.minute:02d}`."
+            ),
+            message_channel_id=config.STARTED_CHANNEL,
+        )
 
     @bot.listen(hikari.StartedEvent)
     async def on_started(event: hikari.StartedEvent):
         log.info("Started")
         # await client.sync_application_commands()
+        await sync_bot_metadata(bot, initial=True)
+        if profile.has_service(config.BotService.GAME_RELAY):
+            dc_relay.log_chat_relay_summary()
         online_tracker.set_ready_delay(8)
         synced_name_count = await asyncio.to_thread(name_cache.sync_cached_members, bot.cache)
         if synced_name_count:
             log.info(f"Synced {synced_name_count} cached member identities on startup")
 
-        global auto_app
-        auto_app = None
-
-        try:
-            for arg in sys.argv:
-                if arg.startswith("app="):
-                    auto_app = app_manager.get(arg.split("=", 1)[1])
-                    break
-        except Exception as xcp:
-            starting_xcp.append(str(xcp))
-            raise xcp
+        auto_launch = _consume_restart_auto_launch_selection(app_manager)
+        if auto_launch.error_text is not None:
+            starting_xcp.append(auto_launch.error_text)
 
         silent = Path("silent_restart")
         if config.STARTED_CHANNEL and not silent.exists():
             txt = ["Started: DEBUG" if config.IS_DEBUG else "Started"]
-            if auto_app:
-                txt.append(f"\tAuto-Launching: {auto_app.friendly}")
+            if auto_launch.started_notice_line is not None:
+                txt.append(auto_launch.started_notice_line)
+            txt.extend(app_manager.startup_disabled_notice_lines())
             txt.extend(starting_xcp)
             flags = hikari.MessageFlag.SUPPRESS_NOTIFICATIONS
             try:
@@ -319,32 +550,30 @@ def main():
             if mess:
                 await mess.edit(f"{mess.content or ''} ...Done! :D")
 
-        # await se_app.setup()
-
-    @bot.listen(hikari.StartedEvent)
-    async def after_started(event: hikari.StartedEvent):
-        global auto_app
-        if auto_app:
-            log.info(f"Auto-Launching: {auto_app.friendly}")
-            await asyncio.sleep(7)
+        if auto_launch.app is not None:
             try:
-                await app_manager.launch(auto_app)
+                await _launch_restart_auto_app(app_manager, auto_launch.app)
             except Exception as xcp:
-                log.exception(f"AUTO_LAUNCH: {auto_app}")
+                log.exception(f"AUTO_LAUNCH: {auto_launch.app}")
                 if config.STARTED_CHANNEL:
                     flags = hikari.MessageFlag.SUPPRESS_NOTIFICATIONS
                     await bot.rest.create_message(config.STARTED_CHANNEL, f"Error: {xcp}", flags=flags)
+
+        # await se_app.setup()
 
     @bot.listen(hikari.StoppingEvent)
     async def on_stopping(event: hikari.StoppingEvent):
         log.info("Ending")
         print("Ending")
+        config.IS_SHUTTINGDOWN = True
+        app_editor.begin_web_shutdown()
         if voice_tts:
             await voice_tts.close()
         if music:
             await music.close()
         if voice_client:
             await voice_client.close()
+        await remote_node.stop()
         await authority_server.stop()
         await app_manager.end()
         is_silent_restart = config.IS_RESTARTING and Path("silent_restart").exists()
@@ -416,6 +645,15 @@ def main():
                 return
             handled = await app_editor.route_component(
                 interaction,
+                bot=bot,
+                acl=acl,
+                manager=app_manager,
+            )
+            if handled:
+                return
+            handled = await app_console.route_component(
+                interaction,
+                bot=bot,
                 acl=acl,
                 manager=app_manager,
             )
@@ -425,6 +663,7 @@ def main():
                 interaction,
                 acl=acl,
                 bot=bot,
+                maintenance=maintenance,
                 manager=app_manager,
                 names_cache=name_cache,
                 stats=stats,
@@ -467,8 +706,29 @@ def main():
                 return
             handled = await app_editor.route_modal(
                 interaction,
+                bot=bot,
                 acl=acl,
                 manager=app_manager,
+            )
+            if handled:
+                return
+            handled = await app_console.route_modal(
+                interaction,
+                bot=bot,
+                acl=acl,
+                manager=app_manager,
+            )
+            if handled:
+                return
+            handled = await dashboard_editor.route_modal(
+                interaction,
+                acl=acl,
+                bot=bot,
+                maintenance=maintenance,
+                manager=app_manager,
+                names_cache=name_cache,
+                stats=stats,
+                tracker=online_tracker,
             )
             if handled:
                 return
@@ -508,8 +768,8 @@ def main():
 
     @bot.listen(hikari.MessageCreateEvent)
     async def _add_names(event: hikari.MessageCreateEvent | hikari.GuildMessageCreateEvent):
-        if hasattr(event, "member"):
-            name_cache.set_names(event.member or event.author)  # type: ignore
+        if isinstance(event, hikari.GuildMessageCreateEvent):
+            name_cache.set_names(event.member or event.author)
         else:
             name_cache.set_names(event.author)
 
@@ -527,7 +787,7 @@ def main():
             return
         if "restart_system" not in event.content or "restart_bot" not in event.content:
             return
-        if acl.perm_check(event.author_id, acl.LvL.sudo):
+        if await acl.perm_check(event.author_id, acl.LvL.sudo):
             await event.message.respond("Yes sir 🫡")
             await _sys.restart(
                 event.message, bot, app_manager, "system" if "restart_system" in event.content else "bot"

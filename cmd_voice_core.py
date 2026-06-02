@@ -4,12 +4,15 @@ import asyncio
 import contextlib
 import functools
 import json
+import logging
 import re
 import shutil
+import sys
+from collections.abc import Awaitable, Iterable, Mapping
 from pathlib import Path
 from string import Formatter
-from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar, Iterable, TypeVar
-from urllib.parse import urlparse
+from typing import TYPE_CHECKING, Callable, ClassVar, TypeVar
+from urllib.parse import unquote, urlparse
 
 import hikari
 import hikariwave
@@ -43,12 +46,18 @@ from cmd_voice_common import (
     UserVoiceSettings,
     VoiceConnectBackoff,
     VoiceJob,
+    VoiceLinkRegexRuleSpec,
     VoiceLinkRule,
+    VoiceLinkRuleDraft,
+    VoiceLinkRuleMode,
     VoiceLinkRules,
+    VoiceLinkSimpleRuleSpec,
     VoiceRuntimeResetResult,
     log,
 )
 from voice_common import VoiceUdpDiscoveryTimeoutError, cached_voice_channel_occupants
+
+tts_log = logging.getLogger(config.LOGGER_TTS)
 
 
 class VoiceTTSCoreMixin:
@@ -207,7 +216,17 @@ class VoiceTTSCoreMixin:
             users = self.listening_users()
             target_users = ",".join(str(uid) for uid in users) if users else "none"
             target_summary = ", ".join(
-                f"{target.guild_id}:tts={target.tts_channel}/voice={target.voice_channel}"
+                (
+                    f"{target.guild_id}:tts={int(target.primary_tts_channel)}"
+                    + (":on" if target.primary_tts_listen_enabled else ":off")
+                    + (
+                        f",{int(target.secondary_tts_channel)}"
+                        f"{':on' if target.secondary_tts_listen_enabled else ':off'}"
+                        if target.secondary_tts_channel is not None
+                        else ""
+                    )
+                    + f"/voice={target.voice_channel}"
+                )
                 for target in sorted(self._voice_targets.values(), key=lambda item: int(item.guild_id))
             )
             log.info(
@@ -303,13 +322,15 @@ class VoiceTTSCoreMixin:
     def voice_target(self, guild_id: hikari.Snowflakeish) -> config.VoiceTargetConfig | None:
         return self._voice_targets.get(hikari.Snowflake(guild_id))
 
+    def voice_targets(self) -> Mapping[hikari.Snowflake, config.VoiceTargetConfig]:
+        return dict(self._voice_targets)
+
     def _load_voice_targets(self) -> dict[hikari.Snowflake, config.VoiceTargetConfig]:
         if not self._bot_configuration_path.exists():
             return dict(config.VOICE_TARGETS)
 
         try:
-            raw = json.loads(self._bot_configuration_path.read_text(config.STR_ENCODE))
-            bot_config = config.BotConfiguration.model_validate(raw)
+            bot_config = config.load_bot_configuration(self._bot_configuration_path)
             payload = {
                 guild_id: target.model_dump(mode="json")
                 for guild_id, target in bot_config.voice_targets.items()
@@ -329,38 +350,79 @@ class VoiceTTSCoreMixin:
         voice_targets = {
             str(guild_id): config.PersistedVoiceTarget(
                 voice_channel=int(target.voice_channel),
-                tts_channel=int(target.tts_channel),
+                primary_tts_channel=int(target.primary_tts_channel),
+                primary_tts_listen_enabled=target.primary_tts_listen_enabled,
+                secondary_tts_channel=(
+                    int(target.secondary_tts_channel) if target.secondary_tts_channel is not None else None
+                ),
+                secondary_tts_listen_enabled=target.secondary_tts_listen_enabled,
+                relay_tts_enabled=target.relay_tts_enabled,
             )
             for guild_id, target in sorted(self._voice_targets.items(), key=lambda item: int(item[0]))
         }
         bot_config = config.BotConfiguration()
         if self._bot_configuration_path.exists():
             try:
-                existing = json.loads(self._bot_configuration_path.read_text(config.STR_ENCODE))
-                bot_config = config.BotConfiguration.model_validate(existing)
+                bot_config = config.load_bot_configuration(self._bot_configuration_path)
             except (OSError, ValueError) as xcp:
                 log.warning(
                     f"TTS bot configuration read failed path={self._bot_configuration_path!s}: "
                     f"{type(xcp).__name__}: {xcp}"
                 )
         bot_config.voice_targets = voice_targets
-        self._bot_configuration_path.parent.mkdir(parents=True, exist_ok=True)
-        self._bot_configuration_path.write_text(
-            json.dumps(bot_config.model_dump(mode="json"), sort_keys=True, indent=4),
-            config.STR_ENCODE,
-        )
+        config.save_bot_configuration(self._bot_configuration_path, bot_config)
 
     def set_voice_target_config(
         self,
         guild_id: hikari.Snowflakeish,
         *,
         voice_channel: hikari.Snowflakeish,
-        tts_channel: hikari.Snowflakeish,
+        primary_tts_channel: hikari.Snowflakeish,
+        primary_tts_listen_enabled: bool | None = None,
+        secondary_tts_channel: hikari.Snowflakeish | None = None,
+        secondary_tts_listen_enabled: bool | None = None,
+        relay_tts_enabled: bool | None = None,
     ) -> config.VoiceTargetConfig:
+        guild = hikari.Snowflake(guild_id)
+        existing = self._voice_targets.get(guild)
+        primary_tts = hikari.Snowflake(primary_tts_channel)
+        secondary_tts = hikari.Snowflake(secondary_tts_channel) if secondary_tts_channel is not None else None
+        if secondary_tts is not None and secondary_tts == primary_tts:
+            raise ValueError("Secondary TTS channel must differ from the primary TTS channel.")
+        resolved_primary_listen_enabled = (
+            primary_tts_listen_enabled
+            if primary_tts_listen_enabled is not None
+            else existing.primary_tts_listen_enabled
+            if existing is not None
+            else True
+        )
+        resolved_secondary_listen_enabled = (
+            False
+            if secondary_tts is None
+            else (
+                secondary_tts_listen_enabled
+                if secondary_tts_listen_enabled is not None
+                else (
+                    existing.secondary_tts_listen_enabled
+                    if existing is not None and existing.secondary_tts_channel == secondary_tts
+                    else True
+                )
+            )
+        )
         target = config.VoiceTargetConfig(
-            guild_id=hikari.Snowflake(guild_id),
+            guild_id=guild,
             voice_channel=hikari.Snowflake(voice_channel),
-            tts_channel=hikari.Snowflake(tts_channel),
+            primary_tts_channel=primary_tts,
+            primary_tts_listen_enabled=resolved_primary_listen_enabled,
+            secondary_tts_channel=secondary_tts,
+            secondary_tts_listen_enabled=resolved_secondary_listen_enabled,
+            relay_tts_enabled=(
+                relay_tts_enabled
+                if relay_tts_enabled is not None
+                else existing.relay_tts_enabled
+                if existing
+                else False
+            ),
         )
         self._voice_targets[target.guild_id] = target
         self._enabled = bool(self._voice_targets)
@@ -369,6 +431,61 @@ class VoiceTTSCoreMixin:
             self._save_voice_target_name_cache()
         self._save_voice_targets()
         return target
+
+    def set_voice_target_relay_tts_enabled(
+        self,
+        guild_id: hikari.Snowflakeish,
+        enabled: bool,
+    ) -> config.VoiceTargetConfig:
+        target = self.voice_target(guild_id)
+        if target is None:
+            raise LookupError("Unknown voice target.")
+        return self.set_voice_target_config(
+            guild_id,
+            voice_channel=target.voice_channel,
+            primary_tts_channel=target.primary_tts_channel,
+            primary_tts_listen_enabled=target.primary_tts_listen_enabled,
+            secondary_tts_channel=target.secondary_tts_channel,
+            secondary_tts_listen_enabled=target.secondary_tts_listen_enabled,
+            relay_tts_enabled=enabled,
+        )
+
+    def set_voice_target_tts_listen_enabled(
+        self,
+        guild_id: hikari.Snowflakeish,
+        role: config.VoiceTargetTtsChannelRole,
+        enabled: bool,
+    ) -> config.VoiceTargetConfig:
+        target = self.voice_target(guild_id)
+        if target is None:
+            raise LookupError("Unknown voice target.")
+        if role is config.VoiceTargetTtsChannelRole.SECONDARY and target.secondary_tts_channel is None:
+            raise LookupError("Secondary TTS channel is not configured.")
+        return self.set_voice_target_config(
+            guild_id,
+            voice_channel=target.voice_channel,
+            primary_tts_channel=target.primary_tts_channel,
+            primary_tts_listen_enabled=enabled
+            if role is config.VoiceTargetTtsChannelRole.PRIMARY
+            else target.primary_tts_listen_enabled,
+            secondary_tts_channel=target.secondary_tts_channel,
+            secondary_tts_listen_enabled=(
+                enabled if role is config.VoiceTargetTtsChannelRole.SECONDARY else target.secondary_tts_listen_enabled
+            ),
+            relay_tts_enabled=target.relay_tts_enabled,
+        )
+
+    def remove_voice_target_config(self, guild_id: hikari.Snowflakeish) -> bool:
+        guild = hikari.Snowflake(guild_id)
+        removed = self._voice_targets.pop(guild, None)
+        if removed is None:
+            return False
+        self._enabled = bool(self._voice_targets)
+        self._voice_target_choices_dirty = True
+        if self._voice_target_name_cache.pop(guild, None) is not None:
+            self._save_voice_target_name_cache()
+        self._save_voice_targets()
+        return True
 
     def _load_voice_target_name_cache(self) -> dict[hikari.Snowflake, str]:
         if not self._voice_target_labels_path.exists():
@@ -504,9 +621,11 @@ class VoiceTTSCoreMixin:
         return label[:97].rstrip() + "..."
 
     async def refresh_voice_target_choices(self) -> bool:
-        from cmd_voice import CMD_VoiceSay
+        command_cls = getattr(sys.modules.get("cmd_voice"), "CMD_VoiceSay", None)
+        if command_cls is None:
+            raise RuntimeError("CMD_VoiceSay is not loaded")
 
-        option_data = CMD_VoiceSay._command_data.options["target"]
+        option_data = command_cls._command_data.options["target"]
         choices = await self.voice_target_choice_list()
         current = option_data.choices
         current_pairs = [] if current is hikari.UNDEFINED else [(choice.name, choice.value) for choice in current]
@@ -564,6 +683,33 @@ class VoiceTTSCoreMixin:
         if len(connections) != 1:
             return None
         return connections[0]
+
+    async def notify_connected_tts_channels(self, content: str) -> int:
+        sent_count = 0
+        sent_channels: set[hikari.Snowflake] = set()
+        for connection in self.active_voice_connections():
+            target = self.voice_target(connection.guild_id)
+            if target is None:
+                continue
+            channel_id = target.tts_channel
+            if channel_id in sent_channels:
+                continue
+            try:
+                await self.bot.rest.create_message(
+                    channel_id,
+                    content,
+                    flags=hikari.MessageFlag.SUPPRESS_NOTIFICATIONS,
+                )
+            except Exception:
+                log.exception(
+                    "Failed to send TTS system notice guild=%s channel=%s",
+                    connection.guild_id,
+                    int(channel_id),
+                )
+                continue
+            sent_channels.add(channel_id)
+            sent_count += 1
+        return sent_count
 
     def _target_voice_channel_id(self, guild_id: hikari.Snowflakeish) -> hikari.Snowflake | None:
         if not (target := self.voice_target(guild_id)):
@@ -1630,7 +1776,7 @@ class VoiceTTSCoreMixin:
         if skipped:
             log.warning(f"{log_message} skipped={skipped}")
         else:
-            log.info(log_message)
+            tts_log.info(log_message)
         return catalog
 
     def _load_protected_text_tokens(self, raw: object) -> set[str]:
@@ -1777,7 +1923,7 @@ class VoiceTTSCoreMixin:
 
         host_labels = self._load_voice_link_host_labels(raw.get("hosts"))
         rules = self._load_voice_link_rule_list(raw.get("rules"))
-        log.info(
+        tts_log.info(
             f"TTS link rule file loaded path={self._voice_link_rules_path!s}: "
             f"hosts={len(host_labels)} rules={len(rules)}"
         )
@@ -1894,34 +2040,10 @@ class VoiceTTSCoreMixin:
         for item in raw:
             if not isinstance(item, dict):
                 continue
-
-            host = item.get("host")
-            path_regex = item.get("path_regex")
-            template = item.get("template")
-            if not isinstance(host, str) or not isinstance(path_regex, str) or not isinstance(template, str):
-                continue
-
-            normalised_host = host.strip().lower()
-            normalised_template = template.strip()
-            if not normalised_host or not path_regex.strip() or not normalised_template:
-                continue
-
             try:
-                path_pattern = re.compile(path_regex)
-            except re.error as xcp:
-                log.warning(
-                    f"TTS link rule regex invalid path={self._voice_link_rules_path!s} host={normalised_host!r}: {xcp}"
-                )
-                continue
-
-            loaded_rules.append(
-                VoiceLinkRule(
-                    host=normalised_host,
-                    path_regex=path_regex,
-                    path_pattern=path_pattern,
-                    template=normalised_template,
-                )
-            )
+                loaded_rules.append(self._load_voice_link_rule(item))
+            except ValueError as xcp:
+                log.warning(f"TTS link rule invalid path={self._voice_link_rules_path!s}: {xcp}")
 
         return tuple(loaded_rules)
 
@@ -1954,9 +2076,23 @@ class VoiceTTSCoreMixin:
             self._save_voice_link_rules()
         return host_key, removed
 
-    def add_voice_link_rule(self, host: str, path_regex: str, template: str) -> tuple[int, VoiceLinkRule]:
+    def add_voice_link_rule(
+        self,
+        host: str,
+        path_regex: str,
+        template: str,
+        *,
+        mode: VoiceLinkRuleMode | str = VoiceLinkRuleMode.REGEX,
+        example_url: str | None = None,
+    ) -> tuple[int, VoiceLinkRule]:
         self._refresh_voice_link_rules_if_needed()
-        rule = self._build_voice_link_rule(host, path_regex, template)
+        rule = self._build_voice_link_rule_from_input(
+            host=host,
+            path_value=path_regex,
+            template=template,
+            mode=mode,
+            example_url=example_url,
+        )
         rules = [*self._voice_link_rules.rules, rule]
         self._replace_voice_link_rules(host_labels=self._voice_link_rules.host_labels, rules=rules)
         self._save_voice_link_rules()
@@ -1969,14 +2105,18 @@ class VoiceTTSCoreMixin:
         host: str | None = None,
         path_regex: str | None = None,
         template: str | None = None,
+        mode: VoiceLinkRuleMode | str | None = None,
+        example_url: str | None = None,
     ) -> tuple[int, VoiceLinkRule]:
         self._refresh_voice_link_rules_if_needed()
         position = self._normalise_voice_link_rule_index(index)
         existing = self._voice_link_rules.rules[position - 1]
-        rule = self._build_voice_link_rule(
-            host if host is not None else existing.host,
-            path_regex if path_regex is not None else existing.path_regex,
-            template if template is not None else existing.template,
+        rule = self._build_voice_link_rule_from_input(
+            host=host if host is not None else existing.host,
+            path_value=path_regex if path_regex is not None else existing.input_pattern,
+            template=template if template is not None else existing.template,
+            mode=mode if mode is not None else existing.mode,
+            example_url=example_url if example_url is not None else existing.example_url,
         )
         rules = list(self._voice_link_rules.rules)
         rules[position - 1] = rule
@@ -2007,14 +2147,7 @@ class VoiceTTSCoreMixin:
     def _save_voice_link_rules(self) -> None:
         payload = {
             "hosts": dict(sorted(self._voice_link_rules.host_labels.items())),
-            "rules": [
-                {
-                    "host": rule.host,
-                    "path_regex": rule.path_regex,
-                    "template": rule.template,
-                }
-                for rule in self._voice_link_rules.rules
-            ],
+            "rules": [self._serialise_voice_link_rule(rule) for rule in self._voice_link_rules.rules],
         }
         try:
             self._voice_link_rules_path.write_text(
@@ -2029,21 +2162,149 @@ class VoiceTTSCoreMixin:
 
         self._voice_link_rules_mtime_ns = self._path_mtime_ns(self._voice_link_rules_path)
 
-    def _build_voice_link_rule(self, host: str, path_regex: str, template: str) -> VoiceLinkRule:
-        host_key = self._normalise_voice_link_host(host)
-        regex_value = self._normalise_voice_link_regex(path_regex)
+    def preview_voice_link_rule(self, rule: VoiceLinkRule, url: str | None = None) -> str | None:
+        preview_url = self._normalise_voice_link_example_url(rule.example_url if url is None else url)
+        if preview_url is None:
+            return None
+
+        parsed = urlparse(preview_url if "://" in preview_url else f"https://{preview_url}")
+        hostname = parsed.hostname
+        if hostname is None:
+            return None
+        if rule.host not in self._voice_link_host_candidates(hostname):
+            return None
+        match = rule.path_pattern.search(parsed.path)
+        if match is None:
+            return None
+        return self._render_link_rule_template(rule.template, rule.host, match)
+
+    def build_voice_link_rule_draft(self, example_url: str, mode: VoiceLinkRuleMode | str) -> VoiceLinkRuleDraft:
+        example_url_value = self._normalise_voice_link_example_url(example_url)
+        if example_url_value is None:
+            raise ValueError("Example URL must look like `https://example.com/path`.")
+
+        mode_value = self._normalise_voice_link_mode(mode)
+        host = self._host_from_voice_link_example_url(example_url_value)
+        if host is None:
+            raise ValueError("Example URL must include a hostname.")
+        path_shape = self._derive_voice_link_shape_from_example_url(example_url_value)
+        compiled_path_regex = self._compile_voice_link_shape(path_shape)
+        input_pattern = path_shape if mode_value is VoiceLinkRuleMode.SIMPLE else compiled_path_regex
+        path_pattern = re.compile(compiled_path_regex)
+        template = self._default_voice_link_rule_template(path_pattern)
+        return VoiceLinkRuleDraft(
+            mode=mode_value,
+            host=host,
+            example_url=example_url_value,
+            input_pattern=input_pattern,
+            compiled_path_regex=compiled_path_regex,
+            template=template,
+        )
+
+    def _load_voice_link_rule(self, item: dict[str, object]) -> VoiceLinkRule:
+        host = item.get("host")
+        template = item.get("template")
+        if not isinstance(host, str) or not isinstance(template, str):
+            raise ValueError("rule is missing a host or template string")
+
+        mode = self._load_voice_link_rule_mode(item)
+        example_url = item.get("example_url")
+        if isinstance(example_url, str):
+            try:
+                example_url = self._normalise_voice_link_example_url(example_url)
+            except ValueError:
+                example_url = None
+        else:
+            example_url = None
+
+        if mode is VoiceLinkRuleMode.SIMPLE:
+            path_shape = item.get("path_shape")
+            if not isinstance(path_shape, str):
+                raise ValueError("simple link rule is missing `path_shape`")
+            spec = VoiceLinkSimpleRuleSpec(
+                host=self._normalise_voice_link_host(host),
+                path_shape=self._normalise_voice_link_shape(path_shape),
+                template=self._normalise_voice_link_template(template),
+                example_url=example_url,
+            )
+            return self._compile_voice_link_rule(spec)
+
+        path_regex = item.get("path_regex")
+        if not isinstance(path_regex, str):
+            raise ValueError("regex link rule is missing `path_regex`")
+        spec = VoiceLinkRegexRuleSpec(
+            host=self._normalise_voice_link_host(host),
+            path_regex=self._normalise_voice_link_regex(path_regex),
+            template=self._normalise_voice_link_template(template),
+            example_url=example_url,
+        )
+        return self._compile_voice_link_rule(spec)
+
+    def _load_voice_link_rule_mode(self, item: dict[str, object]) -> VoiceLinkRuleMode:
+        raw_mode = item.get("mode")
+        if isinstance(raw_mode, str):
+            try:
+                return self._normalise_voice_link_mode(raw_mode)
+            except ValueError:
+                pass
+        if isinstance(item.get("path_shape"), str):
+            return VoiceLinkRuleMode.SIMPLE
+        return VoiceLinkRuleMode.REGEX
+
+    def _build_voice_link_rule_from_input(
+        self,
+        *,
+        host: str,
+        path_value: str,
+        template: str,
+        mode: VoiceLinkRuleMode | str,
+        example_url: str | None = None,
+    ) -> VoiceLinkRule:
+        mode_value = self._normalise_voice_link_mode(mode)
+        example_url_value = self._normalise_voice_link_example_url(example_url)
+        derived_host = self._host_from_voice_link_example_url(example_url_value)
+        host_value = self._normalise_voice_link_host(host if host.strip() else (derived_host or ""))
         template_value = self._normalise_voice_link_template(template)
+        if mode_value is VoiceLinkRuleMode.SIMPLE:
+            path_shape = path_value.strip() or self._derive_voice_link_shape_from_example_url(example_url_value)
+            spec: VoiceLinkRegexRuleSpec | VoiceLinkSimpleRuleSpec = VoiceLinkSimpleRuleSpec(
+                host=host_value,
+                path_shape=self._normalise_voice_link_shape(path_shape),
+                template=template_value,
+                example_url=example_url_value,
+            )
+        else:
+            spec = VoiceLinkRegexRuleSpec(
+                host=host_value,
+                path_regex=self._normalise_voice_link_regex(path_value),
+                template=template_value,
+                example_url=example_url_value,
+            )
+        rule = self._compile_voice_link_rule(spec)
+        if example_url_value is not None and self.preview_voice_link_rule(rule, example_url_value) is None:
+            raise ValueError("example_url does not match the rule")
+        return rule
+
+    def _compile_voice_link_rule(self, spec: VoiceLinkRegexRuleSpec | VoiceLinkSimpleRuleSpec) -> VoiceLinkRule:
+        if isinstance(spec, VoiceLinkSimpleRuleSpec):
+            regex_value = self._compile_voice_link_shape(spec.path_shape)
+        else:
+            regex_value = spec.path_regex
         try:
             path_pattern = re.compile(regex_value)
         except re.error as xcp:
             raise ValueError(f"path_regex is invalid: {xcp}") from xcp
-        self._validate_voice_link_template(template_value, path_pattern)
-        return VoiceLinkRule(
-            host=host_key,
-            path_regex=regex_value,
-            path_pattern=path_pattern,
-            template=template_value,
-        )
+        self._validate_voice_link_template(spec.template, path_pattern)
+        return VoiceLinkRule(spec=spec, compiled_path_regex=regex_value, path_pattern=path_pattern)
+
+    @staticmethod
+    def _default_voice_link_rule_template(path_pattern: re.Pattern[str]) -> str:
+        group_names = tuple(path_pattern.groupindex)
+        if "title" in path_pattern.groupindex:
+            return "link {host} {title_norm}"
+        if group_names:
+            return f"link {{host}} {{{group_names[0]}_norm}}"
+        return "link {host}"
 
     @staticmethod
     def _normalise_voice_link_label(label: str) -> str:
@@ -2057,6 +2318,48 @@ class VoiceTTSCoreMixin:
         value = path_regex.strip()
         if not value:
             raise ValueError("path_regex must not be empty")
+        return value
+
+    @staticmethod
+    def _normalise_voice_link_mode(mode: VoiceLinkRuleMode | str) -> VoiceLinkRuleMode:
+        if isinstance(mode, VoiceLinkRuleMode):
+            return mode
+        value = mode.strip().lower()
+        aliases = {
+            "s": VoiceLinkRuleMode.SIMPLE,
+            "simple": VoiceLinkRuleMode.SIMPLE,
+            "r": VoiceLinkRuleMode.REGEX,
+            "regex": VoiceLinkRuleMode.REGEX,
+        }
+        if value in aliases:
+            return aliases[value]
+        raise ValueError("Mode must be `simple` or `regex`.")
+
+    @staticmethod
+    def _normalise_voice_link_example_url(example_url: str | None) -> str | None:
+        if example_url is None:
+            return None
+        value = example_url.strip()
+        if not value:
+            return None
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+        if parsed.hostname is None:
+            raise ValueError("Example URL must look like `https://example.com/path`.")
+        if parsed.path in ("", "/"):
+            raise ValueError("Example URL must include a path.")
+        return value
+
+    @staticmethod
+    def _normalise_voice_link_shape(path_shape: str) -> str:
+        value = path_shape.strip()
+        if not value:
+            raise ValueError("path_shape must not be empty")
+        if any(char.isspace() for char in value):
+            raise ValueError("path_shape must not contain whitespace")
+        if not value.startswith("/"):
+            raise ValueError("path_shape must start with `/`")
+        if value != "/" and value.endswith("/"):
+            value = value.rstrip("/")
         return value
 
     @staticmethod
@@ -2088,6 +2391,133 @@ class VoiceTTSCoreMixin:
         if index > len(self._voice_link_rules.rules):
             raise ValueError(f"index must be between 1 and {len(self._voice_link_rules.rules)}")
         return index
+
+    @staticmethod
+    def _voice_link_host_candidates(hostname: str) -> tuple[str, ...]:
+        normalised_host = hostname.lower()
+        if normalised_host.startswith("www."):
+            return (normalised_host, normalised_host.removeprefix("www."))
+        return (normalised_host,)
+
+    @classmethod
+    def _render_link_rule_template(cls, template: str, hostname: str, match: re.Match[str]) -> str | None:
+        values: dict[str, str] = {"host": cls._spoken_link_host(hostname)}
+        for key, value in match.groupdict().items():
+            decoded = unquote(value).strip() if value is not None else ""
+            normalised = cls._normalise_link_template_value(decoded)
+            values[key] = decoded
+            values[f"{key}_norm"] = normalised
+            values[f"{key}_words"] = normalised
+
+        try:
+            rendered = template.format_map(values)
+        except KeyError, ValueError:
+            return None
+        return re.sub(r"\s+", " ", rendered).strip() or None
+
+    @staticmethod
+    def _normalise_link_template_value(value: str) -> str:
+        cleaned = value.strip().strip("/")
+        cleaned = re.sub(r"[_\-]+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned.strip()
+
+    @classmethod
+    def _spoken_link_host(cls, hostname: str) -> str:
+        normalised_host = hostname.lower()
+        if normalised_host.startswith("www."):
+            normalised_host = normalised_host.removeprefix("www.")
+        aliases = getattr(cls, "_SPOKEN_LINK_HOST_ALIASES", {})
+        alias = aliases.get(normalised_host)
+        if alias is not None:
+            return alias
+        if normalised_host.endswith(".com"):
+            root = normalised_host[: -len(".com")]
+            if "." not in root:
+                return root
+        return normalised_host
+
+    @staticmethod
+    def _host_from_voice_link_example_url(example_url: str | None) -> str | None:
+        if example_url is None:
+            return None
+        parsed = urlparse(example_url if "://" in example_url else f"https://{example_url}")
+        return parsed.hostname.lower() if parsed.hostname is not None else None
+
+    @staticmethod
+    def _derive_voice_link_shape_from_example_url(example_url: str | None) -> str:
+        if example_url is None:
+            raise ValueError("Path pattern must not be empty.")
+        parsed = urlparse(example_url if "://" in example_url else f"https://{example_url}")
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        if not segments:
+            raise ValueError("Example URL must include a path to derive a simple rule.")
+
+        derived_segments: list[str] = []
+        used_names: set[str] = set()
+        id_count = 0
+        for index, segment in enumerate(segments):
+            decoded = unquote(segment)
+            if re.fullmatch(r"\d+", decoded):
+                id_count += 1
+                name = "id" if id_count == 1 else f"id{id_count}"
+                used_names.add(name)
+                derived_segments.append(f"{{{name}}}")
+                continue
+            if index == len(segments) - 1:
+                suffix = 1
+                name = "title"
+                while name in used_names:
+                    suffix += 1
+                    name = f"title{suffix}"
+                used_names.add(name)
+                derived_segments.append(f"{{{name}}}")
+                continue
+            derived_segments.append(segment)
+        return "/" + "/".join(derived_segments)
+
+    @staticmethod
+    def _compile_voice_link_shape(path_shape: str) -> str:
+        value = VoiceTTSCoreMixin._normalise_voice_link_shape(path_shape)
+        if value == "/":
+            return r"^/$"
+
+        placeholder_re = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+        parts: list[str] = ["^"]
+        used_names: set[str] = set()
+        cursor = 0
+        for match in placeholder_re.finditer(value):
+            literal = value[cursor : match.start()]
+            if "{" in literal or "}" in literal:
+                raise ValueError("path_shape contains invalid braces")
+            parts.append(re.escape(literal))
+            name = match.group(1)
+            if name in used_names:
+                raise ValueError(f"path_shape capture `{name}` is duplicated")
+            used_names.add(name)
+            parts.append(rf"(?P<{name}>[^/?#]+)")
+            cursor = match.end()
+        tail = value[cursor:]
+        if "{" in tail or "}" in tail:
+            raise ValueError("path_shape contains invalid braces")
+        parts.append(re.escape(tail))
+        parts.append(r"/?$")
+        return "".join(parts)
+
+    @staticmethod
+    def _serialise_voice_link_rule(rule: VoiceLinkRule) -> dict[str, str]:
+        payload: dict[str, str] = {
+            "host": rule.host,
+            "template": rule.template,
+            "mode": rule.mode.value,
+        }
+        if isinstance(rule.spec, VoiceLinkSimpleRuleSpec):
+            payload["path_shape"] = rule.spec.path_shape
+        else:
+            payload["path_regex"] = rule.spec.path_regex
+        if rule.example_url:
+            payload["example_url"] = rule.example_url
+        return payload
 
     @staticmethod
     def _validate_voice_link_template(template: str, path_pattern: re.Pattern[str]) -> None:
@@ -2243,7 +2673,7 @@ class VoiceTTSCoreMixin:
             raise RuntimeError("Model add/remove commands are only available for Piper TTS.")
 
         repo_ref = self._hf_parse_repo_url(url)
-        log.info(
+        tts_log.info(
             f"TTS HF scan start repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
             f"direct_file={repo_ref.onnx_file!r}"
         )
@@ -2256,14 +2686,14 @@ class VoiceTTSCoreMixin:
                 repo_ref.onnx_file,
             )
             if not is_candidate:
-                log.info(
+                tts_log.info(
                     f"TTS HF scan rejected repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
                     f"file={repo_ref.onnx_file!r}"
                 )
                 raise LookupError(
                     "The `.onnx` file in that URL is not Piper-compatible (missing/invalid `.onnx.json` Piper config)."
                 )
-            log.info(
+            tts_log.info(
                 f"TTS HF scan accepted repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
                 f"file={repo_ref.onnx_file!r}"
             )
@@ -2271,7 +2701,7 @@ class VoiceTTSCoreMixin:
 
         files = await self._run_blocking_io(self._hf_repo_files, repo_ref.repo_id, repo_ref.revision)
         candidates = await self._run_blocking_io(self._hf_find_piper_candidates, repo_ref.repo_id, repo_ref.revision, files)
-        log.info(
+        tts_log.info(
             f"TTS HF scan complete repo={repo_ref.repo_id!r} revision={repo_ref.revision!r} "
             f"repo_files={len(files)} candidates={len(candidates)}"
         )

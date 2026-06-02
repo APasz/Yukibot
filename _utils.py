@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, overload
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from dateutil.relativedelta import relativedelta
@@ -28,7 +29,8 @@ class File_Cleaner(metaclass=config.Singleton):
         self.symfiles_to_clear: dict[Path, timedelta] = {}
 
     @staticmethod
-    def clear(paths: Path | set[Path], threshold: timedelta = timedelta(seconds=1)) -> set[Path]:
+    def clear(paths: Path | set[Path], threshold: timedelta | None = None) -> set[Path]:
+        threshold = threshold or timedelta(seconds=1)
         removed: set[Path] = set()
         now = datetime.now()
 
@@ -567,7 +569,7 @@ class Utilities:
     def linkify(target: Path) -> tuple[str, Path]:
         up_target = config.DIR_UPLOAD / target.name
         up_target = File_Utils.link(target, up_target, overwrite=None)
-        return (config.PUBLIC_UPLOADS_BASE_URL + target.name, up_target)
+        return (config.PUBLIC_UPLOADS_BASE_URL + quote(target.name), up_target)
 
     @staticmethod
     def is_awaitable(func: Callable[[], Any]) -> bool:

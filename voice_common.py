@@ -6,13 +6,95 @@ import inspect
 import io
 import logging
 import wave
-from typing import Awaitable, Callable, cast
+from collections.abc import Awaitable, Mapping
+from typing import Callable, Protocol, cast
 
 import hikari
 
 log = logging.getLogger(__name__)
 
-_PATCHES_APPLIED = False
+_patches_applied = False
+
+
+class _VoiceBotLike(Protocol):
+    def get_me(self) -> hikari.OwnUser | None: ...
+
+
+class _VoiceClientLike(Protocol):
+    _bot: _VoiceBotLike
+
+
+class _HikariWaveCacheLike(Protocol):
+    _client: _VoiceClientLike
+    _members: Mapping[hikari.Snowflake, hikari.Snowflake]
+
+    async def _Cache__member_join(
+        self,
+        member: hikari.Member,
+        state: hikari.VoiceState,
+        new_channel_id: hikari.Snowflake,
+    ) -> None: ...
+
+    async def _Cache__member_move(
+        self,
+        member: hikari.Member,
+        old_channel_id: hikari.Snowflake,
+        new_channel_id: hikari.Snowflake,
+    ) -> None: ...
+
+    async def _Cache__member_leave(
+        self,
+        member: hikari.Member,
+        old_channel_id: hikari.Snowflake,
+    ) -> None: ...
+
+    async def _Cache__member_update(
+        self,
+        member: hikari.Member,
+        state: hikari.VoiceState,
+        new_channel_id: hikari.Snowflake,
+    ) -> None: ...
+
+
+class _AsyncDisconnectable(Protocol):
+    async def disconnect(self) -> object: ...
+
+
+class _TaskManagerLike(Protocol):
+    def create(self, coro: Awaitable[None], /, *, name: str) -> asyncio.Task[None]: ...
+
+
+class _VoiceConnectionClientLike(Protocol):
+    _tasks: _TaskManagerLike
+
+
+class _VoiceGatewayLike(_AsyncDisconnectable, Protocol):
+    _task_listen: asyncio.Task[None] | None
+
+    async def connect(self, endpoint: str) -> object: ...
+
+
+class _VoiceConnectionLike(Protocol):
+    _lock: asyncio.Lock
+    _state: object
+    _ready: asyncio.Event
+    _client: _VoiceConnectionClientLike
+    _gateway: _VoiceGatewayLike | None
+    _endpoint: str
+    _report_task: asyncio.Task[None] | None
+    _server: _AsyncDisconnectable | None
+
+    def _VoiceConnection__loop_reports(self) -> Awaitable[None]: ...
+
+
+class _UdpTransportLike(Protocol):
+    def close(self) -> None: ...
+
+
+class _VoiceServerLike(Protocol):
+    _ip: str | None
+    _port: int | None
+    _udp: _UdpTransportLike | None
 
 
 class VoiceUdpDiscoveryTimeoutError(asyncio.TimeoutError):
@@ -24,14 +106,15 @@ class VoiceUdpDiscoveryTimeoutError(asyncio.TimeoutError):
 
 
 def apply_hikariwave_patches() -> None:
-    global _PATCHES_APPLIED
-    if _PATCHES_APPLIED:
+    global _patches_applied
+    if _patches_applied:
         return
 
     _patch_hikariwave_cache_state_update_bug()
+    _patch_hikariwave_connect_wait_hang()
     _patch_hikariwave_udp_discovery_timeout()
     _patch_hikariwave_player_idle_queue_race()
-    _PATCHES_APPLIED = True
+    _patches_applied = True
 
 
 def cached_user_voice_channel(
@@ -105,7 +188,7 @@ def _patch_hikariwave_cache_state_update_bug() -> None:
     if getattr(state_update, "__name__", "") == "_patched_state_update":
         return
 
-    async def _patched_state_update(self, event: hikari.VoiceStateUpdateEvent) -> None:
+    async def _patched_state_update(self: _HikariWaveCacheLike, event: hikari.VoiceStateUpdateEvent) -> None:
         state: hikari.VoiceState = event.state
         member: hikari.Member | None = state.member
 
@@ -129,6 +212,108 @@ def _patch_hikariwave_cache_state_update_bug() -> None:
     log.warning("Applied hikari-wave cache state-update workaround")
 
 
+async def _await_voice_connect_ready(
+    ready_event: asyncio.Event,
+    listener_task: asyncio.Task[None] | None,
+) -> None:
+    if ready_event.is_set():
+        return
+
+    if listener_task is None:
+        await ready_event.wait()
+        return
+
+    if listener_task.done():
+        listener_task.result()
+        if ready_event.is_set():
+            return
+        raise RuntimeError("Voice gateway listener exited before the connection became ready.")
+
+    ready_wait = asyncio.create_task(ready_event.wait(), name="voice-connect-ready")
+    try:
+        done, _ = await asyncio.wait({ready_wait, listener_task}, return_when=asyncio.FIRST_COMPLETED)
+        if ready_wait in done:
+            return
+
+        listener_task.result()
+        if ready_event.is_set():
+            return
+        raise RuntimeError("Voice gateway listener exited before the connection became ready.")
+    finally:
+        if not ready_wait.done():
+            ready_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ready_wait
+
+
+async def _cleanup_failed_voice_connect(connection: _VoiceConnectionLike) -> None:
+    server = connection._server
+    if server is not None:
+        with contextlib.suppress(Exception):
+            await server.disconnect()
+
+    gateway = connection._gateway
+    if gateway is not None:
+        with contextlib.suppress(Exception):
+            await gateway.disconnect()
+
+    report_task = connection._report_task
+    if report_task is None:
+        return
+
+    report_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await report_task
+    connection._report_task = None
+
+
+def _patch_hikariwave_connect_wait_hang() -> None:
+    """Propagate gateway listener failures instead of hanging until outer voice connect timeouts."""
+    try:
+        from hikariwave.connection import ConnectionState, VoiceConnection
+        from hikariwave.internal.constants import Constants
+    except Exception as xcp:
+        log.warning(f"Voice workaround skipped: couldn't import hikariwave connection module: {xcp}")
+        return
+
+    connect_name = "_connect"
+    connect_obj = getattr(VoiceConnection, connect_name, None)
+    if not callable(connect_obj):
+        return
+    if getattr(connect_obj, "__name__", "") == "_patched_connect":
+        return
+
+    async def _patched_connect(self: _VoiceConnectionLike) -> None:
+        async with self._lock:
+            if self._state != ConnectionState.DISCONNECTED:
+                return
+
+            self._ready.clear()
+            self._state = ConnectionState.CONNECTING
+
+            self._report_task = self._client._tasks.create(
+                self._VoiceConnection__loop_reports(),
+                name="connection-reports",
+            )
+
+            try:
+                gateway = self._gateway
+                if gateway is None:
+                    raise RuntimeError("Voice connection gateway is not available.")
+                await gateway.connect(f"{self._endpoint}/?v={Constants.GATEWAY_VERSION}")
+                listener_task = gateway._task_listen
+                await _await_voice_connect_ready(self._ready, listener_task)
+                self._state = ConnectionState.CONNECTED
+            except Exception:
+                self._state = ConnectionState.DISCONNECTED
+                await _cleanup_failed_voice_connect(self)
+                logging.exception("Exception occurred while connecting to gateway")
+                raise
+
+    setattr(VoiceConnection, connect_name, _patched_connect)
+    log.warning("Applied hikari-wave connect wait workaround")
+
+
 def _patch_hikariwave_udp_discovery_timeout() -> None:
     """Retry UDP IP discovery to avoid transient 3s timeout failures during voice connect."""
     try:
@@ -143,9 +328,9 @@ def _patch_hikariwave_udp_discovery_timeout() -> None:
         return
     if getattr(discover_ip_obj, "__name__", "") == "_patched_discover_ip":
         return
-    discover_ip = cast(Callable[[object], Awaitable[tuple[str, int]]], discover_ip_obj)
+    discover_ip = cast(Callable[[_VoiceServerLike], Awaitable[tuple[str, int]]], discover_ip_obj)
 
-    async def _patched_discover_ip(self):
+    async def _patched_discover_ip(self: _VoiceServerLike) -> tuple[str, int]:
         last_timeout: asyncio.TimeoutError | None = None
         for attempt in range(1, 4):
             try:
@@ -156,11 +341,11 @@ def _patch_hikariwave_udp_discovery_timeout() -> None:
                     f"Voice UDP discovery timeout attempt={attempt}/3 "
                     f"ip={getattr(self, '_ip', None)!r} port={getattr(self, '_port', None)!r}"
                 )
-                udp = getattr(self, "_udp", None)
+                udp = self._udp
                 if udp:
                     with contextlib.suppress(Exception):
                         udp.close()
-                    setattr(self, "_udp", None)
+                    self._udp = None
                 if attempt < 3:
                     await asyncio.sleep(0.25 * attempt)
 

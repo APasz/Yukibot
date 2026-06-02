@@ -32,3 +32,9 @@ apps/sevendays/instances.json
 voice_users.json
 
 
+remote_nodes.json
+.cache/authority/bot_registry.json
+voice_target_labels.json
+resources/icon/*
+resources/minecraft_default_skins/*
+.cache/*

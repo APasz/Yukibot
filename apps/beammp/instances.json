@@ -4,6 +4,7 @@
         "directory": "{APPS}/beammp",
         "mods_dir": "{WD}/Resources/Client",
         "server_log_file": "{WD}/Server.log",
-        "port": 30814
+        "port": 30814,
+        "enabled": false
     }
 }

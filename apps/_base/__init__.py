@@ -4,11 +4,10 @@ from pathlib import Path
 
 import hikari
 
-import config
 from apps._app import App
 from apps._config import App_Config, Mod_Config
 from apps._mod import Mod
-from apps._settings import App_Settings, Setting
+from apps._settings import App_Settings, Setting, StringSettingSpec
 from config import Activity_Manager
 
 log = logging.getLogger(__name__)
@@ -24,7 +23,7 @@ class Mod_Base(Mod):
 
 class Base_Settings(App_Settings):
     def __init__(self, pointer: Path) -> None:
-        options = [Setting(str, "", "", [])]
+        options = [Setting(StringSettingSpec(allow_blank=True), "", "", [], default="")]
         super().__init__(pointer, options)
 
     def load(self):
@@ -41,7 +40,6 @@ class Base(App):
         self.manage_embed_color = 0x6B7280
         self.proc_name = ""
         self.proc_cmd = [""]
-        file_settings = cfg.directory.absolute() / "server.properties"
         self.cmd_start = cfg.cmd_start or [
             "",
         ]

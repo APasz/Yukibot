@@ -16,6 +16,16 @@ class UpdateRemotesTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no tracked Python files"):
             rupdater.parse_tracked_python_files("")
 
+    def test_planned_sync_files_appends_required_project_files(self) -> None:
+        files = rupdater.planned_sync_files([Path("main.py")])
+
+        self.assertEqual(files, [Path("main.py"), Path("pyproject.toml"), Path("uv.lock")])
+
+    def test_planned_sync_files_deduplicates_required_project_files(self) -> None:
+        files = rupdater.planned_sync_files([Path("main.py"), Path("pyproject.toml")])
+
+        self.assertEqual(files, [Path("main.py"), Path("pyproject.toml"), Path("uv.lock")])
+
     def test_parse_changed_python_files_returns_modified_and_untracked_paths(self) -> None:
         files = rupdater.parse_changed_python_files(" M main.py\n?? apps/_app.py\n")
 
@@ -24,6 +34,22 @@ class UpdateRemotesTests(unittest.TestCase):
     def test_parse_changed_python_files_ignores_deleted_entries(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no changed Python files"):
             rupdater.parse_changed_python_files(" D old_file.py\n")
+
+    def test_parse_changed_python_files_ignores_non_python_entries(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "no changed Python files"):
+            rupdater.parse_changed_python_files(" M remote_nodes.json\n?? resources/icon/root.jpg\n")
+
+    def test_parse_changed_python_plan_tracks_deleted_python_files(self) -> None:
+        plan = rupdater.parse_changed_python_plan(" D old_file.py\n M main.py\n")
+
+        self.assertEqual(plan.write_files, (Path("main.py"),))
+        self.assertEqual(plan.delete_files, (Path("old_file.py"),))
+
+    def test_parse_changed_python_plan_tracks_renamed_python_files(self) -> None:
+        plan = rupdater.parse_changed_python_plan("R  old_name.py -> main.py\n")
+
+        self.assertEqual(plan.write_files, (Path("main.py"),))
+        self.assertEqual(plan.delete_files, (Path("old_name.py"),))
 
     def test_validate_rejects_placeholder_values(self) -> None:
         target = rupdater.RemoteTarget(
@@ -71,6 +97,56 @@ class UpdateRemotesTests(unittest.TestCase):
         self.assertEqual(rupdater.REMOTE_MKDIR_PATH, "/bin/mkdir")
         self.assertEqual(rupdater.REMOTE_CAT_PATH, "/bin/cat")
         self.assertEqual(rupdater.REMOTE_SH_PATH, "/bin/sh")
+
+    def test_build_remote_path_setup_command_adds_common_user_bin_dirs(self) -> None:
+        command = rupdater.build_remote_path_setup_command()
+
+        self.assertEqual(
+            command,
+            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"; ',
+        )
+
+    def test_build_remote_shell_command_quotes_script_for_ssh(self) -> None:
+        command = rupdater.build_remote_shell_command(
+            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"; command -v uv'
+        )
+
+        self.assertEqual(
+            command,
+            "/bin/sh -c 'export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}\"; command -v uv'",
+        )
+
+    def test_build_remote_project_command_runs_from_target_root(self) -> None:
+        target = rupdater.RemoteTarget(
+            name=rupdater.TargetName.WAKUSEI,
+            host="wakusei.apasz.com",
+            user="bot",
+            password="secret",
+            remote_root=PurePosixPath("/srv/yukibot"),
+        )
+
+        command = rupdater.build_remote_project_command(target, rupdater.REMOTE_UV_SYNC_COMMAND)
+
+        self.assertEqual(
+            command,
+            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"; cd /srv/yukibot && uv sync',
+        )
+
+    def test_build_remote_command_path_check_command_fails_loudly_when_missing(self) -> None:
+        command = rupdater.build_remote_command_path_check_command(rupdater.REMOTE_TAR_PATH)
+
+        self.assertEqual(
+            command,
+            "[ -x /usr/bin/tar ] || { echo 'Required remote command is missing or not executable: /usr/bin/tar' >&2; exit 1; }",
+        )
+
+    def test_build_remote_program_check_command_fails_loudly_when_missing(self) -> None:
+        command = rupdater.build_remote_program_check_command("uv")
+
+        self.assertEqual(
+            command,
+            "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}\"; command -v uv >/dev/null 2>&1 || { echo 'Required program not found on remote PATH: uv' >&2; exit 1; }",
+        )
 
     def test_ssh_control_path_is_target_specific(self) -> None:
         wakusei_path = rupdater.ssh_control_path(

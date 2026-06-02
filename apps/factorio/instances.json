@@ -4,6 +4,10 @@
         "directory": "{APPS}/factorio",
         "mods_dir": "{WD}/mods",
         "server_log_file": "{WD}/factorio-current.log",
-        "port": 34197
+        "port": 34197,
+        "version": {
+            "main": "2.0.76"
+        },
+        "chat_channel": "1017934630030159934"
     }
 }

