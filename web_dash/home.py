@@ -672,15 +672,16 @@ class ModWebHomeMixin(ModWebServiceSupport):
         with target:
             ui.tooltip(text)
 
-    @staticmethod
-    def _app_card_link_classes(app: ModWebAppLink) -> str:
+    @classmethod
+    def _app_card_link_classes(cls, app: ModWebAppLink) -> str:
         classes = "mod-card mod-app-card mod-app-card-link w-full"
-        if app.transition_state is NodeAppTransitionState.STARTING:
-            classes = f"{classes} mod-app-card-starting"
-        elif app.transition_state is NodeAppTransitionState.STOPPING:
-            classes = f"{classes} mod-app-card-stopping"
-        elif app.running:
-            classes = f"{classes} mod-app-card-running"
+        runtime_state_class: str | None = cls._app_runtime_state_class(
+            running=app.running,
+            transition_state=app.transition_state,
+            class_prefix="mod-app-card",
+        )
+        if runtime_state_class is not None:
+            classes = f"{classes} {runtime_state_class}"
         if app.runtime_changed:
             classes: LiteralString = f"{classes} mod-app-card-live"
         if not app.enabled:

@@ -1446,6 +1446,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.save_write_level, Power_Level.sudo)
         self.assertTrue(entry.enabled)
         self.assertFalse(entry.supports_chat)
+        self.assertIsNone(entry.map_url)
 
     def test_node_app_entry_accepts_canonical_power_level_parser_inputs(self) -> None:
         entry = NodeAppEntry.from_mapping(
@@ -1465,8 +1466,30 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.save_write_level, Power_Level.sudo)
         self.assertTrue(entry.enabled)
 
+    def test_node_app_entry_round_trips_map_url(self) -> None:
+        map_url = "https://example.invalid/squaremap/?world=minecraft_overworld"
+        entry = NodeAppEntry.from_mapping(
+            {
+                "name": "minecraft_alpha",
+                "friendly": "Minecraft Alpha",
+                "node": "erin",
+                "supports_mods": True,
+                "supports_configs": True,
+                "map_url": map_url,
+            }
+        )
+
+        self.assertEqual(entry.map_url, map_url)
+        self.assertEqual(entry.to_mapping()["map_url"], map_url)
+
     def test_list_apps_includes_chat_support_flag(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def public_map_url(self) -> str | None:
+                return "https://example.invalid/squaremap/?world=minecraft_overworld"
+
         app = _build_app(Mock())
+        app.__class__ = _MappedApp
         app.am_receiver = _DummyReceiver()
         app.chat_relay_outbound = True
         service = NodeApiService()
@@ -1478,6 +1501,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(entries[0].enabled)
         self.assertTrue(entries[0].supports_chat)
         self.assertEqual(entries[0].scope, "minecraft")
+        self.assertEqual(entries[0].map_url, "https://example.invalid/squaremap/?world=minecraft_overworld")
 
     def test_list_apps_includes_player_counts_for_running_apps(self) -> None:
         app = _build_app(Mock())
@@ -1852,6 +1876,63 @@ class NodeApiTests(unittest.TestCase):
         manager.toggle.assert_called_once_with(app.name, False)
         self.assertEqual(result.action, NodeAppMutationAction.DISABLE)
 
+    def test_mutate_app_start_returns_before_launch_finishes(self) -> None:
+        app = _build_app(Mock())
+        app.cfg.enabled = True
+        launch_started = asyncio.Event()
+        allow_launch_finish = asyncio.Event()
+
+        async def _launch(_: object) -> None:
+            launch_started.set()
+            await allow_launch_finish.wait()
+
+        manager = Mock()
+        manager.get_current = None
+        manager.launch = AsyncMock(side_effect=_launch)
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        runtime_summary = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version=None,
+            transition_state=NodeAppTransitionState.STARTING,
+            player_count=None,
+            player_capacity=None,
+            relay_support=app.chat_relay_support,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+
+        async def _run_test() -> NodeAppMutationResult:
+            with patch.object(service, "build_app_runtime_summary", new=AsyncMock(return_value=runtime_summary)):
+                result = await service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.START,
+                    actor_user_id=42,
+                )
+            await asyncio.sleep(0)
+            self.assertTrue(launch_started.is_set())
+            self.assertFalse(allow_launch_finish.is_set())
+            self.assertEqual(result.message, "Start requested for Minecraft Alpha.")
+            self.assertEqual(result.app_stats, runtime_summary)
+            pending_task = service._app_mutation_tasks.get(app.name.casefold())
+            self.assertIsNotNone(pending_task)
+            allow_launch_finish.set()
+            if pending_task is not None:
+                await pending_task
+            return result
+
+        result = asyncio.run(_run_test())
+
+        manager.launch.assert_awaited_once_with(app)
+        self.assertEqual(result.action, NodeAppMutationAction.START)
+        self.assertNotIn(app.name.casefold(), service._app_mutation_tasks)
+
     def test_mutate_app_kill_uses_manager_kill(self) -> None:
         app = _build_app(Mock())
         app.cfg.enabled = True
@@ -1881,17 +1962,23 @@ class NodeApiTests(unittest.TestCase):
                 )
             ),
         ):
-            result = asyncio.run(
-                service.mutate_app(
+            async def _run_test() -> NodeAppMutationResult:
+                result = await service.mutate_app(
                     app=app,
                     action=NodeAppMutationAction.KILL,
                     actor_user_id=42,
                 )
-            )
+                pending_task = service._app_mutation_tasks.get(app.name.casefold())
+                self.assertIsNotNone(pending_task)
+                if pending_task is not None:
+                    await pending_task
+                return result
+
+            result = asyncio.run(_run_test())
 
         manager.kill.assert_awaited_once_with(app.name)
         self.assertEqual(result.action, NodeAppMutationAction.KILL)
-        self.assertEqual(result.message, "Killed Minecraft Alpha.")
+        self.assertEqual(result.message, "Kill requested for Minecraft Alpha.")
 
     def test_build_mod_list_uses_local_mod_manager(self) -> None:
         with TemporaryDirectory() as temp_dir:

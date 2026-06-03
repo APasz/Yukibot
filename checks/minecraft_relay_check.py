@@ -296,6 +296,15 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runtime, MinecraftRuntimeInfo("1.20.4", MinecraftLoader.VANILLA, None))
 
+    def test_detect_runtime_from_modlauncher_forge_log_line(self) -> None:
+        runtime = _runtime_info_from_log_line(
+            "[03Jun2026 18:08:45.352] [main/INFO] [cpw.mods.modlauncher.Launcher/MODLAUNCHER]: "
+            "ModLauncher running: args [--launchTarget, forgeserver, --fml.forgeVersion, 47.4.0, "
+            "--fml.mcVersion, 1.20.1, --fml.forgeGroup, net.minecraftforge, --fml.mcpVersion, 20230612.114412, nogui]"
+        )
+
+        self.assertEqual(runtime, MinecraftRuntimeInfo("1.20.1", MinecraftLoader.FORGE, "47.4.0"))
+
     def test_detect_runtime_from_quilt_log_line(self) -> None:
         runtime = _runtime_info_from_log_line(
             "[23:26:57] [main/INFO]: Loading Minecraft 1.20.1 with Quilt Loader 0.26.1-beta.1"
@@ -573,6 +582,24 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(version.main, "1.20.1")
         self.assertEqual(version.loader, "quilt")
         self.assertEqual(version.framework, "0.26.1-beta.1")
+
+    async def test_match_runtime_does_not_downgrade_forge_to_vanilla(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.cfg = _make_minecraft_cfg(version=AppVersion(main="1.20.1", framework="47.4.0", loader="forge"))
+        app.name = "minecraft_demo"
+        app.scope = "minecraft"
+        app._runtime = MinecraftRuntimeInfo("1.20.1", MinecraftLoader.FORGE, "47.4.0")
+        app._tail_machers = set()
+        app.persist_instance_config_overrides = Mock()  # type: ignore[method-assign]
+        matcher = Matchers(app)
+
+        await matcher.match_runtime("[00:00:00] [main/INFO]: Starting minecraft server version 1.20.1")
+
+        version = app.cfg.version
+        assert version is not None
+        self.assertEqual(version.main, "1.20.1")
+        self.assertEqual(version.loader, "forge")
+        self.assertEqual(version.framework, "47.4.0")
 
     async def test_match_chat_decodes_chatimage_cicode_with_documented_argument_order(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
@@ -1234,8 +1261,63 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(send_kwargs["content"], hikari.UNDEFINED)
         self.assertIn("embeds", send_kwargs)
         embed = send_kwargs["embeds"][0]
-        self.assertEqual(embed.title, "Minecraft Demo")
-        self.assertEqual(embed.description, "Advancement Alice: Stone Age")
+        self.assertEqual(embed.title, "Advancement")
+        self.assertEqual(embed.description, "Stone Age")
+        self.assertEqual(embed.color, 0x22C55E)
+
+    async def test_send_dc_preserves_explicit_system_embed_title_and_description(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay.bot = cast(Any, object())
+        setattr(relay, "names", _NamesStub())
+        relay._channel_objects = {}
+        relay.resolve_channel = AsyncMock()
+        relay._notify_resolution_failure = AsyncMock()
+
+        app = cast(Any, object.__new__(Minecraft))
+        app.name = "minecraft_demo"
+        app.friendly = "Minecraft Demo"
+        app.scope = "minecraft"
+        app.chat_channel = hikari.Snowflake(1)
+
+        send_mock = AsyncMock(return_value=SimpleNamespace(channel_id=hikari.Snowflake(1)))
+        channel = cast(
+            hikari.TextableChannel,
+            cast(
+                object,
+                SimpleNamespace(
+                    id=hikari.Snowflake(1),
+                    guild_id=None,
+                    send=send_mock,
+                ),
+            ),
+        )
+        relay._channel_objects[app.chat_channel] = channel
+
+        message = DC_Bound(
+            app,
+            "Started",
+            "System",
+            relay_embed=RelayEmbedPayload(
+                title="Minecraft Demo Started",
+                description="Join: `play.example.com:25565`\n[Squaremap](https://maps.example.com:8123/?world=minecraft_overworld)",
+                color=0x22C55E,
+            ),
+        )
+
+        await relay._send_dc(message)
+
+        await_args = send_mock.await_args
+        if await_args is None:
+            raise AssertionError("Expected relay send to be awaited.")
+        send_kwargs = await_args.kwargs
+        self.assertIs(send_kwargs["content"], hikari.UNDEFINED)
+        self.assertIn("embeds", send_kwargs)
+        embed = send_kwargs["embeds"][0]
+        self.assertEqual(embed.title, "Minecraft Demo Started")
+        self.assertEqual(
+            embed.description,
+            "Join: `play.example.com:25565`\n[Squaremap](https://maps.example.com:8123/?world=minecraft_overworld)",
+        )
         self.assertEqual(embed.color, 0x22C55E)
 
     async def test_send_dc_synthesises_join_embed_for_generic_notices(self) -> None:

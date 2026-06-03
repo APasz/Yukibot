@@ -58,13 +58,6 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
     def test_started_embed_includes_squaremap_link(self) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
-            config_dir = directory / "config" / "squaremap"
-            config_dir.mkdir(parents=True)
-            (config_dir / "config.yml").write_text(
-                "settings:\n  internal-webserver:\n    enabled: true\n    port: 8123\n",
-                encoding=config.STR_ENCODE,
-            )
-
             app = object.__new__(Minecraft)
             app.name = "minecraft_alpha"
             app.friendly = "Minecraft Alpha"
@@ -95,7 +88,7 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
 
         self.assertEqual(
             embed.description,
-            "Join: `play.example.com:25565`\n[Squaremap](https://maps.example.com:8123/?world=minecraft_overworld)",
+            "Join: `play.example.com:25565`\n[Squaremap](https://maps.example.com/squaremap/?world=minecraft_overworld)",
         )
 
 

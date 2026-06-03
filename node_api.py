@@ -238,6 +238,7 @@ class NodeAppEntry:
     config_write_level: Power_Level = _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL
     save_write_level: Power_Level = Power_Level.sudo
     color_hex: str | None = None
+    map_url: str | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeAppEntry:
@@ -262,6 +263,7 @@ class NodeAppEntry:
         config_write_level = _power_level(payload, "config_write_level", default=_DEFAULT_REMOTE_CONFIG_WRITE_LEVEL)
         save_write_level = _power_level(payload, "save_write_level", default=Power_Level.sudo)
         color_hex = payload.get("color_hex")
+        map_url = payload.get("map_url")
         if not isinstance(name, str) or not name:
             raise ValueError("Node app entry name is invalid.")
         if not isinstance(friendly, str) or not friendly:
@@ -292,6 +294,8 @@ class NodeAppEntry:
             raise ValueError("Node app entry supports_chat is invalid.")
         if color_hex is not None and not isinstance(color_hex, str):
             raise ValueError("Node app entry color_hex is invalid.")
+        if map_url is not None and not isinstance(map_url, str):
+            raise ValueError("Node app entry map_url is invalid.")
         return cls(
             name=name,
             friendly=friendly,
@@ -314,6 +318,7 @@ class NodeAppEntry:
             config_write_level=config_write_level,
             save_write_level=save_write_level,
             color_hex=color_hex,
+            map_url=map_url,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -339,6 +344,7 @@ class NodeAppEntry:
             "config_write_level": self.config_write_level.name,
             "save_write_level": self.save_write_level.name,
             "color_hex": self.color_hex,
+            "map_url": self.map_url,
         }
 
 
@@ -2050,6 +2056,7 @@ class NodeApiService:
         self._web_auth: ModWebAuthService | None = None
         self._app_footprint_cache: dict[str, NodeAppFootprintSnapshot] = {}
         self._app_transition_cache: dict[str, NodeAppTransitionSnapshot] = {}
+        self._app_mutation_tasks: dict[str, asyncio.Task[None]] = {}
         self._local_runtime_watchers: dict[str, _NodeLocalAppRuntimeWatchState] = {}
         self._local_runtime_watch_lock = threading.RLock()
         self._local_node_state_watcher = _NodeLocalNodeStateWatchState()
@@ -2082,12 +2089,16 @@ class NodeApiService:
 
     def begin_shutdown(self) -> None:
         self._shutting_down = True
+        app_mutation_tasks = tuple(self._app_mutation_tasks.values())
+        self._app_mutation_tasks.clear()
         with self._local_runtime_watch_lock:
             tasks = tuple(state.task for state in self._local_runtime_watchers.values() if state.task is not None)
             self._local_runtime_watchers.clear()
         with self._local_node_state_watch_lock:
             node_task = self._local_node_state_watcher.task
             self._local_node_state_watcher = _NodeLocalNodeStateWatchState()
+        for task in app_mutation_tasks:
+            task.cancel()
         for task in tasks:
             task.cancel()
         if node_task is not None:
@@ -2776,6 +2787,7 @@ class NodeApiService:
                     config_write_level=app.config_file_write_level,
                     save_write_level=app.save_file_write_level,
                     color_hex=self.app_color_hex(app.manage_embed_color),
+                    map_url=app.public_map_url,
                 )
             )
         return tuple(entries)
@@ -2785,6 +2797,12 @@ class NodeApiService:
         snapshot = self._app_transition_cache.get(key)
         if snapshot is None:
             return NodeAppTransitionState.NONE
+        task = self._app_mutation_tasks.get(key)
+        if task is not None and task.done():
+            self._app_mutation_tasks.pop(key, None)
+            task = None
+        if task is not None:
+            return snapshot.state
         if time.monotonic() - snapshot.requested_at_seconds >= _APP_TRANSITION_TTL_SECONDS:
             self._app_transition_cache.pop(key, None)
             return NodeAppTransitionState.NONE
@@ -2799,6 +2817,60 @@ class NodeApiService:
             state=state,
             requested_at_seconds=time.monotonic(),
         )
+
+    def _track_app_mutation_task(
+        self,
+        *,
+        app_name: str,
+        action: NodeAppMutationAction,
+        state: NodeAppTransitionState,
+        task: asyncio.Task[None],
+    ) -> None:
+        key = app_name.casefold()
+        self._remember_app_transition_state(app_name, state)
+        self._app_mutation_tasks[key] = task
+
+        def _finalise_task(completed_task: asyncio.Task[None]) -> None:
+            self._finish_app_mutation_task(app_name=app_name, action=action, task=completed_task)
+
+        task.add_done_callback(_finalise_task)
+
+    def _finish_app_mutation_task(
+        self,
+        *,
+        app_name: str,
+        action: NodeAppMutationAction,
+        task: asyncio.Task[None],
+    ) -> None:
+        key = app_name.casefold()
+        tracked_task = self._app_mutation_tasks.get(key)
+        if tracked_task is task:
+            self._app_mutation_tasks.pop(key, None)
+            self._remember_app_transition_state(app_name, NodeAppTransitionState.NONE)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            log.info("Node API app mutation task cancelled: node=%s app=%s action=%s", self.node_name, app_name, action)
+        except Exception:
+            log.exception("Node API app mutation failed: node=%s app=%s action=%s", self.node_name, app_name, action)
+
+    async def _run_app_mutation_task(
+        self,
+        *,
+        manager: App_Manager,
+        app: App,
+        action: NodeAppMutationAction,
+    ) -> None:
+        if action is NodeAppMutationAction.START:
+            await manager.launch(app)
+            return
+        if action is NodeAppMutationAction.STOP:
+            await manager.end(app.name)
+            return
+        if action is NodeAppMutationAction.KILL:
+            await manager.kill(app.name)
+            return
+        raise ValueError(f"Unsupported app runtime mutation action: {action}")
 
     @staticmethod
     def app_color_hex(color: int | None) -> str | None:
@@ -3686,29 +3758,29 @@ class NodeApiService:
             blocked_by = self._running_blocker_name(app)
             if blocked_by is not None:
                 raise _http_exception(409, f"Blocked by running app: {blocked_by}")
-            self._remember_app_transition_state(app.name, NodeAppTransitionState.STARTING)
-            try:
-                await manager.launch(app)
-            except Exception:
-                self._remember_app_transition_state(app.name, NodeAppTransitionState.NONE)
-                raise
-            message = f"Started {app.friendly}."
+            self._track_app_mutation_task(
+                app_name=app.name,
+                action=action,
+                state=NodeAppTransitionState.STARTING,
+                task=asyncio.create_task(self._run_app_mutation_task(manager=manager, app=app, action=action)),
+            )
+            message = f"Start requested for {app.friendly}."
         elif action is NodeAppMutationAction.STOP:
-            self._remember_app_transition_state(app.name, NodeAppTransitionState.STOPPING)
-            try:
-                await manager.end(app.name)
-            except Exception:
-                self._remember_app_transition_state(app.name, NodeAppTransitionState.NONE)
-                raise
-            message = f"Stopped {app.friendly}."
+            self._track_app_mutation_task(
+                app_name=app.name,
+                action=action,
+                state=NodeAppTransitionState.STOPPING,
+                task=asyncio.create_task(self._run_app_mutation_task(manager=manager, app=app, action=action)),
+            )
+            message = f"Stop requested for {app.friendly}."
         elif action is NodeAppMutationAction.KILL:
-            self._remember_app_transition_state(app.name, NodeAppTransitionState.STOPPING)
-            try:
-                await manager.kill(app.name)
-            except Exception:
-                self._remember_app_transition_state(app.name, NodeAppTransitionState.NONE)
-                raise
-            message = f"Killed {app.friendly}."
+            self._track_app_mutation_task(
+                app_name=app.name,
+                action=action,
+                state=NodeAppTransitionState.STOPPING,
+                task=asyncio.create_task(self._run_app_mutation_task(manager=manager, app=app, action=action)),
+            )
+            message = f"Kill requested for {app.friendly}."
         elif action is NodeAppMutationAction.ENABLE:
             manager.toggle(app.name, True)
             message = f"Enabled {app.friendly}."

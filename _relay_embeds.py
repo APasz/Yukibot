@@ -37,20 +37,16 @@ def build_app_lifecycle_embed(
     started: bool,
     uptime: timedelta | None = None,
 ) -> RelayEmbedPayload:
-    action = "Started" if started else "Stopped"
+    action = "Started" if started else "Ended"
     title = f"{app.friendly} {action}"
     description_lines: list[str] = []
     if started:
         if app.cfg.join_display_address is not None:
             description_lines.append(f"Join: `{app.cfg.join_display_address}`")
-        else:
-            description_lines.append("No join address configured.")
         description_lines.extend(app.lifecycle_relay_description_lines(started=True))
     else:
         if uptime is not None:
             description_lines.append(f"Uptime: `{format_uptime(uptime)}`")
-        else:
-            description_lines.append("Uptime unavailable.")
     return build_app_relay_embed(
         app,
         title=title,

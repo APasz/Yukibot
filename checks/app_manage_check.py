@@ -1037,7 +1037,7 @@ class AppManageTests(unittest.TestCase):
 
         embed = build_app_lifecycle_embed(app, started=False, uptime=timedelta(hours=1, minutes=2, seconds=3))
 
-        self.assertEqual(embed.title, "Dummy Stopped")
+        self.assertEqual(embed.title, "Dummy Ended")
         self.assertEqual(
             embed.description,
             "Uptime: `1h 2m 3s`",
@@ -2089,7 +2089,7 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.player, "System")
         self.assertEqual(relayed_message.content, "Stopped")
         assert relayed_message.relay_embed is not None
-        self.assertEqual(relayed_message.relay_embed.title, "Dummy Stopped")
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Ended")
         self.assertEqual(relayed_message.relay_embed.description, "Uptime: `1h 2m 3s`")
         self.assertIsNone(app.lifecycle_started_at)
 

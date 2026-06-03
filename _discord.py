@@ -2404,9 +2404,10 @@ class DC_Relay(metaclass=Singleton):
     ) -> RelayEmbedPayload | None:
         embed_title = getattr(app, "friendly", event.room_id) if app is not None else event.room_id
         if event.embed is not None:
+            explicit_title = event.embed.title.strip()
             return RelayEmbedPayload(
-                title=embed_title,
-                description=cls._discord_embed_description_for_explicit_embed(event),
+                title=explicit_title or embed_title,
+                description=event.embed.description.strip(),
                 color=event.embed.color,
             )
         if not event.is_template or app is None:
@@ -2441,26 +2442,6 @@ class DC_Relay(metaclass=Singleton):
         if generic_title is None:
             return None
         return f"{generic_title} {author_name}"
-
-    @staticmethod
-    def _discord_embed_description_for_explicit_embed(event: ChatEvent) -> str:
-        embed = event.embed
-        if embed is None:
-            raise ValueError("Explicit embed description requires an embed.")
-        title = embed.title.strip()
-        description = embed.description.strip()
-        if event.author.kind is ChatAuthorKind.SYSTEM:
-            if title and description:
-                return f"{title} {description}"
-            return title or description
-        author_name = event.author.display_name
-        if title and description:
-            return f"{title} {author_name}: {description}"
-        if description:
-            return f"{author_name}: {description}"
-        if title:
-            return f"{title} {author_name}"
-        return author_name
 
     @classmethod
     def _embedify_event(cls, event: ChatEvent, *, app: "App | None" = None) -> list[hikari.Embed]:

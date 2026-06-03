@@ -196,6 +196,36 @@ class ModWebTheme:
                         ) border-box !important;
                     position: relative;
                     overflow: hidden;
+                    isolation: isolate;
+                }}
+                .mod-card-hero::after {{
+                    content: "";
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    height: 3px;
+                    pointer-events: none;
+                    opacity: 0;
+                    background:
+                        linear-gradient(
+                            90deg,
+                            transparent 0%,
+                            transparent 24%,
+                            var(--mod-hero-border, var(--mod-border-hot)) 50%,
+                            transparent 76%,
+                            transparent 100%
+                        ) 0 0 / 220% 100% no-repeat;
+                }}
+                .mod-app-hero-starting::after {{
+                    opacity: 0.88;
+                    animation: mod-app-hero-border-starting 1.35s ease-in-out infinite;
+                    will-change: background-position, opacity, filter;
+                }}
+                .mod-app-hero-running::after {{
+                    opacity: 0.62;
+                    animation: mod-app-hero-border-running 2.4s ease-in-out infinite;
+                    will-change: background-position, opacity, filter;
                 }}
                 .mod-hero-shell {{
                     width: 100%;
@@ -556,6 +586,34 @@ class ModWebTheme:
                     100% {{
                         border-color: var(--mod-border) !important;
                         box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
+                    }}
+                }}
+                @keyframes mod-app-hero-border-starting {{
+                    0% {{
+                        background-position: 0% 0;
+                        filter: saturate(0.98) brightness(0.96);
+                    }}
+                    50% {{
+                        background-position: 100% 0;
+                        filter: saturate(1.08) brightness(1.22);
+                    }}
+                    100% {{
+                        background-position: 0% 0;
+                        filter: saturate(0.98) brightness(0.96);
+                    }}
+                }}
+                @keyframes mod-app-hero-border-running {{
+                    0% {{
+                        background-position: 0% 0;
+                        filter: saturate(0.98) brightness(0.98);
+                    }}
+                    50% {{
+                        background-position: 100% 0;
+                        filter: saturate(1.05) brightness(1.12);
+                    }}
+                    100% {{
+                        background-position: 0% 0;
+                        filter: saturate(0.98) brightness(0.98);
                     }}
                 }}
                 @keyframes mod-app-card-strip-live {{

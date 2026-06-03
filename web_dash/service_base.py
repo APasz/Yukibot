@@ -108,6 +108,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_app_page_hero_shell_classes"]) -> Callable[..., str]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_app_runtime_state_class"]) -> Callable[..., str | None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_app_start_blocked_local"]) -> Callable[..., bool]: ...
 
     @overload

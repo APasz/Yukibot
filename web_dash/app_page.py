@@ -20,6 +20,7 @@ from .runtime_imports import (
     App,
     Awaitable,
     Button,
+    Card,
     Callable,
     Checkbox,
     Html,
@@ -158,12 +159,16 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         last_system_summary: NodeSystemSummary | None = initial_system_summary
         with ui.column().classes(self._app_page_classes()):
             self._render_user_header(ui=ui, user=user)
-            with ui.card().classes(self._hero_card_classes()).style(self._hero_card_style(model.app_color_hex)):
+            hero_card: Card = ui.card().classes(self._app_hero_card_classes(model.app_stats)).style(
+                self._hero_card_style(model.app_color_hex)
+            )
+            with hero_card:
                 self._render_app_node_badge(ui=ui, node_name=model.node_name)
                 with ui.column().classes(self._app_page_hero_shell_classes()):
                     apply_app_hero_runtime: Callable[[NodeAppRuntimeSummary | None], None] = (
                         self._render_live_app_hero_runtime(
                             ui=ui,
+                            hero_card=hero_card,
                             title=model.app_friendly,
                             static_badges=self._app_page_hero_badges(model),
                             initial_app_stats=model.app_stats,
@@ -244,12 +249,16 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         last_system_summary: NodeSystemSummary | None = initial_system_summary
         with ui.column().classes(self._app_page_classes()):
             self._render_user_header(ui=ui, user=user)
-            with ui.card().classes(self._hero_card_classes()).style(self._hero_card_style(model.app_color_hex)):
+            hero_card: Card = ui.card().classes(self._app_hero_card_classes(model.app_stats)).style(
+                self._hero_card_style(model.app_color_hex)
+            )
+            with hero_card:
                 self._render_app_node_badge(ui=ui, node_name=model.node_name)
                 with ui.column().classes(self._app_page_hero_shell_classes()):
                     apply_app_hero_runtime: Callable[[NodeAppRuntimeSummary | None], None] = (
                         self._render_live_app_hero_runtime(
                             ui=ui,
+                            hero_card=hero_card,
                             title=model.app_friendly,
                             static_badges=self._app_page_hero_badges(model),
                             initial_app_stats=model.app_stats,
@@ -405,10 +414,24 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             text = f"{total_count} Mods"
         return _ModWebBadgeSpec(text=text, tone="black")
 
+    def _app_hero_card_classes(self, app_stats: NodeAppRuntimeSummary | None) -> str:
+        classes = self._hero_card_classes()
+        if app_stats is None:
+            return classes
+        runtime_state_class: str | None = self._app_runtime_state_class(
+            running=app_stats.running,
+            transition_state=app_stats.transition_state,
+            class_prefix="mod-app-hero",
+        )
+        if runtime_state_class is None:
+            return classes
+        return f"{classes} {runtime_state_class}"
+
     def _render_live_app_hero_runtime(
         self,
         *,
         ui: ModWebUi,
+        hero_card: Card,
         title: str,
         static_badges: tuple[_ModWebBadgeSpec, ...],
         initial_app_stats: NodeAppRuntimeSummary | None,
@@ -432,12 +455,17 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     for badge in static_badges:
                         self._badge(ui=ui, text=badge.text, tone=badge.tone)
 
+        def _apply_runtime(app_stats: NodeAppRuntimeSummary | None) -> None:
+            hero_card.classes(replace=self._app_hero_card_classes(app_stats))
+            _render_runtime.refresh(app_stats)
+
+        hero_card.classes(replace=self._app_hero_card_classes(initial_app_stats))
         _render_runtime(initial_app_stats)
         if refresh_async_app_stats is None:
-            return _render_runtime.refresh
+            return _apply_runtime
         refresh_async: AsyncRefresh = self._build_async_refreshable_updater(
             refresh_async_value=refresh_async_app_stats,
-            apply_value=_render_runtime.refresh,
+            apply_value=_apply_runtime,
             error_context="Mod web app hero runtime",
         )
         refresh_timer: Timer = ui.timer(
@@ -445,7 +473,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             lambda: asyncio.create_task(refresh_async()),
         )
         self._register_timer_cleanup(ui=ui, timer=refresh_timer)
-        return _render_runtime.refresh
+        return _apply_runtime
 
     def _page_section_badges(
         self,
@@ -535,10 +563,10 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 tone="black" if settings.settings else "grey",
             ),
         ]
-        if settings.settings:
-            badges.append(_ModWebBadgeSpec(text=f"{settings.editable_count} editable", tone="purple"))
         if settings.pending_change_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{settings.pending_change_count} drafts", tone="grey"))
+        if settings.settings:
+            badges.append(_ModWebBadgeSpec(text=f"{settings.editable_count} editable", tone="purple"))
         if settings.restricted_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{settings.restricted_count} restricted", tone="warn"))
         return tuple[_ModWebBadgeSpec, ...](badges)
@@ -585,16 +613,20 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         )
 
     @staticmethod
-    def _section_badge_columns(
+    def _section_badge_rows(
         badges: tuple[_ModWebBadgeSpec, ...],
         *,
-        rows_per_column: int = 2,
+        row_count: int = 2,
     ) -> tuple[tuple[_ModWebBadgeSpec, ...], ...]:
-        if rows_per_column < 1:
-            raise ValueError("Section badge columns require at least one row per column.")
+        if row_count < 1:
+            raise ValueError("Section badge rows require at least one row.")
+        badge_rows: list[list[_ModWebBadgeSpec]] = [[] for _ in range(row_count)]
+        for badge_index, badge in enumerate(badges):
+            badge_rows[badge_index % row_count].append(badge)
         return tuple(
-            tuple[_ModWebBadgeSpec, ...](badges[index : index + rows_per_column])
-            for index in range(0, len(badges), rows_per_column)
+            tuple[_ModWebBadgeSpec, ...](badge_row)
+            for badge_row in badge_rows
+            if badge_row
         )
 
     @classmethod
@@ -696,6 +728,14 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                                 with ui.column().classes("mod-section-chrome-badge-stack items-end gap-1"):
                                     with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
                                         with ui.column().classes("mod-section-chrome-badge-column items-end gap-1"):
+                                            if chat_surface.map_url is not None:
+                                                self._badge_link(
+                                                    ui=ui,
+                                                    text="Map",
+                                                    tone="purple",
+                                                    url=chat_surface.map_url,
+                                                    new_tab=True,
+                                                )
                                             (
                                                 chat_endpoint_count_label,
                                                 chat_endpoint_tooltip,
@@ -729,11 +769,10 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                             section_chrome_by_tab_id[tab.tab_id] = section_chrome
                             if section_badges:
                                 with ui.column().classes("mod-section-chrome-badge-stack items-end gap-1"):
-                                    with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
-                                        for badge_column in self._section_badge_columns(section_badges):
-                                            with ui.column().classes("mod-section-chrome-badge-column items-end gap-1"):
-                                                for badge in badge_column:
-                                                    self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                                    for badge_row in self._section_badge_rows(section_badges):
+                                        with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
+                                            for badge in badge_row:
+                                                self._badge(ui=ui, text=badge.text, tone=badge.tone)
                             if section_actions:
                                 with ui.row().classes("mod-section-chrome-actions items-center justify-end gap-2"):
                                     for action in section_actions:
@@ -1265,10 +1304,10 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         mod_label: Literal["mod", "mods"] = "mod" if summary.total_count == 1 else "mods"
         coremod_label: Literal["coremod", "coremods"] = "coremod" if summary.coremod_count == 1 else "coremods"
         badges: list[_ModWebBadgeSpec] = [_ModWebBadgeSpec(text=f"{summary.total_count} {mod_label}", tone="black")]
-        if summary.downloadable_count > 0:
-            badges.append(_ModWebBadgeSpec(text=f"{summary.downloadable_count} downloadable", tone="purple"))
         if summary.non_downloadable_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{summary.non_downloadable_count} blocked", tone="warn"))
+        if summary.downloadable_count > 0:
+            badges.append(_ModWebBadgeSpec(text=f"{summary.downloadable_count} downloadable", tone="purple"))
         if summary.coremod_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{summary.coremod_count} {coremod_label}", tone="red"))
         return tuple[_ModWebBadgeSpec, ...](badges)

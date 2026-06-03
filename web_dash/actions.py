@@ -46,6 +46,24 @@ if TYPE_CHECKING:
 
 
 class ModWebActionsMixin(ModWebServiceSupport):
+    def _remote_app_mutation(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        action: NodeAppMutationAction,
+        user: ModWebUser,
+    ) -> NodeAppMutationResult:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/mutate",
+            scopes=(required_app_mutation_scope(action),),
+            user=user,
+            method="POST",
+            json_payload={"action": action.value},
+        )
+        return NodeAppMutationResult.from_mapping(payload)
+
     async def _mutate_mod(
         self,
         *,
@@ -150,16 +168,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
             app: ManagedApp = self._resolve_app(model.app_name)
             return await self._node_api.mutate_app(app=app, action=action, actor_user_id=user.discord_id)
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        payload: dict[str, object] = self._remote_json(
-            node=node,
-            app_name=model.app_name,
-            path=f"/apps/{quote(model.app_name, safe='')}/mutate",
-            scopes=(required_app_mutation_scope(action),),
-            user=user,
-            method="POST",
-            json_payload={"action": action.value},
+        return await asyncio.to_thread(
+            self._remote_app_mutation,
+            node,
+            model.app_name,
+            action,
+            user,
         )
-        return NodeAppMutationResult.from_mapping(payload)
 
     @staticmethod
     def _app_start_stop_action(model: ModWebBasePageModel) -> NodeAppMutationAction | None:

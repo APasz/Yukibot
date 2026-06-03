@@ -144,6 +144,7 @@ class _ModWebChatSurfaceConfig:
     hero_badges: tuple[_ModWebBadgeSpec, ...] = ()
     refresh_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]] | None = None
     popout_url: str | None = None
+    map_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

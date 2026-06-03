@@ -1413,6 +1413,24 @@ class ModWebModelsMixin(ModWebServiceSupport):
         return "mod-card mod-card-hero w-full"
 
     @staticmethod
+    def _app_runtime_state_class(
+        *,
+        running: bool,
+        transition_state: NodeAppTransitionState,
+        class_prefix: str,
+    ) -> str | None:
+        state_suffix: Literal["starting", "running", "stopping"] | None = None
+        if transition_state is NodeAppTransitionState.STARTING:
+            state_suffix = "starting"
+        elif transition_state is NodeAppTransitionState.STOPPING:
+            state_suffix = "stopping"
+        elif running:
+            state_suffix = "running"
+        if state_suffix is None:
+            return None
+        return f"{class_prefix}-{state_suffix}"
+
+    @staticmethod
     def _hero_shell_classes() -> str:
         return "mod-hero-shell gap-2 px-2 pb-2 pt-2 md:px-5 md:pb-5 md:pt-4"
 

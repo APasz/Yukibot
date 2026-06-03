@@ -304,6 +304,10 @@ class App(Generic[ConfigT], ABC):
         return ()
 
     @property
+    def public_map_url(self) -> str | None:
+        return None
+
+    @property
     def has_mod_manager(self) -> Mod_Manager:
         if self.mods:
             return self.mods

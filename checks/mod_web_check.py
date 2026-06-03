@@ -852,10 +852,15 @@ class ModWebTests(unittest.TestCase):
     def test_badge_link_can_open_shift_click_target(self) -> None:
         class FakeLink:
             class_value: str | None = None
+            props_value: str | None = None
             js_handler: str | None = None
 
             def classes(self, value: str) -> "FakeLink":
                 self.class_value = value
+                return self
+
+            def props(self, value: str) -> "FakeLink":
+                self.props_value = value
                 return self
 
             def on(self, event: str, *, js_handler: str) -> "FakeLink":
@@ -891,6 +896,43 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("event.shiftKey", ui.link_object.js_handler)
         self.assertIn('window.open("/mod-web/chat/minecraft_alpha"', ui.link_object.js_handler)
         self.assertIn("event.stopPropagation();", ui.link_object.js_handler)
+
+    def test_badge_link_can_open_in_new_tab(self) -> None:
+        class FakeLink:
+            class_value: str | None = None
+            props_value: str | None = None
+
+            def classes(self, value: str) -> "FakeLink":
+                self.class_value = value
+                return self
+
+            def props(self, value: str) -> "FakeLink":
+                self.props_value = value
+                return self
+
+        class FakeUi:
+            label: str | None = None
+            url: str | None = None
+            link_object: FakeLink = FakeLink()
+
+            def link(self, label: str, url: str) -> FakeLink:
+                self.label = label
+                self.url = url
+                return self.link_object
+
+        ui: FakeUi = FakeUi()
+
+        ModWebService._badge_link(
+            ui=cast(ModWebUi, cast(object, ui)),
+            text="Map",
+            tone="purple",
+            url="https://example.invalid/squaremap/",
+            new_tab=True,
+        )
+
+        self.assertEqual(ui.label, "Map")
+        self.assertEqual(ui.url, "https://example.invalid/squaremap/")
+        self.assertEqual(ui.link_object.props_value, 'target="_blank" rel="noopener noreferrer"')
 
     def test_node_links_include_current_and_known_mod_web_nodes(self) -> None:
         remote_snapshot: BotMetadataSnapshot = config.BotMetadataSnapshot(
@@ -940,6 +982,7 @@ class ModWebTests(unittest.TestCase):
             friendly="Minecraft Alpha",
             cfg=SimpleNamespace(enabled=True),
             manage_embed_color=0x22C55E,
+            public_map_url=None,
             mods=None,
             supports_config_files=False,
             supports_save_files=False,
@@ -971,6 +1014,7 @@ class ModWebTests(unittest.TestCase):
             friendly="Minecraft Alpha",
             cfg=SimpleNamespace(enabled=True),
             manage_embed_color=0x22C55E,
+            public_map_url=None,
             mods=None,
             supports_config_files=False,
             supports_save_files=False,
@@ -1392,6 +1436,187 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("mod-app-card-stopping", classes)
         self.assertNotIn("mod-app-card-starting", classes)
         self.assertNotIn("mod-app-card-running", classes)
+
+    def test_app_hero_card_classes_use_starting_state_class(self) -> None:
+        classes = ModWebService()._app_hero_card_classes(
+            NodeAppRuntimeSummary(
+                running=False,
+                enabled=True,
+                version="1.21.1",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                transition_state=NodeAppTransitionState.STARTING,
+            )
+        )
+
+        self.assertIn("mod-app-hero-starting", classes)
+        self.assertNotIn("mod-app-hero-running", classes)
+        self.assertNotIn("mod-app-hero-stopping", classes)
+
+    def test_app_hero_card_classes_use_running_state_class_when_stable(self) -> None:
+        classes = ModWebService()._app_hero_card_classes(
+            NodeAppRuntimeSummary(
+                running=True,
+                enabled=True,
+                version="1.21.1",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                transition_state=NodeAppTransitionState.NONE,
+            )
+        )
+
+        self.assertIn("mod-app-hero-running", classes)
+        self.assertNotIn("mod-app-hero-starting", classes)
+        self.assertNotIn("mod-app-hero-stopping", classes)
+
+    def test_app_hero_card_classes_use_stopping_state_class(self) -> None:
+        classes = ModWebService()._app_hero_card_classes(
+            NodeAppRuntimeSummary(
+                running=True,
+                enabled=True,
+                version="1.21.1",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                transition_state=NodeAppTransitionState.STOPPING,
+            )
+        )
+
+        self.assertIn("mod-app-hero-stopping", classes)
+        self.assertNotIn("mod-app-hero-starting", classes)
+        self.assertNotIn("mod-app-hero-running", classes)
+
+    def test_render_live_app_hero_runtime_renders_initial_content_before_refresh_updates(self) -> None:
+        class FakeContainer:
+            def classes(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeLabel:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def classes(self, value: str) -> "FakeLabel":
+                del value
+                return self
+
+        class FakeRefreshable:
+            def __init__(self, func: object) -> None:
+                self._func = cast(Any, func)
+                self.call_count = 0
+                self.refresh_count = 0
+
+            def __call__(self, *args: object, **kwargs: object) -> None:
+                self.call_count += 1
+                self._func(*args, **kwargs)
+
+            def refresh(self, *args: object, **kwargs: object) -> None:
+                self.refresh_count += 1
+                self._func(*args, **kwargs)
+
+        class FakeCard:
+            replaced_classes: str | None = None
+
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeCard":
+                del value
+                self.replaced_classes = replace
+                return self
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.label_texts: list[str] = []
+                self.refreshable_object: FakeRefreshable | None = None
+
+            def refreshable(self, func: object) -> FakeRefreshable:
+                refreshable = FakeRefreshable(func)
+                self.refreshable_object = refreshable
+                return refreshable
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeLabel:
+                self.label_texts.append(text)
+                return FakeLabel(text)
+
+        service = ModWebService()
+        ui = FakeUi()
+        hero_card = FakeCard()
+        static_badges = (_ModWebBadgeSpec(text="4 Mods", tone="black"),)
+        initial_stats = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version="1.21.1",
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            transition_state=NodeAppTransitionState.NONE,
+        )
+        updated_stats = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version="1.21.1",
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            transition_state=NodeAppTransitionState.STARTING,
+        )
+
+        with patch.object(ModWebService, "_badge", return_value=cast(Any, object())) as render_badge:
+            apply_runtime = service._render_live_app_hero_runtime(
+                ui=cast(ModWebUi, cast(object, ui)),
+                hero_card=cast(Any, hero_card),
+                title="Minecraft Alpha",
+                static_badges=static_badges,
+                initial_app_stats=initial_stats,
+            )
+
+            self.assertEqual(hero_card.replaced_classes, "mod-card mod-card-hero w-full mod-app-hero-running")
+            self.assertEqual(ui.label_texts[:3], ["Minecraft Alpha", "Status", "Running"])
+            self.assertIsNotNone(ui.refreshable_object)
+            assert ui.refreshable_object is not None
+            self.assertEqual(ui.refreshable_object.call_count, 1)
+            self.assertEqual(ui.refreshable_object.refresh_count, 0)
+
+            apply_runtime(updated_stats)
+
+        self.assertEqual(hero_card.replaced_classes, "mod-card mod-card-hero w-full mod-app-hero-starting")
+        assert ui.refreshable_object is not None
+        self.assertEqual(ui.refreshable_object.call_count, 1)
+        self.assertEqual(ui.refreshable_object.refresh_count, 1)
+        self.assertEqual(render_badge.call_count, 8)
 
     def test_app_card_badges_omit_no_mods_placeholder(self) -> None:
         service = ModWebService()
@@ -1940,6 +2165,17 @@ class ModWebTests(unittest.TestCase):
         self.assertIn('<pre class="mod-chat-code-block"><code>**literal**</code></pre>', markup)
         self.assertNotIn("<strong>literal</strong>", markup)
 
+    def test_chat_markup_html_supports_discord_multiline_quote_blocks(self) -> None:
+        markup = ModWebService._chat_markup_html(">>> quoted\nstill quoted")
+
+        self.assertIn('<blockquote class="mod-chat-quote">quoted<br>still quoted</blockquote>', markup)
+
+    def test_chat_markup_html_supports_language_tagged_code_blocks(self) -> None:
+        markup = ModWebService._chat_markup_html("```py\n**literal**\n```")
+
+        self.assertIn('<pre class="mod-chat-code-block"><code>**literal**</code></pre>', markup)
+        self.assertNotIn("<strong>literal</strong>", markup)
+
     def test_chat_markup_html_applies_text_transform_after_code_placeholders(self) -> None:
         markup = ModWebService._chat_markup_html(
             "hi <@42> `keep <@43>`",
@@ -1979,6 +2215,59 @@ class ModWebTests(unittest.TestCase):
                 call(43, scope="minecraft", preferred_guild_id=99, default="43"),
             ],
         )
+
+    def test_chat_event_author_display_name_resolves_raw_discord_mentions(self) -> None:
+        service = ModWebService()
+        service.set_manager(
+            _manager_stub(
+                apps={
+                    "minecraft_alpha": SimpleNamespace(name="minecraft_alpha", scope="minecraft"),
+                }
+            )
+        )
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="<@42>", discord_user_id=42),
+            content="{player} joined {app}",
+            is_template=True,
+            source_guild_id=99,
+        )
+        relay_display_name = Mock(return_value="Alex")
+
+        with patch(
+            "web_dash.chat.config.Name_Cache",
+            return_value=SimpleNamespace(relay_display_name=relay_display_name),
+        ):
+            resolved = service._chat_event_author_display_name(event)
+
+        self.assertEqual(resolved, "Alex")
+        relay_display_name.assert_called_once_with(42, "42", scope="minecraft", preferred_guild_id=99)
+
+    def test_chat_reference_label_resolves_raw_discord_mentions(self) -> None:
+        service = ModWebService()
+        service.set_manager(
+            _manager_stub(
+                apps={
+                    "minecraft_alpha": SimpleNamespace(name="minecraft_alpha", scope="minecraft"),
+                }
+            )
+        )
+        relay_mention_name = Mock(return_value="Alex")
+
+        with patch(
+            "web_dash.chat.config.Name_Cache",
+            return_value=SimpleNamespace(relay_mention_name=relay_mention_name),
+        ):
+            label = service._chat_reference_label(
+                ChatReferenceKind.REPLY,
+                ChatMessageReference("<@42>", "Joined the game"),
+                room_id="minecraft_alpha",
+                preferred_guild_id=99,
+            )
+
+        self.assertEqual(label, "Replying to Alex")
+        relay_mention_name.assert_called_once_with(42, scope="minecraft", preferred_guild_id=99, default="42")
 
     def test_chat_event_badges_include_join_template_badge(self) -> None:
         event = ChatEvent(
@@ -2411,6 +2700,116 @@ class ModWebTests(unittest.TestCase):
 
         apply_runtime_stats.assert_called_once_with(runtime_stats)
 
+    def test_render_chat_page_card_includes_map_badge_link(self) -> None:
+        class FakeContainer:
+            class_value: str | None = None
+            style_value: str | None = None
+
+            def classes(self, value: str) -> "FakeContainer":
+                self.class_value = value
+                return self
+
+            def style(self, value: str) -> "FakeContainer":
+                self.style_value = value
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeLabel:
+            def __init__(self, text: str) -> None:
+                self.text = text
+                self.class_value: str | None = None
+
+            def classes(self, value: str) -> "FakeLabel":
+                self.class_value = value
+                return self
+
+        class FakeUi:
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeLabel:
+                return FakeLabel(text)
+
+        service = ModWebService()
+        runtime_stats = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version="1.20.1",
+            player_count=3,
+            player_capacity=12,
+            relay_support=ChatRelaySupport.BIDIRECTIONAL,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            transition_state=NodeAppTransitionState.NONE,
+        )
+        initial_snapshot = NodeChatRoomSnapshot(
+            room_id="minecraft_alpha",
+            endpoint_count=1,
+            events=(),
+            endpoint_summaries=(NodeChatEndpointSummary(label="Game: Minecraft Alpha"),),
+        )
+        chat_surface = _ModWebChatSurfaceConfig(
+            panel=_ModWebChatPanelConfig(
+                initial_snapshot=initial_snapshot,
+                refresh_snapshot=AsyncMock(return_value=initial_snapshot),
+                send_message=None,
+            ),
+            node_name="yuki",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            app_stats=runtime_stats,
+            hero_badges=(_ModWebBadgeSpec(text="Relay", tone="purple"),),
+            refresh_app_stats=AsyncMock(return_value=runtime_stats),
+            popout_url="/mod-web/chat/minecraft_alpha",
+            map_url="https://example.invalid/squaremap/?world=minecraft_overworld",
+        )
+        ui = FakeUi()
+
+        with (
+            patch.object(ModWebService, "_render_app_node_badge") as render_app_node_badge,
+            patch.object(
+                ModWebService,
+                "_render_chat_endpoint_badge",
+                return_value=(cast(Any, object()), cast(Any, object()), cast(Any, object())),
+            ) as render_chat_endpoint_badge,
+            patch.object(ModWebService, "_badge", return_value=cast(Any, object())) as render_badge,
+            patch.object(ModWebService, "_set_optional_badge_state") as set_optional_badge_state,
+            patch.object(ModWebService, "_badge_link") as render_badge_link,
+            patch.object(ModWebService, "_render_chat_panel") as render_chat_panel,
+        ):
+            service._render_chat_page_card(ui=cast(ModWebUi, cast(object, ui)), chat_surface=chat_surface)
+
+        render_app_node_badge.assert_called_once()
+        render_chat_endpoint_badge.assert_called_once()
+        self.assertGreaterEqual(render_badge.call_count, 3)
+        set_optional_badge_state.assert_called_once()
+        render_badge_link.assert_called_once_with(
+            ui=ui,
+            text="Map",
+            tone="purple",
+            url="https://example.invalid/squaremap/?world=minecraft_overworld",
+            new_tab=True,
+        )
+        render_chat_panel.assert_called_once()
+
     def test_render_flat_tab_header_omits_redundant_title_and_keeps_copy_only(self) -> None:
         class FakeContainer:
             def __init__(self) -> None:
@@ -2533,24 +2932,24 @@ class ModWebTests(unittest.TestCase):
             badges,
             (
                 _ModWebBadgeSpec(text="6 mods", tone="black"),
-                _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
                 _ModWebBadgeSpec(text="2 blocked", tone="warn"),
+                _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
                 _ModWebBadgeSpec(text="2 coremods", tone="red"),
             ),
         )
 
-    def test_section_badge_columns_stack_pairs_from_the_right(self) -> None:
+    def test_section_badge_rows_stagger_badges_from_the_right(self) -> None:
         badges = (
             _ModWebBadgeSpec(text="6 mods", tone="black"),
-            _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
             _ModWebBadgeSpec(text="2 blocked", tone="warn"),
+            _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
             _ModWebBadgeSpec(text="2 coremods", tone="red"),
         )
 
-        columns = ModWebService._section_badge_columns(badges)
+        rows = ModWebService._section_badge_rows(badges)
 
         self.assertEqual(
-            columns,
+            rows,
             (
                 (
                     _ModWebBadgeSpec(text="6 mods", tone="black"),
@@ -2559,6 +2958,87 @@ class ModWebTests(unittest.TestCase):
                 (
                     _ModWebBadgeSpec(text="2 blocked", tone="warn"),
                     _ModWebBadgeSpec(text="2 coremods", tone="red"),
+                ),
+            ),
+        )
+
+    def test_settings_section_badges_prioritise_editable_summary_on_the_top_row(self) -> None:
+        service = ModWebService()
+        model = ModWebOverviewPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=NodeSettingList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                editable_count=1,
+                restricted_count=1,
+                has_pending_changes=True,
+                pending_change_count=1,
+                required_save_level_name=Power_Level.user.name,
+                required_reload_level_name=Power_Level.user.name,
+                settings=(
+                    self._setting_entry(
+                        key="pvp",
+                        label="PVP",
+                        type_name="bool",
+                        value_text="true",
+                        default_text="true",
+                        description="Whether players can hurt each other.",
+                        can_edit=True,
+                    ),
+                    self._setting_entry(
+                        key="difficulty",
+                        label="Difficulty",
+                        type_name="str",
+                        value_text="hard",
+                        default_text="normal",
+                        description="Current world difficulty.",
+                        can_edit=False,
+                    ),
+                ),
+            ),
+            console_actions=None,
+        )
+
+        badges = service._settings_section_badges(model=model)
+
+        self.assertEqual(
+            badges,
+            (
+                _ModWebBadgeSpec(text="2 settings", tone="black"),
+                _ModWebBadgeSpec(text="1 drafts", tone="grey"),
+                _ModWebBadgeSpec(text="1 editable", tone="purple"),
+                _ModWebBadgeSpec(text="1 restricted", tone="warn"),
+            ),
+        )
+        self.assertEqual(
+            service._section_badge_rows(badges),
+            (
+                (
+                    _ModWebBadgeSpec(text="2 settings", tone="black"),
+                    _ModWebBadgeSpec(text="1 editable", tone="purple"),
+                ),
+                (
+                    _ModWebBadgeSpec(text="1 drafts", tone="grey"),
+                    _ModWebBadgeSpec(text="1 restricted", tone="warn"),
                 ),
             ),
         )
@@ -3206,14 +3686,25 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("loadedmetadata", script)
 
     def test_chat_reference_label_reflects_reference_kind(self) -> None:
+        service = ModWebService()
         reference = ChatMessageReference(author_display_name="Alex", content="hello")
 
         self.assertEqual(
-            ModWebService._chat_reference_label(ChatReferenceKind.REPLY, reference),
+            service._chat_reference_label(
+                ChatReferenceKind.REPLY,
+                reference,
+                room_id="minecraft_alpha",
+                preferred_guild_id=None,
+            ),
             "Replying to Alex",
         )
         self.assertEqual(
-            ModWebService._chat_reference_label(ChatReferenceKind.FORWARD, reference),
+            service._chat_reference_label(
+                ChatReferenceKind.FORWARD,
+                reference,
+                room_id="minecraft_alpha",
+                preferred_guild_id=None,
+            ),
             "Forwarded from Alex",
         )
 
@@ -4209,8 +4700,8 @@ class ModWebTests(unittest.TestCase):
             badges,
             (
                 _ModWebBadgeSpec(text="4 mods", tone="black"),
-                _ModWebBadgeSpec(text="2 downloadable", tone="purple"),
                 _ModWebBadgeSpec(text="2 blocked", tone="warn"),
+                _ModWebBadgeSpec(text="2 downloadable", tone="purple"),
                 _ModWebBadgeSpec(text="1 coremod", tone="red"),
             ),
         )
@@ -4558,6 +5049,140 @@ class ModWebTests(unittest.TestCase):
             )
         )
         self.assertEqual(service.rendered_tab_ids, ["map"])
+
+    def test_render_tabbed_page_sections_includes_chat_map_badge_link(self) -> None:
+        class FakeContainer:
+            class_value: str | None = None
+            added_style: str | None = None
+            removed_style: str | None = None
+
+            def classes(self, value: str) -> "FakeContainer":
+                self.class_value = value
+                return self
+
+            def style(self, *, add: str | None = None, remove: str | None = None) -> "FakeContainer":
+                self.added_style = add
+                self.removed_style = remove
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeUi:
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
+            def tabs(self, *, value: str, on_change: object) -> FakeContainer:
+                del value, on_change
+                return FakeContainer()
+
+            def tab(self, tab_id: str, *, label: str) -> object:
+                del tab_id, label
+                return object()
+
+            def tab_panels(self, tabs: object, *, value: str, animated: bool) -> FakeContainer:
+                del tabs, value, animated
+                return FakeContainer()
+
+            def tab_panel(self, tab: object) -> FakeContainer:
+                del tab
+                return FakeContainer()
+
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        model = ModWebOverviewPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            supports_chat=True,
+            chat_url="/mod-web/chat/minecraft_alpha",
+        )
+        initial_snapshot = NodeChatRoomSnapshot(
+            room_id="minecraft_alpha",
+            endpoint_count=1,
+            events=(),
+            endpoint_summaries=(NodeChatEndpointSummary(label="Game: Minecraft Alpha"),),
+        )
+        chat_surface = _ModWebChatSurfaceConfig(
+            panel=_ModWebChatPanelConfig(
+                initial_snapshot=initial_snapshot,
+                refresh_snapshot=AsyncMock(return_value=initial_snapshot),
+                send_message=None,
+            ),
+            node_name="yuki",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            app_stats=None,
+            popout_url="/mod-web/chat/minecraft_alpha",
+            map_url="https://example.invalid/squaremap/?world=minecraft_overworld",
+        )
+        ui = FakeUi()
+        tabs = service._page_tabs(model)
+
+        with (
+            patch.object(
+                ModWebService,
+                "_render_chat_endpoint_badge",
+                return_value=(cast(Any, object()), cast(Any, object()), cast(Any, object())),
+            ) as render_chat_endpoint_badge,
+            patch.object(ModWebService, "_badge_link") as render_badge_link,
+            patch.object(ModWebService, "_action_link") as render_action_link,
+            patch.object(ModWebService, "_render_page_section", return_value=None) as render_page_section,
+        ):
+            result = service._render_tabbed_page_sections(
+                ui=cast(ModWebUi, cast(object, ui)),
+                model=model,
+                user=user,
+                current_url="/mod-web/apps/minecraft_alpha?tab=chat",
+                tabs=tabs,
+                chat_surface=chat_surface,
+            )
+
+        self.assertIsNone(result)
+        render_chat_endpoint_badge.assert_called_once()
+        render_badge_link.assert_called_once_with(
+            ui=ui,
+            text="Map",
+            tone="purple",
+            url="https://example.invalid/squaremap/?world=minecraft_overworld",
+            new_tab=True,
+        )
+        render_action_link.assert_called_once()
+        render_page_section.assert_called_once()
 
     def test_additional_app_tabs_stay_hidden_when_conditions_are_not_met(self) -> None:
         class HiddenTabService(ModWebService):

@@ -269,6 +269,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             hero_badges=(_ModWebBadgeSpec(text=app.chat_relay_support.display_value, tone="purple"),),
             refresh_app_stats=_refresh_app_stats if include_runtime_updates else None,
             popout_url=self.app_chat_path(app.name),
+            map_url=app.public_map_url,
         )
 
     async def _remote_chat_surface_config(
@@ -319,6 +320,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             hero_badges=hero_badges,
             refresh_app_stats=_refresh_app_stats if include_runtime_updates else None,
             popout_url=self.node_app_chat_path(node.node_name, resolved_app_entry.name),
+            map_url=resolved_app_entry.map_url,
         )
 
     def _remote_chat_snapshot(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeChatRoomSnapshot:
@@ -591,6 +593,14 @@ class ModWebChatMixin(ModWebServiceSupport):
                         with ui.row().classes(self._hero_badge_row_classes()):
                             for badge in chat_surface.hero_badges:
                                 self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                            if chat_surface.map_url is not None:
+                                self._badge_link(
+                                    ui=ui,
+                                    text="Map",
+                                    tone="purple",
+                                    url=chat_surface.map_url,
+                                    new_tab=True,
+                                )
                             (
                                 endpoint_count_label,
                                 endpoint_count_tooltip,
@@ -709,7 +719,12 @@ class ModWebChatMixin(ModWebServiceSupport):
                 return
             with ui.row().classes("mod-chat-reply-banner w-full items-start justify-between gap-3"):
                 with ui.column().classes("mod-chat-reply-copy min-w-0 gap-1"):
-                    ui.label(f"Replying to {reply_reference.author_display_name}").classes("mod-chat-reply-label")
+                    reply_author_name = self._chat_reference_author_display_name(
+                        reply_reference,
+                        room_id=chat_panel.initial_snapshot.room_id,
+                        preferred_guild_id=reply_reference_source_guild_id,
+                    )
+                    ui.label(f"Replying to {reply_author_name}").classes("mod-chat-reply-label")
                     self._render_chat_markup(
                         ui=ui,
                         text=reply_reference.content,
@@ -1329,7 +1344,9 @@ class ModWebChatMixin(ModWebServiceSupport):
                 with ui.row().classes("mod-chat-message-head w-full items-center justify-between gap-2 flex-wrap"):
                     with ui.row().classes("mod-chat-author-row items-center gap-2 min-w-0"):
                         self._render_chat_author_avatar(ui=ui, event=head_event)
-                        author_label = ui.label(head_event.author.display_name).classes("mod-chat-author break-all")
+                        author_label = ui.label(self._chat_event_author_display_name(head_event)).classes(
+                            "mod-chat-author break-all"
+                        )
                         author_label.style(f"color: {self._chat_author_color_hex(head_event)} !important;")
                     with ui.row().classes("mod-chat-head-meta items-center gap-2 flex-wrap justify-end ml-auto"):
                         with ui.row().classes("mod-chat-badge-row items-center gap-1 flex-wrap justify-end"):
@@ -1381,9 +1398,14 @@ class ModWebChatMixin(ModWebServiceSupport):
         reference = event.reference
         if reference is not None:
             with ui.column().classes("mod-chat-reference w-full"):
-                ui.label(self._chat_reference_label(event.reference_kind, reference)).classes(
-                    "mod-chat-reference-label"
-                )
+                ui.label(
+                    self._chat_reference_label(
+                        event.reference_kind,
+                        reference,
+                        room_id=event.room_id,
+                        preferred_guild_id=event.source_guild_id,
+                    )
+                ).classes("mod-chat-reference-label")
                 self._render_chat_markup(
                     ui=ui,
                     text=reference.content,
@@ -1436,11 +1458,22 @@ class ModWebChatMixin(ModWebServiceSupport):
                             url=attachment_url,
                         ).classes("mod-row-download mod-chat-asset")
 
-    @staticmethod
-    def _chat_reference_label(reference_kind: ChatReferenceKind, reference: ChatMessageReference) -> str:
+    def _chat_reference_label(
+        self,
+        reference_kind: ChatReferenceKind,
+        reference: ChatMessageReference,
+        *,
+        room_id: str,
+        preferred_guild_id: int | None,
+    ) -> str:
+        author_display_name = self._chat_reference_author_display_name(
+            reference,
+            room_id=room_id,
+            preferred_guild_id=preferred_guild_id,
+        )
         if reference_kind is ChatReferenceKind.FORWARD:
-            return f"Forwarded from {reference.author_display_name}"
-        return f"Replying to {reference.author_display_name}"
+            return f"Forwarded from {author_display_name}"
+        return f"Replying to {author_display_name}"
 
     def _render_chat_markup(
         self,
@@ -1485,6 +1518,35 @@ class ModWebChatMixin(ModWebServiceSupport):
         room_id: str,
         preferred_guild_id: int | None,
     ) -> str:
+        return self._resolve_chat_mentions(
+            text,
+            room_id=room_id,
+            preferred_guild_id=preferred_guild_id,
+            prefix="@",
+        )
+
+    def _resolve_chat_display_mentions(
+        self,
+        text: str,
+        *,
+        room_id: str,
+        preferred_guild_id: int | None,
+    ) -> str:
+        return self._resolve_chat_mentions(
+            text,
+            room_id=room_id,
+            preferred_guild_id=preferred_guild_id,
+            prefix="",
+        )
+
+    def _resolve_chat_mentions(
+        self,
+        text: str,
+        *,
+        room_id: str,
+        preferred_guild_id: int | None,
+        prefix: str,
+    ) -> str:
         if not text:
             return text
         scope = self._chat_room_scope(room_id)
@@ -1501,9 +1563,64 @@ class ModWebChatMixin(ModWebServiceSupport):
                 preferred_guild_id=preferred_guild_id,
                 default=str(user_id),
             )
-            return f"@{display_name}"
+            return f"{prefix}{display_name}"
 
         return _CHAT_MARKUP_DISCORD_MENTION_RE.sub(replace_mention, text)
+
+    def _chat_event_author_display_name(self, event: ChatEvent) -> str:
+        return self._chat_identity_display_name(
+            display_name=event.author.display_name,
+            room_id=event.room_id,
+            preferred_guild_id=event.source_guild_id,
+            discord_user_id=event.author.discord_user_id,
+        )
+
+    def _chat_reference_author_display_name(
+        self,
+        reference: ChatMessageReference,
+        *,
+        room_id: str,
+        preferred_guild_id: int | None,
+    ) -> str:
+        return self._chat_identity_display_name(
+            display_name=reference.author_display_name,
+            room_id=room_id,
+            preferred_guild_id=preferred_guild_id,
+        )
+
+    def _chat_identity_display_name(
+        self,
+        *,
+        display_name: str,
+        room_id: str,
+        preferred_guild_id: int | None,
+        discord_user_id: int | None = None,
+    ) -> str:
+        if not display_name:
+            return display_name
+        if discord_user_id is not None and self._is_raw_chat_discord_mention(display_name, discord_user_id):
+            scope = self._chat_room_scope(room_id)
+            return config.Name_Cache().relay_display_name(
+                discord_user_id,
+                str(discord_user_id),
+                scope=scope,
+                preferred_guild_id=preferred_guild_id,
+            )
+        return self._resolve_chat_display_mentions(
+            display_name,
+            room_id=room_id,
+            preferred_guild_id=preferred_guild_id,
+        )
+
+    @staticmethod
+    def _is_raw_chat_discord_mention(text: str, discord_user_id: int) -> bool:
+        match = _CHAT_MARKUP_DISCORD_MENTION_RE.fullmatch(text.strip())
+        if match is None:
+            return False
+        raw_user_id = match.group("discord_user_id") or match.group("raw_discord_user_id")
+        if raw_user_id is None:
+            return False
+        return int(raw_user_id) == discord_user_id
 
     @classmethod
     def _chat_markup_preserve_code(cls, text: str) -> tuple[str, dict[str, str]]:
@@ -1824,7 +1941,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         avatar_uri: str | None = self._chat_author_avatar_uri(event)
         if avatar_uri is None:
             return
-        avatar_alt: str = f"{event.author.display_name} avatar"
+        avatar_alt: str = f"{self._chat_event_author_display_name(event)} avatar"
         ui.html(
             (
                 "<img"

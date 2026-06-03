@@ -212,6 +212,10 @@ _VANILLA_LOG_RUNTIME_RE = re.compile(
     r"Starting minecraft server version (?P<mc>\S+)",
     re.IGNORECASE,
 )
+_MODLAUNCHER_ARGS_RUNTIME_RE = re.compile(
+    r"ModLauncher running: args \[(?P<body>.*)\]",
+    re.IGNORECASE,
+)
 _FABRIC_SERVER_JAR_RE = re.compile(
     r"fabric-server-mc\.(?P<mc>[^-]+)-loader\.(?P<loader>[^-]+)-launcher\.(?P<launcher>.+)\.jar",
     re.IGNORECASE,
@@ -233,11 +237,7 @@ _MINECRAFT_MOD_VERSION_RE_PATTERNS = (
 )
 _MINECRAFT_MOD_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
 _SQUAREMAP_MOD_BASE_NAME = "squaremap"
-_SQUAREMAP_CONFIG_RELATIVE_PATHS: tuple[Path, ...] = (
-    Path("squaremap") / "config.yml",
-    Path("config") / "squaremap" / "config.yml",
-    Path("plugins") / "squaremap" / "config.yml",
-)
+_SQUAREMAP_PUBLIC_PATH = "/squaremap/"
 _SQUAREMAP_WORLD_NAME = "minecraft_overworld"
 
 
@@ -308,7 +308,7 @@ def _overlay_runtime_info(
         return incoming
     return MinecraftRuntimeInfo(
         minecraft_version=incoming.minecraft_version or base.minecraft_version,
-        loader=incoming.loader or base.loader,
+        loader=_overlay_runtime_loader(base.loader, incoming.loader),
         loader_version=incoming.loader_version or base.loader_version,
     )
 
@@ -325,6 +325,18 @@ def _fill_runtime_info(
         loader=base.loader or fallback.loader,
         loader_version=base.loader_version or fallback.loader_version,
     )
+
+
+def _overlay_runtime_loader(
+    base: MinecraftLoader | None, incoming: MinecraftLoader | None
+) -> MinecraftLoader | None:
+    if incoming is None:
+        return base
+    if base is None:
+        return incoming
+    if incoming is MinecraftLoader.VANILLA and base is not MinecraftLoader.VANILLA:
+        return base
+    return incoming
 
 
 def _runtime_info_from_config(cfg: "Minecraft_Config") -> MinecraftRuntimeInfo | None:
@@ -375,6 +387,45 @@ def _parse_forge_like_runtime(pointer: Path, *, loader: MinecraftLoader) -> Mine
         minecraft_version=_normalise_minecraft_version(minecraft_version),
         loader=loader,
         loader_version=_normalise_optional_text(loader_version),
+    )
+    if runtime.minecraft_version is None and runtime.loader_version is None:
+        return None
+    return runtime
+
+
+def _runtime_info_from_modlauncher_args_line(line: str) -> MinecraftRuntimeInfo | None:
+    match = _MODLAUNCHER_ARGS_RUNTIME_RE.search(line)
+    if match is None:
+        return None
+    tokens = [token.strip() for token in match.group("body").split(",")]
+    values: dict[str, str] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith("--") or index + 1 >= len(tokens):
+            index += 1
+            continue
+        values[token] = tokens[index + 1]
+        index += 2
+    loader: MinecraftLoader | None = None
+    if values.get("--fml.forgeVersion") is not None or values.get("--launchTarget") == "forgeserver":
+        loader = MinecraftLoader.FORGE
+    elif (
+        values.get("--fml.neoforgeVersion") is not None
+        or values.get("--fml.neoForgeVersion") is not None
+        or values.get("--launchTarget") == "neoforgeserver"
+    ):
+        loader = MinecraftLoader.NEOFORGE
+    if loader is None:
+        return None
+    runtime = MinecraftRuntimeInfo(
+        minecraft_version=_normalise_minecraft_version(values.get("--fml.mcVersion")),
+        loader=loader,
+        loader_version=_normalise_optional_text(
+            values.get("--fml.forgeVersion")
+            or values.get("--fml.neoforgeVersion")
+            or values.get("--fml.neoForgeVersion")
+        ),
     )
     if runtime.minecraft_version is None and runtime.loader_version is None:
         return None
@@ -485,6 +536,8 @@ def _candidate_runtime_logs(*, directory: Path, server_log: Path | None) -> tupl
 
 
 def _runtime_info_from_log_line(line: str) -> MinecraftRuntimeInfo | None:
+    if runtime := _runtime_info_from_modlauncher_args_line(line):
+        return runtime
     if match := _FORGE_LOG_RUNTIME_RE.search(line):
         return MinecraftRuntimeInfo(
             minecraft_version=_normalise_minecraft_version(match.group("mc")),
@@ -895,51 +948,11 @@ def _is_squaremap_mod_name(name: str) -> bool:
     return _detect_minecraft_mod_base_name(name).casefold() == _SQUAREMAP_MOD_BASE_NAME
 
 
-def _parse_squaremap_port_from_config(pointer: Path) -> int | None:
-    key_stack: list[tuple[int, str]] = []
-    for raw_line in pointer.read_text(config.STR_ENCODE, errors="ignore").splitlines():
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        match = re.match(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+):(?:\s*(?P<value>[^#]+?)\s*)?$", raw_line)
-        if match is None:
-            continue
-
-        indent: int = len(match.group("indent"))
-        key: str = match.group("key")
-        value: str | None = match.group("value")
-        while key_stack and indent <= key_stack[-1][0]:
-            key_stack.pop()
-        key_stack.append((indent, key))
-
-        if key != "port" or value is None:
-            continue
-        parent_path: tuple[str, ...] = tuple(path_key for _, path_key in key_stack[:-1])
-        if parent_path not in {("internal-webserver",), ("settings", "internal-webserver")}:
-            continue
-
-        port_text = value.strip().strip("'\"")
-        if not port_text.isdecimal():
-            raise ValueError(f"Invalid squaremap port {port_text!r} in {pointer}")
-        port = int(port_text)
-        if port <= 0 or port > 65535:
-            raise ValueError(f"Squaremap port out of range in {pointer}: {port}")
-        return port
-    return None
-
-
-def _build_squaremap_public_url(*, public_base_url: str, port: int, world: str) -> str:
+def _build_squaremap_public_url(*, public_base_url: str, world: str) -> str:
     parsed = urlsplit(public_base_url)
     if not parsed.scheme or parsed.hostname is None:
         raise ValueError("PUBLIC_BASE_URL must include a scheme and host.")
-    auth = ""
-    if parsed.username is not None:
-        auth = parsed.username
-        if parsed.password is not None:
-            auth += f":{parsed.password}"
-        auth += "@"
-    netloc = f"{auth}{parsed.hostname}:{port}"
-    return urlunsplit((parsed.scheme, netloc, "/", urlencode({"world": world}), ""))
+    return urlunsplit((parsed.scheme, parsed.netloc, _SQUAREMAP_PUBLIC_PATH, urlencode({"world": world}), ""))
 
 
 class Mod_MC(Mod):
@@ -1525,26 +1538,19 @@ class Minecraft(App[Minecraft_Config]):
             return ()
         return (f"[Squaremap]({squaremap_url})",)
 
+    @property
+    def public_map_url(self) -> str | None:
+        return self._squaremap_public_url()
+
     def apply_relay_advancements_enabled(self, enabled: bool) -> None:
         self.cfg.relay_advancements = enabled
 
     def _squaremap_public_url(self) -> str | None:
         if not self._has_squaremap_mod():
             return None
-        config_path = self._squaremap_config_path()
-        if config_path is None:
-            return None
-        try:
-            port = _parse_squaremap_port_from_config(config_path)
-        except (OSError, ValueError) as xcp:
-            log.warning("Failed to read squaremap config for %s from %s: %s", self.name, config_path, xcp)
-            return None
-        if port is None:
-            return None
         try:
             return _build_squaremap_public_url(
                 public_base_url=config.PUBLIC_BASE_URL,
-                port=port,
                 world=_SQUAREMAP_WORLD_NAME,
             )
         except ValueError as xcp:
@@ -1555,13 +1561,6 @@ class Minecraft(App[Minecraft_Config]):
         if self.mods is None:
             return False
         return any(_is_squaremap_mod_name(mod.name) for mod in self.mods.list_mods())
-
-    def _squaremap_config_path(self) -> Path | None:
-        for relative_path in _SQUAREMAP_CONFIG_RELATIVE_PATHS:
-            candidate = self.directory / relative_path
-            if candidate.is_file():
-                return candidate
-        return None
 
     def _apply_runtime_snapshot(self, runtime: MinecraftRuntimeInfo | None, *, persist: bool) -> bool:
         current_runtime = getattr(self, "_runtime", None)

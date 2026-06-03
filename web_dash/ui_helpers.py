@@ -60,6 +60,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         text: str,
         tone: BadgeTone,
         url: str,
+        new_tab: bool = False,
         shift_url: str | None = None,
         stop_propagation: bool = False,
         extra_classes: str = "",
@@ -67,6 +68,8 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         badge = ui.link(text, url).classes(
             f"{mod_web_badge_class(tone)} mod-badge-link cursor-pointer {extra_classes}".strip()
         )
+        if new_tab:
+            badge.props('target="_blank" rel="noopener noreferrer"')
         if shift_url is not None:
             encoded_shift_url: str = json.dumps(shift_url)
             stop_propagation_js: str = "event.stopPropagation();" if stop_propagation else ""
