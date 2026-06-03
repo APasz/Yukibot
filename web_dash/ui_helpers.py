@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .runtime_imports import (
     BadgeTone,
     Label,
@@ -7,6 +9,7 @@ from .runtime_imports import (
     Request,
     apply_mod_web_theme,
     config,
+    json,
     mod_web_badge_class,
     parse_qsl,
     urlencode,
@@ -20,6 +23,9 @@ from .constants import (
 from .nicegui_protocols import ModWebUi
 
 from .service_base import ModWebServiceSupport
+
+if TYPE_CHECKING:
+    from nicegui.element import Element
 
 class ModWebUiHelpersMixin(ModWebServiceSupport):
     @staticmethod
@@ -45,6 +51,42 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
             badge.on("click", lambda _=None, target_url=url: ui.navigate.to(target_url))
         if tooltip_text is not None:
             self._attach_text_tooltip(ui=ui, target=badge, text=tooltip_text)
+        return badge
+
+    @staticmethod
+    def _badge_link(
+        *,
+        ui: ModWebUi,
+        text: str,
+        tone: BadgeTone,
+        url: str,
+        shift_url: str | None = None,
+        stop_propagation: bool = False,
+        extra_classes: str = "",
+    ) -> "Element":
+        badge = ui.link(text, url).classes(
+            f"{mod_web_badge_class(tone)} mod-badge-link cursor-pointer {extra_classes}".strip()
+        )
+        if shift_url is not None:
+            encoded_shift_url: str = json.dumps(shift_url)
+            stop_propagation_js: str = "event.stopPropagation();" if stop_propagation else ""
+            badge.on(
+                "click",
+                js_handler=(
+                    "(event) => {"
+                    "if (event.shiftKey) {"
+                    "event.preventDefault();"
+                    f"{stop_propagation_js}"
+                    f"const opened = window.open({encoded_shift_url}, '_blank', 'noopener,noreferrer');"
+                    "if (opened) { opened.opener = null; }"
+                    "return;"
+                    "}"
+                    f"{stop_propagation_js}"
+                    "}"
+                ),
+            )
+        elif stop_propagation:
+            badge.on("click", js_handler="(event) => event.stopPropagation()")
         return badge
 
     @staticmethod

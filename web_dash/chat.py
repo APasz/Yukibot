@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .runtime_imports import (
+    App,
     App_Manager,
     Awaitable,
     BadgeTone,
@@ -24,6 +25,7 @@ from .runtime_imports import (
     Label,
     Mapping,
     ModWebUser,
+    NodeAppEntry,
     NodeApiScope,
     NodeAppRuntimeSummary,
     NodeChatRoomSnapshot,
@@ -74,6 +76,7 @@ from .json_helpers import _json_object_from_text
 from .nicegui_protocols import ModWebUi, _value_as_text
 from .types import (
     ChatMediaPreviewKind,
+    ModWebBasePageModel,
     ModWebNodeLink,
     _ChatMediaPreview,
     _ModWebBadgeSpec,
@@ -81,6 +84,7 @@ from .types import (
     _ModWebChatEventGroup,
     _ModWebChatPanelConfig,
     _ModWebChatPanelSignal,
+    _ModWebChatSurfaceConfig,
 )
 
 from .service_base import ModWebServiceSupport
@@ -105,6 +109,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         session_id: str,
         user: ModWebUser,
         app_scope: str | None,
+        include_runtime_updates: bool = True,
     ) -> _ModWebChatPanelConfig:
         async def _refresh_snapshot() -> NodeChatRoomSnapshot:
             return self._local_chat_snapshot(room_id)
@@ -114,14 +119,17 @@ class ModWebChatMixin(ModWebServiceSupport):
                 room_id,
                 lambda _update: on_update(_ModWebChatPanelSignal.chat()),
             )
-            unsubscribe_runtime = self._node_api.subscribe_local_app_runtime(
-                room_id,
-                lambda event: (
-                    on_update(_ModWebChatPanelSignal.runtime(app_stats=event.app_stats))
-                    if (not event.is_initial and event.app_stats is not None)
-                    else None
-                ),
-            )
+            if include_runtime_updates:
+                unsubscribe_runtime = self._node_api.subscribe_local_app_runtime(
+                    room_id,
+                    lambda event: (
+                        on_update(_ModWebChatPanelSignal.runtime(app_stats=event.app_stats))
+                        if (not event.is_initial and event.app_stats is not None)
+                        else None
+                    ),
+                )
+            else:
+                unsubscribe_runtime = lambda: None
 
             def _unsubscribe() -> None:
                 ChatHub().unsubscribe(room_id, room_subscription_id)
@@ -161,6 +169,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         session_id: str,
         user: ModWebUser,
         app_scope: str | None,
+        include_runtime_updates: bool = True,
     ) -> _ModWebChatPanelConfig:
         async def _refresh_snapshot() -> NodeChatRoomSnapshot:
             return await asyncio.to_thread(self._remote_chat_snapshot, node, app_name, user)
@@ -193,12 +202,17 @@ class ModWebChatMixin(ModWebServiceSupport):
                     app_name=app_name,
                     user=user,
                     on_update=on_update,
+                    include_runtime_updates=include_runtime_updates,
                     on_stream_health_change=_set_stream_health,
                 )
             )
             fallback_task = asyncio.create_task(
                 self._chat_stream_fallback_loop(
-                    fallback_signal=_ModWebChatPanelSignal.both(),
+                    fallback_signal=(
+                        _ModWebChatPanelSignal.both()
+                        if include_runtime_updates
+                        else _ModWebChatPanelSignal.chat()
+                    ),
                     is_stream_healthy=lambda: stream_healthy,
                     on_update=on_update,
                     wakeup=fallback_wakeup,
@@ -220,6 +234,93 @@ class ModWebChatMixin(ModWebServiceSupport):
             subscribe_updates=_subscribe_updates,
         )
 
+    async def _local_chat_surface_config(
+        self,
+        *,
+        app: App,
+        request: Request,
+        user: ModWebUser,
+        app_stats: NodeAppRuntimeSummary | None = None,
+        include_runtime_updates: bool = True,
+    ) -> _ModWebChatSurfaceConfig:
+        if not app.supports_chat_relay:
+            raise ValueError(f"{app.friendly} does not expose a chat relay.")
+
+        session_id = self._web_chat_session_id(app_name=app.name, user=user, request=request)
+        initial_app_stats = app_stats
+        if initial_app_stats is None:
+            initial_app_stats = await self._node_api.build_live_app_runtime_summary(app)
+
+        async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
+            return await self._node_api.build_live_app_runtime_summary(app)
+
+        return _ModWebChatSurfaceConfig(
+            panel=self._local_chat_panel_config(
+                room_id=app.name,
+                session_id=session_id,
+                user=user,
+                app_scope=app.scope,
+                include_runtime_updates=include_runtime_updates,
+            ),
+            node_name=config.MOD_WEB_SERVER.node_name,
+            app_friendly=app.friendly,
+            app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
+            app_stats=initial_app_stats,
+            hero_badges=(_ModWebBadgeSpec(text=app.chat_relay_support.display_value, tone="purple"),),
+            refresh_app_stats=_refresh_app_stats if include_runtime_updates else None,
+            popout_url=self.app_chat_path(app.name),
+        )
+
+    async def _remote_chat_surface_config(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        request: Request,
+        user: ModWebUser,
+        app_entry: NodeAppEntry | None = None,
+        app_stats: NodeAppRuntimeSummary | None = None,
+        include_runtime_updates: bool = True,
+    ) -> _ModWebChatSurfaceConfig:
+        resolved_app_entry = (
+            app_entry
+            if app_entry is not None
+            else await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+        )
+        if not resolved_app_entry.supports_chat:
+            raise ValueError(f"{resolved_app_entry.friendly} does not expose a chat relay.")
+
+        session_id = self._web_chat_session_id(app_name=app_name, user=user, request=request)
+        panel = await self._remote_chat_panel_config(
+            node=node,
+            app_name=app_name,
+            session_id=session_id,
+            user=user,
+            app_scope=resolved_app_entry.scope,
+            include_runtime_updates=include_runtime_updates,
+        )
+        initial_app_stats = app_stats
+        if initial_app_stats is None:
+            initial_app_stats = await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
+
+        async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
+            return await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
+
+        hero_badges: tuple[_ModWebBadgeSpec, ...] = ()
+        if initial_app_stats is not None:
+            hero_badges = (_ModWebBadgeSpec(text=initial_app_stats.relay_support.display_value, tone="grey"),)
+
+        return _ModWebChatSurfaceConfig(
+            panel=panel,
+            node_name=node.node_name,
+            app_friendly=resolved_app_entry.friendly,
+            app_color_hex=resolved_app_entry.color_hex,
+            app_stats=initial_app_stats,
+            hero_badges=hero_badges,
+            refresh_app_stats=_refresh_app_stats if include_runtime_updates else None,
+            popout_url=self.node_app_chat_path(node.node_name, resolved_app_entry.name),
+        )
+
     def _remote_chat_snapshot(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeChatRoomSnapshot:
         payload = self._remote_json(
             node=node,
@@ -237,6 +338,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         app_name: str,
         user: ModWebUser,
         on_update: Callable[[_ModWebChatPanelSignal], None],
+        include_runtime_updates: bool = True,
         on_stream_health_change: Callable[[bool], None] | None = None,
     ) -> None:
         while True:
@@ -275,7 +377,12 @@ class ModWebChatMixin(ModWebServiceSupport):
                                         "Remote chat stream room id mismatch: "
                                         f"expected={app_name!r} got={event.room_id!r}"
                                     )
-                                on_update(self._remote_chat_stream_signal(event))
+                                signal = self._remote_chat_stream_signal(
+                                    event,
+                                    include_runtime_updates=include_runtime_updates,
+                                )
+                                if signal is not None:
+                                    on_update(signal)
                                 continue
                             if message.type in {
                                 aiohttp.WSMsgType.CLOSE,
@@ -321,20 +428,29 @@ class ModWebChatMixin(ModWebServiceSupport):
                 wakeup.clear()
 
     @staticmethod
-    def _remote_chat_stream_signal(event: NodeChatStreamEvent) -> _ModWebChatPanelSignal:
+    def _remote_chat_stream_signal(
+        event: NodeChatStreamEvent,
+        *,
+        include_runtime_updates: bool = True,
+    ) -> _ModWebChatPanelSignal | None:
         chat_changed = event.snapshot is not None or event.kind in {
             NodeChatStreamEventKind.INITIAL,
             NodeChatStreamEventKind.CHAT_CHANGED,
         }
-        runtime_changed = event.app_stats is not None or event.kind in {
-            NodeChatStreamEventKind.INITIAL,
-            NodeChatStreamEventKind.RUNTIME_CHANGED,
-        }
+        runtime_changed = include_runtime_updates and (
+            event.app_stats is not None
+            or event.kind in {
+                NodeChatStreamEventKind.INITIAL,
+                NodeChatStreamEventKind.RUNTIME_CHANGED,
+            }
+        )
+        if not chat_changed and not runtime_changed:
+            return None
         return _ModWebChatPanelSignal(
             chat_changed=chat_changed,
             runtime_changed=runtime_changed,
             snapshot=event.snapshot,
-            app_stats=event.app_stats,
+            app_stats=event.app_stats if include_runtime_updates else None,
         )
 
     @staticmethod
@@ -379,40 +495,20 @@ class ModWebChatMixin(ModWebServiceSupport):
             log.exception("Mod web chat page render failed: app=%s", app_name)
             self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
             return
-        if not app.supports_chat_relay:
-            self._render_error_page(
-                ui=ui,
-                title="Chat unavailable",
-                detail=f"{app.friendly} does not expose a chat relay.",
-                app_name=app_name,
-            )
+        try:
+            chat_surface = await self._local_chat_surface_config(app=app, request=request, user=user)
+        except ValueError as xcp:
+            self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
+            return
+        except Exception as xcp:
+            log.exception("Mod web chat page render failed: app=%s", app_name)
+            self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
             return
 
         self._apply_theme(ui=ui)
-        session_id = self._web_chat_session_id(app_name=app.name, user=user, request=request)
-        chat_panel = self._local_chat_panel_config(
-            room_id=app.name,
-            session_id=session_id,
-            user=user,
-            app_scope=app.scope,
-        )
-        app_stats = await self._node_api.build_live_app_runtime_summary(app)
-
-        async def refresh_app_stats() -> NodeAppRuntimeSummary | None:
-            return await self._node_api.build_live_app_runtime_summary(app)
-
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_user_header(ui=ui, user=user)
-            self._render_chat_page_card(
-                ui=ui,
-                chat_panel=chat_panel,
-                node_name=config.MOD_WEB_SERVER.node_name,
-                app_friendly=app.friendly,
-                app_stats=app_stats,
-                refresh_app_stats=refresh_app_stats,
-                color_hex=self._node_api.app_color_hex(app.manage_embed_color),
-                hero_badges=(_ModWebBadgeSpec(text=app.chat_relay_support.display_value, tone="purple"),),
-            )
+            self._render_chat_page_card(ui=ui, chat_surface=chat_surface)
 
     async def _render_remote_chat_page(self, *, ui: ModWebUi, node_name: str, app_name: str, request: Request) -> None:
         user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
@@ -420,24 +516,17 @@ class ModWebChatMixin(ModWebServiceSupport):
             return
         try:
             node = self._remote_node_link(node_name)
-            session_id = self._web_chat_session_id(app_name=app_name, user=user, request=request)
             app_entry = await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
-            if not app_entry.supports_chat:
-                self._render_error_page(
-                    ui=ui,
-                    title="Chat unavailable",
-                    detail=f"{app_entry.friendly} does not expose a chat relay.",
-                    app_name=app_name,
-                )
-                return
-            chat_panel = await self._remote_chat_panel_config(
+            chat_surface = await self._remote_chat_surface_config(
                 node=node,
                 app_name=app_name,
-                session_id=session_id,
+                request=request,
                 user=user,
-                app_scope=app_entry.scope,
+                app_entry=app_entry,
             )
-            app_stats = await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
+        except ValueError as xcp:
+            self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
+            return
         except Exception as xcp:
             log.exception("Remote mod web chat page render failed: node=%s app=%s", node_name, app_name)
             self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
@@ -445,52 +534,62 @@ class ModWebChatMixin(ModWebServiceSupport):
 
         self._apply_theme(ui=ui)
 
-        async def refresh_app_stats() -> NodeAppRuntimeSummary | None:
-            return await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
-
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_user_header(ui=ui, user=user)
-            self._render_chat_page_card(
+            self._render_chat_page_card(ui=ui, chat_surface=chat_surface)
+
+    def _render_chat_section(
+        self,
+        *,
+        ui: ModWebUi,
+        chat_surface: _ModWebChatSurfaceConfig,
+        endpoint_count_label: Label | None = None,
+        endpoint_count_tooltip: "Tooltip | None" = None,
+        endpoint_count_tooltip_content: Html | None = None,
+    ) -> Callable[[ModWebBasePageModel], None]:
+        with ui.column().classes("w-full min-h-0"):
+            apply_runtime_stats = self._render_chat_panel(
                 ui=ui,
-                chat_panel=chat_panel,
-                node_name=node.node_name,
-                app_friendly=app_entry.friendly,
-                app_stats=app_stats,
-                refresh_app_stats=refresh_app_stats,
-                color_hex=app_entry.color_hex,
-                hero_badges=(_ModWebBadgeSpec(text=app_stats.relay_support.display_value, tone="grey"),),
+                chat_panel=chat_surface.panel,
+                app_friendly=chat_surface.app_friendly,
+                app_stats=chat_surface.app_stats,
+                refresh_app_stats=None,
+                show_header=False,
+                endpoint_count_label=endpoint_count_label,
+                endpoint_count_tooltip=endpoint_count_tooltip,
+                endpoint_count_tooltip_content=endpoint_count_tooltip_content,
+                embedded=True,
             )
+
+        def apply_runtime_model(runtime_model: ModWebBasePageModel) -> None:
+            apply_runtime_stats(runtime_model.app_stats)
+
+        return apply_runtime_model
 
     def _render_chat_page_card(
         self,
         *,
         ui: ModWebUi,
-        chat_panel: _ModWebChatPanelConfig,
-        node_name: str,
-        app_friendly: str,
-        app_stats: NodeAppRuntimeSummary | None,
-        refresh_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]],
-        color_hex: str | None,
-        hero_badges: tuple[_ModWebBadgeSpec, ...],
+        chat_surface: _ModWebChatSurfaceConfig,
     ) -> None:
-        can_send = chat_panel.send_message is not None
+        can_send = chat_surface.panel.send_message is not None
         app_status_label, app_status_tone = self._chat_app_status_badge(
-            None if app_stats is None else app_stats.running
+            None if chat_surface.app_stats is None else chat_surface.app_stats.running
         )
-        player_count_badge = self._chat_player_count_badge(app_stats)
+        player_count_badge = self._chat_player_count_badge(chat_surface.app_stats)
         with (
             ui.card()
             .classes(f"{self._hero_card_classes()} mod-chat-shell-card")
-            .style(self._hero_card_style(color_hex))
+            .style(self._hero_card_style(chat_surface.app_color_hex))
         ):
-            self._render_app_node_badge(ui=ui, node_name=node_name)
+            self._render_app_node_badge(ui=ui, node_name=chat_surface.node_name)
             with ui.column().classes(f"{self._hero_shell_classes()} mod-chat-shell"):
                 with ui.row().classes("mod-chat-shell-header w-full items-center justify-between gap-3"):
                     with ui.column().classes("mod-chat-shell-header-main gap-1"):
-                        ui.label(f"{app_friendly}").classes(self._hero_title_classes())
+                        ui.label(f"{chat_surface.app_friendly}").classes(self._hero_title_classes())
                     with ui.column().classes(self._hero_badges_classes(wide=True)):
                         with ui.row().classes(self._hero_badge_row_classes()):
-                            for badge in hero_badges:
+                            for badge in chat_surface.hero_badges:
                                 self._badge(ui=ui, text=badge.text, tone=badge.tone)
                             (
                                 endpoint_count_label,
@@ -498,7 +597,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                                 endpoint_count_tooltip_content,
                             ) = self._render_chat_endpoint_badge(
                                 ui=ui,
-                                snapshot=chat_panel.initial_snapshot,
+                                snapshot=chat_surface.panel.initial_snapshot,
                             )
                             self._badge(ui=ui, text="Live", tone="purple" if can_send else "warn")
                             app_status_badge_label = self._badge(
@@ -517,10 +616,10 @@ class ModWebChatMixin(ModWebServiceSupport):
                             )
                 self._render_chat_panel(
                     ui=ui,
-                    chat_panel=chat_panel,
-                    app_friendly=app_friendly,
-                    app_stats=app_stats,
-                    refresh_app_stats=refresh_app_stats,
+                    chat_panel=chat_surface.panel,
+                    app_friendly=chat_surface.app_friendly,
+                    app_stats=chat_surface.app_stats,
+                    refresh_app_stats=chat_surface.refresh_app_stats,
                     show_header=False,
                     endpoint_count_label=endpoint_count_label,
                     endpoint_count_tooltip=endpoint_count_tooltip,
@@ -537,15 +636,17 @@ class ModWebChatMixin(ModWebServiceSupport):
         chat_panel: _ModWebChatPanelConfig,
         app_friendly: str,
         app_stats: NodeAppRuntimeSummary | None,
-        refresh_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]],
+        refresh_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]] | None,
         show_header: bool = True,
+        header_badges: tuple[_ModWebBadgeSpec, ...] = (),
         endpoint_count_label: Label | None = None,
         endpoint_count_tooltip: "Tooltip | None" = None,
         endpoint_count_tooltip_content: Html | None = None,
         app_status_badge_label: Label | None = None,
         player_count_badge_label: Label | None = None,
+        popout_url: str | None = None,
         embedded: bool = False,
-    ) -> None:
+    ) -> Callable[[NodeAppRuntimeSummary | None], None]:
         can_send = chat_panel.send_message is not None
         app_status_label, app_status_tone = self._chat_app_status_badge(
             None if app_stats is None else app_stats.running
@@ -573,6 +674,20 @@ class ModWebChatMixin(ModWebServiceSupport):
         runtime_payload_pending = False
         push_refresh_running = False
         self._ensure_chat_client_script(ui)
+
+        def apply_runtime_stats(next_app_stats: NodeAppRuntimeSummary | None) -> None:
+            nonlocal app_stats
+            app_stats = next_app_stats
+            if app_status_badge_label is not None:
+                latest_status_label, latest_status_tone = self._chat_app_status_badge(
+                    None if next_app_stats is None else next_app_stats.running
+                )
+                self._set_badge_state(app_status_badge_label, latest_status_label, latest_status_tone)
+            if player_count_badge_label is not None:
+                self._set_optional_badge_state(
+                    player_count_badge_label,
+                    self._chat_player_count_badge(next_app_stats),
+                )
 
         def clear_reply_target() -> None:
             nonlocal reply_reference, reply_reference_source_guild_id, reply_to_event_id
@@ -651,18 +766,8 @@ class ModWebChatMixin(ModWebServiceSupport):
                 finally:
                     refresh_in_flight = False
             if use_runtime_override:
-                app_stats = runtime_override
-                if app_status_badge_label is not None:
-                    latest_status_label, latest_status_tone = self._chat_app_status_badge(
-                        None if runtime_override is None else runtime_override.running
-                    )
-                    self._set_badge_state(app_status_badge_label, latest_status_label, latest_status_tone)
-                if player_count_badge_label is not None:
-                    self._set_optional_badge_state(
-                        player_count_badge_label,
-                        self._chat_player_count_badge(runtime_override),
-                    )
-            elif refresh_runtime and not runtime_refresh_in_flight:
+                apply_runtime_stats(runtime_override)
+            elif refresh_runtime and refresh_app_stats is not None and not runtime_refresh_in_flight:
                 runtime_refresh_in_flight = True
                 try:
                     latest_app_stats = await refresh_app_stats()
@@ -673,17 +778,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                         xcp,
                     )
                 else:
-                    app_stats = latest_app_stats
-                    if app_status_badge_label is not None:
-                        latest_status_label, latest_status_tone = self._chat_app_status_badge(
-                            None if latest_app_stats is None else latest_app_stats.running
-                        )
-                        self._set_badge_state(app_status_badge_label, latest_status_label, latest_status_tone)
-                    if player_count_badge_label is not None:
-                        self._set_optional_badge_state(
-                            player_count_badge_label,
-                            self._chat_player_count_badge(latest_app_stats),
-                        )
+                    apply_runtime_stats(latest_app_stats)
                 finally:
                     runtime_refresh_in_flight = False
             if snapshot is None:
@@ -836,6 +931,8 @@ class ModWebChatMixin(ModWebServiceSupport):
                         with ui.column().classes("mod-chat-header-main min-w-0 gap-1"):
                             ui.label(f"{app_friendly}").classes("mod-chat-title mod-title-small break-all")
                         with ui.row().classes("mod-chat-status-row items-center justify-end gap-2 flex-wrap"):
+                            for badge in header_badges:
+                                self._badge(ui=ui, text=badge.text, tone=badge.tone)
                             (
                                 endpoint_count_display,
                                 endpoint_count_tooltip_display,
@@ -856,6 +953,15 @@ class ModWebChatMixin(ModWebServiceSupport):
                                 tone=player_count_badge.tone if player_count_badge is not None else "grey",
                             )
                             self._set_optional_badge_state(player_count_badge_label, player_count_badge)
+                            if popout_url is not None:
+                                self._action_link(
+                                    ui=ui,
+                                    label="Pop Out",
+                                    url=popout_url,
+                                    compact=True,
+                                    extra_classes="mod-action-border-accent",
+                                    new_tab=True,
+                                )
             initial_events = initial_snapshot.events
             last_chat_signature = self._chat_history_signature(initial_events)
             with ui.column().classes("mod-chat-timeline-shell w-full"):
@@ -920,6 +1026,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                     lambda: asyncio.create_task(refresh_chat_messages()),
                 )
                 self._register_timer_cleanup(ui=ui, timer=refresh_timer)
+        return apply_runtime_stats
 
     @staticmethod
     def _web_chat_session_id(*, app_name: str, user: ModWebUser, request: Request) -> str:

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" aria-hidden="true" class="mod-status-figure-svg">
+  <circle cx="40" cy="42" r="20" fill="rgba(24, 24, 27, 0.96)" stroke="rgba(245, 158, 11, 0.68)" stroke-width="3"/>
+  <path d="M24 30 30 14l8 12" fill="rgba(24, 24, 27, 0.96)" stroke="rgba(245, 158, 11, 0.68)" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M56 30 50 14l-8 12" fill="rgba(24, 24, 27, 0.96)" stroke="rgba(245, 158, 11, 0.68)" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="33" cy="42" r="2.8" fill="rgba(244, 244, 245, 0.94)"/>
+  <circle cx="47" cy="42" r="2.8" fill="rgba(244, 244, 245, 0.94)"/>
+  <path d="M40 47.5 37.2 50.7h5.6Z" fill="rgba(245, 158, 11, 0.92)"/>
+  <path d="M36.8 53.2c.9 1.8 2 2.7 3.2 2.7s2.3-.9 3.2-2.7" fill="none" stroke="rgba(244, 244, 245, 0.84)" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M24.5 47.5h9M23.8 53h8.5M46.5 47.5h9M47.7 53h8.5" fill="none" stroke="rgba(244, 244, 245, 0.56)" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M60 18.5 65 20.6v3.7c0 3.4-2.2 5.9-5 7.4-2.8-1.5-5-4-5-7.4v-3.7l5-2.1Z" fill="rgba(146, 64, 14, 0.94)" stroke="rgba(253, 186, 116, 0.9)" stroke-width="2.1" stroke-linejoin="round"/>
+  <path d="M57.8 24.8h4.4m-2.2-2.2v4.4" stroke="rgba(255, 247, 237, 0.94)" stroke-width="2.1" stroke-linecap="round"/>
+</svg>

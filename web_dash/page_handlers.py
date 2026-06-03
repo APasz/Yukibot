@@ -3,6 +3,7 @@ from __future__ import annotations
 from .runtime_imports import (
     Callable,
     ModWebUser,
+    NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeStateStreamEvent,
     Power_Level,
@@ -137,9 +138,20 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         try:
             if app.mods is not None:
                 model = await self._build_page_model(app, user=user)
+                chat_surface = (
+                    await self._local_chat_surface_config(
+                        app=app,
+                        request=request,
+                        user=user,
+                        app_stats=model.app_stats,
+                        include_runtime_updates=False,
+                    )
+                    if model.supports_chat
+                    else None
+                )
 
-                async def _refresh_title_stats() -> tuple[ModWebTitleStat, ...]:
-                    return self._build_app_title_stats(await self._node_api.build_app_runtime_summary(app))
+                async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
+                    return await self._node_api.build_app_runtime_summary(app)
 
                 async def _refresh_runtime_model() -> ModWebBasePageModel:
                     return await self._refresh_runtime_model(model=model, user=user)
@@ -154,16 +166,28 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     model=model,
                     user=user,
                     current_url=self._request_path(request),
-                    refresh_async_title_stats=_refresh_title_stats,
+                    refresh_async_app_stats=_refresh_app_stats,
                     refresh_async_runtime_model=_refresh_runtime_model,
                     subscribe_app_state_updates=_subscribe_app_state,
                     local_app=app,
+                    chat_surface=chat_surface,
                 )
             else:
                 model = await self._build_overview_page_model(app, user=user)
+                chat_surface = (
+                    await self._local_chat_surface_config(
+                        app=app,
+                        request=request,
+                        user=user,
+                        app_stats=model.app_stats,
+                        include_runtime_updates=False,
+                    )
+                    if model.supports_chat
+                    else None
+                )
 
-                async def _refresh_title_stats() -> tuple[ModWebTitleStat, ...]:
-                    return self._build_app_title_stats(await self._node_api.build_app_runtime_summary(app))
+                async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
+                    return await self._node_api.build_app_runtime_summary(app)
 
                 async def _refresh_runtime_model() -> ModWebBasePageModel:
                     return await self._refresh_runtime_model(model=model, user=user)
@@ -178,10 +202,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     model=model,
                     user=user,
                     current_url=self._request_path(request),
-                    refresh_async_title_stats=_refresh_title_stats,
+                    refresh_async_app_stats=_refresh_app_stats,
                     refresh_async_runtime_model=_refresh_runtime_model,
                     subscribe_app_state_updates=_subscribe_app_state,
                     local_app=app,
+                    chat_surface=chat_surface,
                 )
         except Exception as xcp:
             log.exception("Mod web app page render failed: app=%s", app_name)
@@ -301,10 +326,22 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         running_names=system_summary.running_names,
                     ),
                 )
+                chat_surface = (
+                    await self._remote_chat_surface_config(
+                        node=node,
+                        app_name=app_name,
+                        request=request,
+                        user=user,
+                        app_entry=app_entry,
+                        app_stats=model.app_stats,
+                        include_runtime_updates=False,
+                    )
+                    if model.supports_chat
+                    else None
+                )
 
-                async def _refresh_title_stats() -> tuple[ModWebTitleStat, ...]:
-                    latest = await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
-                    return self._build_app_title_stats(latest)
+                async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
+                    return await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
 
                 async def _refresh_runtime_model() -> ModWebBasePageModel:
                     return await self._refresh_runtime_model(model=model, user=user)
@@ -324,10 +361,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     model=model,
                     user=user,
                     current_url=self._request_path(request),
-                    refresh_async_title_stats=_refresh_title_stats,
+                    refresh_async_app_stats=_refresh_app_stats,
                     refresh_async_runtime_model=_refresh_runtime_model,
                     subscribe_app_state_updates=_subscribe_app_state,
                     initial_system_summary=system_summary,
+                    chat_surface=chat_surface,
                 )
             else:
                 saves_job = (
@@ -379,10 +417,22 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         running_names=system_summary.running_names,
                     ),
                 )
+                chat_surface = (
+                    await self._remote_chat_surface_config(
+                        node=node,
+                        app_name=app_name,
+                        request=request,
+                        user=user,
+                        app_entry=app_entry,
+                        app_stats=model.app_stats,
+                        include_runtime_updates=False,
+                    )
+                    if model.supports_chat
+                    else None
+                )
 
-                async def _refresh_title_stats() -> tuple[ModWebTitleStat, ...]:
-                    latest = await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
-                    return self._build_app_title_stats(latest)
+                async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
+                    return await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
 
                 async def _refresh_runtime_model() -> ModWebBasePageModel:
                     return await self._refresh_runtime_model(model=model, user=user)
@@ -402,10 +452,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     model=model,
                     user=user,
                     current_url=self._request_path(request),
-                    refresh_async_title_stats=_refresh_title_stats,
+                    refresh_async_app_stats=_refresh_app_stats,
                     refresh_async_runtime_model=_refresh_runtime_model,
                     subscribe_app_state_updates=_subscribe_app_state,
                     initial_system_summary=system_summary,
+                    chat_surface=chat_surface,
                 )
         except Exception as xcp:
             log.exception("Remote mod web app page render failed: node=%s app=%s", node_name, app_name)

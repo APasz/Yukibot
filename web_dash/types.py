@@ -50,9 +50,31 @@ class _ModWebBadgeSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class _ModWebAppCardBadgeSpec:
+    text: str
+    tone: BadgeTone
+    tab_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _ModWebLinkSpec:
     label: str
     url: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebTabActionSpec:
+    label: str
+    url: str
+    new_tab: bool = field(default=False, kw_only=True)
+    extra_classes: str = field(default="", kw_only=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebAppHeroRuntimeDetails:
+    status_text: str
+    status_tone: BadgeTone
+    badges: tuple[_ModWebBadgeSpec, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +119,7 @@ class _ModWebStatusPageConfig:
     badge_tone: BadgeTone
     accent_color_hex: str
     icon_markup: str | None = None
+    detail_figure_markup: str | None = None
     detail_text: str | None = None
     detail_label: str | None = None
     context_label: str | None = None
@@ -109,6 +132,18 @@ class _ModWebChatPanelConfig:
     refresh_snapshot: Callable[[], Awaitable[NodeChatRoomSnapshot]]
     send_message: Callable[["_ModWebChatComposeRequest"], Awaitable[ChatEvent]] | None
     subscribe_updates: Callable[[Callable[["_ModWebChatPanelSignal"], None]], Callable[[], None]] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebChatSurfaceConfig:
+    panel: _ModWebChatPanelConfig
+    node_name: str
+    app_friendly: str
+    app_color_hex: str | None
+    app_stats: NodeAppRuntimeSummary | None
+    hero_badges: tuple[_ModWebBadgeSpec, ...] = ()
+    refresh_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]] | None = None
+    popout_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +250,7 @@ class ModWebAppLink:
     supports_chat: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
     runtime_changed: bool = field(default=False, kw_only=True)
+    tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +299,7 @@ class ModWebBasePageModel:
     console_actions: NodeConsoleActionList | None = field(default=None, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
+    tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +342,7 @@ class ModWebAppSectionKind(Enum):
     SETTINGS = "settings"
     SAVES = "saves"
     CONSOLE = "console"
+    CHAT = "chat"
 
     @property
     def label(self) -> str:
@@ -316,6 +354,8 @@ class ModWebAppSectionKind(Enum):
             return "Settings"
         if self is ModWebAppSectionKind.SAVES:
             return "Saves"
+        if self is ModWebAppSectionKind.CHAT:
+            return "Chat"
         return "Console"
 
     @classmethod
@@ -327,6 +367,199 @@ class ModWebAppSectionKind(Enum):
             if section_kind.value == section_name:
                 return section_kind
         raise ValueError(f"Unsupported app section kind: {raw_value}")
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebAppTabSettingSnapshot:
+    key: str
+    value_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebAppTabContext:
+    app_name: str
+    app_friendly: str
+    app_version: str | None = None
+    mod_names: tuple[str, ...] = ()
+    settings: tuple[ModWebAppTabSettingSnapshot, ...] = ()
+
+    def has_mod(self, mod_name: str) -> bool:
+        target_name: str = mod_name.strip().casefold()
+        return any(candidate.casefold() == target_name for candidate in self.mod_names)
+
+    def setting_value(self, setting_key: str) -> str | None:
+        target_key: str = setting_key.strip().casefold()
+        for setting in self.settings:
+            if setting.key.casefold() == target_key:
+                return setting.value_text
+        return None
+
+
+class ModWebAppTabVisibilityKind(Enum):
+    ALWAYS = "always"
+    MIN_APP_VERSION = "min_app_version"
+    HAS_MOD = "has_mod"
+    SETTING_ENABLED = "setting_enabled"
+    SETTING_EQUALS = "setting_equals"
+    ALL = "all"
+    ANY = "any"
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebAppTabVisibilityRule:
+    kind: ModWebAppTabVisibilityKind
+    app_version: str | None = None
+    mod_name: str | None = None
+    setting_key: str | None = None
+    setting_value: str | None = None
+    children: tuple["ModWebAppTabVisibilityRule", ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.kind is ModWebAppTabVisibilityKind.ALWAYS:
+            return
+        if self.kind is ModWebAppTabVisibilityKind.MIN_APP_VERSION:
+            if self.app_version is None or not self.app_version.strip():
+                raise ValueError("App tab minimum-version rule requires a version.")
+            return
+        if self.kind is ModWebAppTabVisibilityKind.HAS_MOD:
+            if self.mod_name is None or not self.mod_name.strip():
+                raise ValueError("App tab mod rule requires a mod name.")
+            return
+        if self.kind is ModWebAppTabVisibilityKind.SETTING_ENABLED:
+            if self.setting_key is None or not self.setting_key.strip():
+                raise ValueError("App tab setting-enabled rule requires a setting key.")
+            return
+        if self.kind is ModWebAppTabVisibilityKind.SETTING_EQUALS:
+            if self.setting_key is None or not self.setting_key.strip():
+                raise ValueError("App tab setting-equals rule requires a setting key.")
+            if self.setting_value is None:
+                raise ValueError("App tab setting-equals rule requires an expected value.")
+            return
+        if not self.children:
+            raise ValueError("Composite app tab visibility rules require at least one child rule.")
+
+    @classmethod
+    def always(cls) -> "ModWebAppTabVisibilityRule":
+        return cls(ModWebAppTabVisibilityKind.ALWAYS)
+
+    @classmethod
+    def min_app_version(cls, app_version: str) -> "ModWebAppTabVisibilityRule":
+        return cls(ModWebAppTabVisibilityKind.MIN_APP_VERSION, app_version=app_version)
+
+    @classmethod
+    def has_mod(cls, mod_name: str) -> "ModWebAppTabVisibilityRule":
+        return cls(ModWebAppTabVisibilityKind.HAS_MOD, mod_name=mod_name)
+
+    @classmethod
+    def setting_enabled(cls, setting_key: str) -> "ModWebAppTabVisibilityRule":
+        return cls(ModWebAppTabVisibilityKind.SETTING_ENABLED, setting_key=setting_key)
+
+    @classmethod
+    def setting_equals(cls, setting_key: str, setting_value: str) -> "ModWebAppTabVisibilityRule":
+        return cls(
+            ModWebAppTabVisibilityKind.SETTING_EQUALS,
+            setting_key=setting_key,
+            setting_value=setting_value,
+        )
+
+    @classmethod
+    def all_of(cls, *children: "ModWebAppTabVisibilityRule") -> "ModWebAppTabVisibilityRule":
+        return cls(ModWebAppTabVisibilityKind.ALL, children=children)
+
+    @classmethod
+    def any_of(cls, *children: "ModWebAppTabVisibilityRule") -> "ModWebAppTabVisibilityRule":
+        return cls(ModWebAppTabVisibilityKind.ANY, children=children)
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebAppTabDefinition:
+    tab_id: str
+    label: str
+    page_order: int
+    app_card_order: int
+    app_card_tone: BadgeTone
+    visibility_rule: ModWebAppTabVisibilityRule = field(default_factory=ModWebAppTabVisibilityRule.always)
+    show_on_app_card: bool = True
+    builtin_kind: ModWebAppSectionKind | None = None
+    render_handler_name: str | None = None
+    badge_handler_name: str | None = None
+    action_handler_name: str | None = None
+
+    def __post_init__(self) -> None:
+        tab_id: str = self.tab_id.strip()
+        label: str = self.label.strip()
+        if not tab_id:
+            raise ValueError("App tab definitions require a tab id.")
+        if not label:
+            raise ValueError("App tab definitions require a label.")
+        if self.page_order < 0 or self.app_card_order < 0:
+            raise ValueError("App tab definition orders must be non-negative.")
+        if (self.builtin_kind is None) == (self.render_handler_name is None):
+            raise ValueError("App tab definitions require exactly one render source.")
+        if self.render_handler_name is not None and not self.render_handler_name.strip():
+            raise ValueError("App tab definitions require a non-empty render handler name.")
+        if self.badge_handler_name is not None and not self.badge_handler_name.strip():
+            raise ValueError("App tab badge handler names must be non-empty when provided.")
+        if self.action_handler_name is not None and not self.action_handler_name.strip():
+            raise ValueError("App tab action handler names must be non-empty when provided.")
+        object.__setattr__(self, "tab_id", tab_id)
+        object.__setattr__(self, "label", label)
+        if self.render_handler_name is not None:
+            object.__setattr__(self, "render_handler_name", self.render_handler_name.strip())
+        if self.badge_handler_name is not None:
+            object.__setattr__(self, "badge_handler_name", self.badge_handler_name.strip())
+        if self.action_handler_name is not None:
+            object.__setattr__(self, "action_handler_name", self.action_handler_name.strip())
+
+    @classmethod
+    def builtin(
+        cls,
+        *,
+        builtin_kind: ModWebAppSectionKind,
+        page_order: int,
+        app_card_order: int,
+        app_card_tone: BadgeTone,
+        visibility_rule: ModWebAppTabVisibilityRule | None = None,
+        show_on_app_card: bool = True,
+    ) -> "ModWebAppTabDefinition":
+        return cls(
+            tab_id=builtin_kind.value,
+            label=builtin_kind.label,
+            page_order=page_order,
+            app_card_order=app_card_order,
+            app_card_tone=app_card_tone,
+            visibility_rule=visibility_rule or ModWebAppTabVisibilityRule.always(),
+            show_on_app_card=show_on_app_card,
+            builtin_kind=builtin_kind,
+        )
+
+    @classmethod
+    def custom(
+        cls,
+        *,
+        tab_id: str,
+        label: str,
+        page_order: int,
+        app_card_order: int,
+        app_card_tone: BadgeTone,
+        render_handler_name: str,
+        visibility_rule: ModWebAppTabVisibilityRule | None = None,
+        show_on_app_card: bool = True,
+        badge_handler_name: str | None = None,
+        action_handler_name: str | None = None,
+    ) -> "ModWebAppTabDefinition":
+        return cls(
+            tab_id=tab_id,
+            label=label,
+            page_order=page_order,
+            app_card_order=app_card_order,
+            app_card_tone=app_card_tone,
+            visibility_rule=visibility_rule or ModWebAppTabVisibilityRule.always(),
+            show_on_app_card=show_on_app_card,
+            render_handler_name=render_handler_name,
+            badge_handler_name=badge_handler_name,
+            action_handler_name=action_handler_name,
+        )
 
 
 class ModWebSettingControlKind(Enum):
@@ -379,6 +612,11 @@ __all__: tuple[str, ...] = (
     "ModDownloadKind",
     "ModWebAppLink",
     "ModWebAppSectionKind",
+    "ModWebAppTabContext",
+    "ModWebAppTabDefinition",
+    "ModWebAppTabSettingSnapshot",
+    "ModWebAppTabVisibilityKind",
+    "ModWebAppTabVisibilityRule",
     "ModWebBasePageModel",
     "ModWebConfigEditorLayout",
     "ModWebConfigEditorShape",
@@ -393,12 +631,14 @@ __all__: tuple[str, ...] = (
     "ModWebTitleStat",
     "ModWebTitleStatLine",
     "_ChatMediaPreview",
+    "_ModWebAppCardBadgeSpec",
     "_ModWebAppRuntimeState",
     "_ModWebBadgeSpec",
     "_ModWebChatComposeRequest",
     "_ModWebChatEventGroup",
     "_ModWebChatPanelConfig",
     "_ModWebChatPanelSignal",
+    "_ModWebChatSurfaceConfig",
     "_ModWebFakeChatMessageMode",
     "_ModWebFakeChatPreviewState",
     "_ModWebKillControlState",
@@ -407,5 +647,6 @@ __all__: tuple[str, ...] = (
     "_ModWebRuntimeToolbarBindings",
     "_ModWebStartStopControlState",
     "_ModWebStatusPageConfig",
+    "_ModWebTabActionSpec",
     "_SettingSecretConfig",
 )

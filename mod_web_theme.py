@@ -80,6 +80,10 @@ class ModWebTheme:
                         radial-gradient(circle at 88% 6%, rgba(220, 38, 38, 0.18), transparent 34rem),
                         linear-gradient(180deg, #020204 0%, #07070a 46%, #101012 100%) !important;
                 }}
+                html {{
+                    overflow-y: scroll;
+                    scrollbar-gutter: stable;
+                }}
                 .q-dialog__backdrop {{
                     background: rgba(2, 2, 4, 0.78) !important;
                     backdrop-filter: blur(7px);
@@ -213,6 +217,28 @@ class ModWebTheme:
                     line-height: 0.92 !important;
                     text-wrap: balance;
                 }}
+                .mod-app-hero-status {{
+                    min-width: 9.5rem;
+                    align-items: flex-end;
+                    text-align: right;
+                }}
+                .mod-app-hero-status-label {{
+                    color: rgba(244, 244, 245, 0.66) !important;
+                    font-size: 0.72rem;
+                    font-weight: 800;
+                    letter-spacing: 0.16em;
+                    text-transform: uppercase;
+                }}
+                .mod-app-hero-status-value {{
+                    font-size: clamp(1.1rem, 2vw, 1.45rem);
+                    font-weight: 900;
+                    line-height: 1;
+                    letter-spacing: 0.01em;
+                }}
+                .mod-app-hero-status-value-grey {{ color: rgba(228, 228, 231, 0.76) !important; }}
+                .mod-app-hero-status-value-purple {{ color: #d8b4fe !important; }}
+                .mod-app-hero-status-value-warn {{ color: #fbbf24 !important; }}
+                .mod-app-hero-status-value-red {{ color: #f87171 !important; }}
                 .mod-hero-support {{
                     max-width: min(42rem, 100%);
                     line-height: 1.35 !important;
@@ -244,12 +270,28 @@ class ModWebTheme:
                 .mod-status-shell {{
                     gap: 1rem;
                 }}
+                .mod-status-top {{
+                    align-items: flex-start;
+                }}
+                .mod-status-content {{
+                    flex: 1 1 28rem;
+                    min-width: 0;
+                }}
                 .mod-status-figure {{
-                    width: 100%;
                     display: flex;
                     justify-content: flex-start;
+                    margin: 0;
+                    padding: 0;
+                    line-height: 0;
+                }}
+                .mod-status-figure-inline {{
+                    flex: 0 0 auto;
+                    width: auto;
+                    min-width: 0;
+                    justify-content: flex-end;
                 }}
                 .mod-status-figure-svg {{
+                    display: block;
                     width: clamp(4.75rem, 8vw, 6.5rem);
                     height: auto;
                     color: rgba(248, 113, 113, 0.88);
@@ -341,8 +383,12 @@ class ModWebTheme:
                     border-top: 0 !important;
                     border-left: 0 !important;
                 }}
-                .mod-app-card {{ transition: transform 150ms ease, border-color 150ms ease, background 150ms ease; }}
-                .mod-app-card:hover, .mod-node-card:hover {{
+                .mod-app-card {{ transition: border-color 150ms ease, background 150ms ease; }}
+                .mod-app-card:hover {{
+                    border-color: rgba(139, 92, 246, 0.58) !important;
+                    background: linear-gradient(135deg, #0d0d12, #151018) !important;
+                }}
+                .mod-node-card:hover {{
                     transform: translateY(-1px);
                     border-color: rgba(139, 92, 246, 0.58) !important;
                     background: linear-gradient(135deg, #0d0d12, #151018) !important;
@@ -352,7 +398,7 @@ class ModWebTheme:
                     grid-template-columns: minmax(0, 1fr) max-content;
                     width: 100%;
                     min-width: 0;
-                    min-height: 4rem;
+                    min-height: 3.35rem;
                     align-items: center !important;
                 }}
                 .mod-app-card-main {{
@@ -381,10 +427,10 @@ class ModWebTheme:
                 }}
                 .mod-app-card .mod-app-card-shell {{
                     gap: 0.7rem !important;
-                    padding: 0.42rem 0.78rem 0.42rem 0.96rem !important;
+                    padding: 0.26rem 0.78rem 0.26rem 0.92rem !important;
                 }}
                 .mod-app-card .mod-app-card-main {{
-                    gap: 0.12rem !important;
+                    gap: 0 !important;
                 }}
                 .mod-app-card .mod-app-card-actions {{
                     gap: 0.42rem !important;
@@ -397,25 +443,13 @@ class ModWebTheme:
                 .mod-app-card .mod-app-card-title {{
                     display: block;
                     width: 100%;
-                    font-size: 1.2rem !important;
-                    line-height: 1 !important;
+                    font-size: 1.34rem !important;
+                    line-height: 0.94 !important;
                     white-space: nowrap;
                     overflow: hidden;
                     text-overflow: ellipsis;
                     word-break: normal !important;
                     overflow-wrap: normal !important;
-                }}
-                .mod-app-card-subtitle {{
-                    display: block;
-                    min-height: 0.82rem;
-                    font-size: 0.72rem !important;
-                    line-height: 0.82rem !important;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                }}
-                .mod-app-card-subtitle-empty {{
-                    visibility: hidden;
                 }}
                 .mod-app-card .mod-badge {{
                     padding: 0.22rem 0.5rem !important;
@@ -442,6 +476,7 @@ class ModWebTheme:
                     justify-content: center;
                     min-width: 4.85rem;
                     text-align: center;
+                    font-variant-numeric: tabular-nums;
                 }}
                 .mod-app-card-live {{
                     animation: mod-app-card-live-pulse 760ms ease-out;
@@ -449,14 +484,59 @@ class ModWebTheme:
                 .mod-app-card-live::before {{
                     animation: mod-app-card-strip-live 760ms ease-out;
                 }}
+                .mod-app-card-starting::before {{
+                    top: 0.42rem;
+                    bottom: auto;
+                    left: 0.08rem;
+                    width: 0.34rem;
+                    height: 0.34rem;
+                    border-radius: 999px;
+                    animation: mod-app-card-strip-starting 1.35s cubic-bezier(0.56, 0.04, 0.44, 0.96) infinite;
+                    will-change: top, opacity, filter;
+                }}
+                .mod-app-card-starting.mod-app-card-live::before {{
+                    animation:
+                        mod-app-card-strip-live 760ms ease-out,
+                        mod-app-card-strip-starting 1.35s cubic-bezier(0.56, 0.04, 0.44, 0.96) 760ms infinite;
+                }}
                 .mod-app-card-running::before {{
-                    animation: mod-app-card-strip-running 2.4s ease-in-out infinite alternate;
+                    animation: mod-app-card-strip-running 2.4s ease-in-out infinite;
                     will-change: opacity, filter;
                 }}
                 .mod-app-card-running.mod-app-card-live::before {{
                     animation:
                         mod-app-card-strip-live 760ms ease-out,
-                        mod-app-card-strip-running 2.4s ease-in-out 760ms infinite alternate;
+                        mod-app-card-strip-running 2.4s ease-in-out 760ms infinite;
+                }}
+                .mod-app-card-stopping::before {{
+                    width: 0.62rem;
+                    background:
+                        linear-gradient(
+                            180deg,
+                            rgba(0, 0, 0, 0.14),
+                            rgba(0, 0, 0, 0.14)
+                        ) 0 0 / 100% 100% no-repeat,
+                        linear-gradient(
+                            150deg,
+                            transparent 0 26%,
+                            rgba(255, 255, 255, 0.92) 26% 38%,
+                            var(--mod-app-strip-color, var(--mod-border-hot)) 38% 52%,
+                            transparent 52% 100%
+                        ) 0 0 / 100% 1rem repeat-y,
+                        linear-gradient(
+                            30deg,
+                            transparent 0 26%,
+                            rgba(255, 255, 255, 0.92) 26% 38%,
+                            var(--mod-app-strip-color, var(--mod-border-hot)) 38% 52%,
+                            transparent 52% 100%
+                        ) 0 0.5rem / 100% 1rem repeat-y;
+                    animation: mod-app-card-strip-stopping 780ms linear infinite;
+                    will-change: background-position, opacity, filter;
+                }}
+                .mod-app-card-stopping.mod-app-card-live::before {{
+                    animation:
+                        mod-app-card-strip-live 760ms ease-out,
+                        mod-app-card-strip-stopping 780ms linear 760ms infinite;
                 }}
                 .mod-app-runtime-chip-live {{
                     animation: mod-app-runtime-chip-live 820ms ease-out;
@@ -492,14 +572,44 @@ class ModWebTheme:
                         filter: saturate(1) brightness(1);
                     }}
                 }}
-                @keyframes mod-app-card-strip-running {{
+                @keyframes mod-app-card-strip-starting {{
                     0% {{
-                        opacity: 0.88;
+                        top: 0.42rem;
+                        opacity: 0.86;
+                        filter: saturate(0.96) brightness(0.98);
+                    }}
+                    50% {{
+                        top: calc(100% - 0.76rem);
+                        opacity: 1;
+                        filter: saturate(1.12) brightness(1.22);
+                    }}
+                    100% {{
+                        top: 0.42rem;
+                        opacity: 0.86;
+                        filter: saturate(0.96) brightness(0.98);
+                    }}
+                }}
+                @keyframes mod-app-card-strip-running {{
+                    50% {{
+                        opacity: 1;
+                        filter: saturate(1.16) brightness(1.18);
+                    }}
+                    0%,
+                    100% {{
+                        opacity: 0.78;
+                        filter: saturate(0.92) brightness(0.92);
+                    }}
+                }}
+                @keyframes mod-app-card-strip-stopping {{
+                    0% {{
+                        background-position: 0 0, 0 0, 0 0.5rem;
+                        opacity: 0.92;
                         filter: saturate(1) brightness(1);
                     }}
                     100% {{
+                        background-position: 0 0, 0 1rem, 0 1.5rem;
                         opacity: 1;
-                        filter: saturate(1.12) brightness(1.14);
+                        filter: saturate(1.02) brightness(1.04);
                     }}
                 }}
                 @keyframes mod-app-runtime-chip-live {{
@@ -545,7 +655,7 @@ class ModWebTheme:
                     box-shadow: 0 24px 70px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
                     transition: transform 150ms ease, border-color 150ms ease, background 150ms ease;
                 }}
-                .mod-card-link:hover {{
+                .mod-card-link:not(.mod-app-card-link):hover {{
                     transform: translateY(-1px);
                     border-color: rgba(139, 92, 246, 0.58) !important;
                     background: linear-gradient(135deg, #0d0d12, #151018) !important;
@@ -563,6 +673,7 @@ class ModWebTheme:
                     left: 0;
                     width: 0.42rem;
                     background: var(--mod-app-strip-color, var(--mod-border-hot));
+                    border-radius: 0;
                     pointer-events: none;
                 }}
                 .mod-app-card-disabled::before {{
@@ -609,11 +720,26 @@ class ModWebTheme:
                 .mod-subtitle {{ color: var(--mod-muted) !important; }}
                 .mod-error-text {{ color: #f87171 !important; }}
                 .mod-select-form {{ display: flex; flex-direction: column; gap: 0.55rem; }}
+                .mod-section-strip {{
+                    align-items: flex-start;
+                }}
+                .mod-section-tabs-shell {{
+                    flex: 1 1 24rem;
+                    min-width: 0;
+                }}
                 .mod-section-tabs {{
+                    display: inline-flex;
+                    width: auto !important;
+                    max-width: 100%;
+                    min-width: 0;
+                    align-self: flex-start;
                     border-bottom: 1px solid rgba(82, 82, 91, 0.44);
                     padding-bottom: 0.25rem;
                 }}
                 .mod-section-tabs .q-tabs__content {{
+                    display: inline-flex;
+                    width: auto;
+                    max-width: 100%;
                     gap: 0.4rem;
                     flex-wrap: wrap;
                     justify-content: flex-start;
@@ -650,6 +776,59 @@ class ModWebTheme:
                 .mod-section-tabs .q-tab__indicator {{
                     display: none !important;
                 }}
+                .mod-section-chrome {{
+                    flex: 0 1 auto;
+                    min-width: 0;
+                    margin-left: auto;
+                }}
+                .mod-section-chrome-panel {{
+                    display: flex;
+                    align-items: flex-start;
+                    justify-content: flex-end;
+                    gap: 0.75rem;
+                    min-width: 0;
+                }}
+                .mod-section-chrome-badge-stack {{
+                    display: flex;
+                    flex-direction: column;
+                    align-items: flex-end;
+                    justify-content: flex-start;
+                    gap: 0.35rem;
+                    min-width: 0;
+                }}
+                .mod-section-chrome-badge-row {{
+                    display: flex;
+                    flex-direction: row-reverse;
+                    align-items: flex-start;
+                    justify-content: flex-end;
+                    gap: 0.5rem;
+                    min-width: 0;
+                }}
+                .mod-section-chrome-badge-column {{
+                    display: flex;
+                    flex-direction: column;
+                    align-items: flex-end;
+                    justify-content: flex-start;
+                    gap: 0.35rem;
+                    min-width: 0;
+                }}
+                .mod-section-chrome-actions {{
+                    display: flex;
+                    align-items: flex-start;
+                    justify-content: flex-end;
+                    gap: 0.5rem;
+                }}
+                .mod-hero-toolbar {{
+                    width: 100%;
+                    margin-top: 0.35rem;
+                    padding-top: 0.9rem;
+                    border-top: 1px solid rgba(82, 82, 91, 0.44);
+                }}
+                .mod-hero-toolbar .mod-hero-toolbar-surface {{
+                    position: static;
+                    top: auto;
+                    z-index: auto;
+                }}
                 .mod-section-panels {{
                     background: transparent !important;
                 }}
@@ -659,23 +838,25 @@ class ModWebTheme:
                 }}
                 .mod-tab-header {{
                     display: flex;
-                    align-items: flex-start;
-                    justify-content: space-between;
-                    gap: 0.6rem;
-                    flex-wrap: wrap;
+                    flex-direction: column;
+                    align-items: stretch;
+                    justify-content: flex-start;
+                    gap: 0.45rem;
                 }}
                 .mod-tab-header-main {{
                     display: flex;
-                    flex: 1 1 22rem;
+                    width: 100%;
+                    flex: 0 0 auto;
                     min-width: 0;
                     flex-direction: column;
-                    gap: 0;
+                    gap: 0.18rem;
                 }}
                 .mod-tab-header-badges {{
                     display: flex;
                     flex: 0 1 auto;
                     align-items: center;
                     justify-content: flex-end;
+                    width: 100%;
                     gap: 0.5rem;
                     flex-wrap: wrap;
                 }}
@@ -2006,6 +2187,8 @@ class ModWebTheme:
                 .mod-row-download:hover {{ color: #fca5a5 !important; }}
                 .mod-row-download.blocked {{ color: #52525b !important; pointer-events: none; }}
                 .mod-badge {{
+                    display: inline-flex;
+                    align-items: center;
                     border-radius: 0 !important;
                     padding: 0.28rem 0.62rem !important;
                     font-size: 0.68rem !important;
@@ -2015,6 +2198,13 @@ class ModWebTheme:
                     border: 1px solid #34343d;
                     background: #111118 !important;
                     color: var(--mod-text) !important;
+                    text-decoration: none !important;
+                }}
+                .mod-badge-link {{
+                    transition: filter 120ms ease, border-color 120ms ease;
+                }}
+                .mod-badge-link:hover {{
+                    filter: brightness(1.08);
                 }}
                 .mod-badge.black {{ background: #050507 !important; border-color: #52525b; }}
                 .mod-badge.purple {{ background: #24113a !important; border-color: #7c3aed; color: #ddd6fe !important; }}
@@ -2176,6 +2366,8 @@ class ModWebTheme:
                     min-width: 0;
                 }}
                 .mod-chat-panel-embedded {{
+                    --mod-chat-panel-inline-padding: 0rem;
+                    --mod-chat-shell-inline-padding: 0rem;
                     padding: 0.08rem 0 0 !important;
                     flex: 1 1 auto;
                     min-height: 0;
@@ -2740,6 +2932,23 @@ class ModWebTheme:
                 @media (max-width: 960px) {{
                     .mod-hero-header {{ flex-wrap: wrap !important; }}
                     .mod-hero-header-main {{ flex-basis: 100%; }}
+                    .mod-app-hero-status {{
+                        min-width: 0;
+                        width: 100%;
+                        align-items: flex-start;
+                        text-align: left;
+                    }}
+                    .mod-status-content {{
+                        order: 2;
+                        width: 100%;
+                        flex-basis: 100%;
+                    }}
+                    .mod-status-figure-inline {{
+                        order: 1;
+                        width: 100%;
+                        min-width: 0;
+                        justify-content: flex-start;
+                    }}
                     .mod-chat-shell-header {{ flex-wrap: wrap !important; }}
                     .mod-chat-shell-header-main {{ flex-basis: 100%; }}
                     .mod-app-card-shell {{
@@ -2765,7 +2974,24 @@ class ModWebTheme:
                     .mod-corner-badges-wide {{ min-width: 0; }}
                 }}
                 @media (max-width: 720px) {{
+                    .mod-section-strip {{
+                        align-items: stretch;
+                    }}
+                    .mod-section-tabs-shell {{
+                        flex: 1 1 100%;
+                    }}
+                    .mod-section-tabs {{
+                        max-width: 100%;
+                    }}
                     .mod-section-tabs .q-tab {{ flex: 1 1 calc(50% - 0.5rem); min-width: 0; }}
+                    .mod-section-chrome {{
+                        width: 100%;
+                        justify-content: flex-end;
+                    }}
+                    .mod-section-chrome-panel {{
+                        margin-left: auto;
+                        max-width: 100%;
+                    }}
                     .mod-config-select,
                     .mod-config-search {{ flex-basis: 100%; min-width: 0; }}
                     .mod-tab-toolbar-actions {{ width: 100%; margin-left: 0; }}
@@ -2846,7 +3072,11 @@ class ModWebTheme:
                         --mod-chat-panel-inline-padding: 0.8rem;
                         padding: 0.8rem;
                     }}
-                    .mod-chat-panel-embedded {{ padding: 0.1rem 0 0 !important; }}
+                    .mod-chat-panel-embedded {{
+                        --mod-chat-panel-inline-padding: 0rem;
+                        --mod-chat-shell-inline-padding: 0rem;
+                        padding: 0.1rem 0 0 !important;
+                    }}
                     .mod-chat-header-top {{ align-items: flex-start; }}
                     .mod-chat-status-row {{
                         width: 100%;

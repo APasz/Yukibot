@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import unittest
 import asyncio
 import threading
+import unittest
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +15,7 @@ from hikari import messages as hikari_messages
 import config
 from _discord import App_Bound, DC_Relay, Message, URLVariant, normalise_attachment_relay_name
 from _file import File_Utils
-from _minecraft_default_heads import (
+from _minecraft_heads import (
     MinecraftDefaultSkin,
     minecraft_default_skin_for_dev_bypass_user,
     minecraft_dev_bypass_head_data_uri,
@@ -55,6 +55,19 @@ def _make_attachment(*, title: str, filename: str, media_type: str | None) -> hi
                 is_ephemeral=False,
             ),
         ),
+    )
+
+
+def _make_textable_channel(
+    *,
+    channel_id: hikari.Snowflake,
+    name: str,
+) -> hikari.TextableChannel:
+    return hikari.TextableChannel(
+        app=cast(Any, object()),
+        id=channel_id,
+        name=name,
+        type=1,
     )
 
 
@@ -556,6 +569,12 @@ class _NamesStub:
     ) -> str:
         del user_id, scope
         return self._discord_fallback_name or fallback_display_name or fallback
+
+
+class _RelayAppStub:
+    def __init__(self, *, name: str, chat_channel_source_value: str) -> None:
+        self.name: str = name
+        self.chat_channel_source: SimpleNamespace = SimpleNamespace(value=chat_channel_source_value)
 
 
 class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
@@ -1151,23 +1170,14 @@ class DiscordRelaySeenMessageTests(unittest.TestCase):
         info_mock.assert_called_once()
 
     def test_log_chat_relay_summary_reports_owner_and_default_pickup(self) -> None:
-        class RelayAppStub:
-            pass
-
         relay = object.__new__(DC_Relay)
         relay.bot = cast(Any, SimpleNamespace(get_me=Mock(return_value=SimpleNamespace(id=hikari.Snowflake(1)))))
         cast(Any, relay)._known_relay_bot_ids = Mock(return_value=frozenset({1, 2}))
         cast(Any, relay)._known_relay_bot_labels = Mock(return_value={1: "yuki", 2: "erin"})
         cast(Any, relay)._relay_channel_owner_bot_id = Mock(return_value=1)
-        first_app = RelayAppStub()
-        first_app.name = "minecraft_alpha"
-        first_app.chat_channel_source = SimpleNamespace(value="default")
-        second_app = RelayAppStub()
-        second_app.name = "minecraft_beta"
-        second_app.chat_channel_source = SimpleNamespace(value="default")
-        third_app = RelayAppStub()
-        third_app.name = "minecraft_gamma"
-        third_app.chat_channel_source = SimpleNamespace(value="instance")
+        first_app = _RelayAppStub(name="minecraft_alpha", chat_channel_source_value="default")
+        second_app = _RelayAppStub(name="minecraft_beta", chat_channel_source_value="default")
+        third_app = _RelayAppStub(name="minecraft_gamma", chat_channel_source_value="instance")
         DC_Relay._chat_channels.clear()
         DC_Relay._chat_channels[hikari.Snowflake(101)] = {
             cast(Any, second_app),
@@ -1231,10 +1241,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, relay)._deliver_chat_event = AsyncMock()
         cast(Any, relay)._record_chat_event = Mock()
         cast(Any, relay)._send_chat_event_to_app = AsyncMock()
-        source_channel = cast(
-            hikari.TextableChannel,
-            SimpleNamespace(id=hikari.Snowflake(101), name="relay-a", guild_id=hikari.Snowflake(1)),
-        )
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
         cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
         channel_id = hikari.Snowflake(101)
         app = Mock()
@@ -1283,10 +1290,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, relay)._owns_shared_relay_channel = Mock(return_value=True)
         cast(Any, relay)._is_active_app_chat_channel = AsyncMock(return_value=True)
         cast(Any, relay)._deliver_chat_event = AsyncMock()
-        source_channel = cast(
-            hikari.TextableChannel,
-            SimpleNamespace(id=hikari.Snowflake(101), name="relay-a", guild_id=hikari.Snowflake(1)),
-        )
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
         cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
         channel_id = hikari.Snowflake(101)
         app = Mock()
@@ -1335,10 +1339,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, relay)._owns_shared_relay_channel = Mock(return_value=True)
         cast(Any, relay)._is_active_app_chat_channel = AsyncMock(return_value=True)
         cast(Any, relay)._deliver_chat_event = AsyncMock()
-        source_channel = cast(
-            hikari.TextableChannel,
-            SimpleNamespace(id=hikari.Snowflake(101), name="relay-a", guild_id=hikari.Snowflake(1)),
-        )
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
         cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
         channel_id = hikari.Snowflake(101)
         app = Mock()
@@ -1396,10 +1397,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, relay)._is_active_app_chat_channel = AsyncMock(return_value=True)
         cast(Any, relay)._deliver_chat_event = AsyncMock()
         cast(Any, relay)._record_chat_event = Mock()
-        source_channel = cast(
-            hikari.TextableChannel,
-            SimpleNamespace(id=hikari.Snowflake(101), name="relay-a", guild_id=hikari.Snowflake(1)),
-        )
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
         cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
         channel_id = hikari.Snowflake(101)
         first_app = Mock()
@@ -1458,10 +1456,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, relay)._deliver_chat_event = AsyncMock()
         cast(Any, relay)._record_chat_event = Mock()
         cast(Any, relay)._send_chat_event_to_app = AsyncMock()
-        source_channel = cast(
-            hikari.TextableChannel,
-            SimpleNamespace(id=hikari.Snowflake(101), name="relay-a", guild_id=hikari.Snowflake(1)),
-        )
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
         cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
         channel_id = hikari.Snowflake(101)
         first_app = Mock()
@@ -1515,10 +1510,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, relay)._deliver_chat_event = AsyncMock()
         cast(Any, relay)._record_chat_event = Mock()
         cast(Any, relay)._send_chat_event_to_app = AsyncMock()
-        source_channel = cast(
-            hikari.TextableChannel,
-            SimpleNamespace(id=hikari.Snowflake(101), name="relay-a", guild_id=hikari.Snowflake(1)),
-        )
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
         cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
         channel_id = hikari.Snowflake(101)
         first_app = Mock()
@@ -1585,10 +1577,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, relay)._chat_author_color = AsyncMock(return_value=None)
         cast(Any, relay)._owns_shared_relay_channel = Mock(return_value=True)
         cast(Any, relay)._is_active_app_chat_channel = AsyncMock(return_value=True)
-        source_channel = cast(
-            hikari.TextableChannel,
-            SimpleNamespace(id=hikari.Snowflake(101), name="relay-a", guild_id=hikari.Snowflake(1)),
-        )
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
         cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
         channel_id = hikari.Snowflake(101)
         first_app = Mock()

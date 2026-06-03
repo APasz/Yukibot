@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import overload
+from typing import TYPE_CHECKING, overload
 
 from .backend import ModWebDashboardBackend
 from .nicegui_protocols import AsyncRefresh, WebChatRelayPublisher
@@ -11,6 +11,7 @@ from .runtime_imports import (
     BadgeTone,
     Callable,
     Checkbox,
+    Html,
     Label,
     Literal,
     ManagedApp,
@@ -21,6 +22,7 @@ from .runtime_imports import (
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
+    NodeChatRoomSnapshot,
     NodeConfigContent,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
@@ -36,6 +38,7 @@ from .runtime_imports import (
     Path,
     Power_Level,
     RedirectResponse,
+    Tooltip,
     cast,
     config,
     threading,
@@ -51,10 +54,14 @@ from .types import (
     ModWebPageModel,
     ModWebTitleStat,
     _ModWebBadgeSpec,
+    _ModWebChatSurfaceConfig,
     _ModWebKillControlState,
     _ModWebStartStopControlState,
 )
 from .utils import _http_exception
+
+if TYPE_CHECKING:
+    from nicegui.element import Element
 
 
 class ModWebServiceSupport:
@@ -81,6 +88,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_app_enable_disable_label"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_footprint_value"]) -> Callable[..., str]: ...
 
     @overload
     def __getattr__(self, name: Literal["_app_link_from_entry"]) -> Callable[..., ModWebAppLink]: ...
@@ -114,6 +124,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_badge"]) -> Callable[..., Label]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_badge_link"]) -> Callable[..., Element]: ...
 
     @overload
     def __getattr__(self, name: Literal["_build_app_title_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
@@ -241,6 +254,11 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_login_node_statuses"]) -> Callable[..., tuple[ModWebNodeStatus, ...]]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_local_chat_surface_config"]
+    ) -> Callable[..., Awaitable[_ModWebChatSurfaceConfig]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_model_with_runtime_state"]) -> Callable[..., ModWebBasePageModel]: ...
 
     @overload
@@ -281,6 +299,11 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_apps"]) -> Callable[..., tuple[NodeAppEntry, ...]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_chat_surface_config"]
+    ) -> Callable[..., Awaitable[_ModWebChatSurfaceConfig]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_config_content"]) -> Callable[..., NodeConfigContent]: ...
@@ -360,7 +383,17 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_render_chat_event_group"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_render_chat_endpoint_badge"]
+    ) -> Callable[..., tuple[Label, Tooltip, Html]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_render_chat_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_render_chat_section"]
+    ) -> Callable[..., Callable[[ModWebBasePageModel], None]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_render_config_editor"]) -> Callable[..., None]: ...
@@ -435,6 +468,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_request_path"]) -> Callable[..., str]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_request_url_with_query_values"]) -> Callable[..., str]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_require_http_user"]) -> Callable[..., ModWebUser]: ...
 
     @overload
@@ -445,6 +481,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_set_badge_state"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_set_chat_endpoint_badge_state"]) -> Callable[..., None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_set_optional_badge_state"]) -> Callable[..., None]: ...

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlsplit, urlunsplit
 
 import hikari
 from pydantic import field_validator
@@ -35,7 +35,7 @@ from _file import File_Utils
 from _relay_embeds import build_app_relay_embed
 from _security import Power_Level
 from apps._app import AM_Receiver, App, RelayAdvancementTerms
-from apps._config import App_Config, AppVersion, Mod_Config, normalise_app_version
+from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType, normalise_app_version
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod, humanise_mod_identifier
@@ -66,6 +66,7 @@ log = logging.getLogger(__name__)
 
 CHATIMAGE_IMAGE_FORMATS = frozenset({"png", "jpg", "jpeg", "jfif", "gif", "ico", "bmp"})
 _CICODE_ARGUMENT_KEYS = ("url", "name", "nsfw", "pre", "suf")
+_PLAYER_NAME_PATTERN = r"[A-Za-z0-9_]{1,16}"
 
 JOIN_RE = re.compile(r"\[.*?\]:\s+[<('\"]*([^>'\"\)\(\s]+)[>'\"\)\(]* joined the game", re.IGNORECASE)
 LEAVE_RE = re.compile(r"\[.*?\]:\s+[<('\"]*([^>'\"\)\(\s]+)[>'\"\)\(]* left the game", re.IGNORECASE)
@@ -124,6 +125,32 @@ def _compile_minecraft_death_re() -> re.Pattern[str]:
     return re.compile(rf"\[.*?\]: (?P<player>\S+)\s+(?P<cause>{cause_pattern})", re.IGNORECASE)
 
 
+_MINECRAFT_DEATH_PLAYER_REFERENCE_SUFFIX_PATTERN = (
+    r"(?=$|\s+using\b|\s+with\b|\s+\[|\s+\(|\s+while\b|\s+whilst\b|\s+trying\b|[.,!?])"
+)
+MINECRAFT_DEATH_PLAYER_REFERENCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        rf"(?P<prefix>\bby\s+)(?P<player>{_PLAYER_NAME_PATTERN})"
+        rf"{_MINECRAFT_DEATH_PLAYER_REFERENCE_SUFFIX_PATTERN}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?P<prefix>\b(?:while|whilst)\s+fighting\s+)(?P<player>{_PLAYER_NAME_PATTERN})"
+        rf"{_MINECRAFT_DEATH_PLAYER_REFERENCE_SUFFIX_PATTERN}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?P<prefix>\btrying\s+to\s+escape\s+)(?P<player>{_PLAYER_NAME_PATTERN})"
+        rf"{_MINECRAFT_DEATH_PLAYER_REFERENCE_SUFFIX_PATTERN}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?P<prefix>\btrying\s+to\s+hurt\s+)(?P<player>{_PLAYER_NAME_PATTERN})"
+        rf"{_MINECRAFT_DEATH_PLAYER_REFERENCE_SUFFIX_PATTERN}",
+        re.IGNORECASE,
+    ),
+)
+
 DEATH_RE = _compile_minecraft_death_re()
 CHAT_RE = re.compile(r"\[.*?\]: <([^>]+)>\s+(.*)")
 UUID_RE = re.compile(r"UUID of player (?P<name>\w+) is (?P<uuid>[0-9a-fA-F-]{36})", re.IGNORECASE)
@@ -138,7 +165,7 @@ PLAYER_LIST_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 PLAYER_LIST_FALLBACK_RE = re.compile(r"(?P<online>\d+)\D+(?P<max>\d+)")
-_PLAYER_NAME_RE = re.compile(r"[A-Za-z0-9_]{1,16}")
+_PLAYER_NAME_RE = re.compile(_PLAYER_NAME_PATTERN)
 _MC_HEADS_AVATAR_URL_TEMPLATE = "https://mc-heads.net/avatar/{identifier}/32"
 DEFAULT_MINECRAFT_RCON_PORT = 25575
 GAMEMODE_CHOICES = ChoiceSpec(
@@ -205,6 +232,13 @@ _MINECRAFT_MOD_VERSION_RE_PATTERNS = (
     re.compile(r"[-_](?P<version>v?\d+(?:\.\d+)+)$", re.IGNORECASE),
 )
 _MINECRAFT_MOD_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
+_SQUAREMAP_MOD_BASE_NAME = "squaremap"
+_SQUAREMAP_CONFIG_RELATIVE_PATHS: tuple[Path, ...] = (
+    Path("squaremap") / "config.yml",
+    Path("config") / "squaremap" / "config.yml",
+    Path("plugins") / "squaremap" / "config.yml",
+)
+_SQUAREMAP_WORLD_NAME = "minecraft_overworld"
 
 
 class MinecraftLoader(enum.StrEnum):
@@ -530,6 +564,40 @@ def _is_player_name(text: str) -> bool:
     return _PLAYER_NAME_RE.fullmatch(text.strip()) is not None
 
 
+def _resolve_minecraft_player_mention(player: str, *, app: "Minecraft") -> str | None:
+    players = getattr(app, "_players", None)
+    has_seen = getattr(players, "has_seen", None)
+    if not callable(has_seen) or not has_seen(player):
+        return None
+
+    name_cache = getattr(app, "name_cache", None)
+    resolve_name = getattr(name_cache, "resolve_name", None)
+    if not callable(resolve_name):
+        return None
+
+    scope = getattr(app, "scope", None)
+    resolution = cast(
+        config.NameResolutionResult,
+        resolve_name(player, scope if isinstance(scope, str) else None),
+    )
+    if resolution.status is not config.NameResolutionStatus.UNIQUE or resolution.user_id is None:
+        return None
+    return f"<@{resolution.user_id}>"
+
+
+def _resolve_minecraft_death_mentions(cause: str, *, app: "Minecraft") -> str:
+    def replace_reference(match: re.Match[str]) -> str:
+        mention = _resolve_minecraft_player_mention(match.group("player"), app=app)
+        if mention is None:
+            return match.group(0)
+        return f"{match.group('prefix')}{mention}"
+
+    resolved_cause = cause
+    for pattern in MINECRAFT_DEATH_PLAYER_REFERENCE_PATTERNS:
+        resolved_cause = pattern.sub(replace_reference, resolved_cause)
+    return resolved_cause
+
+
 def _normalise_extension(value: str | None) -> str | None:
     if value is None:
         return None
@@ -823,12 +891,75 @@ def _detect_minecraft_mod_friendly(name: str) -> str:
     return humanise_mod_identifier(base_name, split_single_camel=True)
 
 
+def _is_squaremap_mod_name(name: str) -> bool:
+    return _detect_minecraft_mod_base_name(name).casefold() == _SQUAREMAP_MOD_BASE_NAME
+
+
+def _parse_squaremap_port_from_config(pointer: Path) -> int | None:
+    key_stack: list[tuple[int, str]] = []
+    for raw_line in pointer.read_text(config.STR_ENCODE, errors="ignore").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = re.match(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+):(?:\s*(?P<value>[^#]+?)\s*)?$", raw_line)
+        if match is None:
+            continue
+
+        indent: int = len(match.group("indent"))
+        key: str = match.group("key")
+        value: str | None = match.group("value")
+        while key_stack and indent <= key_stack[-1][0]:
+            key_stack.pop()
+        key_stack.append((indent, key))
+
+        if key != "port" or value is None:
+            continue
+        parent_path: tuple[str, ...] = tuple(path_key for _, path_key in key_stack[:-1])
+        if parent_path not in {("internal-webserver",), ("settings", "internal-webserver")}:
+            continue
+
+        port_text = value.strip().strip("'\"")
+        if not port_text.isdecimal():
+            raise ValueError(f"Invalid squaremap port {port_text!r} in {pointer}")
+        port = int(port_text)
+        if port <= 0 or port > 65535:
+            raise ValueError(f"Squaremap port out of range in {pointer}: {port}")
+        return port
+    return None
+
+
+def _build_squaremap_public_url(*, public_base_url: str, port: int, world: str) -> str:
+    parsed = urlsplit(public_base_url)
+    if not parsed.scheme or parsed.hostname is None:
+        raise ValueError("PUBLIC_BASE_URL must include a scheme and host.")
+    auth = ""
+    if parsed.username is not None:
+        auth = parsed.username
+        if parsed.password is not None:
+            auth += f":{parsed.password}"
+        auth += "@"
+    netloc = f"{auth}{parsed.hostname}:{port}"
+    return urlunsplit((parsed.scheme, netloc, "/", urlencode({"world": world}), ""))
+
+
 class Mod_MC(Mod):
     def __init__(self, cfg: Mod_Config):
         super().__init__(cfg)
 
     async def install(self, src: Path, atomic: bool = True):
         await self._handle_drop(src, atomic)
+
+    def sync_metadata(self) -> None:
+        super().sync_metadata()
+        if _is_squaremap_mod_name(self.name):
+            self.cfg.mod_type = ModType.SERVER_ONLY
+            if self.cfg.download_block_reason is None:
+                self.cfg.download_block_reason = ModDownloadBlockReason.SERVER_ONLY
+
+    def default_mod_type(self) -> ModType:
+        if _is_squaremap_mod_name(self.name):
+            return ModType.SERVER_ONLY
+        return super().default_mod_type()
 
     def detect_version(self) -> str | None:
         return _detect_minecraft_mod_version(self.name)
@@ -1380,8 +1511,57 @@ class Minecraft(App[Minecraft_Config]):
             lines.append(f"loader: {runtime.loader_display_value}")
         return tuple(lines)
 
+    def lifecycle_relay_description_lines(
+        self,
+        *,
+        started: bool,
+        uptime: timedelta | None = None,
+    ) -> tuple[str, ...]:
+        del uptime
+        if not started:
+            return ()
+        squaremap_url = self._squaremap_public_url()
+        if squaremap_url is None:
+            return ()
+        return (f"[Squaremap]({squaremap_url})",)
+
     def apply_relay_advancements_enabled(self, enabled: bool) -> None:
         self.cfg.relay_advancements = enabled
+
+    def _squaremap_public_url(self) -> str | None:
+        if not self._has_squaremap_mod():
+            return None
+        config_path = self._squaremap_config_path()
+        if config_path is None:
+            return None
+        try:
+            port = _parse_squaremap_port_from_config(config_path)
+        except (OSError, ValueError) as xcp:
+            log.warning("Failed to read squaremap config for %s from %s: %s", self.name, config_path, xcp)
+            return None
+        if port is None:
+            return None
+        try:
+            return _build_squaremap_public_url(
+                public_base_url=config.PUBLIC_BASE_URL,
+                port=port,
+                world=_SQUAREMAP_WORLD_NAME,
+            )
+        except ValueError as xcp:
+            log.warning("Failed to build squaremap public URL for %s: %s", self.name, xcp)
+            return None
+
+    def _has_squaremap_mod(self) -> bool:
+        if self.mods is None:
+            return False
+        return any(_is_squaremap_mod_name(mod.name) for mod in self.mods.list_mods())
+
+    def _squaremap_config_path(self) -> Path | None:
+        for relative_path in _SQUAREMAP_CONFIG_RELATIVE_PATHS:
+            candidate = self.directory / relative_path
+            if candidate.is_file():
+                return candidate
+        return None
 
     def _apply_runtime_snapshot(self, runtime: MinecraftRuntimeInfo | None, *, persist: bool) -> bool:
         current_runtime = getattr(self, "_runtime", None)
@@ -1598,6 +1778,7 @@ class Matchers:
     async def match_death(self, line: str):
         if match := DEATH_RE.match(line):
             player, content = match.groups()
+            content = _resolve_minecraft_death_mentions(content, app=self.app)
             DC_Relay.add(
                 DC_Bound(
                     self.app,
@@ -1779,13 +1960,15 @@ class Players:
         if player in self._players:
             return
         self._players.add(player)
-        DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.join, player, player_avatar_uri=self.avatar_uri(player)))
+        relay_player = _resolve_minecraft_player_mention(player, app=self.app) or player
+        DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.join, relay_player, player_avatar_uri=self.avatar_uri(player)))
 
     def note_leave(self, player: str) -> None:
         if player not in self._players:
             return
+        relay_player = _resolve_minecraft_player_mention(player, app=self.app) or player
         self._players.discard(player)
-        DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.left, player, player_avatar_uri=self.avatar_uri(player)))
+        DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.left, relay_player, player_avatar_uri=self.avatar_uri(player)))
 
     @staticmethod
     def _player_key(player: str) -> str:
@@ -1797,6 +1980,14 @@ class Players:
         if not normalised_player or not normalised_uuid:
             return
         self._player_uuids[self._player_key(normalised_player)] = normalised_uuid
+
+    def has_seen(self, player: str) -> bool:
+        player_key = self._player_key(player)
+        if not player_key:
+            return False
+        if any(self._player_key(seen_player) == player_key for seen_player in self._players):
+            return True
+        return player_key in self._player_uuids
 
     def _cached_profile_uuid(self, player: str) -> str | None:
         name_cache = getattr(self.app, "name_cache", None)

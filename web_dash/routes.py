@@ -7,13 +7,16 @@ from .runtime_imports import (
     Awaitable,
     Callable,
     ModWebAuthError,
+    ModWebUser,
     NodeApiScope,
     Power_Level,
     RedirectResponse,
     Request,
     StarletteResponse,
     asyncio,
+    config,
     quote,
+    requests,
 )
 from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
 from .nicegui_protocols import ModWebFastApiApp, ModWebRouteUi
@@ -121,6 +124,175 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         def _logout(request: Request) -> RedirectResponse:
             self._auth.logout_request(request)
             return self._auth.logout_response()
+
+        def _require_dev_preview_enabled() -> None:
+            if not config.INDEV:
+                raise _http_exception(404, "Dev error previews are not available.")
+
+        def _dev_preview_user() -> ModWebUser:
+            return ModWebUser(
+                discord_id=42,
+                username="dev_preview",
+                global_name="Dev Preview",
+                avatar_hash=None,
+            )
+
+        def _render_dev_notification_preview_page(
+            *,
+            title: str,
+            support_text: str,
+            actions: tuple[tuple[str, str, str], ...],
+        ) -> None:
+            self._apply_theme(ui=ui)
+            with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
+                with ui.card().classes("mod-card w-full"):
+                    with ui.column().classes("gap-4 p-5"):
+                        with ui.column().classes("gap-1"):
+                            ui.label(title).classes("text-xl font-bold mod-title-small")
+                            ui.label(support_text).classes("text-sm mod-subtitle")
+                        with ui.row().classes("gap-2 flex-wrap"):
+                            for label, message, tone in actions:
+                                ui.button(
+                                    label,
+                                    on_click=lambda _=None, preview_message=message, preview_tone=tone: ui.notify(
+                                        preview_message,
+                                        type=preview_tone,
+                                    ),
+                                ).classes("mod-list-button")
+                        self._action_link(ui=ui, label="Back to Sign In", url=self.index_path(), compact=True)
+
+        @ui.page("/mod-web/dev/error/access-denied")
+        async def _dev_access_denied(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_forbidden_page(ui=ui, user=_dev_preview_user(), required_level=Power_Level.admin)
+
+        @ui.page("/mod-web/dev/error/sign-in-unavailable")
+        async def _dev_sign_in_unavailable(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_auth_setup_page(ui=ui)
+
+        @ui.page("/mod-web/dev/error/page-unavailable")
+        async def _dev_page_unavailable(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_error_page(
+                ui=ui,
+                title="Page unavailable",
+                detail="RuntimeError: This is a dev preview of the app page failure surface.",
+                app_name="dev_preview_alpha",
+            )
+
+        @ui.page("/mod-web/dev/error/chat-unavailable")
+        async def _dev_chat_unavailable(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_error_page(
+                ui=ui,
+                title="Chat unavailable",
+                detail="RuntimeError: This is a dev preview of the chat page failure surface.",
+                app_name="dev_preview_alpha",
+            )
+
+        @ui.page("/mod-web/dev/error/node-unavailable")
+        async def _dev_node_unavailable(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_remote_node_unavailable_page(
+                ui=ui,
+                node_name="erin",
+                exception=requests.ConnectionError("Dev preview simulated an offline node."),
+            )
+
+        @ui.page("/mod-web/dev/error/remote-json-invalid")
+        async def _dev_remote_json_invalid(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_remote_node_unavailable_page(
+                ui=ui,
+                node_name="erin",
+                exception=RuntimeError("Remote node returned invalid JSON."),
+            )
+
+        @ui.page("/mod-web/dev/error/remote-timeout")
+        async def _dev_remote_timeout(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_remote_node_unavailable_page(
+                ui=ui,
+                node_name="erin",
+                exception=requests.Timeout("Dev preview simulated a slow remote node."),
+            )
+
+        @ui.page("/mod-web/dev/error/remote-rejected")
+        async def _dev_remote_rejected(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_remote_node_unavailable_page(
+                ui=ui,
+                node_name="erin",
+                exception=RuntimeError("Remote node rejected the request: missing scope token."),
+            )
+
+        @ui.page("/mod-web/dev/error/framework-404")
+        async def _dev_framework_404(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            raise _http_exception(404, "This is a dev preview of the framework 404 page.")
+
+        @ui.page("/mod-web/dev/error/framework-500")
+        async def _dev_framework_500(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_framework_page_exception(
+                ui=ui,
+                exception=RuntimeError("This is a dev preview of the framework 500 page."),
+            )
+
+        @ui.page("/mod-web/dev/error/nicegui-exception")
+        async def _dev_nicegui_exception(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            raise RuntimeError("This is a dev preview of the NiceGUI page exception surface.")
+
+        @ui.page("/mod-web/dev/error/refresh-shutdown")
+        async def _dev_refresh_shutdown(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._apply_theme(ui=ui)
+            with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
+                self._render_status_page_panel(
+                    ui=ui,
+                    config=self._framework_http_error_config(
+                        status_code=500,
+                        exception=RuntimeError("cannot schedule new futures after shutdown"),
+                    ),
+                )
+
+        @ui.page("/mod-web/dev/error/config-failure")
+        async def _dev_config_failure(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            _render_dev_notification_preview_page(
+                title="Config Failure Toasts",
+                support_text="Preview the negative notifications used when config loads or saves fail.",
+                actions=(
+                    ("Preview Load Fail", "Config load failed: RuntimeError: preview load failure", "negative"),
+                    ("Preview Save Fail", "Config save failed: RuntimeError: preview save failure", "negative"),
+                ),
+            )
+
+        @ui.page("/mod-web/dev/error/chat-stream-websocket")
+        async def _dev_chat_stream_websocket(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_error_page(
+                ui=ui,
+                title="Chat unavailable",
+                detail="RuntimeError: Remote chat stream websocket error: preview disconnect",
+                app_name="dev_preview_alpha",
+            )
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps")
         async def _proxy_apps(node_name: str, request: Request) -> dict[str, object]:

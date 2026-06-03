@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" shape-rendering="crispEdges" style="image-rendering: pixelated;">
+  <image href="{skin_png_data_uri}" x="-8" y="-8" width="64" height="64"/>
+  <image href="{skin_png_data_uri}" x="-40" y="-8" width="64" height="64"/>
+</svg>

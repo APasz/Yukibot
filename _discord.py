@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from hikari.guilds import Role
-from hikari.guilds import Member
-from hikari.users import OwnUser
 import html
 import json
 import logging
@@ -25,9 +22,19 @@ import emoji
 import hikari
 import lightbulb
 from hikari import messages as hikari_messages
+from hikari.guilds import Member, Role
+from hikari.users import OwnUser
 from pathvalidate import sanitize_filename
 from TenorGrabber import tenorgrabber
 
+import config
+from _audit import tenor_log
+from _authority import AuthorityResource, read_json_object
+from _file import File_Utils
+from _minecraft_heads import minecraft_dev_bypass_head_data_uri
+from _resolator import Resolutator
+from _security import Access_Control
+from _utils import Utilities
 from chat_hub import (
     ChatAttachment,
     ChatAuthor,
@@ -40,18 +47,10 @@ from chat_hub import (
     ChatHub,
     ChatLink,
     ChatLinkVariant,
-    ChatMessageReference,
     ChatMediaProvider,
+    ChatMessageReference,
     ChatReferenceKind,
 )
-import config
-from _audit import tenor_log
-from _authority import AuthorityResource, read_json_object
-from _file import File_Utils
-from _minecraft_default_heads import minecraft_dev_bypass_head_data_uri
-from _resolator import Resolutator
-from _security import Access_Control
-from _utils import Utilities
 from config import Name_Cache, NameResolutionResult, NameResolutionStatus, Singleton
 
 if TYPE_CHECKING:

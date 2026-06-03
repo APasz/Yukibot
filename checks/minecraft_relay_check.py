@@ -56,6 +56,29 @@ class _NamesStub:
         del user_id, preferred_guild_id
         return fallback
 
+    @staticmethod
+    def discord_fallback_name(
+        user_id: hikari.Snowflakeish | None,
+        fallback: str,
+        *,
+        scope: str | None = None,
+        fallback_display_name: str | None = None,
+    ) -> str:
+        del user_id, scope
+        return fallback_display_name or fallback
+
+    @staticmethod
+    def relay_display_name(
+        user_id: int | None,
+        default: str,
+        /,
+        *,
+        scope: str | None = None,
+        preferred_guild_id: hikari.Snowflakeish | None = None,
+    ) -> str:
+        del user_id, scope, preferred_guild_id
+        return default
+
 
 class _DummyReceiver(AM_Receiver):
     async def send(self, payload: App_Bound) -> None:
@@ -116,10 +139,13 @@ def _make_send_channel(
 ) -> hikari.TextableChannel:
     return cast(
         hikari.TextableChannel,
-        SimpleNamespace(
-            id=hikari.Snowflake(channel_id),
-            guild_id=hikari.Snowflake(guild_id) if guild_id is not None else None,
-            send=AsyncMock(return_value=send_result),
+        cast(
+            object,
+            SimpleNamespace(
+                id=hikari.Snowflake(channel_id),
+                guild_id=hikari.Snowflake(guild_id) if guild_id is not None else None,
+                send=AsyncMock(return_value=send_result),
+            ),
         ),
     )
 
@@ -143,17 +169,23 @@ def _make_minecraft_cfg(
 def _make_textable_channel() -> hikari.TextableChannel:
     return cast(
         hikari.TextableChannel,
-        SimpleNamespace(app=cast(Any, object()), id=hikari.Snowflake(1), name="relay-test", type=1),
+        cast(
+            object,
+            SimpleNamespace(app=cast(Any, object()), id=hikari.Snowflake(1), name="relay-test", type=1),
+        ),
     )
 
 
 def _make_resolution_message(*, app: object, player: str, status: config.NameResolutionStatus) -> DC_Bound:
     return cast(
         DC_Bound,
-        SimpleNamespace(
-            player=player,
-            player_resolution=config.NameResolutionResult(status),
-            app=app,
+        cast(
+            object,
+            SimpleNamespace(
+                player=player,
+                player_resolution=config.NameResolutionResult(status),
+                app=app,
+            ),
         ),
     )
 
@@ -339,6 +371,45 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
         add_mock.assert_called_once()
 
+    async def test_note_join_resolves_player_to_discord_mention_when_available(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.name = "minecraft_demo"
+        app.scope = "minecraft"
+        app.name_cache = SimpleNamespace(
+            resolve_name=Mock(return_value=config.NameResolutionResult(config.NameResolutionStatus.UNIQUE, 42))
+        )
+        players = Players(app)
+        app._players = players
+
+        with patch("apps.minecraft.DC_Relay.add") as add_mock:
+            players.note_join("Alice")
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.content, "{player} joined {app}")
+        self.assertEqual(relayed_message.player, "<@42>")
+        app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
+
+    async def test_note_leave_resolves_player_to_discord_mention_when_available(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.name = "minecraft_demo"
+        app.scope = "minecraft"
+        app.name_cache = SimpleNamespace(
+            resolve_name=Mock(return_value=config.NameResolutionResult(config.NameResolutionStatus.UNIQUE, 42))
+        )
+        players = Players(app)
+        app._players = players
+        players._players = {"Alice"}
+
+        with patch("apps.minecraft.DC_Relay.add") as add_mock:
+            players.note_leave("Alice")
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.content, "{player} left {app}")
+        self.assertEqual(relayed_message.player, "<@42>")
+        app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
+
     async def test_listplayers_logs_unrecognised_response_only_once_until_success(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
         app.name = "minecraft_demo"
@@ -401,6 +472,9 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         app.cfg = _make_minecraft_cfg()
         app.name = "minecraft_demo"
         app.scope = "minecraft"
+        app.name_cache = SimpleNamespace(
+            resolve_name=Mock(return_value=config.NameResolutionResult(config.NameResolutionStatus.NOT_FOUND))
+        )
         app._tail_machers = set()
         app._players = Players(app)
         matcher = Matchers(app)
@@ -412,6 +486,35 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         relayed_message = add_mock.call_args.args[0]
         self.assertEqual(relayed_message.player, "Alice")
         self.assertEqual(relayed_message.content, "was run over by Ge 6/6 I")
+        app.name_cache.resolve_name.assert_not_called()
+
+    async def test_match_death_resolves_decimated_player_kills_to_discord_mentions(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.cfg = _make_minecraft_cfg()
+        app.name = "minecraft_demo"
+        app.scope = "minecraft"
+        app.name_cache = SimpleNamespace(
+            resolve_name=Mock(
+                side_effect=lambda player, scope: (
+                    config.NameResolutionResult(config.NameResolutionStatus.UNIQUE, 42)
+                    if (player, scope) == ("Bob", "minecraft")
+                    else config.NameResolutionResult(config.NameResolutionStatus.NOT_FOUND)
+                )
+            )
+        )
+        app._tail_machers = set()
+        app._players = Players(app)
+        app._players.note_uuid("Bob", "123e4567-e89b-12d3-a456-426614174000")
+        matcher = Matchers(app)
+
+        with patch("apps.minecraft.DC_Relay.add") as add_mock:
+            await matcher.match_death("[12:00:00] [Server thread/INFO]: Alice was decimated by Bob")
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.player, "Alice")
+        self.assertEqual(relayed_message.content, "was decimated by <@42>")
+        app.name_cache.resolve_name.assert_called_once_with("Bob", "minecraft")
 
     async def test_match_death_relays_supported_modded_death_phrases(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
@@ -1032,10 +1135,13 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         target_send = AsyncMock(return_value=SimpleNamespace(id=hikari.Snowflake(999)))
         target_channel = cast(
             hikari.TextableChannel,
-            SimpleNamespace(
-                id=hikari.Snowflake(2),
-                guild_id=None,
-                send=target_send,
+            cast(
+                object,
+                SimpleNamespace(
+                    id=hikari.Snowflake(2),
+                    guild_id=None,
+                    send=target_send,
+                ),
             ),
         )
         relay._channel_objects[hikari.Snowflake(2)] = target_channel
@@ -1051,6 +1157,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
             content="hello",
             message_id=hikari.Snowflake(99),
             guild_id=None,
+            author=None,
             author_id=hikari.Snowflake(456),
             message=SimpleNamespace(
                 type=hikari.MessageType.DEFAULT,
@@ -1096,10 +1203,13 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         send_mock = AsyncMock(return_value=SimpleNamespace(channel_id=hikari.Snowflake(1)))
         channel = cast(
             hikari.TextableChannel,
-            SimpleNamespace(
-                id=hikari.Snowflake(1),
-                guild_id=None,
-                send=send_mock,
+            cast(
+                object,
+                SimpleNamespace(
+                    id=hikari.Snowflake(1),
+                    guild_id=None,
+                    send=send_mock,
+                ),
             ),
         )
         relay._channel_objects[app.chat_channel] = channel
@@ -1146,10 +1256,13 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         send_mock = AsyncMock(return_value=SimpleNamespace(channel_id=hikari.Snowflake(1)))
         channel = cast(
             hikari.TextableChannel,
-            SimpleNamespace(
-                id=hikari.Snowflake(1),
-                guild_id=None,
-                send=send_mock,
+            cast(
+                object,
+                SimpleNamespace(
+                    id=hikari.Snowflake(1),
+                    guild_id=None,
+                    send=send_mock,
+                ),
             ),
         )
         relay._channel_objects[app.chat_channel] = channel

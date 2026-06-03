@@ -16,11 +16,13 @@ from .runtime_imports import (
     ModWebUser,
     Power_Level,
     Request,
+    Path,
     Timer,
     asyncio,
     cast,
     config,
     inspect,
+    lru_cache,
     requests,
     urlencode,
 )
@@ -45,8 +47,11 @@ from .types import (
 )
 
 from .service_base import ModWebServiceSupport
+_STATUS_SVG_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "svg" / "web_dash"
+
 class ModWebStatusMixin(ModWebServiceSupport):
     def _render_error_page(self, *, ui: ModWebUi, title: str, detail: str, app_name: str | None = None) -> None:
+        icon_markup: str = self._error_page_icon_markup(title)
         self._apply_theme(ui=ui)
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_status_page_panel(
@@ -57,6 +62,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     badge_text="Unavailable",
                     badge_tone="red",
                     accent_color_hex="#dc2626",
+                    icon_markup=icon_markup,
                     detail_text=detail,
                     detail_label="Details",
                     context_label=app_name,
@@ -105,25 +111,25 @@ class ModWebStatusMixin(ModWebServiceSupport):
             .style(self._hero_card_style(config.accent_color_hex))
         ):
             with ui.column().classes(f"{self._hero_shell_classes()} mod-status-shell"):
-                if config.icon_markup is not None:
-                    ui.html(config.icon_markup).classes("mod-status-figure")
-                with ui.row().classes(self._hero_header_classes()):
-                    with ui.column().classes(f"{self._hero_header_main_classes()} mod-status-header-main"):
-                        with ui.row().classes("mod-status-kicker w-full items-center gap-2 flex-wrap"):
-                            self._badge(ui=ui, text=config.badge_text, tone=config.badge_tone)
-                            if config.context_label is not None:
-                                ui.label(config.context_label).classes("mod-status-context break-all")
-                        ui.label(config.title).classes(self._hero_title_classes())
-                        ui.label(config.support_text).classes(self._hero_support_classes())
-                if config.detail_text is not None:
-                    with ui.column().classes("mod-status-detail w-full"):
-                        if config.detail_label is not None:
-                            ui.label(config.detail_label).classes("mod-status-detail-label")
-                        ui.label(config.detail_text).classes("mod-status-detail-text break-all")
-                if config.actions:
-                    with ui.row().classes("mod-status-actions w-full"):
-                        for action in config.actions:
-                            self._action_link(ui=ui, label=action.label, url=action.url)
+                with ui.row().classes("mod-status-top w-full items-start justify-between gap-4 flex-wrap"):
+                    with ui.column().classes("mod-status-content min-w-0 gap-4"):
+                        with ui.column().classes(f"{self._hero_header_main_classes()} mod-status-header-main"):
+                            with ui.row().classes("mod-status-kicker w-full items-center gap-2 flex-wrap"):
+                                self._badge(ui=ui, text=config.badge_text, tone=config.badge_tone)
+                                if config.context_label is not None:
+                                    ui.label(config.context_label).classes("mod-status-context break-all")
+                            ui.label(config.title).classes(self._hero_title_classes())
+                            ui.label(config.support_text).classes(self._hero_support_classes())
+                        if config.detail_text is not None:
+                            with ui.column().classes("mod-status-detail w-full"):
+                                if config.detail_label is not None:
+                                    ui.label(config.detail_label).classes("mod-status-detail-label")
+                                ui.label(config.detail_text).classes("mod-status-detail-text break-all")
+                        if config.actions:
+                            with ui.row().classes("mod-status-actions w-full"):
+                                for action in config.actions:
+                                    self._action_link(ui=ui, label=action.label, url=action.url)
+                    ui.html(self._resolved_status_icon_markup(config)).classes("mod-status-figure mod-status-figure-inline")
 
     def _render_framework_page_exception(self, *, ui: ModWebUi, exception: Exception) -> None:
         self._apply_theme(ui=ui)
@@ -238,33 +244,39 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
     @staticmethod
     def _remote_node_unavailable_icon_markup() -> str:
-        return """
-<svg viewBox="0 0 96 96" aria-hidden="true" class="mod-status-figure-svg">
-  <circle cx="48" cy="50" r="24" fill="rgba(24, 24, 27, 0.94)" stroke="rgba(248, 113, 113, 0.6)" stroke-width="3"/>
-  <path d="M28 36 35 18l9 14" fill="rgba(24, 24, 27, 0.94)" stroke="rgba(248, 113, 113, 0.6)" stroke-width="3" stroke-linejoin="round"/>
-  <path d="M68 36 61 18l-9 14" fill="rgba(24, 24, 27, 0.94)" stroke="rgba(248, 113, 113, 0.6)" stroke-width="3" stroke-linejoin="round"/>
-  <circle cx="39" cy="50" r="3.2" fill="rgba(244, 244, 245, 0.92)"/>
-  <circle cx="57" cy="50" r="3.2" fill="rgba(244, 244, 245, 0.92)"/>
-  <path d="M48 56 44.5 60h7Z" fill="rgba(248, 113, 113, 0.9)"/>
-  <path d="M44.5 62c1 2.1 2.2 3.1 3.5 3.1s2.5-1 3.5-3.1" fill="none" stroke="rgba(244, 244, 245, 0.82)" stroke-width="2.4" stroke-linecap="round"/>
-  <path d="M28 56h11M27 62h10M57 56h11M59 62h10" fill="none" stroke="rgba(244, 244, 245, 0.55)" stroke-width="2.4" stroke-linecap="round"/>
-  <circle cx="72" cy="28" r="10" fill="rgba(127, 29, 29, 0.88)" stroke="rgba(248, 113, 113, 0.72)" stroke-width="2.5"/>
-  <path d="M72 23v6m0 6h.01" stroke="rgba(254, 242, 242, 0.94)" stroke-width="2.8" stroke-linecap="round"/>
-</svg>
-""".strip()
+        return _status_svg_markup("remote_node_unavailable.svg", fallback_name="generic_error.svg")
 
     @staticmethod
     def _framework_error_icon_markup() -> str:
-        return """
-<svg viewBox="0 0 96 96" aria-hidden="true" class="mod-status-figure-svg">
-  <rect x="18" y="20" width="60" height="44" rx="0" fill="rgba(9, 9, 13, 0.88)" stroke="rgba(248, 113, 113, 0.68)" stroke-width="3"/>
-  <rect x="26" y="30" width="44" height="8" rx="0" fill="rgba(248, 113, 113, 0.2)" stroke="rgba(248, 113, 113, 0.38)" stroke-width="2"/>
-  <rect x="26" y="46" width="28" height="6" rx="0" fill="rgba(244, 244, 245, 0.12)"/>
-  <circle cx="65" cy="49" r="5" fill="rgba(248, 113, 113, 0.9)"/>
-  <path d="M48 12v8M36 12h24" stroke="rgba(248, 113, 113, 0.72)" stroke-width="3" stroke-linecap="square"/>
-  <path d="M34 76h28M58 76h4" stroke="rgba(244, 244, 245, 0.52)" stroke-width="4" stroke-linecap="square"/>
-</svg>
-""".strip()
+        return _status_svg_markup("framework_error.svg", fallback_name="generic_error.svg")
+
+    @staticmethod
+    def _generic_error_icon_markup() -> str:
+        return _status_svg_markup("generic_error.svg")
+
+    @staticmethod
+    def _chat_unavailable_icon_markup() -> str:
+        return _status_svg_markup("chat_unavailable.svg", fallback_name="generic_error.svg")
+
+    @staticmethod
+    def _access_denied_icon_markup() -> str:
+        return _status_svg_markup("access_denied.svg", fallback_name="generic_error.svg")
+
+    @staticmethod
+    def _page_unavailable_icon_markup() -> str:
+        return _status_svg_markup("page_unavailable.svg", fallback_name="generic_error.svg")
+
+    def _error_page_icon_markup(self, title: str) -> str:
+        if title == "Chat unavailable":
+            return self._chat_unavailable_icon_markup()
+        if title == "Page unavailable":
+            return self._page_unavailable_icon_markup()
+        return self._generic_error_icon_markup()
+
+    def _resolved_status_icon_markup(self, config: _ModWebStatusPageConfig) -> str:
+        if config.icon_markup is not None:
+            return config.icon_markup
+        return self._generic_error_icon_markup()
 
     def _authorised_page_user(
         self, *, ui: ModWebUi, request: Request, required_level: Power_Level
@@ -304,6 +316,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     badge_text="Setup Required",
                     badge_tone="warn",
                     accent_color_hex="#f59e0b",
+                    icon_markup=self._generic_error_icon_markup(),
                     detail_text=self._auth.redirect_url,
                     detail_label="Callback URL",
                     actions=(_ModWebLinkSpec(label="Home", url=self.index_path()),),
@@ -395,6 +408,20 @@ class ModWebStatusMixin(ModWebServiceSupport):
                                 self._action_link(ui=ui, label=action.label, url=action.url)
 
                     _render_login_actions()
+            if dev_mode_enabled:
+                self._render_login_dev_error_preview_card(ui=ui)
+
+    def _render_login_dev_error_preview_card(self, *, ui: ModWebUi) -> None:
+        with ui.card().classes("mod-card w-full"):
+            with ui.column().classes("gap-4 p-5"):
+                with ui.column().classes("gap-1"):
+                    ui.label("Dev Error Previews").classes("text-xl font-bold mod-title-small")
+                    ui.label(
+                        "Open the current mod web and NiceGUI error states without breaking a live app page."
+                    ).classes("text-sm mod-subtitle")
+                with ui.row().classes("gap-2 flex-wrap"):
+                    for action in self._dev_error_preview_actions():
+                        self._action_link(ui=ui, label=action.label, url=action.url, compact=True)
 
     def _login_page_subtitle(self) -> str:
         if self._auth.bypass_enabled:
@@ -418,6 +445,25 @@ class ModWebStatusMixin(ModWebServiceSupport):
             ),
         )
 
+    @staticmethod
+    def _dev_error_preview_actions() -> tuple[_ModWebLinkSpec, ...]:
+        return (
+            _ModWebLinkSpec(label="Access Denied", url="/mod-web/dev/error/access-denied"),
+            _ModWebLinkSpec(label="Sign-in Unavailable", url="/mod-web/dev/error/sign-in-unavailable"),
+            _ModWebLinkSpec(label="Page Unavailable", url="/mod-web/dev/error/page-unavailable"),
+            _ModWebLinkSpec(label="Chat Unavailable", url="/mod-web/dev/error/chat-unavailable"),
+            _ModWebLinkSpec(label="Node Unavailable", url="/mod-web/dev/error/node-unavailable"),
+            _ModWebLinkSpec(label="Remote JSON Invalid", url="/mod-web/dev/error/remote-json-invalid"),
+            _ModWebLinkSpec(label="Remote Timeout", url="/mod-web/dev/error/remote-timeout"),
+            _ModWebLinkSpec(label="Remote Rejected", url="/mod-web/dev/error/remote-rejected"),
+            _ModWebLinkSpec(label="Framework 404", url="/mod-web/dev/error/framework-404"),
+            _ModWebLinkSpec(label="Framework 500", url="/mod-web/dev/error/framework-500"),
+            _ModWebLinkSpec(label="NiceGUI Exception", url="/mod-web/dev/error/nicegui-exception"),
+            _ModWebLinkSpec(label="Refresh Shutdown", url="/mod-web/dev/error/refresh-shutdown"),
+            _ModWebLinkSpec(label="Config Fail Toasts", url="/mod-web/dev/error/config-failure"),
+            _ModWebLinkSpec(label="Chat Stream WS", url="/mod-web/dev/error/chat-stream-websocket"),
+        )
+
     def _render_forbidden_page(self, *, ui: ModWebUi, user: ModWebUser, required_level: Power_Level) -> None:
         current_level: Power_Level = self._acl.level_of(user.discord_id) if self._acl is not None else Power_Level.guest
         self._apply_theme(ui=ui)
@@ -431,6 +477,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     badge_text="Restricted",
                     badge_tone="warn",
                     accent_color_hex="#f59e0b",
+                    icon_markup=self._access_denied_icon_markup(),
                     detail_text=f"{current_level.name.title()} access is below {required_level.name.title()}.",
                     detail_label="Required Access",
                     actions=(_ModWebLinkSpec(label="Home", url=self.index_path()),),
@@ -816,3 +863,15 @@ class ModWebStatusMixin(ModWebServiceSupport):
             badge: Label = self._badge(ui=ui, text=node_name, tone="black", extra_classes="mod-app-node-badge")
             if color_hex := self._node_role_color_hex(node_name=node_name):
                 badge.style(self._node_badge_style(color_hex))
+
+
+@lru_cache(maxsize=None)
+def _status_svg_markup(file_name: str, fallback_name: str | None = None) -> str:
+    path: Path = _STATUS_SVG_DIRECTORY / file_name
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        if fallback_name is None:
+            raise
+        fallback_path: Path = _STATUS_SVG_DIRECTORY / fallback_name
+        return fallback_path.read_text(encoding="utf-8").strip()

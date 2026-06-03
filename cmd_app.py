@@ -54,8 +54,8 @@ from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionRe
 from apps._mod import Mod
 from apps._settings import Setting, Settings_Manager
 from config import VoiceTargetConfig
-from mod_web_dashboard.nicegui_protocols import WebChatRelayPublisher
-from mod_web_dashboard.service import ModWebService
+from web_dash.nicegui_protocols import WebChatRelayPublisher
+from web_dash.service import ModWebService
 from node_api import RelayTTSQueue
 
 log: Logger = logging.getLogger(__name__)

@@ -1,5 +1,20 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from .constants import (
+    _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
+    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    _REMOTE_NODE_TOKEN_TTL_SECONDS,
+    _SAME_ORIGIN_NODE_API_BASE,
+    _SAME_ORIGIN_NODE_PROXY_BASE,
+    _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
+    log,
+    traffic_log,
+)
+from .home import ModWebHomeMixin
+from .json_helpers import _json_object, _json_request_object
+from .nicegui_protocols import AsyncRefresh, ModWebUi, RefreshableValue
 from .runtime_imports import (
     App,
     App_Manager,
@@ -51,18 +66,7 @@ from .runtime_imports import (
     urlencode,
     urlunsplit,
 )
-from .constants import (
-    _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
-    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-    _REMOTE_NODE_TOKEN_TTL_SECONDS,
-    _SAME_ORIGIN_NODE_API_BASE,
-    _SAME_ORIGIN_NODE_PROXY_BASE,
-    _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
-    log,
-    traffic_log,
-)
-from .json_helpers import _json_object, _json_request_object
-from .nicegui_protocols import AsyncRefresh, ModWebUi, RefreshableValue
+from .service_base import ModWebServiceSupport
 from .types import (
     ModWebHomeNodeSummary,
     ModWebNodeAppSection,
@@ -74,13 +78,9 @@ from .types import (
 )
 from .utils import _http_exception, _is_executor_shutdown_error
 
-from .home import ModWebHomeMixin
-from .service_base import ModWebServiceSupport
-
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from nicegui.elements.upload_files import FileUpload
+
 
 class ModWebModelsMixin(ModWebServiceSupport):
     async def _build_page_model(self, app: App, *, user: ModWebUser) -> ModWebPageModel:
@@ -123,45 +123,47 @@ class ModWebModelsMixin(ModWebServiceSupport):
             len(saves.saves) if saves is not None else 0,
             len(settings.settings) if settings is not None else 0,
         )
-        return ModWebPageModel(
-            node_name=config.MOD_WEB_SERVER.node_name,
-            app_name=app.name,
-            app_friendly=app.friendly,
-            app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
-            supports_configs=supports_configs,
-            config_read_level=config_read_level,
-            config_write_level=config_write_level,
-            supports_save_uploads=supports_save_uploads,
-            supports_save_rename=supports_save_rename,
-            save_write_level=save_write_level,
-            mods=mods,
-            configs=configs,
-            saves=saves,
-            app_stats=mods.app_stats,
-            app_start_blocked=app_start_blocked,
-            settings=settings,
-            console_actions=console_actions,
-            supports_chat=app.supports_chat_relay,
-            chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
-            download_all_url=self._node_api.mod_download_url(
-                app.name,
-                enabled_only=False,
-                base_url=_SAME_ORIGIN_NODE_API_BASE,
-            ),
-            download_enabled_url=self._node_api.mod_download_url(
-                app.name,
-                enabled_only=True,
-                base_url=_SAME_ORIGIN_NODE_API_BASE,
-            ),
-            mod_download_urls={
-                mod.name: self._node_api.single_mod_download_url(
+        return self._page_model_with_tabs(
+            ModWebPageModel(
+                node_name=config.MOD_WEB_SERVER.node_name,
+                app_name=app.name,
+                app_friendly=app.friendly,
+                app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
+                supports_configs=supports_configs,
+                config_read_level=config_read_level,
+                config_write_level=config_write_level,
+                supports_save_uploads=supports_save_uploads,
+                supports_save_rename=supports_save_rename,
+                save_write_level=save_write_level,
+                mods=mods,
+                configs=configs,
+                saves=saves,
+                app_stats=mods.app_stats,
+                app_start_blocked=app_start_blocked,
+                settings=settings,
+                console_actions=console_actions,
+                supports_chat=app.supports_chat_relay,
+                chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
+                download_all_url=self._node_api.mod_download_url(
                     app.name,
-                    mod.name,
+                    enabled_only=False,
                     base_url=_SAME_ORIGIN_NODE_API_BASE,
-                )
-                for mod in mods.mods
-                if mod.downloadable
-            },
+                ),
+                download_enabled_url=self._node_api.mod_download_url(
+                    app.name,
+                    enabled_only=True,
+                    base_url=_SAME_ORIGIN_NODE_API_BASE,
+                ),
+                mod_download_urls={
+                    mod.name: self._node_api.single_mod_download_url(
+                        app.name,
+                        mod.name,
+                        base_url=_SAME_ORIGIN_NODE_API_BASE,
+                    )
+                    for mod in mods.mods
+                    if mod.downloadable
+                },
+            )
         )
 
     async def _build_overview_page_model(self, app: App, *, user: ModWebUser) -> ModWebOverviewPageModel:
@@ -203,25 +205,27 @@ class ModWebModelsMixin(ModWebServiceSupport):
             len(saves.saves) if saves is not None else 0,
             len(settings.settings) if settings is not None else 0,
         )
-        return ModWebOverviewPageModel(
-            node_name=config.MOD_WEB_SERVER.node_name,
-            app_name=app.name,
-            app_friendly=app.friendly,
-            app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
-            supports_configs=supports_configs,
-            config_read_level=config_read_level,
-            config_write_level=config_write_level,
-            supports_save_uploads=supports_save_uploads,
-            supports_save_rename=supports_save_rename,
-            save_write_level=save_write_level,
-            configs=configs,
-            saves=saves,
-            app_stats=app_stats,
-            app_start_blocked=app_start_blocked,
-            settings=settings,
-            console_actions=console_actions,
-            supports_chat=app.supports_chat_relay,
-            chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
+        return self._page_model_with_tabs(
+            ModWebOverviewPageModel(
+                node_name=config.MOD_WEB_SERVER.node_name,
+                app_name=app.name,
+                app_friendly=app.friendly,
+                app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
+                supports_configs=supports_configs,
+                config_read_level=config_read_level,
+                config_write_level=config_write_level,
+                supports_save_uploads=supports_save_uploads,
+                supports_save_rename=supports_save_rename,
+                save_write_level=save_write_level,
+                configs=configs,
+                saves=saves,
+                app_stats=app_stats,
+                app_start_blocked=app_start_blocked,
+                settings=settings,
+                console_actions=console_actions,
+                supports_chat=app.supports_chat_relay,
+                chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
+            )
         )
 
     def _remote_page_model(
@@ -246,33 +250,35 @@ class ModWebModelsMixin(ModWebServiceSupport):
     ) -> ModWebPageModel:
         node_path: str = f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node.node_name, safe='')}"
         app_path: str = f"{node_path}/apps/{quote(mods.app_name, safe='')}"
-        return ModWebPageModel(
-            node_name=node.node_name,
-            app_name=mods.app_name,
-            app_friendly=mods.app_friendly,
-            app_color_hex=app_color_hex,
-            supports_configs=supports_configs,
-            config_read_level=config_read_level,
-            config_write_level=config_write_level,
-            supports_save_uploads=supports_save_uploads,
-            supports_save_rename=supports_save_rename,
-            save_write_level=save_write_level,
-            mods=mods,
-            configs=configs,
-            saves=saves,
-            app_stats=mods.app_stats,
-            app_start_blocked=app_start_blocked,
-            settings=settings,
-            console_actions=console_actions,
-            supports_chat=supports_chat,
-            chat_url=chat_url,
-            download_all_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'false'})}",
-            download_enabled_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'true'})}",
-            mod_download_urls={
-                mod.name: f"{app_path}/mods/{quote(mod.name, safe='')}/download"
-                for mod in mods.mods
-                if mod.downloadable
-            },
+        return self._page_model_with_tabs(
+            ModWebPageModel(
+                node_name=node.node_name,
+                app_name=mods.app_name,
+                app_friendly=mods.app_friendly,
+                app_color_hex=app_color_hex,
+                supports_configs=supports_configs,
+                config_read_level=config_read_level,
+                config_write_level=config_write_level,
+                supports_save_uploads=supports_save_uploads,
+                supports_save_rename=supports_save_rename,
+                save_write_level=save_write_level,
+                mods=mods,
+                configs=configs,
+                saves=saves,
+                app_stats=mods.app_stats,
+                app_start_blocked=app_start_blocked,
+                settings=settings,
+                console_actions=console_actions,
+                supports_chat=supports_chat,
+                chat_url=chat_url,
+                download_all_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'false'})}",
+                download_enabled_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'true'})}",
+                mod_download_urls={
+                    mod.name: f"{app_path}/mods/{quote(mod.name, safe='')}/download"
+                    for mod in mods.mods
+                    if mod.downloadable
+                },
+            )
         )
 
     def _remote_overview_page_model(
@@ -297,25 +303,27 @@ class ModWebModelsMixin(ModWebServiceSupport):
         app_stats: NodeAppRuntimeSummary | None,
         app_start_blocked: bool,
     ) -> ModWebOverviewPageModel:
-        return ModWebOverviewPageModel(
-            node_name=node.node_name,
-            app_name=app_name,
-            app_friendly=app_friendly,
-            app_color_hex=app_color_hex,
-            supports_configs=supports_configs,
-            config_read_level=config_read_level,
-            config_write_level=config_write_level,
-            supports_save_uploads=supports_save_uploads,
-            supports_save_rename=supports_save_rename,
-            save_write_level=save_write_level,
-            configs=configs,
-            saves=saves,
-            app_stats=app_stats,
-            app_start_blocked=app_start_blocked,
-            settings=settings,
-            console_actions=console_actions,
-            supports_chat=supports_chat,
-            chat_url=chat_url,
+        return self._page_model_with_tabs(
+            ModWebOverviewPageModel(
+                node_name=node.node_name,
+                app_name=app_name,
+                app_friendly=app_friendly,
+                app_color_hex=app_color_hex,
+                supports_configs=supports_configs,
+                config_read_level=config_read_level,
+                config_write_level=config_write_level,
+                supports_save_uploads=supports_save_uploads,
+                supports_save_rename=supports_save_rename,
+                save_write_level=save_write_level,
+                configs=configs,
+                saves=saves,
+                app_stats=app_stats,
+                app_start_blocked=app_start_blocked,
+                settings=settings,
+                console_actions=console_actions,
+                supports_chat=supports_chat,
+                chat_url=chat_url,
+            )
         )
 
     def _node_links(self) -> tuple[ModWebNodeLink, ...]:
@@ -988,7 +996,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _app_footprint_value(size_bytes: int) -> str:
-        return f"{Utilities.humanise_bytes(size_bytes, precision=1)} total"
+        return f"{Utilities.humanise_bytes(size_bytes, precision=1)}"
 
     @staticmethod
     def _ram_value(*, percent: int, used_bytes: int, total_bytes: int) -> str:

@@ -37,6 +37,7 @@ from .page_handlers import ModWebPageHandlersMixin
 from .routes import ModWebRoutesMixin
 from .status import ModWebStatusMixin
 from .streams import ModWebStreamsMixin
+from .tabs import ModWebTabsMixin
 from .ui_helpers import ModWebUiHelpersMixin
 
 
@@ -45,6 +46,7 @@ class ModWebService(
     ModWebPageHandlersMixin,
     ModWebStreamsMixin,
     ModWebChatMixin,
+    ModWebTabsMixin,
     ModWebModelsMixin,
     ModWebHomeMixin,
     ModWebStatusMixin,

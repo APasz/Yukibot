@@ -15,7 +15,6 @@ from .runtime_imports import (
     NodeAppTransitionState,
     NodeStateStreamEvent,
     Request,
-    Timer,
     asyncio,
     config,
     mod_web_badge_class,
@@ -23,11 +22,11 @@ from .runtime_imports import (
     replace,
 )
 from .constants import (
-    _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
+    _APP_SECTION_QUERY_PARAM,
     _SAME_ORIGIN_NODE_API_BASE,
     _SAME_ORIGIN_NODE_PROXY_BASE,
 )
-from .nicegui_protocols import AsyncRefresh, ModWebUi
+from .nicegui_protocols import ModWebUi
 from .types import (
     ModWebAppLink,
     ModWebBasePageModel,
@@ -36,6 +35,7 @@ from .types import (
     ModWebNodeLink,
     ModWebNodeStatus,
     ModWebTitleStat,
+    _ModWebAppCardBadgeSpec,
     _ModWebAppRuntimeState,
     _ModWebBadgeSpec,
     _ModWebLinkSpec,
@@ -188,49 +188,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
             _render_home_sections(_current_sections())
 
-            def _apply_sections(updated_sections: tuple[ModWebNodeAppSection, ...]) -> None:
-                nonlocal sections_by_node, summaries_by_node
-                previous_sections: tuple[ModWebNodeAppSection, ...] = _current_sections()
-                for section in updated_sections:
-                    previous_section: ModWebNodeAppSection | None = sections_by_node.get(section.node.node_name)
-                    section_app_links = section.app_links
-                    if previous_section is not None:
-                        section_app_links: tuple[ModWebAppLink, ...] = self._mark_runtime_changes(
-                            previous_apps=previous_section.app_links,
-                            updated_apps=section.app_links,
-                        )
-                    section: ModWebNodeAppSection = replace(section, app_links=section_app_links)
-                    sections_by_node[section.node.node_name] = section
-                    existing_summary: ModWebHomeNodeSummary | None = summaries_by_node.get(section.node.node_name)
-                    summaries_by_node[section.node.node_name] = ModWebHomeNodeSummary(
-                        node=section.node,
-                        app_count=len(section.app_links),
-                        system_summary=(
-                            None
-                            if section.error is not None
-                            else None
-                            if existing_summary is None
-                            else existing_summary.system_summary
-                        ),
-                    )
-                current_sections: tuple[ModWebNodeAppSection, ...] = _current_sections()
-                if not self._sections_equal_for_card_render(previous_sections, current_sections):
-                    _render_home_badges.refresh(current_sections)
-                    _render_home_sections.refresh(current_sections)
-
-            refresh_sections: AsyncRefresh = self._build_async_refreshable_updater(
-                refresh_async_value=lambda: self._home_app_sections(
-                    user,
-                    simulated_down_node_names=simulated_down_node_names,
-                ),
-                apply_value=_apply_sections,
-                error_context="Mod web home app sections",
-            )
-            refresh_sections_timer: Timer = ui.timer(
-                _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
-                lambda: asyncio.create_task(refresh_sections()),
-            )
-            self._register_timer_cleanup(ui=ui, timer=refresh_sections_timer)
             page_closed = False
             loop: AbstractEventLoop = asyncio.get_running_loop()
             unsubscribes: list[Callable[[], None]] = []
@@ -537,10 +494,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
     ) -> None:
         runtime_badge: _ModWebBadgeSpec | None = self._app_card_runtime_badge(app)
         with ui.row().classes("mod-app-card-shell w-full items-center justify-between gap-2 p-3 flex-wrap"):
-            with ui.column().classes("mod-app-card-main min-w-0 gap-1"):
+            with ui.column().classes("mod-app-card-main min-w-0 gap-0"):
                 title_label = ui.label(app.friendly).classes(self._app_card_title_classes(app))
                 self._attach_text_tooltip(ui=ui, target=title_label, text=app.friendly)
-                ui.label("").classes("mod-app-card-subtitle text-sm mod-subtitle mod-app-card-subtitle-empty")
             with ui.row().classes("mod-app-card-actions items-center justify-end gap-3 flex-wrap"):
                 if runtime_badge is not None:
                     runtime_badge_classes = "mod-app-runtime-chip"
@@ -554,61 +510,65 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     )
                 with ui.row().classes("mod-app-card-badges items-center gap-3 flex-wrap"):
                     for badge in self._app_card_badges(app):
-                        self._badge(ui=ui, text=badge.text, tone=badge.tone)
-                if app.chat_url is not None:
-                    self._action_link(
-                        ui=ui,
-                        label="Chat",
-                        url=self._app_list_view_url(app.chat_url, show_api_actions=show_api_actions),
-                        compact=True,
-                        extra_classes="mod-action-border-accent",
-                        stop_propagation=True,
-                        new_tab=True,
-                    )
+                        badge_target: str | None = self._app_card_badge_target(
+                            app=app,
+                            badge=badge,
+                            show_api_actions=show_api_actions,
+                        )
+                        shift_target: str | None = (
+                            self._app_list_view_url(app.chat_url, show_api_actions=show_api_actions)
+                            if badge.tab_id == "chat" and app.chat_url is not None
+                            else None
+                        )
+                        if badge_target is None:
+                            self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                        else:
+                            self._badge_link(
+                                ui=ui,
+                                text=badge.text,
+                                tone=badge.tone,
+                                url=badge_target,
+                                shift_url=shift_target,
+                                stop_propagation=True,
+                            )
                 api_actions: tuple[_ModWebLinkSpec, ...] | tuple[()] = (
                     self._app_card_api_actions(app) if show_api_actions else ()
                 )
                 if api_actions:
                     self._render_app_card_api_pill(ui=ui, actions=api_actions)
 
-    @staticmethod
-    def _app_card_badges(app: ModWebAppLink) -> tuple[_ModWebBadgeSpec, ...]:
-        badges: list[_ModWebBadgeSpec] = []
-        if app.supports_saves:
-            badges.append(_ModWebBadgeSpec(text="Saves", tone="black"))
-        if app.supports_configs:
-            badges.append(_ModWebBadgeSpec(text="Configs", tone="black"))
-        if app.supports_settings:
-            badges.append(_ModWebBadgeSpec(text="Settings", tone="black"))
-        if app.supports_console_actions:
-            badges.append(_ModWebBadgeSpec(text="Console", tone="black"))
-        if app.supports_mods:
-            badges.append(_ModWebBadgeSpec(text="Mods", tone="purple"))
-        if app.supports_chat:
-            badges.append(_ModWebBadgeSpec(text="Chat", tone="purple"))
-        return tuple[_ModWebBadgeSpec, ...](badges)
+    def _app_card_badges(self, app: ModWebAppLink) -> tuple[_ModWebAppCardBadgeSpec, ...]:
+        return tuple(
+            _ModWebAppCardBadgeSpec(
+                text=tab.label,
+                tone=tab.app_card_tone,
+                tab_id=tab.tab_id,
+            )
+            for tab in self._app_link_tabs(app)
+            if tab.show_on_app_card
+        )
+
+    def _app_card_badge_target(
+        self,
+        *,
+        app: ModWebAppLink,
+        badge: _ModWebAppCardBadgeSpec,
+        show_api_actions: bool,
+    ) -> str | None:
+        if badge.tab_id is None or not app.url:
+            return None
+        base_url: str = self._app_list_view_url(app.url, show_api_actions=show_api_actions)
+        return self._request_url_with_query_values(
+            base_url,
+            param_name=_APP_SECTION_QUERY_PARAM,
+            values=(badge.tab_id,),
+        )
 
     @staticmethod
     def _player_count_snapshot_text(*, player_count: int | None, player_capacity: int | None) -> str | None:
         if player_count is None or player_capacity is None:
             return None
         return f"{player_count} / {player_capacity}"
-
-    @classmethod
-    def _app_card_player_count_subtext(cls, app: ModWebAppLink) -> str | None:
-        if app.transition_state is NodeAppTransitionState.STOPPING:
-            return "Stopping"
-        if app.transition_state is NodeAppTransitionState.STARTING:
-            return "Starting"
-        if not app.running:
-            return None
-        player_snapshot_text: str | None = cls._player_count_snapshot_text(
-            player_count=app.player_count,
-            player_capacity=app.player_capacity,
-        )
-        if player_snapshot_text is not None:
-            return f"{player_snapshot_text} players"
-        return "Running"
 
     @classmethod
     def _chat_player_count_badge(cls, app_stats: NodeAppRuntimeSummary | None) -> _ModWebBadgeSpec | None:
@@ -715,7 +675,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
     @staticmethod
     def _app_card_link_classes(app: ModWebAppLink) -> str:
         classes = "mod-card mod-app-card mod-app-card-link w-full"
-        if app.running:
+        if app.transition_state is NodeAppTransitionState.STARTING:
+            classes = f"{classes} mod-app-card-starting"
+        elif app.transition_state is NodeAppTransitionState.STOPPING:
+            classes = f"{classes} mod-app-card-stopping"
+        elif app.running:
             classes = f"{classes} mod-app-card-running"
         if app.runtime_changed:
             classes: LiteralString = f"{classes} mod-app-card-live"
@@ -794,8 +758,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             for app in updated_apps
         )
 
-    @staticmethod
-    def _app_link_with_runtime(app: ModWebAppLink, app_stats: NodeAppRuntimeSummary) -> ModWebAppLink:
+    def _app_link_with_runtime(self, app: ModWebAppLink, app_stats: NodeAppRuntimeSummary) -> ModWebAppLink:
         updated_app: ModWebAppLink = replace(
             app,
             running=app_stats.running,
@@ -804,16 +767,16 @@ class ModWebHomeMixin(ModWebServiceSupport):
             player_count=app_stats.player_count,
             player_capacity=app_stats.player_capacity,
         )
-        return ModWebHomeMixin._with_runtime_change_flag(app=updated_app, previous_app=app)
+        return self._app_link_with_tabs(ModWebHomeMixin._with_runtime_change_flag(app=updated_app, previous_app=app))
 
-    @staticmethod
     def _model_with_runtime_state(
+        self,
         model: ModWebBasePageModel,
         *,
         app_stats: NodeAppRuntimeSummary | None,
         app_start_blocked: bool,
     ) -> ModWebBasePageModel:
-        return replace(model, app_stats=app_stats, app_start_blocked=app_start_blocked)
+        return self._page_model_with_tabs(replace(model, app_stats=app_stats, app_start_blocked=app_start_blocked))
 
     @staticmethod
     def _is_current_node_name(node_name: str) -> bool:
@@ -894,26 +857,28 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 else None
             )
             chat_url: str | None = self.node_app_chat_path(node_name, entry.name) if entry.supports_chat else None
-        return ModWebAppLink(
-            name=entry.name,
-            friendly=entry.friendly,
-            node_name=node_name,
-            running=entry.running,
-            enabled=entry.enabled,
-            color_hex=entry.color_hex,
-            supports_mods=entry.supports_mods,
-            supports_configs=entry.supports_configs,
-            supports_saves=entry.supports_saves,
-            supports_settings=entry.supports_settings,
-            url=url,
-            api_url=api_url,
-            configs_api_url=configs_api_url,
-            transition_state=entry.transition_state,
-            player_count=entry.player_count,
-            player_capacity=entry.player_capacity,
-            saves_api_url=saves_api_url,
-            settings_api_url=settings_api_url,
-            supports_console_actions=entry.supports_console_actions,
-            supports_chat=entry.supports_chat,
-            chat_url=chat_url,
+        return self._app_link_with_tabs(
+            ModWebAppLink(
+                name=entry.name,
+                friendly=entry.friendly,
+                node_name=node_name,
+                running=entry.running,
+                enabled=entry.enabled,
+                color_hex=entry.color_hex,
+                supports_mods=entry.supports_mods,
+                supports_configs=entry.supports_configs,
+                supports_saves=entry.supports_saves,
+                supports_settings=entry.supports_settings,
+                url=url,
+                api_url=api_url,
+                configs_api_url=configs_api_url,
+                transition_state=entry.transition_state,
+                player_count=entry.player_count,
+                player_capacity=entry.player_capacity,
+                saves_api_url=saves_api_url,
+                settings_api_url=settings_api_url,
+                supports_console_actions=entry.supports_console_actions,
+                supports_chat=entry.supports_chat,
+                chat_url=chat_url,
+            )
         )

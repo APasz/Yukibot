@@ -3,6 +3,9 @@ from __future__ import annotations
 from .runtime_imports import Path, Power_Level, base64, escape, lru_cache
 
 _USER_AVATAR_ICON_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "icon"
+_USER_AVATAR_SVG_TEMPLATE_PATH: Path = (
+    Path(__file__).resolve().parent.parent / "resources" / "svg" / "web_dash" / "user_avatar_fallback.svg"
+)
 _USER_AVATAR_ICON_PATH_BY_LEVEL: dict[Power_Level, Path] = {
     Power_Level.guest: _USER_AVATAR_ICON_DIRECTORY / "guest.jpg",
     Power_Level.visitor: _USER_AVATAR_ICON_DIRECTORY / "visitor.webp",
@@ -77,18 +80,10 @@ def _user_avatar_fallback_svg_markup(level: Power_Level) -> str:
     accent_color_hex: str = _USER_AVATAR_SVG_ACCENT_BY_LEVEL[level]
     badge_markup: str = _USER_AVATAR_SVG_BADGE_MARKUP_BY_LEVEL[level].format(accent=accent_color_hex)
     aria_label: str = escape(f"{level.name.title()} avatar fallback", quote=True)
-    return (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" '
-        f'aria-label="{aria_label}">'
-        '<rect width="64" height="64" fill="#07070a"/>'
-        f'<rect x="3" y="3" width="58" height="58" fill="#111217" stroke="{accent_color_hex}" stroke-width="2"/>'
-        '<path d="M13 61 32 44 51 61Z" fill="rgba(255,255,255,0.06)"/>'
-        f'<circle cx="32" cy="24" r="9.5" fill="none" stroke="{accent_color_hex}" stroke-width="2.5"/>'
-        f'<path d="M18 48c3.5-6.7 8.8-10 14-10s10.5 3.3 14 10" fill="none" stroke="{accent_color_hex}" '
-        'stroke-width="2.5" stroke-linecap="square"/>'
-        '<circle cx="48" cy="48" r="10.5" fill="#09090b" stroke="rgba(255,255,255,0.2)" stroke-width="1.4"/>'
-        f"{badge_markup}"
-        "</svg>"
+    return _user_avatar_fallback_svg_template().format(
+        aria_label=aria_label,
+        accent_color_hex=accent_color_hex,
+        badge_markup=badge_markup,
     )
 
 
@@ -99,12 +94,18 @@ def _user_avatar_fallback_svg_data_uri(level: Power_Level) -> str:
     return f"data:image/svg+xml;base64,{encoded_svg}"
 
 
+@lru_cache(maxsize=1)
+def _user_avatar_fallback_svg_template() -> str:
+    return _USER_AVATAR_SVG_TEMPLATE_PATH.read_text(encoding="utf-8").strip()
+
+
 __all__: tuple[str, ...] = (
     "_USER_AVATAR_ICON_DIRECTORY",
     "_USER_AVATAR_ICON_PATH_BY_LEVEL",
     "_USER_AVATAR_MIME_TYPE_BY_SUFFIX",
     "_USER_AVATAR_SVG_ACCENT_BY_LEVEL",
     "_USER_AVATAR_SVG_BADGE_MARKUP_BY_LEVEL",
+    "_user_avatar_fallback_svg_template",
     "_user_avatar_fallback_svg_data_uri",
     "_user_avatar_fallback_svg_markup",
     "_user_avatar_icon_data_uri",

@@ -18,6 +18,7 @@ import requests
 from nicegui.elements.link import Link
 
 import config
+from _minecraft_heads import minecraft_dev_bypass_head_data_uri
 from _security import Access_Control, Power_Level
 from apps._app import ChatRelaySupport
 from apps._config import ModType
@@ -36,12 +37,44 @@ from chat_hub import (
     ChatReferenceKind,
 )
 from config import BotConfiguration, BotMetadataSnapshot, ModWebServerConfig
-from mod_web_dashboard.nicegui_protocols import ModWebUi
-from mod_web_dashboard.service import ModWebService
-from mod_web_dashboard.types import (
+from mod_web_auth import ModWebUser
+from node_api import (
+    ConsoleResponseSource,
+    NodeAppEntry,
+    NodeAppMutationAction,
+    NodeAppRuntimeSummary,
+    NodeAppStateStreamEvent,
+    NodeAppTransitionState,
+    NodeChatEndpointSummary,
+    NodeChatRoomSnapshot,
+    NodeChatStreamEvent,
+    NodeChatStreamEventKind,
+    NodeConfigEntry,
+    NodeConfigList,
+    NodeConsoleActionEntry,
+    NodeConsoleActionExecutionResult,
+    NodeConsoleActionList,
+    NodeConsoleActionParameter,
+    NodeModList,
+    NodeModSummary,
+    NodeSaveEntry,
+    NodeSaveList,
+    NodeSettingChoice,
+    NodeSettingEntry,
+    NodeSettingList,
+    NodeStateStreamEvent,
+    NodeSystemSummary,
+)
+from node_auth import NodeApiScope, verify_node_token
+from web_dash.nicegui_protocols import ModWebUi
+from web_dash.service import ModWebService
+from web_dash.types import (
     ModDownloadKind,
-    ModWebAppSectionKind,
     ModWebAppLink,
+    ModWebAppSectionKind,
+    ModWebAppTabContext,
+    ModWebAppTabDefinition,
+    ModWebAppTabVisibilityRule,
     ModWebBasePageModel,
     ModWebConfigEditorShape,
     ModWebHomeNodeSummary,
@@ -53,42 +86,17 @@ from mod_web_dashboard.types import (
     ModWebSearchOption,
     ModWebSettingControlKind,
     ModWebTitleStat,
+    _ModWebAppCardBadgeSpec,
     _ModWebBadgeSpec,
     _ModWebChatComposeRequest,
+    _ModWebChatPanelConfig,
     _ModWebChatPanelSignal,
+    _ModWebChatSurfaceConfig,
     _ModWebFakeChatMessageMode,
     _ModWebFakeChatPreviewState,
+    _ModWebLinkSpec,
+    _ModWebTabActionSpec,
 )
-from mod_web_auth import ModWebUser
-from _minecraft_default_heads import minecraft_dev_bypass_head_data_uri
-from node_api import (
-    NodeAppEntry,
-    NodeAppStateStreamEvent,
-    NodeAppMutationAction,
-    NodeAppRuntimeSummary,
-    NodeAppTransitionState,
-    NodeChatEndpointSummary,
-    NodeChatRoomSnapshot,
-    NodeChatStreamEvent,
-    NodeChatStreamEventKind,
-    NodeConsoleActionList,
-    NodeConsoleActionEntry,
-    NodeConsoleActionExecutionResult,
-    NodeConsoleActionParameter,
-    NodeConfigEntry,
-    NodeConfigList,
-    ConsoleResponseSource,
-    NodeModList,
-    NodeModSummary,
-    NodeSaveList,
-    NodeSaveEntry,
-    NodeSettingChoice,
-    NodeSettingEntry,
-    NodeSettingList,
-    NodeStateStreamEvent,
-    NodeSystemSummary,
-)
-from node_auth import NodeApiScope, verify_node_token
 
 if TYPE_CHECKING:
     from _manager import App_Manager
@@ -497,7 +505,7 @@ class ModWebTests(unittest.TestCase):
         )
         response: SimpleNamespace = SimpleNamespace(status_code=401)
 
-        with patch("mod_web_dashboard.page_handlers.requests.get", return_value=response):
+        with patch("web_dash.page_handlers.requests.get", return_value=response):
             status: ModWebNodeStatus = ModWebService()._probe_node_status(node)
 
         self.assertEqual(status, ModWebNodeStatus(node=node, alive=True, detail="HTTP 401"))
@@ -513,7 +521,7 @@ class ModWebTests(unittest.TestCase):
         )
         response: SimpleNamespace = SimpleNamespace(status_code=200)
 
-        with patch("mod_web_dashboard.page_handlers.requests.get", return_value=response) as get_request:
+        with patch("web_dash.page_handlers.requests.get", return_value=response) as get_request:
             ModWebService()._probe_node_status(node)
 
         get_request.assert_called_once_with(
@@ -531,7 +539,7 @@ class ModWebTests(unittest.TestCase):
             is_current=False,
         )
 
-        with patch("mod_web_dashboard.page_handlers.requests.get", side_effect=requests.RequestException("timeout")):
+        with patch("web_dash.page_handlers.requests.get", side_effect=requests.RequestException("timeout")):
             status: ModWebNodeStatus = ModWebService()._probe_node_status(node)
 
         self.assertFalse(status.alive)
@@ -709,7 +717,7 @@ class ModWebTests(unittest.TestCase):
 
         user = ModWebUser(discord_id=42, username="tester", global_name="Tester", avatar_hash=None)
 
-        with patch("mod_web_dashboard.avatars._user_avatar_icon_data_uri", return_value=None):
+        with patch("web_dash.avatars._user_avatar_icon_data_uri", return_value=None):
             avatar_uri = service._user_avatar_uri(user)
 
         self.assertTrue(avatar_uri.startswith("data:image/svg+xml;base64,"))
@@ -717,6 +725,27 @@ class ModWebTests(unittest.TestCase):
         svg_markup = base64.b64decode(encoded_svg).decode("utf-8")
         self.assertIn("<svg", svg_markup)
         self.assertIn('aria-label="Admin avatar fallback"', svg_markup)
+
+    def test_page_unavailable_icon_markup_loads_svg_resource(self) -> None:
+        svg_markup = ModWebService._page_unavailable_icon_markup()
+
+        self.assertIn("<svg", svg_markup)
+        self.assertIn('viewBox="0 0 80 80"', svg_markup)
+        self.assertIn("M54 18h11l5 5v14H54Z", svg_markup)
+
+    def test_error_page_icon_markup_uses_chat_specific_icon(self) -> None:
+        svg_markup = ModWebService()._error_page_icon_markup("Chat unavailable")
+
+        self.assertIn("<svg", svg_markup)
+        self.assertIn('viewBox="0 0 80 80"', svg_markup)
+        self.assertIn("M55.5 23h10.5", svg_markup)
+
+    def test_error_page_icon_markup_falls_back_to_generic_icon(self) -> None:
+        svg_markup = ModWebService()._error_page_icon_markup("Page unavailable")
+
+        self.assertIn("<svg", svg_markup)
+        self.assertIn('viewBox="0 0 80 80"', svg_markup)
+        self.assertIn("M24 30 30 14l8 12", svg_markup)
 
     def test_user_avatar_markup_renders_avatar_image_tag(self) -> None:
         markup = ModWebService._user_avatar_markup(
@@ -819,6 +848,49 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ui.url, "/mod-web/chat/minecraft_alpha")
         self.assertEqual(ui.link_object.props_value, 'target="_blank" rel="noopener noreferrer"')
         self.assertEqual(ui.link_object.js_handler, "(event) => event.stopPropagation()")
+
+    def test_badge_link_can_open_shift_click_target(self) -> None:
+        class FakeLink:
+            class_value: str | None = None
+            js_handler: str | None = None
+
+            def classes(self, value: str) -> "FakeLink":
+                self.class_value = value
+                return self
+
+            def on(self, event: str, *, js_handler: str) -> "FakeLink":
+                assert event == "click"
+                self.js_handler = js_handler
+                return self
+
+        class FakeUi:
+            label: str | None = None
+            url: str | None = None
+            link_object: FakeLink = FakeLink()
+
+            def link(self, label: str, url: str) -> FakeLink:
+                self.label = label
+                self.url = url
+                return self.link_object
+
+        ui: FakeUi = FakeUi()
+
+        ModWebService._badge_link(
+            ui=cast(ModWebUi, cast(object, ui)),
+            text="Chat",
+            tone="purple",
+            url="/mod-web/mods/minecraft_alpha?tab=chat",
+            shift_url="/mod-web/chat/minecraft_alpha",
+            stop_propagation=True,
+        )
+
+        self.assertEqual(ui.label, "Chat")
+        self.assertEqual(ui.url, "/mod-web/mods/minecraft_alpha?tab=chat")
+        self.assertIsNotNone(ui.link_object.js_handler)
+        assert ui.link_object.js_handler is not None
+        self.assertIn("event.shiftKey", ui.link_object.js_handler)
+        self.assertIn('window.open("/mod-web/chat/minecraft_alpha"', ui.link_object.js_handler)
+        self.assertIn("event.stopPropagation();", ui.link_object.js_handler)
 
     def test_node_links_include_current_and_known_mod_web_nodes(self) -> None:
         remote_snapshot: BotMetadataSnapshot = config.BotMetadataSnapshot(
@@ -1091,6 +1163,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(target, "/mod-web/mods/minecraft_alpha")
 
     def test_app_card_badges_follow_standard_order(self) -> None:
+        service = ModWebService()
         app: ModWebAppLink = ModWebAppLink(
             name="minecraft_alpha",
             friendly="Minecraft Alpha",
@@ -1112,7 +1185,7 @@ class ModWebTests(unittest.TestCase):
             chat_url="/mod-web/chat/minecraft_alpha",
         )
 
-        badges = ModWebService._app_card_badges(app)
+        badges = service._app_card_badges(app)
 
         self.assertEqual(
             [badge.text for badge in badges],
@@ -1122,33 +1195,52 @@ class ModWebTests(unittest.TestCase):
             [badge.tone for badge in badges],
             ["black", "black", "black", "black", "purple", "purple"],
         )
+        self.assertEqual(
+            [badge.tab_id for badge in badges],
+            [
+                "saves",
+                "configs",
+                "settings",
+                "console",
+                "mods",
+                "chat",
+            ],
+        )
 
-    def test_app_card_player_count_subtext_formats_running_player_snapshot(self) -> None:
+    def test_app_card_badge_target_preserves_app_list_query_and_sets_requested_tab(self) -> None:
+        service: ModWebService = ModWebService()
         app = ModWebAppLink(
             name="minecraft_alpha",
             friendly="Minecraft Alpha",
             node_name="yuki",
-            running=True,
+            running=False,
             enabled=True,
             color_hex="#22C55E",
             supports_mods=True,
-            supports_configs=False,
+            supports_configs=True,
             supports_saves=False,
             supports_settings=False,
-            url="/mod-web/mods/minecraft_alpha",
+            url="/mod-web/mods/minecraft_alpha?view=compact",
             api_url=None,
             configs_api_url=None,
-            player_count=3,
-            player_capacity=20,
             supports_chat=False,
             chat_url=None,
         )
 
-        subtitle = ModWebService._app_card_player_count_subtext(app)
+        target = service._app_card_badge_target(
+            app=app,
+            badge=_ModWebAppCardBadgeSpec(
+                text="Configs",
+                tone="black",
+                tab_id="configs",
+            ),
+            show_api_actions=True,
+        )
 
-        self.assertEqual(subtitle, "3 / 20 players")
+        self.assertEqual(target, "/mod-web/mods/minecraft_alpha?view=compact&dev_api=1&tab=configs")
 
-    def test_app_card_player_count_subtext_shows_starting_until_player_count_exists(self) -> None:
+    def test_app_card_badge_target_routes_chat_badges_to_the_chat_tab(self) -> None:
+        service: ModWebService = ModWebService()
         app = ModWebAppLink(
             name="minecraft_alpha",
             friendly="Minecraft Alpha",
@@ -1163,42 +1255,24 @@ class ModWebTests(unittest.TestCase):
             url="/mod-web/mods/minecraft_alpha",
             api_url=None,
             configs_api_url=None,
-            transition_state=NodeAppTransitionState.STARTING,
-            supports_chat=False,
-            chat_url=None,
+            supports_chat=True,
+            chat_url="/mod-web/chat/minecraft_alpha",
         )
 
-        subtitle = ModWebService._app_card_player_count_subtext(app)
-
-        self.assertEqual(subtitle, "Starting")
-
-    def test_app_card_player_count_subtext_shows_stopping_until_player_count_clears(self) -> None:
-        app = ModWebAppLink(
-            name="minecraft_alpha",
-            friendly="Minecraft Alpha",
-            node_name="yuki",
-            running=True,
-            enabled=True,
-            color_hex="#22C55E",
-            supports_mods=True,
-            supports_configs=False,
-            supports_saves=False,
-            supports_settings=False,
-            url="/mod-web/mods/minecraft_alpha",
-            api_url=None,
-            configs_api_url=None,
-            transition_state=NodeAppTransitionState.STOPPING,
-            player_count=3,
-            player_capacity=20,
-            supports_chat=False,
-            chat_url=None,
+        target = service._app_card_badge_target(
+            app=app,
+            badge=_ModWebAppCardBadgeSpec(
+                text="Chat",
+                tone="purple",
+                tab_id="chat",
+            ),
+            show_api_actions=False,
         )
 
-        subtitle = ModWebService._app_card_player_count_subtext(app)
-
-        self.assertEqual(subtitle, "Stopping")
+        self.assertEqual(target, "/mod-web/mods/minecraft_alpha?tab=chat")
 
     def test_app_link_with_runtime_updates_dynamic_fields(self) -> None:
+        service = ModWebService()
         app = ModWebAppLink(
             name="minecraft_alpha",
             friendly="Minecraft Alpha",
@@ -1219,7 +1293,7 @@ class ModWebTests(unittest.TestCase):
             chat_url=None,
         )
 
-        updated = ModWebService._app_link_with_runtime(
+        updated = service._app_link_with_runtime(
             app,
             NodeAppRuntimeSummary(
                 running=True,
@@ -1241,7 +1315,86 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(updated.player_capacity, 20)
         self.assertEqual(updated.url, app.url)
 
+    def test_app_card_link_classes_uses_starting_state_class(self) -> None:
+        app = ModWebAppLink(
+            name="minecraft_alpha",
+            friendly="Minecraft Alpha",
+            node_name="yuki",
+            running=False,
+            enabled=True,
+            color_hex="#22C55E",
+            supports_mods=True,
+            supports_configs=False,
+            supports_saves=False,
+            supports_settings=False,
+            url="/mod-web/mods/minecraft_alpha",
+            api_url=None,
+            configs_api_url=None,
+            transition_state=NodeAppTransitionState.STARTING,
+            supports_chat=False,
+            chat_url=None,
+        )
+
+        classes = ModWebService._app_card_link_classes(app)
+
+        self.assertIn("mod-app-card-starting", classes)
+        self.assertNotIn("mod-app-card-running", classes)
+        self.assertNotIn("mod-app-card-stopping", classes)
+
+    def test_app_card_link_classes_uses_running_state_class_when_stable(self) -> None:
+        app = ModWebAppLink(
+            name="minecraft_alpha",
+            friendly="Minecraft Alpha",
+            node_name="yuki",
+            running=True,
+            enabled=True,
+            color_hex="#22C55E",
+            supports_mods=True,
+            supports_configs=False,
+            supports_saves=False,
+            supports_settings=False,
+            url="/mod-web/mods/minecraft_alpha",
+            api_url=None,
+            configs_api_url=None,
+            transition_state=NodeAppTransitionState.NONE,
+            supports_chat=False,
+            chat_url=None,
+        )
+
+        classes = ModWebService._app_card_link_classes(app)
+
+        self.assertIn("mod-app-card-running", classes)
+        self.assertNotIn("mod-app-card-starting", classes)
+        self.assertNotIn("mod-app-card-stopping", classes)
+
+    def test_app_card_link_classes_uses_stopping_state_class(self) -> None:
+        app = ModWebAppLink(
+            name="minecraft_alpha",
+            friendly="Minecraft Alpha",
+            node_name="yuki",
+            running=True,
+            enabled=True,
+            color_hex="#22C55E",
+            supports_mods=True,
+            supports_configs=False,
+            supports_saves=False,
+            supports_settings=False,
+            url="/mod-web/mods/minecraft_alpha",
+            api_url=None,
+            configs_api_url=None,
+            transition_state=NodeAppTransitionState.STOPPING,
+            supports_chat=False,
+            chat_url=None,
+        )
+
+        classes = ModWebService._app_card_link_classes(app)
+
+        self.assertIn("mod-app-card-stopping", classes)
+        self.assertNotIn("mod-app-card-starting", classes)
+        self.assertNotIn("mod-app-card-running", classes)
+
     def test_app_card_badges_omit_no_mods_placeholder(self) -> None:
+        service = ModWebService()
         app = ModWebAppLink(
             name="factorio",
             friendly="Factorio",
@@ -1262,7 +1415,7 @@ class ModWebTests(unittest.TestCase):
             chat_url=None,
         )
 
-        badges = ModWebService._app_card_badges(app)
+        badges = service._app_card_badges(app)
 
         self.assertEqual([badge.text for badge in badges], ["Saves", "Configs"])
         self.assertNotIn("no mods", [badge.text.casefold() for badge in badges])
@@ -1302,10 +1455,10 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(enabled_url, "/mod-web/nodes/erin/chat/factorio?view=compact&dev_api=1")
         self.assertEqual(disabled_url, "/mod-web/nodes/erin/chat/factorio?view=compact")
 
-    def test_page_section_url_preserves_existing_query_and_replaces_tab(self) -> None:
-        updated_url = ModWebService._page_section_url(
+    def test_page_tab_url_preserves_existing_query_and_replaces_tab(self) -> None:
+        updated_url = ModWebService._page_tab_url(
             "/mod-web/mods/minecraft_alpha?view=compact&tab=saves&dev_api=1",
-            section_kind=ModWebAppSectionKind.CONFIGS,
+            tab_id="configs",
         )
 
         self.assertEqual(updated_url, "/mod-web/mods/minecraft_alpha?view=compact&dev_api=1&tab=configs")
@@ -1405,7 +1558,7 @@ class ModWebTests(unittest.TestCase):
         )
 
         with patch(
-            "mod_web_dashboard.chat.time.localtime",
+            "web_dash.chat.time.localtime",
             return_value=time.struct_time((2026, 5, 30, 12, 34, 56, 5, 150, 0)),
         ):
             self.assertEqual(ModWebService._chat_event_time(event), "12:34:56")
@@ -1658,6 +1811,13 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(config.actions[0].label, "Home")
         self.assertEqual(config.actions[0].url, service.index_path())
 
+    def test_access_denied_icon_markup_loads_svg_resource(self) -> None:
+        svg_markup = ModWebService._access_denied_icon_markup()
+
+        self.assertIn("<svg", svg_markup)
+        self.assertIn('viewBox="0 0 80 80"', svg_markup)
+        self.assertIn("M60 18.5 65 20.6", svg_markup)
+
     def test_framework_http_error_config_formats_not_found_page(self) -> None:
         from fastapi import HTTPException
 
@@ -1672,6 +1832,29 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(config.detail_label, "Details")
         self.assertEqual(config.detail_text, "Missing page")
         self.assertIsNotNone(config.icon_markup)
+
+    def test_dev_error_preview_actions_list_expected_preview_routes(self) -> None:
+        actions = ModWebService._dev_error_preview_actions()
+
+        self.assertEqual(
+            actions,
+            (
+                _ModWebLinkSpec(label="Access Denied", url="/mod-web/dev/error/access-denied"),
+                _ModWebLinkSpec(label="Sign-in Unavailable", url="/mod-web/dev/error/sign-in-unavailable"),
+                _ModWebLinkSpec(label="Page Unavailable", url="/mod-web/dev/error/page-unavailable"),
+                _ModWebLinkSpec(label="Chat Unavailable", url="/mod-web/dev/error/chat-unavailable"),
+                _ModWebLinkSpec(label="Node Unavailable", url="/mod-web/dev/error/node-unavailable"),
+                _ModWebLinkSpec(label="Remote JSON Invalid", url="/mod-web/dev/error/remote-json-invalid"),
+                _ModWebLinkSpec(label="Remote Timeout", url="/mod-web/dev/error/remote-timeout"),
+                _ModWebLinkSpec(label="Remote Rejected", url="/mod-web/dev/error/remote-rejected"),
+                _ModWebLinkSpec(label="Framework 404", url="/mod-web/dev/error/framework-404"),
+                _ModWebLinkSpec(label="Framework 500", url="/mod-web/dev/error/framework-500"),
+                _ModWebLinkSpec(label="NiceGUI Exception", url="/mod-web/dev/error/nicegui-exception"),
+                _ModWebLinkSpec(label="Refresh Shutdown", url="/mod-web/dev/error/refresh-shutdown"),
+                _ModWebLinkSpec(label="Config Fail Toasts", url="/mod-web/dev/error/config-failure"),
+                _ModWebLinkSpec(label="Chat Stream WS", url="/mod-web/dev/error/chat-stream-websocket"),
+            ),
+        )
 
     def test_exception_detail_text_formats_class_and_message(self) -> None:
         self.assertEqual(ModWebService._exception_detail_text(RuntimeError("boom")), "RuntimeError: boom")
@@ -1779,7 +1962,7 @@ class ModWebTests(unittest.TestCase):
         relay_mention_name = Mock(side_effect=lambda user_id, **_: f"user-{user_id}")
 
         with patch(
-            "mod_web_dashboard.chat.config.Name_Cache",
+            "web_dash.chat.config.Name_Cache",
             return_value=SimpleNamespace(relay_mention_name=relay_mention_name),
         ):
             resolved = service._resolve_chat_markup_mentions(
@@ -2079,7 +2262,7 @@ class ModWebTests(unittest.TestCase):
         )
 
         with patch(
-            "mod_web_dashboard.service.config.Name_Cache",
+            "web_dash.service.config.Name_Cache",
             return_value=SimpleNamespace(relay_display_name=Mock(return_value="AliceGame")),
         ):
             send_message = panel.send_message
@@ -2099,6 +2282,285 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             service._chat_relay.publish_web_chat.await_args.kwargs["author_display_name"],
             "AliceGame",
+        )
+
+    def test_local_chat_panel_config_can_skip_runtime_updates(self) -> None:
+        service = ModWebService()
+        service._local_chat_snapshot = Mock(
+            return_value=NodeChatRoomSnapshot(
+                room_id="minecraft_alpha",
+                endpoint_count=0,
+                events=(),
+                endpoint_summaries=(),
+            )
+        )  # type: ignore[method-assign]
+        service._node_api.subscribe_local_app_runtime = Mock()  # type: ignore[method-assign]
+
+        panel = service._local_chat_panel_config(
+            room_id="minecraft_alpha",
+            session_id="session-1",
+            user=cast(Any, SimpleNamespace(discord_id=42, display_name="Tester")),
+            app_scope="minecraft",
+            include_runtime_updates=False,
+        )
+
+        on_update = Mock()
+        with (
+            patch.object(ChatHub(), "subscribe", return_value="room-subscription") as subscribe_mock,
+            patch.object(ChatHub(), "unsubscribe") as unsubscribe_mock,
+        ):
+            assert panel.subscribe_updates is not None
+            unsubscribe = panel.subscribe_updates(on_update)
+            room_callback = subscribe_mock.call_args.args[1]
+            room_callback(object())
+            unsubscribe()
+
+        self.assertEqual(on_update.call_args_list, [call(_ModWebChatPanelSignal.chat())])
+        service._node_api.subscribe_local_app_runtime.assert_not_called()
+        unsubscribe_mock.assert_called_once_with("minecraft_alpha", "room-subscription")
+
+    def test_render_chat_section_reuses_panel_without_embedded_header_chrome(self) -> None:
+        class FakeColumn:
+            class_value: str | None = None
+
+            def classes(self, value: str) -> "FakeColumn":
+                self.class_value = value
+                return self
+
+            def __enter__(self) -> "FakeColumn":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeUi:
+            def column(self) -> FakeColumn:
+                return FakeColumn()
+
+        service = ModWebService()
+        runtime_stats = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version="1.20.1",
+            player_count=3,
+            player_capacity=12,
+            relay_support=ChatRelaySupport.BIDIRECTIONAL,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            footprint_bytes=None,
+            transition_state=NodeAppTransitionState.NONE,
+        )
+        initial_snapshot = NodeChatRoomSnapshot(
+            room_id="minecraft_alpha",
+            endpoint_count=1,
+            events=(),
+            endpoint_summaries=(NodeChatEndpointSummary(label="Game: Minecraft Alpha"),),
+        )
+        panel = _ModWebChatPanelConfig(
+            initial_snapshot=initial_snapshot,
+            refresh_snapshot=AsyncMock(return_value=initial_snapshot),
+            send_message=None,
+        )
+        chat_surface = _ModWebChatSurfaceConfig(
+            panel=panel,
+            node_name="yuki",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            app_stats=runtime_stats,
+            hero_badges=(_ModWebBadgeSpec(text="Relay", tone="purple"),),
+            refresh_app_stats=AsyncMock(return_value=runtime_stats),
+            popout_url="/mod-web/chat/minecraft_alpha",
+        )
+        endpoint_count_label = cast(Any, object())
+        endpoint_count_tooltip = cast(Any, object())
+        endpoint_count_tooltip_content = cast(Any, object())
+        apply_runtime_stats = Mock()
+        ui = FakeUi()
+
+        with patch.object(ModWebService, "_render_chat_panel", return_value=apply_runtime_stats) as render_chat_panel:
+            apply_runtime_model = service._render_chat_section(
+                ui=cast(ModWebUi, cast(object, ui)),
+                chat_surface=chat_surface,
+                endpoint_count_label=endpoint_count_label,
+                endpoint_count_tooltip=endpoint_count_tooltip,
+                endpoint_count_tooltip_content=endpoint_count_tooltip_content,
+            )
+
+        call_kwargs = render_chat_panel.call_args.kwargs
+        self.assertEqual(call_kwargs["ui"], ui)
+        self.assertEqual(call_kwargs["chat_panel"], panel)
+        self.assertEqual(call_kwargs["app_friendly"], "Minecraft Alpha")
+        self.assertEqual(call_kwargs["app_stats"], runtime_stats)
+        self.assertIsNone(call_kwargs["refresh_app_stats"])
+        self.assertFalse(call_kwargs["show_header"])
+        self.assertTrue(call_kwargs["embedded"])
+        self.assertIs(call_kwargs["endpoint_count_label"], endpoint_count_label)
+        self.assertIs(call_kwargs["endpoint_count_tooltip"], endpoint_count_tooltip)
+        self.assertIs(call_kwargs["endpoint_count_tooltip_content"], endpoint_count_tooltip_content)
+        self.assertNotIn("header_badges", call_kwargs)
+        self.assertNotIn("popout_url", call_kwargs)
+
+        apply_runtime_model(cast(ModWebBasePageModel, cast(object, SimpleNamespace(app_stats=runtime_stats))))
+
+        apply_runtime_stats.assert_called_once_with(runtime_stats)
+
+    def test_render_flat_tab_header_omits_redundant_title_and_keeps_copy_only(self) -> None:
+        class FakeContainer:
+            def __init__(self) -> None:
+                self.class_value: str | None = None
+
+            def classes(self, value: str) -> "FakeContainer":
+                self.class_value = value
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeLabel:
+            def __init__(self, text: str) -> None:
+                self.text: str = text
+                self.class_value: str | None = None
+
+            def classes(self, value: str) -> "FakeLabel":
+                self.class_value = value
+                return self
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.labels: list[FakeLabel] = []
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeLabel:
+                label = FakeLabel(text)
+                self.labels.append(label)
+                return label
+
+        service = ModWebService()
+        ui = FakeUi()
+
+        description_label, secondary_label = service._render_flat_tab_header(
+            ui=cast(ModWebUi, cast(object, ui)),
+            title="Mods",
+            description="Browse the indexed mod inventory.",
+            secondary_description="Metadata is loaded from the selected file.",
+        )
+
+        self.assertEqual(
+            [label.text for label in ui.labels],
+            [
+                "Browse the indexed mod inventory.",
+                "Metadata is loaded from the selected file.",
+            ],
+        )
+        self.assertEqual(description_label, ui.labels[0])
+        self.assertEqual(secondary_label, ui.labels[1])
+        self.assertEqual(description_label.class_value, "mod-subtitle text-sm w-full")
+        self.assertEqual(secondary_label.class_value, "mod-subtitle text-xs w-full")
+
+    def test_page_section_badges_provide_mods_chrome_without_body_header_badges(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=NodeModList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                summary=NodeModSummary(
+                    total_count=6,
+                    enabled_count=5,
+                    disabled_count=1,
+                    coremod_count=2,
+                    downloadable_count=4,
+                    non_downloadable_count=2,
+                ),
+                mods=(),
+            ),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        tab = service._page_tabs(model)[0]
+
+        badges = service._page_section_badges(
+            model=model,
+            user=user,
+            tab=tab,
+        )
+
+        self.assertEqual(
+            badges,
+            (
+                _ModWebBadgeSpec(text="6 mods", tone="black"),
+                _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
+                _ModWebBadgeSpec(text="2 blocked", tone="warn"),
+                _ModWebBadgeSpec(text="2 coremods", tone="red"),
+            ),
+        )
+
+    def test_section_badge_columns_stack_pairs_from_the_right(self) -> None:
+        badges = (
+            _ModWebBadgeSpec(text="6 mods", tone="black"),
+            _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
+            _ModWebBadgeSpec(text="2 blocked", tone="warn"),
+            _ModWebBadgeSpec(text="2 coremods", tone="red"),
+        )
+
+        columns = ModWebService._section_badge_columns(badges)
+
+        self.assertEqual(
+            columns,
+            (
+                (
+                    _ModWebBadgeSpec(text="6 mods", tone="black"),
+                    _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
+                ),
+                (
+                    _ModWebBadgeSpec(text="2 blocked", tone="warn"),
+                    _ModWebBadgeSpec(text="2 coremods", tone="red"),
+                ),
+            ),
         )
 
     def test_remote_chat_stream_signal_maps_event_kinds(self) -> None:
@@ -2141,6 +2603,16 @@ class ModWebTests(unittest.TestCase):
                 )
             ),
             _ModWebChatPanelSignal.chat(snapshot=snapshot),
+        )
+        self.assertIsNone(
+            ModWebService._remote_chat_stream_signal(
+                NodeChatStreamEvent(
+                    kind=NodeChatStreamEventKind.RUNTIME_CHANGED,
+                    room_id="minecraft_alpha",
+                    app_stats=app_stats,
+                ),
+                include_runtime_updates=False,
+            )
         )
         self.assertEqual(
             ModWebService._remote_chat_stream_signal(
@@ -2258,7 +2730,7 @@ class ModWebTests(unittest.TestCase):
                 if len(updates) >= 2:
                     received_two_updates.set()
 
-            with patch("mod_web_dashboard.chat.aiohttp.ClientSession", return_value=session):
+            with patch("web_dash.chat.aiohttp.ClientSession", return_value=session):
                 task = asyncio.create_task(
                     service._remote_chat_stream_listener(
                         node=node,
@@ -2399,7 +2871,7 @@ class ModWebTests(unittest.TestCase):
                 if len(updates) >= 2:
                     update_seen.set()
 
-            with patch("mod_web_dashboard.streams.aiohttp.ClientSession", return_value=session):
+            with patch("web_dash.streams.aiohttp.ClientSession", return_value=session):
                 task = asyncio.create_task(
                     service._remote_app_state_stream_listener(
                         node=node,
@@ -2552,7 +3024,7 @@ class ModWebTests(unittest.TestCase):
                 if len(updates) >= 2:
                     update_seen.set()
 
-            with patch("mod_web_dashboard.streams.aiohttp.ClientSession", return_value=session):
+            with patch("web_dash.streams.aiohttp.ClientSession", return_value=session):
                 task = asyncio.create_task(
                     service._remote_node_state_stream_listener(
                         node=node,
@@ -2928,7 +3400,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertIsNone(response)
 
-    def test_build_app_title_stats_uses_runtime_summary(self) -> None:
+    def test_app_hero_runtime_details_use_status_text_and_badges(self) -> None:
         stats = NodeAppRuntimeSummary(
             running=True,
             enabled=True,
@@ -2942,40 +3414,40 @@ class ModWebTests(unittest.TestCase):
             footprint_bytes=12 * 1024**3,
         )
 
-        title_stats = ModWebService._build_app_title_stats(stats)
+        details = ModWebService()._app_hero_runtime_details(stats)
 
         self.assertEqual(
-            [(stat.label, stat.tone) for stat in title_stats],
+            [(badge.text, badge.tone) for badge in details.badges],
             [
-                ("Status", "purple"),
-                ("Relay", "grey"),
-                ("Version", "black"),
-                ("Storage", "grey"),
+                ("Game <-> Chat", "grey"),
+                ("1.20.4", "black"),
+                ("12.0GiB", "grey"),
+                ("3 / 20", "purple"),
             ],
         )
-        self.assertEqual(title_stats[0].value, "3 / 20")
-        self.assertEqual(title_stats[1].value, "Game <-> Chat")
-        self.assertEqual(title_stats[-1].value, "12.0GiB total")
-        self.assertEqual(title_stats[-1].tone, "grey")
+        self.assertEqual(details.status_text, "Running")
+        self.assertEqual(details.status_tone, "purple")
 
-    def test_build_app_title_stats_falls_back_to_running_without_player_count(self) -> None:
+    def test_app_hero_runtime_details_prefer_transition_status(self) -> None:
         stats = NodeAppRuntimeSummary(
             running=True,
             enabled=True,
             version="1.20.4",
-            player_count=None,
-            player_capacity=None,
+            player_count=0,
+            player_capacity=20,
             relay_support=ChatRelaySupport.BIDIRECTIONAL,
             storage_percent=58,
             storage_free_bytes=120 * 1024**3,
             storage_total_bytes=256 * 1024**3,
             footprint_bytes=12 * 1024**3,
+            transition_state=NodeAppTransitionState.STARTING,
         )
 
-        title_stats = ModWebService._build_app_title_stats(stats)
+        details = ModWebService()._app_hero_runtime_details(stats)
 
-        self.assertEqual(title_stats[0].value, "Running")
-        self.assertEqual(title_stats[0].tone, "purple")
+        self.assertEqual(details.status_text, "Starting")
+        self.assertEqual(details.status_tone, "purple")
+        self.assertEqual(details.badges[-1], _ModWebBadgeSpec(text="0 / 20", tone="grey"))
 
     def test_config_options_use_root_and_relative_path_labels(self) -> None:
         configs = (
@@ -3743,6 +4215,34 @@ class ModWebTests(unittest.TestCase):
             ),
         )
 
+    def test_app_page_hero_mod_badge_uses_compact_enabled_over_total_format(self) -> None:
+        badge = ModWebService._app_page_hero_mod_badge(
+            NodeModSummary(
+                total_count=4,
+                enabled_count=3,
+                disabled_count=1,
+                coremod_count=1,
+                downloadable_count=2,
+                non_downloadable_count=2,
+            )
+        )
+
+        self.assertEqual(badge, _ModWebBadgeSpec(text="3/4 Mods", tone="black"))
+
+    def test_app_page_hero_mod_badge_uses_total_only_when_all_mods_are_enabled(self) -> None:
+        badge = ModWebService._app_page_hero_mod_badge(
+            NodeModSummary(
+                total_count=4,
+                enabled_count=4,
+                disabled_count=0,
+                coremod_count=1,
+                downloadable_count=2,
+                non_downloadable_count=2,
+            )
+        )
+
+        self.assertEqual(badge, _ModWebBadgeSpec(text="4 Mods", tone="black"))
+
     def test_download_selection_label_uses_all_for_none_or_full_selection(self) -> None:
         self.assertEqual(
             ModWebService._download_selection_label(selected_count=0, downloadable_count=7),
@@ -3764,7 +4264,8 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(ModWebService._hero_card_style(None), "")
 
-    def test_page_section_kinds_use_capability_order_for_mod_pages(self) -> None:
+    def test_page_tabs_use_capability_order_for_mod_pages(self) -> None:
+        service = ModWebService()
         model = ModWebPageModel(
             node_name="yuki",
             app_name="minecraft_alpha",
@@ -3793,20 +4294,15 @@ class ModWebTests(unittest.TestCase):
             mod_download_urls={},
         )
 
-        section_kinds = ModWebService._page_section_kinds(model)
+        tabs = service._page_tabs(model)
 
         self.assertEqual(
-            section_kinds,
-            (
-                ModWebAppSectionKind.MODS,
-                ModWebAppSectionKind.CONFIGS,
-                ModWebAppSectionKind.SETTINGS,
-                ModWebAppSectionKind.SAVES,
-                ModWebAppSectionKind.CONSOLE,
-            ),
+            [tab.tab_id for tab in tabs],
+            ["mods", "configs", "settings", "saves", "console"],
         )
 
-    def test_page_section_kinds_omit_mods_for_overview_pages(self) -> None:
+    def test_page_tabs_omit_mods_for_overview_pages(self) -> None:
+        service = ModWebService()
         model = ModWebOverviewPageModel(
             node_name="yuki",
             app_name="factorio",
@@ -3831,47 +4327,312 @@ class ModWebTests(unittest.TestCase):
             console_actions=self._console_action_list(app_name="factorio"),
         )
 
-        section_kinds = ModWebService._page_section_kinds(model)
+        tabs = service._page_tabs(model)
 
         self.assertEqual(
-            section_kinds,
-            (
-                ModWebAppSectionKind.CONFIGS,
-                ModWebAppSectionKind.SETTINGS,
-                ModWebAppSectionKind.CONSOLE,
-            ),
+            [tab.tab_id for tab in tabs],
+            ["configs", "settings", "console"],
         )
 
-    def test_initial_page_section_kind_uses_requested_available_tab(self) -> None:
-        section_kind = ModWebService._initial_page_section_kind(
+    def test_page_tabs_include_chat_when_supported(self) -> None:
+        service = ModWebService()
+        model = ModWebOverviewPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            supports_chat=True,
+            chat_url="/mod-web/chat/minecraft_alpha",
+        )
+
+        tabs = service._page_tabs(model)
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["chat"])
+
+    def test_initial_page_tab_id_uses_requested_available_tab(self) -> None:
+        tab_id = ModWebService._initial_page_tab_id(
             current_url="/mod-web/mods/minecraft_alpha?tab=saves",
-            section_kinds=(
-                ModWebAppSectionKind.MODS,
-                ModWebAppSectionKind.CONFIGS,
-                ModWebAppSectionKind.SAVES,
+            tabs=(
+                ModWebService._builtin_tab_definition(ModWebAppSectionKind.MODS),
+                ModWebService._builtin_tab_definition(ModWebAppSectionKind.CONFIGS),
+                ModWebService._builtin_tab_definition(ModWebAppSectionKind.SAVES),
             ),
         )
 
-        self.assertEqual(section_kind, ModWebAppSectionKind.SAVES)
+        self.assertEqual(tab_id, "saves")
 
-    def test_initial_page_section_kind_falls_back_to_first_section(self) -> None:
-        unavailable_tab = ModWebService._initial_page_section_kind(
+    def test_initial_page_tab_id_falls_back_to_first_section(self) -> None:
+        unavailable_tab = ModWebService._initial_page_tab_id(
             current_url="/mod-web/mods/factorio?tab=mods",
-            section_kinds=(
-                ModWebAppSectionKind.CONFIGS,
-                ModWebAppSectionKind.SETTINGS,
+            tabs=(
+                ModWebService._builtin_tab_definition(ModWebAppSectionKind.CONFIGS),
+                ModWebService._builtin_tab_definition(ModWebAppSectionKind.SETTINGS),
             ),
         )
-        invalid_tab = ModWebService._initial_page_section_kind(
+        invalid_tab = ModWebService._initial_page_tab_id(
             current_url="/mod-web/mods/factorio?tab=unknown",
-            section_kinds=(
-                ModWebAppSectionKind.CONFIGS,
-                ModWebAppSectionKind.SETTINGS,
+            tabs=(
+                ModWebService._builtin_tab_definition(ModWebAppSectionKind.CONFIGS),
+                ModWebService._builtin_tab_definition(ModWebAppSectionKind.SETTINGS),
             ),
         )
 
-        self.assertEqual(unavailable_tab, ModWebAppSectionKind.CONFIGS)
-        self.assertEqual(invalid_tab, ModWebAppSectionKind.CONFIGS)
+        self.assertEqual(unavailable_tab, "configs")
+        self.assertEqual(invalid_tab, "configs")
+
+    def test_additional_app_tabs_can_be_conditionally_enabled_for_detail_pages(self) -> None:
+        class HiddenTabService(ModWebService):
+            def __init__(self) -> None:
+                super().__init__()
+                self.rendered_tab_ids: list[str] = []
+
+            def _additional_app_tab_definitions(
+                self,
+                *,
+                context: ModWebAppTabContext,
+                is_detail_page: bool,
+            ) -> tuple[ModWebAppTabDefinition, ...]:
+                if context.app_name != "minecraft_alpha" or not is_detail_page:
+                    return ()
+                return (
+                    ModWebAppTabDefinition.custom(
+                        tab_id="map",
+                        label="Map",
+                        page_order=650,
+                        app_card_order=650,
+                        app_card_tone="purple",
+                        render_handler_name="_render_map_tab",
+                        badge_handler_name="_map_tab_badges",
+                        action_handler_name="_map_tab_actions",
+                        visibility_rule=ModWebAppTabVisibilityRule.all_of(
+                            ModWebAppTabVisibilityRule.min_app_version("1.20.1"),
+                            ModWebAppTabVisibilityRule.has_mod("squaremap"),
+                            ModWebAppTabVisibilityRule.setting_enabled("squaremap_enabled"),
+                        ),
+                    ),
+                )
+
+            def _render_map_tab(
+                self,
+                *,
+                ui: ModWebUi,
+                model: ModWebBasePageModel,
+                user: ModWebUser,
+                tab: ModWebAppTabDefinition,
+            ) -> None:
+                del ui, model, user
+                self.rendered_tab_ids.append(tab.tab_id)
+                return None
+
+            @staticmethod
+            def _map_tab_badges(
+                *,
+                model: ModWebBasePageModel,
+                user: ModWebUser,
+                tab: ModWebAppTabDefinition,
+            ) -> tuple[_ModWebBadgeSpec, ...]:
+                del model, user, tab
+                return (_ModWebBadgeSpec(text="Squaremap", tone="purple"),)
+
+            @staticmethod
+            def _map_tab_actions(
+                *,
+                model: ModWebBasePageModel,
+                user: ModWebUser,
+                tab: ModWebAppTabDefinition,
+            ) -> tuple[_ModWebTabActionSpec, ...]:
+                del model, user, tab
+                return (_ModWebTabActionSpec(label="Open Map", url="/maps/minecraft_alpha", new_tab=True),)
+
+        service = HiddenTabService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        settings = NodeSettingList(
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            node="yuki",
+            editable_count=1,
+            restricted_count=0,
+            has_pending_changes=False,
+            pending_change_count=0,
+            required_save_level_name=Power_Level.user.name,
+            required_reload_level_name=Power_Level.user.name,
+            settings=(
+                self._setting_entry(
+                    key="squaremap_enabled",
+                    label="Squaremap Enabled",
+                    type_name="bool",
+                    value_text="true",
+                    current_input_value="true",
+                ),
+            ),
+        )
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=NodeAppRuntimeSummary(
+                running=True,
+                enabled=True,
+                version="1.20.4",
+                player_count=0,
+                player_capacity=20,
+                relay_support=ChatRelaySupport.BIDIRECTIONAL,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                transition_state=NodeAppTransitionState.NONE,
+            ),
+            app_start_blocked=False,
+            settings=settings,
+            console_actions=None,
+            mods=NodeModList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                summary=NodeModSummary(
+                    total_count=1,
+                    enabled_count=1,
+                    disabled_count=0,
+                    coremod_count=0,
+                    downloadable_count=0,
+                    non_downloadable_count=1,
+                ),
+                mods=(cast(Any, SimpleNamespace(name="squaremap")),),
+                app_stats=None,
+            ),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+        )
+
+        tabs = service._page_tabs(model)
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "settings", "map"])
+        map_tab = tabs[-1]
+        self.assertEqual(
+            service._page_section_badges(model=model, user=user, tab=map_tab),
+            (_ModWebBadgeSpec(text="Squaremap", tone="purple"),),
+        )
+        self.assertEqual(
+            service._page_tab_actions(model=model, user=user, tab=map_tab, chat_surface=None),
+            (_ModWebTabActionSpec(label="Open Map", url="/maps/minecraft_alpha", new_tab=True),),
+        )
+        self.assertIsNone(
+            service._render_page_section(
+                ui=cast(ModWebUi, cast(object, SimpleNamespace())),
+                model=model,
+                user=user,
+                tab=map_tab,
+                chat_surface=None,
+            )
+        )
+        self.assertEqual(service.rendered_tab_ids, ["map"])
+
+    def test_additional_app_tabs_stay_hidden_when_conditions_are_not_met(self) -> None:
+        class HiddenTabService(ModWebService):
+            def _additional_app_tab_definitions(
+                self,
+                *,
+                context: ModWebAppTabContext,
+                is_detail_page: bool,
+            ) -> tuple[ModWebAppTabDefinition, ...]:
+                if context.app_name != "minecraft_alpha" or not is_detail_page:
+                    return ()
+                return (
+                    ModWebAppTabDefinition.custom(
+                        tab_id="map",
+                        label="Map",
+                        page_order=650,
+                        app_card_order=650,
+                        app_card_tone="purple",
+                        render_handler_name="_render_map_tab",
+                        visibility_rule=ModWebAppTabVisibilityRule.all_of(
+                            ModWebAppTabVisibilityRule.min_app_version("1.20.1"),
+                            ModWebAppTabVisibilityRule.has_mod("squaremap"),
+                            ModWebAppTabVisibilityRule.setting_enabled("squaremap_enabled"),
+                        ),
+                    ),
+                )
+
+            @staticmethod
+            def _render_map_tab(
+                *,
+                ui: ModWebUi,
+                model: ModWebBasePageModel,
+                user: ModWebUser,
+                tab: ModWebAppTabDefinition,
+            ) -> None:
+                del ui, model, user, tab
+                return None
+
+        service = HiddenTabService()
+        model = ModWebOverviewPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=NodeAppRuntimeSummary(
+                running=True,
+                enabled=True,
+                version="1.20.0",
+                player_count=0,
+                player_capacity=20,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                transition_state=NodeAppTransitionState.NONE,
+            ),
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+        )
+
+        self.assertEqual(service._page_tabs(model), ())
 
     def test_save_card_description_prefers_supported_actions(self) -> None:
         model = ModWebBasePageModel(
@@ -4223,6 +4984,7 @@ class ModWebTests(unittest.TestCase):
         self.assertFalse(ModWebService._app_kill_disabled(running_model))
 
     def test_model_with_runtime_state_updates_app_stats_and_blocked_flag(self) -> None:
+        service = ModWebService()
         model = ModWebBasePageModel(
             node_name="erin",
             app_name="minecraft_alpha",
@@ -4241,7 +5003,7 @@ class ModWebTests(unittest.TestCase):
             settings=None,
         )
 
-        updated = ModWebService._model_with_runtime_state(
+        updated = service._model_with_runtime_state(
             model,
             app_stats=NodeAppRuntimeSummary(
                 running=False,

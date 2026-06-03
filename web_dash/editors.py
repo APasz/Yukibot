@@ -236,7 +236,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     ui=ui,
                     title="Console",
                     description=self._console_card_description(action_count=len(current_console_actions.actions)),
-                    badges=(_ModWebBadgeSpec(text=f"{len(current_console_actions.actions)} actions", tone="black"),),
                 )
 
                 @ui.refreshable
@@ -483,26 +482,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     with ui.row().classes("w-full justify-end"):
                         ui.button("Close", on_click=upload_dialog.close).classes("mod-list-button secondary")
 
-        header_badges: list[_ModWebBadgeSpec] = [
-            _ModWebBadgeSpec(text=f"{len(saves.saves)} saves", tone="black"),
-        ]
-        directory_count: int = sum(1 for save in saves.saves if save.kind == "directory")
-        if directory_count > 0:
-            header_badges.append(_ModWebBadgeSpec(text=f"{directory_count} folders", tone="grey"))
-        if model.supports_save_uploads:
-            header_badges.append(_ModWebBadgeSpec(text="Upload", tone="purple"))
-        if model.supports_save_rename:
-            header_badges.append(_ModWebBadgeSpec(text="Rename", tone="grey"))
-        if show_write_lock_note:
-            header_badges.append(_ModWebBadgeSpec(text=f"{model.save_write_level.name.title()} write", tone="warn"))
-
         with ui.card().classes(self._flat_tab_card_classes()):
             with ui.column().classes(self._tab_section_body_classes()):
                 self._render_flat_tab_header(
                     ui=ui,
                     title="Saves",
                     description=self._save_card_description(model=model, save_count=len(saves.saves)),
-                    badges=tuple(header_badges),
                 )
 
                 @ui.refreshable
@@ -772,22 +757,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         set_setting_validity=set_setting_validity,
                     )
 
-        header_badges: list[_ModWebBadgeSpec] = [
-            _ModWebBadgeSpec(text=f"{len(settings.settings)} settings", tone="black"),
-            _ModWebBadgeSpec(text=f"{settings.editable_count} editable", tone="purple"),
-        ]
-        if settings.pending_change_count > 0:
-            header_badges.append(_ModWebBadgeSpec(text=f"{settings.pending_change_count} drafts", tone="grey"))
-        if settings.restricted_count > 0:
-            header_badges.append(_ModWebBadgeSpec(text=f"{settings.restricted_count} restricted", tone="warn"))
-
         with ui.card().classes(self._flat_tab_card_classes()):
             with ui.column().classes(self._tab_section_body_classes()):
                 self._render_flat_tab_header(
                     ui=ui,
                     title="Settings",
                     description=self._settings_card_description(),
-                    badges=tuple(header_badges),
                 )
                 with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
                     search_input = (
@@ -984,7 +959,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     if model.config_write_level != model.config_read_level
                     else None
                 ),
-                badges=(_ModWebBadgeSpec(text="Locked", tone="grey"),),
                 notepad=True,
             )
             return
@@ -996,13 +970,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 title="Configs",
                 description="No config files are currently indexed for this app.",
                 detail_text="Add a readable config root to populate this tab.",
-                badges=(
-                    _ModWebBadgeSpec(text="0 files", tone="grey"),
-                    _ModWebBadgeSpec(
-                        text=f"{model.config_write_level.name.title()} write" if can_write else "Read only",
-                        tone="red" if can_write else "grey",
-                    ),
-                ),
                 notepad=True,
             )
             return
@@ -1145,13 +1112,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         def set_line_wrapping(event: ModWebValueContainer) -> None:
             editor.set_line_wrapping(bool(_value_as_object(event)))
 
-        header_badges: tuple[_ModWebBadgeSpec, ...] = (
-            _ModWebBadgeSpec(text=f"{len(configs)} files", tone="grey"),
-            _ModWebBadgeSpec(
-                text=f"{model.config_write_level.name.title()} write" if can_write else "Read only",
-                tone="red" if can_write else "grey",
-            ),
-        )
         with ui.card().classes(self._flat_tab_card_classes(notepad=True)):
             with ui.column().classes(self._tab_section_body_classes()):
                 loaded_label, meta_label = self._render_flat_tab_header(
@@ -1159,7 +1119,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     title="Configs",
                     description=self._config_card_description(),
                     secondary_description="Loading selected config metadata...",
-                    badges=header_badges,
                 )
                 if loaded_label is None or meta_label is None:
                     raise ValueError("Config tab header labels are not available.")

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -79,9 +81,31 @@ def read_json_object(path: Path) -> dict[str, object]:
     return _json_object(cast(object, json.loads(path.read_text("utf-8"))), label=str(path))
 
 
-def write_json_object(path: Path, payload: Mapping[str, object]) -> None:
+def _atomic_write_text(path: Path, text: str, *, encoding: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, sort_keys=True, indent=4), "utf-8")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding=encoding,
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        temp_path.replace(path)
+    except Exception:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
+
+
+def write_json_object(path: Path, payload: Mapping[str, object]) -> None:
+    _atomic_write_text(path, json.dumps(payload, sort_keys=True, indent=4), encoding="utf-8")
 
 
 def response_data(payload: Mapping[str, object]) -> dict[str, object]:

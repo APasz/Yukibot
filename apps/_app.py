@@ -11,7 +11,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import IO, Any, Callable, Generic, Protocol, TypeVar, cast
 
@@ -293,6 +293,15 @@ class App(Generic[ConfigT], ABC):
     @property
     def relay_advancement_term_plural(self) -> str:
         return self.relay_advancement_terms.plural
+
+    def lifecycle_relay_description_lines(
+        self,
+        *,
+        started: bool,
+        uptime: timedelta | None = None,
+    ) -> tuple[str, ...]:
+        del started, uptime
+        return ()
 
     @property
     def has_mod_manager(self) -> Mod_Manager:
