@@ -1243,7 +1243,10 @@ class AliasEditorService:
             )
         if view.section is AliasEditorSection.APP_SCOPES:
             layout.add_button(
-                self._action_codec.build(AliasActionKind.SHOW_ALIASES, page=0),
+                self._build_section_state_action(
+                    AliasActionKind.SHOW_ALIASES,
+                    AliasEditorState(section=AliasEditorSection.APP_SCOPES, page=0),
+                ),
                 "Back To Aliases",
                 style=hikari.ButtonStyle.SECONDARY,
             )

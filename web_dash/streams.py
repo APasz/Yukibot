@@ -5,8 +5,11 @@ from .runtime_imports import (
     Callable,
     ModWebUser,
     NodeApiScope,
+    NodeAppEntry,
+    NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeStateStreamEvent,
+    NodeSystemSummary,
     aiohttp,
     asyncio,
     cast,
@@ -15,6 +18,7 @@ from .runtime_imports import (
     urlunsplit,
 )
 from .constants import (
+    _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
     _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
@@ -26,6 +30,10 @@ from .types import ModWebNodeLink
 from .service_base import ModWebServiceSupport
 
 class ModWebStreamsMixin(ModWebServiceSupport):
+    @staticmethod
+    def _remote_websocket_stream_is_unsupported(xcp: Exception) -> bool:
+        return isinstance(xcp, aiohttp.WSServerHandshakeError) and xcp.status in {400, 404, 405, 426}
+
     def _subscribe_local_app_state(
         self,
         *,
@@ -145,6 +153,19 @@ class ModWebStreamsMixin(ModWebServiceSupport):
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
+                if self._remote_websocket_stream_is_unsupported(xcp):
+                    log.warning(
+                        "Remote app state stream websocket unsupported: node=%s app=%s status=%s; falling back to polling",
+                        node.node_name,
+                        app_name,
+                        getattr(xcp, "status", None),
+                    )
+                    return await self._remote_app_state_polling_listener(
+                        node=node,
+                        app_name=app_name,
+                        user=user,
+                        on_update=on_update,
+                    )
                 log.warning(
                     "Remote app state stream failed: node=%s app=%s error=%s",
                     node.node_name,
@@ -152,6 +173,44 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     xcp,
                 )
             await asyncio.sleep(_REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS)
+
+    async def _remote_app_state_polling_listener(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+        on_update: Callable[[NodeAppStateStreamEvent], None],
+    ) -> None:
+        previous_app_stats: NodeAppRuntimeSummary | None = None
+        previous_system_summary: NodeSystemSummary | None = None
+        while True:
+            try:
+                app_stats, system_summary = await asyncio.gather(
+                    asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user),
+                    asyncio.to_thread(self._remote_node_system_summary, node, user),
+                )
+                event = self._remote_polled_app_state_event(
+                    app_name=app_name,
+                    app_stats=app_stats,
+                    system_summary=system_summary,
+                    previous_app_stats=previous_app_stats,
+                    previous_system_summary=previous_system_summary,
+                )
+                previous_app_stats = app_stats
+                previous_system_summary = system_summary
+                if event is not None:
+                    on_update(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as xcp:
+                log.warning(
+                    "Remote app state polling failed: node=%s app=%s error=%s",
+                    node.node_name,
+                    app_name,
+                    xcp,
+                )
+            await asyncio.sleep(_APP_RUNTIME_REFRESH_INTERVAL_SECONDS)
 
     async def _remote_node_state_stream_listener(
         self,
@@ -205,12 +264,105 @@ class ModWebStreamsMixin(ModWebServiceSupport):
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
+                if self._remote_websocket_stream_is_unsupported(xcp):
+                    log.warning(
+                        "Remote node state stream websocket unsupported: node=%s status=%s; falling back to polling",
+                        node.node_name,
+                        getattr(xcp, "status", None),
+                    )
+                    return await self._remote_node_state_polling_listener(
+                        node=node,
+                        user=user,
+                        on_update=on_update,
+                    )
                 log.warning(
                     "Remote node state stream failed: node=%s error=%s",
                     node.node_name,
                     xcp,
                 )
             await asyncio.sleep(_REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS)
+
+    async def _remote_node_state_polling_listener(
+        self,
+        *,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        on_update: Callable[[NodeStateStreamEvent], None],
+    ) -> None:
+        previous_app_entries: tuple[NodeAppEntry, ...] | None = None
+        previous_system_summary: NodeSystemSummary | None = None
+        while True:
+            try:
+                app_entries, system_summary = await asyncio.gather(
+                    asyncio.to_thread(self._remote_apps, node, user),
+                    asyncio.to_thread(self._remote_node_system_summary, node, user),
+                )
+                event = self._remote_polled_node_state_event(
+                    node_name=node.node_name,
+                    app_entries=app_entries,
+                    system_summary=system_summary,
+                    previous_app_entries=previous_app_entries,
+                    previous_system_summary=previous_system_summary,
+                )
+                previous_app_entries = app_entries
+                previous_system_summary = system_summary
+                if event is not None:
+                    on_update(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as xcp:
+                log.warning(
+                    "Remote node state polling failed: node=%s error=%s",
+                    node.node_name,
+                    xcp,
+                )
+            await asyncio.sleep(_APP_RUNTIME_REFRESH_INTERVAL_SECONDS)
+
+    @staticmethod
+    def _remote_polled_app_state_event(
+        *,
+        app_name: str,
+        app_stats: NodeAppRuntimeSummary,
+        system_summary: NodeSystemSummary,
+        previous_app_stats: NodeAppRuntimeSummary | None,
+        previous_system_summary: NodeSystemSummary | None,
+    ) -> NodeAppStateStreamEvent | None:
+        runtime_changed = previous_app_stats != app_stats
+        system_changed = previous_system_summary != system_summary
+        if runtime_changed and system_changed:
+            return NodeAppStateStreamEvent.both(
+                app_name=app_name,
+                app_stats=app_stats,
+                system_summary=system_summary,
+            )
+        if runtime_changed:
+            return NodeAppStateStreamEvent.runtime(app_name=app_name, app_stats=app_stats)
+        if system_changed:
+            return NodeAppStateStreamEvent.system(app_name=app_name, system_summary=system_summary)
+        return None
+
+    @staticmethod
+    def _remote_polled_node_state_event(
+        *,
+        node_name: str,
+        app_entries: tuple[NodeAppEntry, ...],
+        system_summary: NodeSystemSummary,
+        previous_app_entries: tuple[NodeAppEntry, ...] | None,
+        previous_system_summary: NodeSystemSummary | None,
+    ) -> NodeStateStreamEvent | None:
+        apps_changed = previous_app_entries != app_entries
+        system_changed = previous_system_summary != system_summary
+        if apps_changed and system_changed:
+            return NodeStateStreamEvent.both(
+                node_name=node_name,
+                app_entries=app_entries,
+                system_summary=system_summary,
+            )
+        if apps_changed:
+            return NodeStateStreamEvent.apps(node_name=node_name, app_entries=app_entries)
+        if system_changed:
+            return NodeStateStreamEvent.system(node_name=node_name, system_summary=system_summary)
+        return None
 
     @staticmethod
     def _remote_node_state_stream_url(*, node: ModWebNodeLink) -> str:

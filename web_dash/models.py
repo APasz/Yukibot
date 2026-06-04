@@ -35,6 +35,8 @@ from .runtime_imports import (
     NodeAppEntry,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    NodeBlueprintList,
+    NodeBlueprintMutationResult,
     NodeConfigContent,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
@@ -102,6 +104,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
         saves: NodeSaveList | None = (
             self._node_api.build_save_list(app) if app.supports_save_files and can_manage_app else None
         )
+        blueprints: NodeBlueprintList | None = (
+            self._node_api.build_blueprint_list(app, actor_user_id=user.discord_id)
+            if app.supports_blueprints and can_manage_app
+            else None
+        )
         settings: NodeSettingList | None = (
             self._node_api.build_setting_list(app=app, actor_user_id=user.discord_id)
             if app.supports_settings
@@ -116,11 +123,12 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         app_start_blocked: bool = self._app_start_blocked_local(app)
         traffic_log.info(
-            "Mod web page model built: app=%s mods=%s configs=%s saves=%s settings=%s",
+            "Mod web page model built: app=%s mods=%s configs=%s saves=%s blueprints=%s settings=%s",
             app.name,
             mods.summary.total_count,
             len(configs.configs),
             len(saves.saves) if saves is not None else 0,
+            len(blueprints.blueprints) if blueprints is not None else 0,
             len(settings.settings) if settings is not None else 0,
         )
         return self._page_model_with_tabs(
@@ -142,6 +150,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 app_start_blocked=app_start_blocked,
                 settings=settings,
                 console_actions=console_actions,
+                blueprints=blueprints,
                 supports_chat=app.supports_chat_relay,
                 chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
                 download_all_url=self._node_api.mod_download_url(
@@ -184,6 +193,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
         saves: NodeSaveList | None = (
             self._node_api.build_save_list(app) if app.supports_save_files and can_manage_app else None
         )
+        blueprints: NodeBlueprintList | None = (
+            self._node_api.build_blueprint_list(app, actor_user_id=user.discord_id)
+            if app.supports_blueprints and can_manage_app
+            else None
+        )
         settings: NodeSettingList | None = (
             self._node_api.build_setting_list(app=app, actor_user_id=user.discord_id)
             if app.supports_settings
@@ -199,10 +213,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
         app_stats: NodeAppRuntimeSummary = await self._node_api.build_app_runtime_summary(app)
         app_start_blocked: bool = self._app_start_blocked_local(app)
         traffic_log.info(
-            "Mod web overview model built: app=%s configs=%s saves=%s settings=%s",
+            "Mod web overview model built: app=%s configs=%s saves=%s blueprints=%s settings=%s",
             app.name,
             len(configs.configs),
             len(saves.saves) if saves is not None else 0,
+            len(blueprints.blueprints) if blueprints is not None else 0,
             len(settings.settings) if settings is not None else 0,
         )
         return self._page_model_with_tabs(
@@ -223,6 +238,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 app_start_blocked=app_start_blocked,
                 settings=settings,
                 console_actions=console_actions,
+                blueprints=blueprints,
                 supports_chat=app.supports_chat_relay,
                 chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
             )
@@ -241,6 +257,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         save_write_level: Power_Level,
         configs: NodeConfigList,
         saves: NodeSaveList | None,
+        blueprints: NodeBlueprintList | None,
         settings: NodeSettingList | None,
         console_actions: NodeConsoleActionList | None,
         supports_chat: bool,
@@ -269,6 +286,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 app_start_blocked=app_start_blocked,
                 settings=settings,
                 console_actions=console_actions,
+                blueprints=blueprints,
                 supports_chat=supports_chat,
                 chat_url=chat_url,
                 download_all_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'false'})}",
@@ -296,6 +314,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         save_write_level: Power_Level,
         configs: NodeConfigList,
         saves: NodeSaveList | None,
+        blueprints: NodeBlueprintList | None,
         settings: NodeSettingList | None,
         console_actions: NodeConsoleActionList | None,
         supports_chat: bool,
@@ -321,6 +340,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 app_start_blocked=app_start_blocked,
                 settings=settings,
                 console_actions=console_actions,
+                blueprints=blueprints,
                 supports_chat=supports_chat,
                 chat_url=chat_url,
             )
@@ -469,6 +489,16 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSaveList.from_mapping(payload)
 
+    def _remote_blueprint_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeBlueprintList:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/blueprints",
+            scopes=(NodeApiScope.BLUEPRINTS_READ,),
+            user=user,
+        )
+        return NodeBlueprintList.from_mapping(payload)
+
     def _remote_save_upload(
         self,
         node: ModWebNodeLink,
@@ -507,6 +537,44 @@ class ModWebModelsMixin(ModWebServiceSupport):
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
         return NodeSaveMutationResult.from_mapping(_json_object(payload, context="Remote node response"))
 
+    def _remote_blueprint_upload(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        session_name: str,
+        upload_path: Path,
+        upload_name: str,
+        user: ModWebUser,
+    ) -> NodeBlueprintMutationResult:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
+            user=user,
+        )
+        url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/blueprints/upload"
+        try:
+            with upload_path.open("rb") as handle:
+                response: Response = requests.post(
+                    url,
+                    data={"session_name": session_name, "filename": upload_name},
+                    files={"upload": (upload_name, handle, "application/octet-stream")},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+                )
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return NodeBlueprintMutationResult.from_mapping(_json_object(payload, context="Remote node response"))
+
     def _remote_save_rename(
         self,
         node: ModWebNodeLink,
@@ -525,6 +593,23 @@ class ModWebModelsMixin(ModWebServiceSupport):
             json_payload={"new_name": new_name},
         )
         return NodeSaveMutationResult.from_mapping(payload)
+
+    def _remote_blueprint_delete(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        blueprint_id: str,
+        user: ModWebUser,
+    ) -> NodeBlueprintMutationResult:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/blueprints/{quote(blueprint_id, safe='/')}",
+            scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
+            user=user,
+            method="DELETE",
+        )
+        return NodeBlueprintMutationResult.from_mapping(payload)
 
     def _remote_app_runtime_summary(
         self, node: ModWebNodeLink, app_name: str, user: ModWebUser
@@ -1253,12 +1338,15 @@ class ModWebModelsMixin(ModWebServiceSupport):
             if app_stats.running:
                 status_value = "Running"
                 status_tone = "purple"
-            elif app_stats.enabled:
-                status_value = "Stopped"
-                status_tone = "warn"
-            else:
+            elif not app_stats.enabled:
                 status_value = "Disabled"
                 status_tone = "red"
+            elif app_stats.runtime_fault is not None:
+                status_value = "Crashed"
+                status_tone = "red"
+            else:
+                status_value = "Stopped"
+                status_tone = "warn"
 
             relay_value = app_stats.relay_support.display_value
             relay_tone = "grey"

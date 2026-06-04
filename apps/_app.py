@@ -21,6 +21,7 @@ import psutil
 import _errors
 import config
 from _security import Power_Level
+from apps._blueprint_files import AppBlueprintEntry
 from apps._config import App_Config, AppVersion, Mod_Config, RelayChannelSource, normalise_app_version
 from apps._config_files import (
     AppConfigFile,
@@ -96,6 +97,40 @@ class RelayAdvancementTerms:
             raise ValueError("Relay advancement plural term must not be empty.")
 
 
+class AppRuntimeFaultKind(enum.StrEnum):
+    CRASH = "crash"
+
+
+@dataclass(frozen=True, slots=True)
+class AppRuntimeFault:
+    kind: AppRuntimeFaultKind
+    summary: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.summary is not None and not self.summary.strip():
+            raise ValueError("App runtime fault summary must not be blank.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "AppRuntimeFault":
+        raw_kind = payload.get("kind")
+        raw_summary = payload.get("summary")
+        if not isinstance(raw_kind, str):
+            raise ValueError("App runtime fault kind is invalid.")
+        if raw_summary is not None and not isinstance(raw_summary, str):
+            raise ValueError("App runtime fault summary is invalid.")
+        try:
+            kind = AppRuntimeFaultKind(raw_kind)
+        except ValueError as xcp:
+            raise ValueError("App runtime fault kind is invalid.") from xcp
+        return cls(kind=kind, summary=raw_summary)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "kind": self.kind.value,
+            "summary": self.summary,
+        }
+
+
 class App(Generic[ConfigT], ABC):
     cfg_cls: type[ConfigT] = cast(type[ConfigT], App_Config)
     bot: hikari.GatewayBot
@@ -137,6 +172,7 @@ class App(Generic[ConfigT], ABC):
     relay_advancement_terms: RelayAdvancementTerms = RelayAdvancementTerms()
     _instance_config_change_handler: Callable[["App"], None] | None = None
     lifecycle_started_at: datetime | None = None
+    runtime_fault: AppRuntimeFault | None = None
     config_file_read_level_override: Power_Level | None = None
     config_file_write_level_override: Power_Level | None = None
     save_file_write_level_override: Power_Level | None = None
@@ -188,6 +224,7 @@ class App(Generic[ConfigT], ABC):
 
         self.providers = []
         self.lifecycle_started_at = None
+        self.runtime_fault = None
         self.proc_name = getattr(self, "proc_name", "")
         self.proc_cmd = getattr(self, "proc_cmd", [])
         self.cmd_start = getattr(self, "cmd_start", [])
@@ -285,6 +322,30 @@ class App(Generic[ConfigT], ABC):
 
     def apply_relay_advancements_enabled(self, enabled: bool) -> None:
         raise ValueError(f"{self.friendly} does not support {self.relay_advancement_term.lower()} relay.")
+
+    def clear_runtime_fault(self) -> bool:
+        if getattr(self, "runtime_fault", None) is None:
+            return False
+        self.runtime_fault = None
+        return True
+
+    def record_runtime_fault(
+        self,
+        *,
+        kind: AppRuntimeFaultKind,
+        summary: str | None = None,
+    ) -> bool:
+        normalised_summary: str | None
+        if summary is None:
+            normalised_summary = None
+        else:
+            stripped_summary = summary.strip()
+            normalised_summary = stripped_summary or None
+        next_fault = AppRuntimeFault(kind=kind, summary=normalised_summary)
+        if getattr(self, "runtime_fault", None) == next_fault:
+            return False
+        self.runtime_fault = next_fault
+        return True
 
     @property
     def relay_advancement_term(self) -> str:
@@ -422,6 +483,32 @@ class App(Generic[ConfigT], ABC):
         raise ValueError(f"{self.friendly} does not support save relocation.")
 
     @property
+    def supports_blueprints(self) -> bool:
+        return False
+
+    def list_blueprint_files(self) -> tuple[AppBlueprintEntry, ...]:
+        raise ValueError(f"{self.friendly} does not support blueprint files.")
+
+    def upload_blueprint_file(
+        self,
+        *,
+        session_name: str,
+        upload_name: str,
+        source_path: Path,
+        actor_user_id: int,
+    ) -> AppBlueprintEntry:
+        raise ValueError(f"{self.friendly} does not support blueprint uploads.")
+
+    def delete_blueprint_file(
+        self,
+        *,
+        file_id: str,
+        actor_user_id: int,
+        actor_is_sudo: bool,
+    ) -> AppBlueprintEntry:
+        raise ValueError(f"{self.friendly} does not support blueprint deletion.")
+
+    @property
     def config_file_roots(self) -> tuple[AppConfigFileRoot, ...]:
         return ()
 
@@ -463,6 +550,13 @@ class App(Generic[ConfigT], ABC):
         self._running = False
         await self._terminate()
         return True
+
+    async def handle_unexpected_stop(self) -> None:
+        self._running = False
+        process = getattr(self, "process", None)
+        if process is not None and process.poll() is not None:
+            await self._drain_stderr_task()
+            self.process = None
 
     async def player_count(self) -> tuple[int, int] | None:
         return None
@@ -549,6 +643,19 @@ class App(Generic[ConfigT], ABC):
     async def _drain_stderr_task(self, timeout_seconds: float = 1.0) -> None:
         task = self._stderr_task
         if task is None or task.done():
+            return
+
+        current_loop = asyncio.get_running_loop()
+        task_loop = task.get_loop()
+        if task_loop is not current_loop:
+            deadline = current_loop.time() + timeout_seconds
+            while not task.done():
+                if current_loop.time() >= deadline:
+                    log.warning("%s stderr reader did not finish in time; cancelling it.", self.name)
+                    if not task_loop.is_closed():
+                        task_loop.call_soon_threadsafe(task.cancel)
+                    return
+                await asyncio.sleep(0.05)
             return
 
         try:

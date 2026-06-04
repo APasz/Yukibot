@@ -25,6 +25,7 @@ from _discord import (
     URLVariant,
     URLish,
 )
+from apps._app import AppRuntimeFaultKind
 from apps._app import AM_Receiver
 from apps._config import AppVersion
 from apps.minecraft import (
@@ -37,6 +38,7 @@ from apps.minecraft import (
     Players,
     Receiver,
     _detect_minecraft_runtime,
+    _minecraft_crash_summary_from_log_line,
     _runtime_info_from_log_line,
 )
 
@@ -312,6 +314,22 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runtime, MinecraftRuntimeInfo("1.20.1", MinecraftLoader.QUILT, "0.26.1-beta.1"))
 
+    def test_detect_crash_summary_from_main_fatal_log_line(self) -> None:
+        summary = _minecraft_crash_summary_from_log_line(
+            "[04Jun2026 08:29:24.797] [main/ERROR] [net.minecraft.server.Main/FATAL]: "
+            "Failed to start the minecraft server"
+        )
+
+        self.assertEqual(summary, "Failed to start the minecraft server")
+
+    def test_detect_crash_summary_ignores_intermediate_crash_report_uuid_lines(self) -> None:
+        summary = _minecraft_crash_summary_from_log_line(
+            "[04Jun2026 08:29:22.884] [main/FATAL] [net.minecraftforge.common.ForgeMod/]: "
+            "Preparing crash report with UUID 17451b13-ee0d-4d29-9334-d74e5904f42e"
+        )
+
+        self.assertIsNone(summary)
+
     def test_parse_list_response_handles_names(self) -> None:
         snapshot = Players.parse_list_response("There are 3/20 players online: Alice, Bob, Carol")
 
@@ -396,7 +414,8 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         add_mock.assert_called_once()
         relayed_message = add_mock.call_args.args[0]
         self.assertEqual(relayed_message.content, "{player} joined {app}")
-        self.assertEqual(relayed_message.player, "<@42>")
+        self.assertEqual(relayed_message.player, "Alice")
+        self.assertEqual(relayed_message.player_id, 42)
         app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
 
     async def test_note_leave_resolves_player_to_discord_mention_when_available(self) -> None:
@@ -416,7 +435,8 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         add_mock.assert_called_once()
         relayed_message = add_mock.call_args.args[0]
         self.assertEqual(relayed_message.content, "{player} left {app}")
-        self.assertEqual(relayed_message.player, "<@42>")
+        self.assertEqual(relayed_message.player, "Alice")
+        self.assertEqual(relayed_message.player_id, 42)
         app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
 
     async def test_listplayers_logs_unrecognised_response_only_once_until_success(self) -> None:
@@ -600,6 +620,29 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(version.main, "1.20.1")
         self.assertEqual(version.loader, "forge")
         self.assertEqual(version.framework, "47.4.0")
+
+    async def test_match_crash_records_runtime_fault_and_prefers_latest_summary(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.cfg = _make_minecraft_cfg()
+        app.name = "minecraft_demo"
+        app.scope = "minecraft"
+        app._tail_machers = set()
+        app.runtime_fault = None
+        matcher = Matchers(app)
+
+        await matcher.match_crash(
+            "[04Jun2026 08:29:22.884] [main/FATAL] [net.minecraftforge.server.loading.ServerModLoader/]: "
+            "Crash report saved to ./crash-reports/crash-2026-06-04_08.29.22-fml.txt"
+        )
+        await matcher.match_crash(
+            "[04Jun2026 08:29:24.797] [main/ERROR] [net.minecraft.server.Main/FATAL]: "
+            "Failed to start the minecraft server"
+        )
+
+        self.assertIsNotNone(app.runtime_fault)
+        assert app.runtime_fault is not None
+        self.assertIs(app.runtime_fault.kind, AppRuntimeFaultKind.CRASH)
+        self.assertEqual(app.runtime_fault.summary, "Failed to start the minecraft server")
 
     async def test_match_chat_decodes_chatimage_cicode_with_documented_argument_order(self) -> None:
         app = cast(Any, object.__new__(Minecraft))

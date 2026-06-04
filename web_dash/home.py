@@ -538,15 +538,32 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     self._render_app_card_api_pill(ui=ui, actions=api_actions)
 
     def _app_card_badges(self, app: ModWebAppLink) -> tuple[_ModWebAppCardBadgeSpec, ...]:
-        return tuple(
-            _ModWebAppCardBadgeSpec(
-                text=tab.label,
-                tone=tab.app_card_tone,
-                tab_id=tab.tab_id,
-            )
-            for tab in self._app_link_tabs(app)
-            if tab.show_on_app_card
-        )
+        badges: list[_ModWebAppCardBadgeSpec] = []
+        for tab in self._app_link_tabs(app):
+            if tab.show_on_app_card:
+                badges.append(
+                    _ModWebAppCardBadgeSpec(
+                        text=tab.label,
+                        tone=tab.app_card_tone,
+                        tab_id=tab.tab_id,
+                    )
+                )
+            if tab.app_card_badge_handler_name is None:
+                continue
+            badge_handler = getattr(self, tab.app_card_badge_handler_name, None)
+            if badge_handler is None:
+                raise ValueError(f"Unknown app tab app-card badge handler: {tab.app_card_badge_handler_name}")
+            badges.extend(badge_handler(app=app, tab=tab))
+        return tuple(badges)
+
+    @staticmethod
+    def _blueprint_app_card_badges(
+        *,
+        app: ModWebAppLink,
+        tab: "ModWebAppTabDefinition",
+    ) -> tuple[_ModWebAppCardBadgeSpec, ...]:
+        del app
+        return (_ModWebAppCardBadgeSpec(text=tab.label, tone=tab.app_card_tone, tab_id=tab.tab_id),)
 
     def _app_card_badge_target(
         self,
@@ -625,9 +642,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     tone="purple" if app.player_count > 0 else "black",
                 )
             return _ModWebBadgeSpec(text="Running", tone="black")
-        if app.enabled:
-            return None
-        return _ModWebBadgeSpec(text="Disabled", tone="red")
+        if not app.enabled:
+            return _ModWebBadgeSpec(text="Disabled", tone="red")
+        if app.runtime_fault is not None:
+            return _ModWebBadgeSpec(text="Crashed", tone="red")
+        return None
 
     @staticmethod
     def _app_card_api_actions(app: ModWebAppLink) -> tuple[_ModWebLinkSpec, ...]:
@@ -709,6 +728,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             transition_state=app.transition_state,
             player_count=app.player_count,
             player_capacity=app.player_capacity,
+            runtime_fault=app.runtime_fault,
         )
 
     @classmethod
@@ -767,6 +787,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             transition_state=app_stats.transition_state,
             player_count=app_stats.player_count,
             player_capacity=app_stats.player_capacity,
+            runtime_fault=app_stats.runtime_fault,
         )
         return self._app_link_with_tabs(ModWebHomeMixin._with_runtime_change_flag(app=updated_app, previous_app=app))
 
@@ -876,8 +897,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 transition_state=entry.transition_state,
                 player_count=entry.player_count,
                 player_capacity=entry.player_capacity,
+                runtime_fault=entry.runtime_fault,
                 saves_api_url=saves_api_url,
                 settings_api_url=settings_api_url,
+                supports_blueprints=entry.supports_blueprints,
                 supports_console_actions=entry.supports_console_actions,
                 supports_chat=entry.supports_chat,
                 chat_url=chat_url,

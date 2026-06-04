@@ -28,6 +28,7 @@ from .runtime_imports import (
     NodeAppEntry,
     NodeApiScope,
     NodeAppRuntimeSummary,
+    NodeAppTransitionState,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
@@ -397,6 +398,14 @@ class ModWebChatMixin(ModWebServiceSupport):
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
+                if ModWebStreamsMixin._remote_websocket_stream_is_unsupported(xcp):
+                    log.warning(
+                        "Remote chat stream websocket unsupported: node=%s app=%s status=%s; falling back to polling",
+                        node.node_name,
+                        app_name,
+                        getattr(xcp, "status", None),
+                    )
+                    return
                 log.warning(
                     "Remote chat stream failed: node=%s app=%s error=%s",
                     node.node_name,
@@ -575,9 +584,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         chat_surface: _ModWebChatSurfaceConfig,
     ) -> None:
         can_send = chat_surface.panel.send_message is not None
-        app_status_label, app_status_tone = self._chat_app_status_badge(
-            None if chat_surface.app_stats is None else chat_surface.app_stats.running
-        )
+        app_status_label, app_status_tone = self._chat_app_status_badge(chat_surface.app_stats)
         player_count_badge = self._chat_player_count_badge(chat_surface.app_stats)
         with (
             ui.card()
@@ -658,9 +665,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         embedded: bool = False,
     ) -> Callable[[NodeAppRuntimeSummary | None], None]:
         can_send = chat_panel.send_message is not None
-        app_status_label, app_status_tone = self._chat_app_status_badge(
-            None if app_stats is None else app_stats.running
-        )
+        app_status_label, app_status_tone = self._chat_app_status_badge(app_stats)
         player_count_badge = self._chat_player_count_badge(app_stats)
         message_input: Input | None = None
         message_count_label: Label | None = None
@@ -689,9 +694,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             nonlocal app_stats
             app_stats = next_app_stats
             if app_status_badge_label is not None:
-                latest_status_label, latest_status_tone = self._chat_app_status_badge(
-                    None if next_app_stats is None else next_app_stats.running
-                )
+                latest_status_label, latest_status_tone = self._chat_app_status_badge(next_app_stats)
                 self._set_badge_state(app_status_badge_label, latest_status_label, latest_status_tone)
             if player_count_badge_label is not None:
                 self._set_optional_badge_state(
@@ -1909,8 +1912,10 @@ class ModWebChatMixin(ModWebServiceSupport):
         lower: str = text.casefold()
         if "started" in lower:
             return _ModWebBadgeSpec(text=text, tone="purple")
-        if "stopped" in lower:
+        if "stopped" in lower or "ended" in lower:
             return _ModWebBadgeSpec(text=text, tone="grey")
+        if "crashed" in lower:
+            return _ModWebBadgeSpec(text=text, tone="red")
         if "joined" in lower:
             return _ModWebBadgeSpec(text=text, tone="purple")
         if "left" in lower:
@@ -1951,12 +1956,20 @@ class ModWebChatMixin(ModWebServiceSupport):
         )
 
     @staticmethod
-    def _chat_app_status_badge(app_running: bool | None) -> tuple[str, BadgeTone]:
-        if app_running is True:
+    def _chat_app_status_badge(app_stats: NodeAppRuntimeSummary | None) -> tuple[str, BadgeTone]:
+        if app_stats is None:
+            return "Status unknown", "warn"
+        if app_stats.transition_state is NodeAppTransitionState.STARTING:
+            return "Starting", "purple"
+        if app_stats.transition_state is NodeAppTransitionState.STOPPING:
+            return "Stopping", "warn"
+        if app_stats.running:
             return "Running", "purple"
-        if app_running is False:
-            return "Stopped", "grey"
-        return "Status unknown", "warn"
+        if not app_stats.enabled:
+            return "Disabled", "red"
+        if app_stats.runtime_fault is not None:
+            return "Crashed", "red"
+        return "Stopped", "grey"
 
     def _chat_event_source_label(self, event: ChatEvent) -> str:
         if event.author.kind is ChatAuthorKind.SYSTEM:

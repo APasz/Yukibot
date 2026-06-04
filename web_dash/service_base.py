@@ -22,6 +22,8 @@ from .runtime_imports import (
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
+    NodeBlueprintList,
+    NodeBlueprintMutationResult,
     NodeChatRoomSnapshot,
     NodeConfigContent,
     NodeConfigList,
@@ -356,6 +358,15 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_portal_redirect"]) -> Callable[..., RedirectResponse | None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_remote_blueprint_delete"]) -> Callable[..., NodeBlueprintMutationResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_blueprint_list"]) -> Callable[..., NodeBlueprintList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_blueprint_upload"]) -> Callable[..., NodeBlueprintMutationResult]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_remote_save_list"]) -> Callable[..., NodeSaveList]: ...
 
     @overload
@@ -457,6 +468,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_render_remote_node_unavailable_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_blueprints_editor"]) -> Callable[..., None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_render_saves_editor"]) -> Callable[..., None]: ...

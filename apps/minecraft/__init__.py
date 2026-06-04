@@ -34,7 +34,7 @@ from _discord import (
 from _file import File_Utils
 from _relay_embeds import build_app_relay_embed
 from _security import Power_Level
-from apps._app import AM_Receiver, App, RelayAdvancementTerms
+from apps._app import AM_Receiver, App, AppRuntimeFaultKind, RelayAdvancementTerms
 from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType, normalise_app_version
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
@@ -239,6 +239,22 @@ _MINECRAFT_MOD_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"
 _SQUAREMAP_MOD_BASE_NAME = "squaremap"
 _SQUAREMAP_PUBLIC_PATH = "/squaremap/"
 _SQUAREMAP_WORLD_NAME = "minecraft_overworld"
+_MINECRAFT_CRASH_SUMMARY_IGNORED_PREFIXES: tuple[str, ...] = ("Preparing crash report with UUID ",)
+
+
+def _minecraft_crash_summary_from_log_line(line: str) -> str | None:
+    if "FATAL" not in line:
+        return None
+    if "[main/FATAL]" not in line and "[main/ERROR]" not in line:
+        return None
+    if "]:" not in line:
+        return None
+    summary = line.rsplit("]:", 1)[1].strip()
+    if not summary:
+        return None
+    if any(summary.startswith(prefix) for prefix in _MINECRAFT_CRASH_SUMMARY_IGNORED_PREFIXES):
+        return None
+    return summary
 
 
 class MinecraftLoader(enum.StrEnum):
@@ -617,7 +633,7 @@ def _is_player_name(text: str) -> bool:
     return _PLAYER_NAME_RE.fullmatch(text.strip()) is not None
 
 
-def _resolve_minecraft_player_mention(player: str, *, app: "Minecraft") -> str | None:
+def _resolve_minecraft_player_user_id(player: str, *, app: "Minecraft") -> int | None:
     players = getattr(app, "_players", None)
     has_seen = getattr(players, "has_seen", None)
     if not callable(has_seen) or not has_seen(player):
@@ -635,7 +651,14 @@ def _resolve_minecraft_player_mention(player: str, *, app: "Minecraft") -> str |
     )
     if resolution.status is not config.NameResolutionStatus.UNIQUE or resolution.user_id is None:
         return None
-    return f"<@{resolution.user_id}>"
+    return resolution.user_id
+
+
+def _resolve_minecraft_player_mention(player: str, *, app: "Minecraft") -> str | None:
+    user_id = _resolve_minecraft_player_user_id(player, app=app)
+    if user_id is None:
+        return None
+    return f"<@{user_id}>"
 
 
 def _resolve_minecraft_death_mentions(cause: str, *, app: "Minecraft") -> str:
@@ -1573,8 +1596,25 @@ class Minecraft(App[Minecraft_Config]):
             self.persist_instance_config_overrides()
         return True
 
+    async def _stop_runtime_services(self) -> None:
+        self._running = False
+        await self._players.stop()
+        await self._activities.stop()
+
+    async def _stop_tailer(self) -> None:
+        if self._tail is None:
+            return
+        await self._tail.stop()
+        self._tail = None
+
+    async def handle_unexpected_stop(self) -> None:
+        await self._stop_runtime_services()
+        await self._stop_tailer()
+        await super().handle_unexpected_stop()
+
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
+        self.clear_runtime_fault()
         self._server_ready.clear()
         log.info(
             "Minecraft config for %s: server_properties=%s exists=%s rcon_host=%s rcon_port=%s file_enable_rcon=%s file_rcon_port=%s file_max_players=%s file_password_state=%s password_match=%s",
@@ -1634,12 +1674,12 @@ class Minecraft(App[Minecraft_Config]):
 
     async def stop(self) -> bool:
         log.info(f"{__name__}.stop")
-        self._running = False
-        await self._players.stop()
-        await self._activities.stop()
+        self.clear_runtime_fault()
+        await self._stop_runtime_services()
         if not self._relay.is_connected:
             log.warning("%s shutdown is skipping graceful RCON stop because the relay is not connected.", self.name)
             await self._terminate()
+            await self._stop_tailer()
             return True
         try:
             await self._relay.send("save-all")
@@ -1648,24 +1688,28 @@ class Minecraft(App[Minecraft_Config]):
         except RuntimeError as xcp:
             log.warning("%s shutdown fell back to terminate because RCON was unavailable: %s", self.name, xcp)
             await self._terminate()
+            await self._stop_tailer()
             return True
         for _ in range(10):
             if not self.process:
+                await self._stop_tailer()
                 return False
             if self.process and self.process.poll() is not None:
                 log.info(f"{self.friendly} stopped gracefully.")
                 self.process = None
+                await self._stop_tailer()
                 return False
             await asyncio.sleep(0.25)
         log.warning(f"{self.friendly} did not shut down in time. Forcing termination.")
         await self._terminate()
+        await self._stop_tailer()
         return True
 
     async def kill(self) -> bool:
-        self._running = False
-        await self._players.stop()
-        await self._activities.stop()
+        self.clear_runtime_fault()
+        await self._stop_runtime_services()
         await self._terminate()
+        await self._stop_tailer()
         return True
 
     async def player_count(self):
@@ -1703,6 +1747,7 @@ class Matchers:
     def __init__(self, app: Minecraft):
         self.app = app
         app._tail_machers.add(self.match_runtime)
+        app._tail_machers.add(self.match_crash)
         app._tail_machers.add(self.match_ready)
         app._tail_machers.add(self.match_uuid)
         app._tail_machers.add(self.match_chat)
@@ -1734,6 +1779,13 @@ class Matchers:
                 self.app.cfg.version.main if self.app.cfg.version is not None else None,
                 loader_value,
             )
+
+    async def match_crash(self, line: str) -> None:
+        summary = _minecraft_crash_summary_from_log_line(line)
+        if summary is None:
+            return
+        if self.app.record_runtime_fault(kind=AppRuntimeFaultKind.CRASH, summary=summary):
+            log.warning("%s detected Minecraft crash signal: %s", self.app.name, summary)
 
     async def match_chat(self, line: str):
         if match := CHAT_RE.match(line):
@@ -1959,15 +2011,31 @@ class Players:
         if player in self._players:
             return
         self._players.add(player)
-        relay_player = _resolve_minecraft_player_mention(player, app=self.app) or player
-        DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.join, relay_player, player_avatar_uri=self.avatar_uri(player)))
+        relay_player_id = _resolve_minecraft_player_user_id(player, app=self.app)
+        DC_Relay.add(
+            DC_Bound(
+                self.app,
+                DC_Bound.generics.join,
+                player,
+                player_id=relay_player_id,
+                player_avatar_uri=self.avatar_uri(player),
+            )
+        )
 
     def note_leave(self, player: str) -> None:
         if player not in self._players:
             return
-        relay_player = _resolve_minecraft_player_mention(player, app=self.app) or player
+        relay_player_id = _resolve_minecraft_player_user_id(player, app=self.app)
         self._players.discard(player)
-        DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.left, relay_player, player_avatar_uri=self.avatar_uri(player)))
+        DC_Relay.add(
+            DC_Bound(
+                self.app,
+                DC_Bound.generics.left,
+                player,
+                player_id=relay_player_id,
+                player_avatar_uri=self.avatar_uri(player),
+            )
+        )
 
     @staticmethod
     def _player_key(player: str) -> str:

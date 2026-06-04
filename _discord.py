@@ -968,12 +968,19 @@ class DC_Bound(Message):
         files: Sequence[Fileish] | None = None,
         extra_fmt: dict[str, str] | None = None,
         relay_embed: RelayEmbedPayload | None = None,
+        player_id: int | None = None,
         player_avatar_uri: str | None = None,
     ) -> None:
         super().__init__(content, player, files, extra_fmt=extra_fmt, relay_embed=relay_embed)
         self.app = app
-        self.player_resolution = Name_Cache().resolve_name(str(player), app.scope)
-        self.player_id = self.player_resolution.user_id
+        if player_id is None:
+            self.player_resolution = Name_Cache().resolve_name(str(player), app.scope)
+            self.player_id = self.player_resolution.user_id
+        else:
+            if isinstance(player_id, bool):
+                raise TypeError("DC_Bound player_id must not be a boolean.")
+            self.player_id = player_id
+            self.player_resolution = NameResolutionResult(NameResolutionStatus.UNIQUE, player_id)
         if player_avatar_uri is None:
             self.player_avatar_uri = None
         else:

@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
 from unittest.mock import AsyncMock, Mock, call, patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -20,7 +20,7 @@ from nicegui.elements.link import Link
 import config
 from _minecraft_heads import minecraft_dev_bypass_head_data_uri
 from _security import Access_Control, Power_Level
-from apps._app import ChatRelaySupport
+from apps._app import AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
 from apps._config import ModType
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
@@ -45,6 +45,8 @@ from node_api import (
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
+    NodeBlueprintEntry,
+    NodeBlueprintList,
     NodeChatEndpointSummary,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
@@ -168,6 +170,43 @@ class _FakeQueryParams:
         return list(self._values_by_key.get(key, ()))
 
 
+class _FakeCleanupClient:
+    def __init__(self) -> None:
+        self.delete_handlers: list[Callable[..., object]] = []
+
+    def on_delete(self, handler: Callable[..., object]) -> None:
+        self.delete_handlers.append(handler)
+
+
+class _FakeCleanupOwner:
+    def __init__(self) -> None:
+        self.delete_call_count = 0
+
+    def _handle_delete(self) -> None:
+        self.delete_call_count += 1
+
+
+@dataclass(frozen=True, slots=True)
+class _FakeCleanupSlot:
+    parent: _FakeCleanupOwner
+
+
+class _FakeCleanupTimer:
+    def __init__(self, parent_slot: _FakeCleanupSlot) -> None:
+        self.parent_slot = parent_slot
+        self._deleted = False
+        self.cancel_calls: list[bool] = []
+        self.raise_deleted_parent_slot = False
+
+    def cancel(self, *, with_current_invocation: bool = False) -> None:
+        self.cancel_calls.append(with_current_invocation)
+
+    def _get_context(self) -> object:
+        if self.raise_deleted_parent_slot:
+            raise RuntimeError("The parent slot of the element has been deleted.")
+        return object()
+
+
 class ModWebTests(unittest.TestCase):
     @staticmethod
     def _config_entry(
@@ -267,6 +306,28 @@ class ModWebTests(unittest.TestCase):
             node="yuki",
             roots=(),
             saves=(),
+        )
+
+    @staticmethod
+    def _blueprint_list(*, app_name: str = "minecraft_alpha") -> NodeBlueprintList:
+        return NodeBlueprintList(
+            app_name=app_name,
+            app_friendly="Minecraft Alpha",
+            node="yuki",
+            blueprints=(
+                NodeBlueprintEntry(
+                    id="Session Alpha/Assembler.sbp",
+                    label="Assembler.sbp",
+                    session_name="Session Alpha",
+                    relative_path="Session Alpha/Assembler.sbp",
+                    file_type="module",
+                    size_bytes=128,
+                    size_text="128B",
+                    modified_at="2026-06-04 20:00:00",
+                    uploaded_by_display_name="User 42",
+                    can_delete=True,
+                ),
+            ),
         )
 
     @staticmethod
@@ -1250,6 +1311,97 @@ class ModWebTests(unittest.TestCase):
                 "chat",
             ],
         )
+
+    def test_hidden_app_tabs_can_contribute_home_app_card_badges(self) -> None:
+        class HiddenTabBadgeService(ModWebService):
+            def _additional_app_tab_definitions(
+                self,
+                *,
+                context: ModWebAppTabContext,
+                is_detail_page: bool,
+            ) -> tuple[ModWebAppTabDefinition, ...]:
+                del is_detail_page
+                if context.app_name != "minecraft_alpha":
+                    return ()
+                return (
+                    ModWebAppTabDefinition.custom(
+                        tab_id="map",
+                        label="Map",
+                        page_order=650,
+                        app_card_order=650,
+                        app_card_tone="purple",
+                        show_on_app_card=False,
+                        render_handler_name="_render_map_tab",
+                        app_card_badge_handler_name="_map_app_card_badges",
+                    ),
+                )
+
+            @staticmethod
+            def _render_map_tab(
+                *,
+                ui: ModWebUi,
+                model: ModWebBasePageModel,
+                user: ModWebUser,
+                tab: ModWebAppTabDefinition,
+            ) -> None:
+                del ui, model, user, tab
+                return None
+
+            @staticmethod
+            def _map_app_card_badges(
+                *,
+                app: ModWebAppLink,
+                tab: ModWebAppTabDefinition,
+            ) -> tuple[_ModWebAppCardBadgeSpec, ...]:
+                del app
+                return (_ModWebAppCardBadgeSpec(text="Live Map", tone="purple", tab_id=tab.tab_id),)
+
+        service = HiddenTabBadgeService()
+        app = ModWebAppLink(
+            name="minecraft_alpha",
+            friendly="Minecraft Alpha",
+            node_name="yuki",
+            running=False,
+            enabled=True,
+            color_hex="#22C55E",
+            supports_mods=True,
+            supports_configs=False,
+            supports_saves=False,
+            supports_settings=False,
+            url="/mod-web/mods/minecraft_alpha",
+            api_url="/api/node/apps/minecraft_alpha/mods",
+            configs_api_url=None,
+        )
+
+        badges = service._app_card_badges(app)
+
+        self.assertEqual([badge.text for badge in badges], ["Mods", "Live Map"])
+        self.assertEqual([badge.tab_id for badge in badges], ["mods", "map"])
+
+    def test_blueprint_hidden_tab_contributes_home_app_card_badge(self) -> None:
+        service = ModWebService()
+        app = ModWebAppLink(
+            name="satisfactory_alpha",
+            friendly="Satisfactory Alpha",
+            node_name="yuki",
+            running=False,
+            enabled=True,
+            color_hex="#F59E0B",
+            supports_mods=False,
+            supports_configs=False,
+            supports_saves=False,
+            supports_settings=False,
+            url="/mod-web/mods/satisfactory_alpha",
+            api_url=None,
+            configs_api_url=None,
+            supports_blueprints=True,
+        )
+
+        badges = service._app_card_badges(app)
+
+        self.assertEqual([badge.text for badge in badges], ["Blueprints"])
+        self.assertEqual([badge.tab_id for badge in badges], ["blueprints"])
+        self.assertEqual([badge.tone for badge in badges], ["black"])
 
     def test_app_card_badge_target_preserves_app_list_query_and_sets_requested_tab(self) -> None:
         service: ModWebService = ModWebService()
@@ -2294,6 +2446,34 @@ class ModWebTests(unittest.TestCase):
             (_ModWebBadgeSpec(text="Research", tone="black"),),
         )
 
+    def test_chat_event_badges_treat_ended_embed_titles_as_stopped(self) -> None:
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(kind=ChatAuthorKind.SYSTEM, display_name="System"),
+            content="Stopped",
+            embed=ChatEmbed(title="Minecraft Alpha Ended", description="Uptime: `1h 2m 3s`", color=0x336699),
+        )
+
+        self.assertEqual(
+            ModWebService._chat_event_badges(event),
+            (_ModWebBadgeSpec(text="Minecraft Alpha Ended", tone="grey"),),
+        )
+
+    def test_chat_event_badges_treat_crashed_embed_titles_as_crash_notices(self) -> None:
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(kind=ChatAuthorKind.SYSTEM, display_name="System"),
+            content="Crashed",
+            embed=ChatEmbed(title="Minecraft Alpha Crashed", description="Out of memory", color=0x336699),
+        )
+
+        self.assertEqual(
+            ModWebService._chat_event_badges(event),
+            (_ModWebBadgeSpec(text="Minecraft Alpha Crashed", tone="red"),),
+        )
+
     def test_discord_chat_source_label_uses_guild_name_for_single_guild_channel(self) -> None:
         service = ModWebService()
         event = ChatEvent(
@@ -2424,9 +2604,38 @@ class ModWebTests(unittest.TestCase):
         self.assertNotIn('cat "onerror"', markup)
 
     def test_chat_app_status_badge_reflects_runtime_state(self) -> None:
-        self.assertEqual(ModWebService._chat_app_status_badge(True), ("Running", "purple"))
-        self.assertEqual(ModWebService._chat_app_status_badge(False), ("Stopped", "grey"))
+        running_stats = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version="1.20.1",
+            player_count=2,
+            player_capacity=20,
+            relay_support=ChatRelaySupport.BIDIRECTIONAL,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+        stopped_stats = replace(running_stats, running=False, player_count=None, player_capacity=None)
+
+        self.assertEqual(ModWebService._chat_app_status_badge(running_stats), ("Running", "purple"))
+        self.assertEqual(ModWebService._chat_app_status_badge(stopped_stats), ("Stopped", "grey"))
         self.assertEqual(ModWebService._chat_app_status_badge(None), ("Status unknown", "warn"))
+
+    def test_chat_app_status_badge_uses_crash_state(self) -> None:
+        crashed_stats = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version="1.20.1",
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.BIDIRECTIONAL,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            runtime_fault=AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"),
+        )
+
+        self.assertEqual(ModWebService._chat_app_status_badge(crashed_stats), ("Crashed", "red"))
 
     def test_player_count_snapshot_text_requires_complete_snapshot(self) -> None:
         self.assertEqual(
@@ -3246,6 +3455,67 @@ class ModWebTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_remote_chat_stream_listener_stops_retrying_after_unsupported_websocket(self) -> None:
+        class _FailingClientSession:
+            def __init__(self) -> None:
+                self.ws_connect_calls: list[tuple[str, dict[str, str], float]] = []
+
+            async def __aenter__(self) -> "_FailingClientSession":
+                return self
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                del exc_type, exc, tb
+                return False
+
+            def ws_connect(self, url: str, *, headers: dict[str, str], heartbeat: float) -> object:
+                self.ws_connect_calls.append((url, headers, heartbeat))
+                raise aiohttp.WSServerHandshakeError(
+                    None,
+                    (),
+                    status=404,
+                    message="Not Found",
+                    headers=None,
+                )
+
+        async def exercise() -> None:
+            service = ModWebService()
+            service._remote_token = Mock(return_value="stream-token")  # type: ignore[method-assign]
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            session = _FailingClientSession()
+            updates: list[_ModWebChatPanelSignal] = []
+
+            with patch("web_dash.chat.aiohttp.ClientSession", return_value=session):
+                await asyncio.wait_for(
+                    service._remote_chat_stream_listener(
+                        node=node,
+                        app_name="minecraft_alpha",
+                        user=cast(Any, SimpleNamespace(discord_id=42)),
+                        on_update=updates.append,
+                    ),
+                    timeout=0.2,
+                )
+
+            self.assertEqual(updates, [])
+            self.assertEqual(
+                session.ws_connect_calls,
+                [
+                    (
+                        "wss://erin.example/api/node/apps/minecraft_alpha/chat/stream",
+                        {"Authorization": "Bearer stream-token"},
+                        30.0,
+                    )
+                ],
+            )
+
+        asyncio.run(exercise())
+
     def test_remote_app_state_stream_listener_emits_updates(self) -> None:
         class _FakeWebSocket:
             def __init__(self, messages: list[object]) -> None:
@@ -3379,6 +3649,114 @@ class ModWebTests(unittest.TestCase):
                         app_name="minecraft_alpha",
                         app_stats=app_stats,
                     ),
+                ],
+            )
+            self.assertEqual(
+                session.ws_connect_calls,
+                [
+                    (
+                        "wss://erin.example/api/node/apps/minecraft_alpha/state/stream",
+                        {"Authorization": "Bearer stream-token"},
+                        30.0,
+                    )
+                ],
+            )
+
+        asyncio.run(exercise())
+
+    def test_remote_app_state_stream_listener_falls_back_to_polling_after_unsupported_websocket(self) -> None:
+        class _FailingClientSession:
+            def __init__(self) -> None:
+                self.ws_connect_calls: list[tuple[str, dict[str, str], float]] = []
+
+            async def __aenter__(self) -> "_FailingClientSession":
+                return self
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                del exc_type, exc, tb
+                return False
+
+            def ws_connect(self, url: str, *, headers: dict[str, str], heartbeat: float) -> object:
+                self.ws_connect_calls.append((url, headers, heartbeat))
+                raise aiohttp.WSServerHandshakeError(
+                    None,
+                    (),
+                    status=404,
+                    message="Not Found",
+                    headers=None,
+                )
+
+        async def exercise() -> None:
+            service = ModWebService()
+            service._remote_token = Mock(return_value="stream-token")  # type: ignore[method-assign]
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            app_stats = NodeAppRuntimeSummary(
+                running=True,
+                enabled=True,
+                version="1.20.1",
+                player_count=2,
+                player_capacity=8,
+                relay_support=ChatRelaySupport.BIDIRECTIONAL,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                footprint_bytes=None,
+                transition_state=NodeAppTransitionState.NONE,
+            )
+            system_summary = NodeSystemSummary(
+                cpu_percent=20,
+                ram_percent=30,
+                ram_used_bytes=3,
+                ram_total_bytes=10,
+                storage_percent=40,
+                storage_free_bytes=20,
+                storage_total_bytes=30,
+                running_names=("Minecraft Alpha",),
+            )
+            service._remote_app_runtime_summary = Mock(return_value=app_stats)  # type: ignore[method-assign]
+            service._remote_node_system_summary = Mock(return_value=system_summary)  # type: ignore[method-assign]
+            session = _FailingClientSession()
+            updates: list[NodeAppStateStreamEvent] = []
+            update_seen = asyncio.Event()
+
+            def on_update(event: NodeAppStateStreamEvent) -> None:
+                updates.append(event)
+                update_seen.set()
+
+            with (
+                patch("web_dash.streams.aiohttp.ClientSession", return_value=session),
+                patch("web_dash.streams._APP_RUNTIME_REFRESH_INTERVAL_SECONDS", 0.01),
+            ):
+                task = asyncio.create_task(
+                    service._remote_app_state_stream_listener(
+                        node=node,
+                        app_name="minecraft_alpha",
+                        user=cast(Any, SimpleNamespace(discord_id=42)),
+                        on_update=on_update,
+                    )
+                )
+                try:
+                    await asyncio.wait_for(update_seen.wait(), timeout=0.2)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+            self.assertEqual(
+                updates,
+                [
+                    NodeAppStateStreamEvent.both(
+                        app_name="minecraft_alpha",
+                        app_stats=app_stats,
+                        system_summary=system_summary,
+                    )
                 ],
             )
             self.assertEqual(
@@ -3531,6 +3909,118 @@ class ModWebTests(unittest.TestCase):
                         node_name="erin",
                         app_entries=(app_entry,),
                     ),
+                ],
+            )
+            self.assertEqual(
+                session.ws_connect_calls,
+                [
+                    (
+                        "wss://erin.example/api/node/state/stream",
+                        {"Authorization": "Bearer stream-token"},
+                        30.0,
+                    )
+                ],
+            )
+
+        asyncio.run(exercise())
+
+    def test_remote_node_state_stream_listener_falls_back_to_polling_after_unsupported_websocket(self) -> None:
+        class _FailingClientSession:
+            def __init__(self) -> None:
+                self.ws_connect_calls: list[tuple[str, dict[str, str], float]] = []
+
+            async def __aenter__(self) -> "_FailingClientSession":
+                return self
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                del exc_type, exc, tb
+                return False
+
+            def ws_connect(self, url: str, *, headers: dict[str, str], heartbeat: float) -> object:
+                self.ws_connect_calls.append((url, headers, heartbeat))
+                raise aiohttp.WSServerHandshakeError(
+                    None,
+                    (),
+                    status=404,
+                    message="Not Found",
+                    headers=None,
+                )
+
+        async def exercise() -> None:
+            service = ModWebService()
+            service._remote_token = Mock(return_value="stream-token")  # type: ignore[method-assign]
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            app_entry = NodeAppEntry(
+                name="minecraft_alpha",
+                friendly="Minecraft Alpha",
+                node="erin",
+                running=True,
+                enabled=True,
+                supports_mods=True,
+                supports_configs=True,
+                transition_state=NodeAppTransitionState.NONE,
+                player_count=1,
+                player_capacity=8,
+                supports_saves=True,
+                supports_save_uploads=True,
+                supports_save_rename=True,
+                supports_settings=True,
+                supports_chat=True,
+                color_hex="#336699",
+            )
+            system_summary = NodeSystemSummary(
+                cpu_percent=20,
+                ram_percent=30,
+                ram_used_bytes=3,
+                ram_total_bytes=10,
+                storage_percent=40,
+                storage_free_bytes=20,
+                storage_total_bytes=30,
+                running_names=("Minecraft Alpha",),
+            )
+            service._remote_apps = Mock(return_value=(app_entry,))  # type: ignore[method-assign]
+            service._remote_node_system_summary = Mock(return_value=system_summary)  # type: ignore[method-assign]
+            session = _FailingClientSession()
+            updates: list[NodeStateStreamEvent] = []
+            update_seen = asyncio.Event()
+
+            def on_update(event: NodeStateStreamEvent) -> None:
+                updates.append(event)
+                update_seen.set()
+
+            with (
+                patch("web_dash.streams.aiohttp.ClientSession", return_value=session),
+                patch("web_dash.streams._APP_RUNTIME_REFRESH_INTERVAL_SECONDS", 0.01),
+            ):
+                task = asyncio.create_task(
+                    service._remote_node_state_stream_listener(
+                        node=node,
+                        user=cast(Any, SimpleNamespace(discord_id=42)),
+                        on_update=on_update,
+                    )
+                )
+                try:
+                    await asyncio.wait_for(update_seen.wait(), timeout=0.2)
+                finally:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+
+            self.assertEqual(
+                updates,
+                [
+                    NodeStateStreamEvent.both(
+                        node_name="erin",
+                        app_entries=(app_entry,),
+                        system_summary=system_summary,
+                    )
                 ],
             )
             self.assertEqual(
@@ -3939,6 +4429,55 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(details.status_text, "Starting")
         self.assertEqual(details.status_tone, "purple")
         self.assertEqual(details.badges[-1], _ModWebBadgeSpec(text="0 / 20", tone="grey"))
+
+    def test_app_hero_runtime_details_show_crashed_status(self) -> None:
+        stats = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version="1.20.4",
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.BIDIRECTIONAL,
+            storage_percent=58,
+            storage_free_bytes=120 * 1024**3,
+            storage_total_bytes=256 * 1024**3,
+            footprint_bytes=12 * 1024**3,
+            runtime_fault=AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"),
+        )
+
+        details = ModWebService()._app_hero_runtime_details(stats)
+
+        self.assertEqual(details.status_text, "Crashed")
+        self.assertEqual(details.status_tone, "red")
+
+    def test_register_timer_cleanup_cancels_timer_when_owner_is_deleted(self) -> None:
+        service = ModWebService()
+        owner = _FakeCleanupOwner()
+        timer = _FakeCleanupTimer(_FakeCleanupSlot(parent=owner))
+        ui = SimpleNamespace(context=SimpleNamespace(client=_FakeCleanupClient()))
+
+        service._register_timer_cleanup(ui=cast(ModWebUi, cast(object, ui)), timer=timer)
+        owner._handle_delete()
+
+        self.assertEqual(timer.cancel_calls, [True])
+        self.assertTrue(timer._deleted)
+        self.assertEqual(owner.delete_call_count, 1)
+
+    def test_register_timer_cleanup_converts_deleted_parent_slot_to_shutdown(self) -> None:
+        service = ModWebService()
+        owner = _FakeCleanupOwner()
+        timer = _FakeCleanupTimer(_FakeCleanupSlot(parent=owner))
+        ui = SimpleNamespace(context=SimpleNamespace(client=_FakeCleanupClient()))
+
+        service._register_timer_cleanup(ui=cast(ModWebUi, cast(object, ui)), timer=timer)
+        timer.raise_deleted_parent_slot = True
+
+        context = timer._get_context()
+        with context:
+            pass
+
+        self.assertEqual(timer.cancel_calls, [True])
+        self.assertTrue(timer._deleted)
 
     def test_config_options_use_root_and_relative_path_labels(self) -> None:
         configs = (
@@ -4792,6 +5331,37 @@ class ModWebTests(unittest.TestCase):
             ["mods", "configs", "settings", "saves", "console"],
         )
 
+    def test_page_tabs_include_blueprints_for_user_visible_satisfactory_pages(self) -> None:
+        service = ModWebService()
+        model = ModWebOverviewPageModel(
+            node_name="yuki",
+            app_name="satisfactory_alpha",
+            app_friendly="Satisfactory Alpha",
+            app_color_hex="#F59E0B",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="satisfactory_alpha",
+                app_friendly="Satisfactory Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=self._console_action_list(app_name="satisfactory_alpha"),
+            blueprints=self._blueprint_list(app_name="satisfactory_alpha"),
+        )
+
+        tabs = service._page_tabs(model)
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["blueprints", "console"])
+
     def test_page_tabs_omit_mods_for_overview_pages(self) -> None:
         service = ModWebService()
         model = ModWebOverviewPageModel(
@@ -5374,6 +5944,25 @@ class ModWebTests(unittest.TestCase):
             _ModWebBadgeSpec(text="Starting", tone="purple"),
         )
         self.assertFalse(ModWebService._console_action_can_execute(action=action, app_stats=starting_stats))
+        crashed_stats = replace(
+            stopped_stats,
+            runtime_fault=AppRuntimeFault(
+                kind=AppRuntimeFaultKind.CRASH,
+                summary="Failed to start the minecraft server",
+            ),
+        )
+        self.assertEqual(
+            ModWebService._console_action_runtime_badge(action=action, app_stats=crashed_stats),
+            _ModWebBadgeSpec(text="Crashed", tone="red"),
+        )
+        self.assertEqual(
+            ModWebService._console_action_status_text(
+                action=action,
+                app_friendly="Minecraft Alpha",
+                app_stats=crashed_stats,
+            ),
+            "Minecraft Alpha crashed. Restart it before using this action.",
+        )
         self.assertEqual(
             ModWebService._console_action_runtime_badge(action=action, app_stats=disabled_stats),
             _ModWebBadgeSpec(text="Disabled", tone="red"),
@@ -5384,6 +5973,29 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(
             ModWebService._console_action_can_execute(action=offline_safe_action, app_stats=stopped_stats)
         )
+
+    def test_app_card_runtime_badge_uses_crash_state(self) -> None:
+        app = ModWebAppLink(
+            name="minecraft_alpha",
+            friendly="Minecraft Alpha",
+            node_name="yuki",
+            running=False,
+            enabled=True,
+            color_hex="#336699",
+            supports_mods=True,
+            supports_configs=True,
+            supports_saves=True,
+            supports_settings=True,
+            url="/mod-web/apps/minecraft_alpha",
+            api_url="/api/node/apps/minecraft_alpha/mods",
+            configs_api_url="/api/node/apps/minecraft_alpha/configs",
+            runtime_fault=AppRuntimeFault(
+                kind=AppRuntimeFaultKind.CRASH,
+                summary="Failed to start the minecraft server",
+            ),
+        )
+
+        self.assertEqual(ModWebService._app_card_runtime_badge(app), _ModWebBadgeSpec(text="Crashed", tone="red"))
 
     def test_console_action_result_for_selection_hides_other_action_feedback(self) -> None:
         result = NodeConsoleActionExecutionResult(

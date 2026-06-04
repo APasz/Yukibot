@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,6 +15,8 @@ from apps._app import App
 from apps._config import AppVersion
 from apps._settings import Setting
 from apps.satisfactory import (
+    Satisfactory,
+    SatisfactoryBlueprintOwnershipStore,
     Satisfactory_Config,
     SatisfactoryNetworkQuality,
     SatisfactoryServerState,
@@ -147,6 +150,17 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError(f"Missing setting: {key}")
         return setting
 
+    def _blueprint_app(self) -> Satisfactory:
+        app = object.__new__(Satisfactory)
+        app.friendly = "Satisfactory"
+        app.dir_log = self.temp_path / "app-log"
+        app.dir_log.mkdir(parents=True, exist_ok=True)
+        app._blueprint_root_override = self.temp_path / "blueprints"
+        app._blueprint_ownership_store = SatisfactoryBlueprintOwnershipStore(
+            app.dir_log / "satisfactory-blueprints.json"
+        )
+        return app
+
     def test_loads_cached_settings_as_typed_values(self) -> None:
         self.assertEqual(self._setting("auto_load_session_name").value, "ALPHA")
         self.assertIs(self._setting("FG.DSAutoPause").value, True)
@@ -243,6 +257,54 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(version, AppVersion(main="1.1.0", framework="3.0.0", loader="sml"))
 
+    def test_blueprint_upload_and_delete_tracks_owner_permissions(self) -> None:
+        app = self._blueprint_app()
+        upload_path = self.temp_path / "Awesome.sbp"
+        upload_path.write_text("module", encoding="utf-8")
+
+        uploaded = app.upload_blueprint_file(
+            session_name="Session Alpha",
+            upload_name="Awesome.sbp",
+            source_path=upload_path,
+            actor_user_id=101,
+        )
+
+        self.assertEqual(uploaded.relative_path, "Session Alpha/Awesome.sbp")
+        listed = app.list_blueprint_files()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0].uploaded_by_user_id, 101)
+
+        with self.assertRaises(PermissionError):
+            app.delete_blueprint_file(file_id=uploaded.id, actor_user_id=202, actor_is_sudo=False)
+
+        deleted = app.delete_blueprint_file(file_id=uploaded.id, actor_user_id=101, actor_is_sudo=False)
+
+        self.assertEqual(deleted.id, uploaded.id)
+        self.assertFalse((self.temp_path / "blueprints" / "Session Alpha" / "Awesome.sbp").exists())
+        self.assertEqual(app.list_blueprint_files(), ())
+
+    def test_blueprint_delete_requires_sudo_when_owner_is_unknown(self) -> None:
+        app = self._blueprint_app()
+        blueprint_path = self.temp_path / "blueprints" / "Session Beta" / "Imported.sbpcfg"
+        blueprint_path.parent.mkdir(parents=True, exist_ok=True)
+        blueprint_path.write_text("config", encoding="utf-8")
+
+        with self.assertRaises(PermissionError):
+            app.delete_blueprint_file(
+                file_id="Session Beta/Imported.sbpcfg",
+                actor_user_id=101,
+                actor_is_sudo=False,
+            )
+
+        deleted = app.delete_blueprint_file(
+            file_id="Session Beta/Imported.sbpcfg",
+            actor_user_id=202,
+            actor_is_sudo=True,
+        )
+
+        self.assertEqual(deleted.relative_path, "Session Beta/Imported.sbpcfg")
+        self.assertFalse(blueprint_path.exists())
+
     async def test_save_persists_cache_without_bridge_when_stopped(self) -> None:
         self._setting("FG.AutosaveInterval").update("900")
         self._setting("admin_password").update("new-secret")
@@ -316,6 +378,50 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         stderr_task = app._stderr_task
         self.assertIsNotNone(stderr_task)
         self.assertTrue(stderr_task.cancelled())
+
+    async def test_shared_terminate_cancels_cross_loop_stderr_task(self) -> None:
+        task_ready = threading.Event()
+        foreign_task_holder: dict[str, asyncio.Task[None]] = {}
+
+        def _run_foreign_loop() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                foreign_task_holder["task"] = loop.create_task(asyncio.Event().wait())
+                task_ready.set()
+                loop.run_forever()
+            finally:
+                pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.close()
+
+        thread = threading.Thread(target=_run_foreign_loop, daemon=True)
+        thread.start()
+        self.assertTrue(task_ready.wait(timeout=1.0))
+        foreign_task = foreign_task_holder["task"]
+
+        app = object.__new__(_DummyApp)
+        app.name = "dummy"
+        app.proc_name = ""
+        app.proc_cmd = []
+        app.process = cast(subprocess.Popen[str], _DummyProcess())
+        app._stderr_task = foreign_task
+
+        try:
+            await app._terminate()
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while not foreign_task.done():
+                if asyncio.get_running_loop().time() >= deadline:
+                    self.fail("cross-loop stderr task was not cancelled")
+                await asyncio.sleep(0.05)
+            self.assertTrue(foreign_task.cancelled())
+        finally:
+            foreign_task.get_loop().call_soon_threadsafe(foreign_task.get_loop().stop)
+            thread.join(timeout=1.0)
+            self.assertFalse(thread.is_alive())
 
 
 if __name__ == "__main__":

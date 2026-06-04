@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from .runtime_imports import (
     Access_Control,
     App_Manager,
@@ -18,6 +20,9 @@ from .runtime_imports import (
     NodeApiScope,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    NodeBlueprintEntry,
+    NodeBlueprintList,
+    NodeBlueprintMutationResult,
     NodeConfigContent,
     NodeConfigEntry,
     NodeConfigList,
@@ -538,6 +543,174 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         ).classes("mod-subtitle text-sm mod-tab-empty-detail")
                     return
                 _save_tile_grid("")
+
+    def _render_blueprints_editor(self, *, ui: ModWebUi, model: ModWebBasePageModel, user: ModWebUser) -> None:
+        blueprints: NodeBlueprintList | None = model.blueprints
+        if blueprints is None:
+            self._render_flat_tab_empty_state(
+                ui=ui,
+                title="Blueprints",
+                description="Blueprint management is only available to signed-in users with app access.",
+                detail_text="Open this app with a user-level session to browse and manage Satisfactory blueprint files.",
+            )
+            return
+
+        blueprint_options: tuple[ModWebSearchOption, ...] = self._blueprint_options(blueprints.blueprints)
+        show_search: bool = len(blueprint_options) > 1
+        default_session_name: str = blueprints.blueprints[0].session_name if blueprints.blueprints else ""
+        session_input: Input | None = None
+
+        async def upload_blueprint(event: "UploadEventArguments") -> None:
+            if session_input is None:
+                raise ValueError("Blueprint session input is not available.")
+            session_name: str = _value_as_text(session_input).strip()
+            if not session_name:
+                ui.notify("Enter a session name before uploading a blueprint.", type="warning")
+                return
+            try:
+                result: NodeBlueprintMutationResult = await self._upload_blueprint(
+                    model=model,
+                    session_name=session_name,
+                    upload_file=event.file,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Blueprint upload failed: {xcp}", type="negative")
+                return
+            upload_dialog.close()
+            ui.notify(result.message, type="positive")
+            ui.navigate.reload()
+
+        with ui.dialog() as upload_dialog:
+            with ui.card().classes("mod-card mod-dialog-card"):
+                with ui.column().classes("w-full gap-4 p-5"):
+                    with ui.column().classes("gap-0"):
+                        ui.label("Upload Blueprint").classes("text-xl font-black mod-title-small")
+                        ui.label(
+                            "Upload a `.sbp` or `.sbpcfg` file into a Satisfactory blueprint session."
+                        ).classes("mod-subtitle text-sm")
+                    session_input = (
+                        ui.input(value=default_session_name, placeholder="Session name")
+                        .props("filled square dense clearable hide-bottom-space color=accent")
+                        .classes("w-full")
+                    )
+                    ui.upload(
+                        label="Choose Blueprint File",
+                        auto_upload=True,
+                        on_upload=upload_blueprint,
+                    ).classes("mod-list-button")
+                    ui.label("Blueprint names follow the game file rules from the Satisfactory wiki.").classes(
+                        "mod-subtitle text-sm"
+                    )
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button("Close", on_click=upload_dialog.close).classes("mod-list-button secondary")
+
+        with ui.card().classes(self._flat_tab_card_classes()):
+            with ui.column().classes(self._tab_section_body_classes()):
+                self._render_flat_tab_header(
+                    ui=ui,
+                    title="Blueprints",
+                    description=self._blueprint_card_description(file_count=len(blueprints.blueprints)),
+                )
+
+                @ui.refreshable
+                def _blueprint_tile_grid(search_query: str) -> None:
+                    filtered_blueprints: tuple[NodeBlueprintEntry, ...] = self._filter_blueprint_entries(
+                        blueprints=blueprints.blueprints,
+                        options=blueprint_options,
+                        search_query=search_query,
+                    )
+                    if not filtered_blueprints:
+                        with ui.card().classes("mod-setting-card locked w-full"):
+                            ui.label("No blueprint files match that search.").classes("mod-subtitle text-sm")
+                        return
+                    with ui.element("div").classes("mod-save-grid w-full"):
+                        for blueprint in filtered_blueprints:
+                            self._render_blueprint_tile(ui=ui, model=model, user=user, blueprint=blueprint)
+
+                with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
+                    if show_search:
+                        search_input: Input = (
+                            ui.input(placeholder="Search blueprints")
+                            .props("filled square dense clearable hide-bottom-space color=accent")
+                            .classes("mod-config-search")
+                        )
+
+                        def _refresh_blueprint_tiles(event: ModWebEventArgumentsContainer) -> None:
+                            _blueprint_tile_grid.refresh(_event_args_as_text(event))
+
+                        search_input.on("update:model-value", _refresh_blueprint_tiles)
+                    with ui.row().classes("mod-tab-toolbar-actions"):
+                        ui.button("Upload Blueprint", on_click=upload_dialog.open).classes("mod-list-button")
+
+                if not blueprints.blueprints:
+                    ui.label("No blueprint files are currently available for this app.").classes(
+                        "mod-subtitle text-sm mod-tab-empty-detail"
+                    )
+                    ui.label("Upload a `.sbp` or `.sbpcfg` file to seed this app.").classes(
+                        "mod-subtitle text-sm mod-tab-empty-detail"
+                    )
+                    return
+                _blueprint_tile_grid("")
+
+    def _render_blueprint_tile(
+        self,
+        *,
+        ui: ModWebUi,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        blueprint: NodeBlueprintEntry,
+    ) -> None:
+        delete_dialog: Dialog | None = None
+
+        async def delete_selected() -> None:
+            try:
+                result: NodeBlueprintMutationResult = await self._delete_blueprint(
+                    model=model,
+                    blueprint_id=blueprint.id,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Blueprint delete failed: {xcp}", type="negative")
+                return
+            if delete_dialog is not None:
+                delete_dialog.close()
+            ui.notify(result.message, type="positive")
+            ui.navigate.reload()
+
+        with ui.card().classes("mod-save-card"):
+            with ui.column().classes("w-full gap-3 p-4"):
+                with ui.column().classes("gap-1 w-full"):
+                    ui.label(blueprint.label).classes("text-base font-black mod-title-small break-all")
+                    ui.label(blueprint.relative_path).classes("mod-subtitle text-sm break-all mod-save-card-path")
+                with ui.row().classes("gap-2 flex-wrap"):
+                    self._badge(ui=ui, text=blueprint.session_name, tone="grey")
+                    self._badge(ui=ui, text=blueprint.file_type.title(), tone="grey")
+                    self._badge(ui=ui, text=blueprint.size_text, tone="black")
+                    self._badge(ui=ui, text=f"Modified {blueprint.modified_at}", tone="purple")
+                    if blueprint.uploaded_by_display_name is not None:
+                        self._badge(ui=ui, text=f"By {blueprint.uploaded_by_display_name}", tone="grey")
+                    else:
+                        self._badge(ui=ui, text="Owner unknown", tone="grey")
+                if blueprint.can_delete:
+                    with ui.dialog().classes("mod-dialog-card") as delete_dialog:
+                        delete_dialog_ref: Dialog = delete_dialog
+                        with ui.card().classes("mod-card w-full"):
+                            with ui.column().classes("w-full gap-4 p-5"):
+                                with ui.column().classes("gap-1"):
+                                    ui.label("Delete Blueprint File").classes("text-xl font-black mod-title-small")
+                                    ui.label(
+                                        f"Delete {blueprint.relative_path} from {model.app_friendly}?"
+                                    ).classes("mod-subtitle text-sm")
+                                with ui.row().classes("w-full justify-end gap-2"):
+                                    ui.button("Cancel", on_click=delete_dialog_ref.close).classes(
+                                        "mod-list-button secondary"
+                                    )
+                                    ui.button("Delete", on_click=delete_selected).classes("mod-list-button danger")
+                    with ui.row().classes("mod-save-card-actions mod-save-card-actions-single"):
+                        ui.button("Delete", on_click=delete_dialog.open).classes(
+                            "mod-list-button danger mod-save-card-button"
+                        )
 
     def _render_save_tile(
         self,
@@ -1299,6 +1472,59 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         finally:
             temp_path.unlink(missing_ok=True)
 
+    async def _upload_blueprint(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        session_name: str,
+        upload_file: "FileUpload",
+        user: ModWebUser,
+    ) -> NodeBlueprintMutationResult:
+        if not self._user_has_level(user, Power_Level.user):
+            raise PermissionError(f"User access is required to upload blueprints for {model.app_friendly}.")
+        temp_path: Path = await self._persist_uploaded_file(upload_file)
+        try:
+            if model.node_name == config.MOD_WEB_SERVER.node_name:
+                app = self._resolve_app(model.app_name)
+                return self._node_api.upload_blueprint_path(
+                    app=app,
+                    session_name=session_name,
+                    source_path=temp_path,
+                    upload_name=upload_file.name,
+                    actor_user_id=user.discord_id,
+                )
+            node = self._remote_node_link(model.node_name)
+            return await asyncio.to_thread(
+                self._remote_blueprint_upload,
+                node,
+                model.app_name,
+                session_name,
+                temp_path,
+                upload_file.name,
+                user,
+            )
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    async def _delete_blueprint(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        blueprint_id: str,
+        user: ModWebUser,
+    ) -> NodeBlueprintMutationResult:
+        if not self._user_has_level(user, Power_Level.user):
+            raise PermissionError(f"User access is required to delete blueprints for {model.app_friendly}.")
+        if model.node_name == config.MOD_WEB_SERVER.node_name:
+            app = self._resolve_app(model.app_name)
+            return self._node_api.delete_blueprint_file(
+                app=app,
+                blueprint_id=blueprint_id,
+                actor_user_id=user.discord_id,
+            )
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        return await asyncio.to_thread(self._remote_blueprint_delete, node, model.app_name, blueprint_id, user)
+
     async def _upload_mod(
         self,
         *,
@@ -1624,6 +1850,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         return f"{entry.root_label} / {entry.relative_path}"
 
     @staticmethod
+    def _blueprint_option_label(entry: NodeBlueprintEntry) -> str:
+        return entry.relative_path
+
+    @staticmethod
     def _save_card_description(*, model: ModWebBasePageModel, save_count: int) -> str:
         if save_count == 0 and model.supports_save_uploads:
             return "No saves are currently available. Upload one to seed this app."
@@ -1636,6 +1866,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if model.supports_save_rename:
             return "Browse, download, and rename the current save artifacts."
         return "Browse and download the current save artifacts."
+
+    @staticmethod
+    def _blueprint_card_description(*, file_count: int) -> str:
+        if file_count == 0:
+            return "No blueprint files are currently available. Upload one to seed this app."
+        return "Browse blueprint files, upload new ones, and delete files you own."
 
     @staticmethod
     def _save_detail_path_text(*, save: NodeSaveEntry, root_count: int) -> str | None:
@@ -1654,6 +1890,28 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 search_text=" ".join((entry.root_label, entry.relative_path, entry.label, entry.kind)).casefold(),
             )
             for entry in saves
+        )
+
+    @classmethod
+    def _blueprint_options(cls, blueprints: tuple[NodeBlueprintEntry, ...]) -> tuple[ModWebSearchOption, ...]:
+        return tuple[ModWebSearchOption, ...](
+            ModWebSearchOption(
+                option_id=entry.id,
+                label=cls._blueprint_option_label(entry),
+                search_text=" ".join(
+                    filter(
+                        None,
+                        (
+                            entry.session_name,
+                            entry.relative_path,
+                            entry.label,
+                            entry.file_type,
+                            entry.uploaded_by_display_name,
+                        ),
+                    )
+                ).casefold(),
+            )
+            for entry in blueprints
         )
 
     @staticmethod
@@ -1752,6 +2010,23 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return ()
         return tuple[NodeSaveEntry, ...](save for save in saves if save.id in matching_ids or not matching_ids)
 
+    @classmethod
+    def _filter_blueprint_entries(
+        cls,
+        *,
+        blueprints: tuple[NodeBlueprintEntry, ...],
+        options: tuple[ModWebSearchOption, ...],
+        search_query: str,
+    ) -> tuple[NodeBlueprintEntry, ...]:
+        matching_ids: set[str] = {
+            option.option_id for option in cls._matching_search_options(options=options, search_query=search_query)
+        }
+        if not matching_ids and cls._search_query_tokens(search_query):
+            return ()
+        return tuple[NodeBlueprintEntry, ...](
+            blueprint for blueprint in blueprints if blueprint.id in matching_ids or not matching_ids
+        )
+
     @staticmethod
     def _setting_choice_for_value(setting: NodeSettingEntry, value: str) -> NodeSettingChoice | None:
         target: str = value.strip()
@@ -1832,6 +2107,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return _ModWebBadgeSpec(text="Running", tone="grey")
         if not app_stats.enabled:
             return _ModWebBadgeSpec(text="Disabled", tone="red")
+        if app_stats.runtime_fault is not None:
+            return _ModWebBadgeSpec(text="Crashed", tone="red")
         return _ModWebBadgeSpec(text="Stopped", tone="warn")
 
     @staticmethod
@@ -1871,6 +2148,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return "Run the action against the selected app instance."
         if not app_stats.enabled:
             return f"{app_friendly} is disabled. Enable and start it before using this action."
+        if app_stats.runtime_fault is not None:
+            return f"{app_friendly} crashed. Restart it before using this action."
         return f"{app_friendly} must be running before this action can be used."
 
     @staticmethod
@@ -1969,13 +2248,85 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         on_delete(_run_cleanup)
 
     @staticmethod
+    def _register_element_cleanup(*, element: object, cleanup: Callable[[], None]) -> None:
+        handle_delete_candidate: object | None = getattr(element, "_handle_delete", None)
+        if not callable(handle_delete_candidate):
+            return
+
+        cleanup_attr = "_mod_web_delete_cleanups"
+        wrapped_attr = "_mod_web_delete_cleanup_wrapped"
+        cleanups_candidate: object | None = getattr(element, cleanup_attr, None)
+        if isinstance(cleanups_candidate, list):
+            cleanups = cast(list[Callable[[], None]], cleanups_candidate)
+        else:
+            cleanups = []
+            setattr(element, cleanup_attr, cleanups)
+        cleanups.append(cleanup)
+        if bool(getattr(element, wrapped_attr, False)):
+            return
+
+        original_handle_delete = cast(Callable[[], None], handle_delete_candidate)
+
+        def _handle_delete_with_cleanup() -> None:
+            registered_cleanups = tuple(cast(list[Callable[[], None]], getattr(element, cleanup_attr, [])))
+            setattr(element, cleanup_attr, [])
+            for registered_cleanup in registered_cleanups:
+                try:
+                    registered_cleanup()
+                except Exception as xcp:
+                    log.warning("Mod web element cleanup failed: element=%s error=%s", type(element).__name__, xcp)
+            original_handle_delete()
+
+        setattr(element, "_handle_delete", _handle_delete_with_cleanup)
+        setattr(element, wrapped_attr, True)
+
+    @staticmethod
     def _register_timer_cleanup(*, ui: ModWebUi, timer: object) -> None:
         cancel = getattr(timer, "cancel", None)
         if not callable(cancel):
             return
 
+        def _mark_timer_deleted() -> None:
+            deleted_candidate: object | None = getattr(timer, "_deleted", None)
+            if isinstance(deleted_candidate, bool):
+                setattr(timer, "_deleted", True)
+
         def _cancel_timer() -> None:
+            _mark_timer_deleted()
             cancel(with_current_invocation=True)
+
+        get_context_candidate: object | None = getattr(timer, "_get_context", None)
+        if callable(get_context_candidate) and not bool(getattr(timer, "_mod_web_safe_timer_context_wrapped", False)):
+            original_get_context = cast(Callable[[], object], get_context_candidate)
+
+            def _safe_get_context() -> object:
+                try:
+                    return original_get_context()
+                except RuntimeError as xcp:
+                    if str(xcp) != "The parent slot of the element has been deleted.":
+                        raise
+                    _cancel_timer()
+                    return nullcontext()
+
+            setattr(timer, "_get_context", _safe_get_context)
+            setattr(timer, "_mod_web_safe_timer_context_wrapped", True)
+
+        try:
+            parent_slot: object | None = getattr(timer, "parent_slot", None)
+        except RuntimeError as xcp:
+            if str(xcp) == "The parent slot of the element has been deleted.":
+                parent_slot = None
+            else:
+                raise
+        parent_element: object | None = None
+        if parent_slot is not None:
+            try:
+                parent_element = getattr(parent_slot, "parent", None)
+            except RuntimeError as xcp:
+                if str(xcp) != "The parent element this slot belongs to has been deleted.":
+                    raise
+        if parent_element is not None:
+            ModWebEditorsMixin._register_element_cleanup(element=parent_element, cleanup=_cancel_timer)
 
         ModWebEditorsMixin._register_client_cleanup(ui=ui, cleanup=_cancel_timer)
 

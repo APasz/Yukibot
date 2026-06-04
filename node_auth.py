@@ -22,6 +22,8 @@ class NodeApiScope(StrEnum):
     SAVES_READ = "saves:read"
     SAVES_DOWNLOAD = "saves:download"
     SAVES_WRITE = "saves:write"
+    BLUEPRINTS_READ = "blueprints:read"
+    BLUEPRINTS_WRITE = "blueprints:write"
     SETTINGS_READ = "settings:read"
     SETTINGS_WRITE = "settings:write"
     FILES_READ = "files:read"

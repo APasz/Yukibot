@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import json
 import logging
@@ -16,11 +17,12 @@ from logging import Logger
 from pathlib import Path
 from re import Pattern
 from ssl import SSLContext
+from threading import Lock as ThreadLock
 from typing import Any, Protocol, Self, TypeVar
 from urllib.parse import SplitResult, urlsplit
 
 import hikari
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from satisfactory_api_client import AsyncSatisfactoryAPI
 from satisfactory_api_client.data.minimum_privilege_level import MinimumPrivilegeLevel
 from satisfactory_api_client.data.response import Response as SatisfactoryAPIResponse
@@ -30,6 +32,13 @@ import config
 from _file import File_Utils
 from _security import Power_Level
 from apps._app import App
+from apps._blueprint_files import (
+    AppBlueprintEntry,
+    describe_blueprint_file,
+    list_blueprint_files,
+    resolve_blueprint_file_path,
+    resolve_blueprint_upload_target,
+)
 from apps._config import App_Config, AppVersion, resolve_config_path
 from apps._settings import (
     App_Settings,
@@ -67,6 +76,7 @@ _SML_UPLUGIN_FILES: tuple[Path, Path] = (
     Path("FactoryGame") / "Mods" / "SML" / "SML.uplugin",
     Path("Mods") / "SML" / "SML.uplugin",
 )
+_BLUEPRINT_ROOT: Path = Path("~/.config/Epic/FactoryGame/Saved/SaveGames/blueprints").expanduser()
 
 
 class SatisfactoryNetworkQuality(enum.IntEnum):
@@ -191,6 +201,59 @@ def _string_object_mapping(value: object, *, label: str) -> dict[str, object]:
             raise ValueError(f"{label} keys must be strings")
         result[key] = item
     return result
+
+
+class SatisfactoryBlueprintOwnershipEntry(BaseModel):
+    uploaded_by_user_id: int
+
+
+class SatisfactoryBlueprintOwnershipIndex(BaseModel):
+    version: int = 1
+    files: dict[str, SatisfactoryBlueprintOwnershipEntry] = Field(default_factory=dict)
+
+
+class SatisfactoryBlueprintOwnershipStore:
+    def __init__(self, path: Path) -> None:
+        self._path: Path = path
+        self._lock: ThreadLock = ThreadLock()
+
+    def uploaded_by_user_id_by_relative_path(self) -> dict[str, int]:
+        with self._lock:
+            index = self._load_index()
+            return {
+                relative_path: entry.uploaded_by_user_id
+                for relative_path, entry in index.files.items()
+            }
+
+    def record_upload(self, *, relative_path: str, actor_user_id: int) -> None:
+        with self._lock:
+            index = self._load_index()
+            index.files[relative_path] = SatisfactoryBlueprintOwnershipEntry(uploaded_by_user_id=actor_user_id)
+            self._save_index(index)
+
+    def clear(self, *, relative_path: str) -> None:
+        with self._lock:
+            index = self._load_index()
+            if relative_path in index.files:
+                index.files.pop(relative_path)
+                self._save_index(index)
+
+    def _load_index(self) -> SatisfactoryBlueprintOwnershipIndex:
+        if not self._path.exists():
+            return SatisfactoryBlueprintOwnershipIndex()
+        try:
+            payload = json.loads(self._path.read_text(config.STR_ENCODE))
+            return SatisfactoryBlueprintOwnershipIndex.model_validate(payload)
+        except (OSError, json.JSONDecodeError, ValidationError) as xcp:
+            log.warning("Resetting invalid Satisfactory blueprint ownership index %s: %s", self._path, xcp)
+            return SatisfactoryBlueprintOwnershipIndex()
+
+    def _save_index(self, index: SatisfactoryBlueprintOwnershipIndex) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(
+            json.dumps(index.model_dump(mode="json"), indent=2, sort_keys=True),
+            config.STR_ENCODE,
+        )
 
 
 class Satisfactory_Config(App_Config):
@@ -741,6 +804,9 @@ class Satisfactory(App[Satisfactory_Config]):
         if not settings_cache.exists():
             settings_cache.write_text("{}", config.STR_ENCODE)
         super().__init__(bot, am, cfg)
+        self._blueprint_ownership_store = SatisfactoryBlueprintOwnershipStore(
+            self.dir_log / "satisfactory-blueprints.json"
+        )
         self._settings: SatisfactorySettings = SatisfactorySettings(
             settings_cache,
             self._bridge,
@@ -759,6 +825,75 @@ class Satisfactory(App[Satisfactory_Config]):
         self._tail_matchers: set[Callable[[str], Awaitable[None]]] = set()
         self._tail_matchers.add(self._match_version)
         self._players: SatisfactoryPlayers = SatisfactoryPlayers(self)
+
+    @property
+    def supports_blueprints(self) -> bool:
+        return True
+
+    def _blueprint_root_path(self) -> Path:
+        override = getattr(self, "_blueprint_root_override", None)
+        if isinstance(override, Path):
+            return override
+        return _BLUEPRINT_ROOT
+
+    def list_blueprint_files(self) -> tuple[AppBlueprintEntry, ...]:
+        return list_blueprint_files(
+            self._blueprint_root_path(),
+            uploaded_by_user_id_by_relative_path=self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path(),
+        )
+
+    def upload_blueprint_file(
+        self,
+        *,
+        session_name: str,
+        upload_name: str,
+        source_path: Path,
+        actor_user_id: int,
+    ) -> AppBlueprintEntry:
+        root = self._blueprint_root_path()
+        destination, relative_path = resolve_blueprint_upload_target(
+            root,
+            session_name=session_name,
+            upload_name=upload_name,
+        )
+        if destination.exists():
+            raise FileExistsError(f"Blueprint file already exists: {relative_path}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        File_Utils.copy(source_path, destination, overwrite=False)
+        self._blueprint_ownership_store.record_upload(relative_path=relative_path, actor_user_id=actor_user_id)
+        return describe_blueprint_file(
+            root,
+            relative_path=relative_path,
+            uploaded_by_user_id=actor_user_id,
+        )
+
+    def delete_blueprint_file(
+        self,
+        *,
+        file_id: str,
+        actor_user_id: int,
+        actor_is_sudo: bool,
+    ) -> AppBlueprintEntry:
+        root = self._blueprint_root_path()
+        blueprint_path, relative_path = resolve_blueprint_file_path(root, file_id)
+        ownership_index = self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path()
+        uploaded_by_user_id: int | None = ownership_index.get(relative_path)
+        if uploaded_by_user_id is not None and uploaded_by_user_id != actor_user_id and not actor_is_sudo:
+            raise PermissionError("Only the uploader or a sudo user can delete this blueprint file.")
+        if uploaded_by_user_id is None and not actor_is_sudo:
+            raise PermissionError("Only a sudo user can delete blueprint files with no recorded uploader.")
+        deleted_entry = describe_blueprint_file(
+            root,
+            relative_path=relative_path,
+            uploaded_by_user_id=uploaded_by_user_id,
+        )
+        if not blueprint_path.exists():
+            raise FileNotFoundError(f"Blueprint file does not exist: {relative_path}")
+        blueprint_path.unlink()
+        self._blueprint_ownership_store.clear(relative_path=relative_path)
+        with contextlib.suppress(OSError):
+            blueprint_path.parent.rmdir()
+        return deleted_entry
 
     async def _warm_bridge(self) -> bool:
         for attempt in range(_API_READY_RETRIES):

@@ -284,6 +284,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     if app_entry.supports_saves and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
+                blueprints_job = (
+                    asyncio.to_thread(self._remote_blueprint_list, node, app_name, user)
+                    if app_entry.supports_blueprints and can_manage_app
+                    else asyncio.sleep(0, result=None)
+                )
                 settings_job = (
                     asyncio.to_thread(self._remote_setting_list, node, app_name, user)
                     if app_entry.supports_settings and can_manage_app
@@ -294,10 +299,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     if app_entry.supports_console_actions and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
-                mods, configs, saves, settings, console_actions, system_summary = await asyncio.gather(
+                mods, configs, saves, blueprints, settings, console_actions, system_summary = await asyncio.gather(
                     asyncio.to_thread(self._remote_mod_list, node, app_name, user),
                     configs_job,
                     saves_job,
+                    blueprints_job,
                     settings_job,
                     console_actions_job,
                     asyncio.to_thread(self._remote_node_system_summary, node, user),
@@ -313,6 +319,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     save_write_level=app_entry.save_write_level,
                     configs=configs,
                     saves=saves,
+                    blueprints=blueprints,
                     settings=settings,
                     console_actions=console_actions,
                     supports_chat=app_entry.supports_chat,
@@ -373,6 +380,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     if app_entry.supports_saves and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
+                blueprints_job = (
+                    asyncio.to_thread(self._remote_blueprint_list, node, app_name, user)
+                    if app_entry.supports_blueprints and can_manage_app
+                    else asyncio.sleep(0, result=None)
+                )
                 settings_job = (
                     asyncio.to_thread(self._remote_setting_list, node, app_name, user)
                     if app_entry.supports_settings and can_manage_app
@@ -383,9 +395,10 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     if app_entry.supports_console_actions and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
-                configs, saves, settings, console_actions, app_stats, system_summary = await asyncio.gather(
+                configs, saves, blueprints, settings, console_actions, app_stats, system_summary = await asyncio.gather(
                     configs_job,
                     saves_job,
+                    blueprints_job,
                     settings_job,
                     console_actions_job,
                     asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user),
@@ -404,6 +417,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     save_write_level=app_entry.save_write_level,
                     configs=configs,
                     saves=saves,
+                    blueprints=blueprints,
                     settings=settings,
                     console_actions=console_actions,
                     supports_chat=app_entry.supports_chat,

@@ -52,3 +52,21 @@ def build_app_lifecycle_embed(
         title=title,
         description="\n".join(description_lines),
     )
+
+
+def build_app_crash_embed(
+    app: App,
+    *,
+    summary: str | None = None,
+    uptime: timedelta | None = None,
+) -> RelayEmbedPayload:
+    description_lines: list[str] = []
+    if summary is not None:
+        description_lines.append(summary)
+    if uptime is not None:
+        description_lines.append(f"Uptime: `{format_uptime(uptime)}`")
+    return build_app_relay_embed(
+        app,
+        title=f"{app.friendly} Crashed",
+        description="\n".join(description_lines),
+    )

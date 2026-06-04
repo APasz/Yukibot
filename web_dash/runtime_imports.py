@@ -62,7 +62,7 @@ from _discord import Generics, cached_member_role_color, color_int_to_hex
 from _manager import App_Manager, ManagedApp
 from _security import Access_Control, Power_Level
 from _utils import Utilities
-from apps._app import App
+from apps._app import App, AppRuntimeFault
 from apps._config import ModType
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
@@ -89,6 +89,9 @@ from node_api import (
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
+    NodeBlueprintEntry,
+    NodeBlueprintList,
+    NodeBlueprintMutationResult,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
@@ -128,6 +131,7 @@ __all__: tuple[str, ...] = (
     "Any",
     "App",
     "App_Manager",
+    "AppRuntimeFault",
     "AuthorityEndpoint",
     "AuthorityResource",
     "Awaitable",
@@ -180,6 +184,9 @@ __all__: tuple[str, ...] = (
     "NodeAppRuntimeSummary",
     "NodeAppStateStreamEvent",
     "NodeAppTransitionState",
+    "NodeBlueprintEntry",
+    "NodeBlueprintList",
+    "NodeBlueprintMutationResult",
     "NodeChatRoomSnapshot",
     "NodeChatStreamEvent",
     "NodeChatStreamEventKind",

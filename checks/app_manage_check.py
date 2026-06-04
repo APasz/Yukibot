@@ -22,7 +22,7 @@ from _editor_session import EditorSessionNamespace
 from _manager import App_Manager, AppInstanceCreateRequest, AppInstanceTemplate, Provider_Player
 from _relay_embeds import build_app_lifecycle_embed
 from _security import Power_Level
-from apps._app import AM_Receiver, App, ChatRelaySupport, RelayAdvancementTerms
+from apps._app import AM_Receiver, App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport, RelayAdvancementTerms
 from apps._config import (
     App_Config,
     AppVersion,
@@ -128,12 +128,15 @@ def _build_dummy_app(
     app.mods = None
     app.settings = None
     app.chat_channel = None
+    app.chat_channels = ()
     app.chat_channel_override = None
+    app.chat_channel_overrides = ()
     app.chat_channel_source = RelayChannelSource.NONE
     app.chat_relay_outbound = chat_relay_outbound
     app.am_receiver = _DummyReceiver() if has_receiver else None
     app.manage_embed_color = 0x96212B
     app.lifecycle_started_at = None
+    app.runtime_fault = None
     app.cfg = App_Config(
         name="dummy",
         instance_key="alpha",
@@ -168,9 +171,12 @@ def _build_minecraft_app(
     app.settings = None
     app.process = None
     app.chat_channel = None
+    app.chat_channels = ()
     app.chat_channel_override = None
+    app.chat_channel_overrides = ()
     app.chat_channel_source = RelayChannelSource.NONE
     app.am_receiver = None
+    app.runtime_fault = None
     version = (
         AppVersion(
             main=minecraft_version,
@@ -2069,6 +2075,89 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.title, "Dummy Started")
         self.assertEqual(relayed_message.relay_embed.description, "Join: `play.example.com:25565`")
         self.assertIsNotNone(app.lifecycle_started_at)
+
+    async def test_launch_emits_lifecycle_start_embed_for_web_chat_only_relay_app(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = None
+        manager.end = AsyncMock(return_value=set())
+        app = _build_dummy_app(has_receiver=True, join_port=25565)
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager.launch(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.player, "System")
+        self.assertEqual(relayed_message.content, "Started")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Started")
+        self.assertEqual(relayed_message.relay_embed.description, "Join: `play.example.com:25565`")
+        self.assertIsNotNone(app.lifecycle_started_at)
+
+    async def test_launch_emits_crash_embed_when_startup_records_runtime_fault(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = None
+        manager.end = AsyncMock(return_value=set())
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        async def _crash_start() -> bool:
+            app.runtime_fault = AppRuntimeFault(
+                kind=AppRuntimeFaultKind.CRASH,
+                summary="Failed to start the minecraft server",
+            )
+            raise RuntimeError("dummy stopped before reporting server readiness")
+
+        app.start = _crash_start  # type: ignore[method-assign]
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            with self.assertRaisesRegex(RuntimeError, "stopped before reporting server readiness"):
+                await manager.launch(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.player, "System")
+        self.assertEqual(relayed_message.content, "Crashed")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Crashed")
+        self.assertEqual(relayed_message.relay_embed.description, "Failed to start the minecraft server")
+        app.handle_unexpected_stop.assert_awaited_once()
+        self.assertIsNone(app.lifecycle_started_at)
+        self.assertIsNone(manager.current)
+
+    async def test_launch_emits_crash_embed_for_web_chat_only_relay_app(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = None
+        manager.end = AsyncMock(return_value=set())
+        app = _build_dummy_app(has_receiver=True, join_port=25565)
+        app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        async def _crash_start() -> bool:
+            app.runtime_fault = AppRuntimeFault(
+                kind=AppRuntimeFaultKind.CRASH,
+                summary="Failed to start the minecraft server",
+            )
+            raise RuntimeError("dummy stopped before reporting server readiness")
+
+        app.start = _crash_start  # type: ignore[method-assign]
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            with self.assertRaisesRegex(RuntimeError, "stopped before reporting server readiness"):
+                await manager.launch(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.player, "System")
+        self.assertEqual(relayed_message.content, "Crashed")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Crashed")
+        self.assertEqual(relayed_message.relay_embed.description, "Failed to start the minecraft server")
+        app.handle_unexpected_stop.assert_awaited_once()
+        self.assertIsNone(app.lifecycle_started_at)
+        self.assertIsNone(manager.current)
 
     async def test_end_emits_lifecycle_stop_embed_with_uptime(self) -> None:
         manager = object.__new__(App_Manager)

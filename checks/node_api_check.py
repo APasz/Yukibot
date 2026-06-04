@@ -19,7 +19,7 @@ from fastapi import WebSocketDisconnect
 
 import config
 from _security import Access_Control, Power_Level
-from apps._app import App, ChatRelaySupport
+from apps._app import App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._config import App_Config, Mod_Config, ModDownloadBlockReason, ModType
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
@@ -36,6 +36,7 @@ from apps._settings import (
     StringSettingSpec,
 )
 from apps._updater import Update_Manager
+from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore
 from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
 from node_api import (
     NodeApiService,
@@ -47,6 +48,8 @@ from node_api import (
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
     NodeAppTransitionState,
+    NodeBlueprintList,
+    NodeBlueprintMutationResult,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeChatRoomSnapshot,
@@ -123,6 +126,7 @@ def _build_app(mod_manager: object) -> _DummyApp:
     app.directory = Path(".")
     app.mods = cast(Any, mod_manager)
     app.settings = None
+    app.runtime_fault = None
     app.cfg = App_Config(
         name=app.name,
         instance_key="alpha",
@@ -147,6 +151,7 @@ def _build_console_action_app(
     app.directory = Path(".")
     app.mods = None
     app.settings = None
+    app.runtime_fault = None
     app.cfg = App_Config(
         name=app.name,
         instance_key="alpha",
@@ -165,6 +170,19 @@ def _build_console_action_app(
     app.config_file_read_level_override = None
     app.config_file_write_level_override = None
     app.save_file_write_level_override = None
+    return app
+
+
+def _build_blueprint_app(temp_path: Path) -> Satisfactory:
+    app = object.__new__(Satisfactory)
+    app.name = "satisfactory_alpha"
+    app.friendly = "Satisfactory Alpha"
+    app.dir_log = temp_path / "app-log"
+    app.dir_log.mkdir(parents=True, exist_ok=True)
+    app._blueprint_root_override = temp_path / "blueprints"
+    app._blueprint_ownership_store = SatisfactoryBlueprintOwnershipStore(
+        app.dir_log / "satisfactory-blueprints.json"
+    )
     return app
 
 
@@ -642,6 +660,13 @@ class NodeApiTests(unittest.TestCase):
 
                 return _decorator
 
+            def delete(self, path: str):
+                def _decorator(handler: object) -> object:
+                    handlers[path] = handler
+                    return handler
+
+                return _decorator
+
             def websocket(self, path: str):
                 def _decorator(handler: object) -> object:
                     handlers[path] = handler
@@ -731,6 +756,7 @@ class NodeApiTests(unittest.TestCase):
             storage_free_bytes=None,
             storage_total_bytes=None,
             footprint_bytes=None,
+            runtime_fault=AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"),
             transition_state=NodeAppTransitionState.NONE,
         )
         system_summary = NodeSystemSummary(
@@ -771,6 +797,7 @@ class NodeApiTests(unittest.TestCase):
             supports_save_rename=True,
             supports_settings=True,
             supports_chat=True,
+            runtime_fault=AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"),
             color_hex="#336699",
         )
         system_summary = NodeSystemSummary(
@@ -1191,6 +1218,73 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsInstance(result, NodeSaveMutationResult)
         self.assertEqual(result.save.id, "saves/incoming.zip")
         self.assertIn("Uploaded save", result.message)
+
+    def test_build_blueprint_list_marks_delete_permission_from_owner_and_sudo(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = _build_blueprint_app(root)
+            source = root / "module.sbp"
+            source.write_text("module", encoding="utf-8")
+            app.upload_blueprint_file(
+                session_name="Session Alpha",
+                upload_name="module.sbp",
+                source_path=source,
+                actor_user_id=101,
+            )
+
+            service = NodeApiService()
+            acl = Mock()
+            acl.can = Mock(side_effect=lambda user_id, level: user_id == 999 and level == Power_Level.sudo)
+            service.set_acl(cast(Any, acl))
+
+            owner_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=101)
+            sudo_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=999)
+            other_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=202)
+
+        self.assertTrue(owner_list.blueprints[0].can_delete)
+        self.assertTrue(sudo_list.blueprints[0].can_delete)
+        self.assertFalse(other_list.blueprints[0].can_delete)
+        self.assertEqual(owner_list.blueprints[0].uploaded_by_display_name, "User 101")
+
+    def test_upload_and_delete_blueprint_path_return_mutation_results(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = _build_blueprint_app(root)
+            source = root / "module.sbp"
+            source.write_text("module", encoding="utf-8")
+            service = NodeApiService()
+            acl = Mock()
+            acl.can = Mock(side_effect=lambda user_id, level: user_id == 999 and level == Power_Level.sudo)
+            service.set_acl(cast(Any, acl))
+
+            uploaded: NodeBlueprintMutationResult = service.upload_blueprint_path(
+                app=app,
+                session_name="Session Alpha",
+                source_path=source,
+                upload_name="module.sbp",
+                actor_user_id=101,
+            )
+
+            with self.assertRaises(Exception) as raised:
+                service.delete_blueprint_file(
+                    app=app,
+                    blueprint_id=uploaded.blueprint.id,
+                    actor_user_id=202,
+                )
+
+            deleted: NodeBlueprintMutationResult = service.delete_blueprint_file(
+                app=app,
+                blueprint_id=uploaded.blueprint.id,
+                actor_user_id=999,
+            )
+
+        self.assertIsInstance(uploaded, NodeBlueprintMutationResult)
+        self.assertEqual(uploaded.blueprint.relative_path, "Session Alpha/module.sbp")
+        self.assertIn("Uploaded blueprint", uploaded.message)
+        self.assertEqual(getattr(raised.exception, "status_code"), 403)
+        self.assertIsInstance(deleted, NodeBlueprintMutationResult)
+        self.assertEqual(deleted.blueprint.id, uploaded.blueprint.id)
+        self.assertIn("Deleted blueprint", deleted.message)
 
     def test_upload_mod_path_preserves_upload_filename_for_manager(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2100,6 +2194,18 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(summary.player_capacity, 12)
         self.assertIsNone(summary.storage_percent)
         self.assertIsNone(summary.footprint_bytes)
+
+    def test_build_live_app_runtime_summary_preserves_runtime_fault(self) -> None:
+        app = _build_app(Mock())
+        app.runtime_fault = AppRuntimeFault(
+            kind=AppRuntimeFaultKind.CRASH,
+            summary="Failed to start the minecraft server",
+        )
+        service = NodeApiService()
+
+        summary = asyncio.run(service.build_live_app_runtime_summary(app))
+
+        self.assertEqual(summary.runtime_fault, app.runtime_fault)
 
     def test_subscribe_local_app_runtime_notifies_initial_and_changed_state(self) -> None:
         async def exercise() -> None:

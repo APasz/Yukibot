@@ -39,7 +39,7 @@ from _mod_ops import (
 from _security import Access_Control, Power_Level
 from _sys import Stats_Disk, Stats_System
 from _utils import Utilities
-from apps._app import App, ChatRelaySupport
+from apps._app import App, AppRuntimeFault, ChatRelaySupport
 from apps._console import (
     ConsoleAction,
     ConsoleActionParameter,
@@ -48,6 +48,7 @@ from apps._console import (
 )
 from apps._config import ModDownloadBlockReason, ModType
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
+from apps._blueprint_files import AppBlueprintEntry
 from apps._mod import Mod
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
@@ -81,6 +82,8 @@ _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.SAVES_READ: Power_Level.user,
     NodeApiScope.SAVES_DOWNLOAD: Power_Level.user,
     NodeApiScope.SAVES_WRITE: Power_Level.user,
+    NodeApiScope.BLUEPRINTS_READ: Power_Level.user,
+    NodeApiScope.BLUEPRINTS_WRITE: Power_Level.user,
     NodeApiScope.SETTINGS_READ: Power_Level.user,
     NodeApiScope.SETTINGS_WRITE: Power_Level.user,
     NodeApiScope.FILES_READ: Power_Level.user,
@@ -231,9 +234,11 @@ class NodeAppEntry:
     supports_saves: bool = False
     supports_save_uploads: bool = False
     supports_save_rename: bool = False
+    supports_blueprints: bool = False
     supports_settings: bool = False
     supports_console_actions: bool = False
     supports_chat: bool = False
+    runtime_fault: AppRuntimeFault | None = None
     config_read_level: Power_Level = _DEFAULT_REMOTE_CONFIG_READ_LEVEL
     config_write_level: Power_Level = _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL
     save_write_level: Power_Level = Power_Level.sudo
@@ -256,9 +261,11 @@ class NodeAppEntry:
         supports_saves = payload.get("supports_saves", False)
         supports_save_uploads = payload.get("supports_save_uploads", False)
         supports_save_rename = payload.get("supports_save_rename", False)
+        supports_blueprints = payload.get("supports_blueprints", False)
         supports_settings = payload.get("supports_settings", False)
         supports_console_actions = payload.get("supports_console_actions", False)
         supports_chat = payload.get("supports_chat", False)
+        raw_runtime_fault = payload.get("runtime_fault")
         config_read_level = _power_level(payload, "config_read_level", default=_DEFAULT_REMOTE_CONFIG_READ_LEVEL)
         config_write_level = _power_level(payload, "config_write_level", default=_DEFAULT_REMOTE_CONFIG_WRITE_LEVEL)
         save_write_level = _power_level(payload, "save_write_level", default=Power_Level.sudo)
@@ -286,12 +293,16 @@ class NodeAppEntry:
             raise ValueError("Node app entry supports_save_uploads is invalid.")
         if not isinstance(supports_save_rename, bool):
             raise ValueError("Node app entry supports_save_rename is invalid.")
+        if not isinstance(supports_blueprints, bool):
+            raise ValueError("Node app entry supports_blueprints is invalid.")
         if not isinstance(supports_settings, bool):
             raise ValueError("Node app entry supports_settings is invalid.")
         if not isinstance(supports_console_actions, bool):
             raise ValueError("Node app entry supports_console_actions is invalid.")
         if not isinstance(supports_chat, bool):
             raise ValueError("Node app entry supports_chat is invalid.")
+        if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
+            raise ValueError("Node app entry runtime_fault is invalid.")
         if color_hex is not None and not isinstance(color_hex, str):
             raise ValueError("Node app entry color_hex is invalid.")
         if map_url is not None and not isinstance(map_url, str):
@@ -311,9 +322,13 @@ class NodeAppEntry:
             supports_saves=supports_saves,
             supports_save_uploads=supports_save_uploads,
             supports_save_rename=supports_save_rename,
+            supports_blueprints=supports_blueprints,
             supports_settings=supports_settings,
             supports_console_actions=supports_console_actions,
             supports_chat=supports_chat,
+            runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
+            if raw_runtime_fault is not None
+            else None,
             config_read_level=config_read_level,
             config_write_level=config_write_level,
             save_write_level=save_write_level,
@@ -337,9 +352,11 @@ class NodeAppEntry:
             "supports_saves": self.supports_saves,
             "supports_save_uploads": self.supports_save_uploads,
             "supports_save_rename": self.supports_save_rename,
+            "supports_blueprints": self.supports_blueprints,
             "supports_settings": self.supports_settings,
             "supports_console_actions": self.supports_console_actions,
             "supports_chat": self.supports_chat,
+            "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
             "config_read_level": self.config_read_level.name,
             "config_write_level": self.config_write_level.name,
             "save_write_level": self.save_write_level.name,
@@ -636,6 +653,7 @@ class NodeAppRuntimeSummary:
     storage_free_bytes: int | None
     storage_total_bytes: int | None
     footprint_bytes: int | None = None
+    runtime_fault: AppRuntimeFault | None = None
     transition_state: NodeAppTransitionState = NodeAppTransitionState.NONE
 
     @classmethod
@@ -651,6 +669,7 @@ class NodeAppRuntimeSummary:
         storage_free_bytes = _optional_int(payload, "storage_free_bytes")
         storage_total_bytes = _optional_int(payload, "storage_total_bytes")
         footprint_bytes = _optional_int(payload, "footprint_bytes")
+        raw_runtime_fault = payload.get("runtime_fault")
 
         if not isinstance(running, bool):
             raise ValueError("Node app runtime summary running is invalid.")
@@ -665,6 +684,8 @@ class NodeAppRuntimeSummary:
             parsed_relay_support = ChatRelaySupport(relay_support)
         except ValueError as xcp:
             raise ValueError("Node app runtime summary relay_support is invalid.") from xcp
+        if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
+            raise ValueError("Node app runtime summary runtime_fault is invalid.")
 
         return cls(
             running=running,
@@ -678,6 +699,9 @@ class NodeAppRuntimeSummary:
             storage_free_bytes=storage_free_bytes,
             storage_total_bytes=storage_total_bytes,
             footprint_bytes=footprint_bytes,
+            runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
+            if raw_runtime_fault is not None
+            else None,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -693,6 +717,7 @@ class NodeAppRuntimeSummary:
             "storage_free_bytes": self.storage_free_bytes,
             "storage_total_bytes": self.storage_total_bytes,
             "footprint_bytes": self.footprint_bytes,
+            "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
         }
 
 
@@ -1277,6 +1302,117 @@ class NodeSaveRenameRequest(BaseModel):
     new_name: str
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+
+@dataclass(frozen=True, slots=True)
+class NodeBlueprintEntry:
+    id: str
+    label: str
+    session_name: str
+    relative_path: str
+    file_type: str
+    size_bytes: int
+    size_text: str
+    modified_at: str
+    uploaded_by_display_name: str | None
+    can_delete: bool
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintEntry":
+        uploaded_by_display_name = _optional_string(payload, "uploaded_by_display_name")
+        return cls(
+            id=_required_string(payload, "id"),
+            label=_required_string(payload, "label"),
+            session_name=_required_string(payload, "session_name"),
+            relative_path=_required_string(payload, "relative_path"),
+            file_type=_required_string(payload, "file_type"),
+            size_bytes=_required_int(payload, "size_bytes"),
+            size_text=_required_string(payload, "size_text"),
+            modified_at=_required_string(payload, "modified_at"),
+            uploaded_by_display_name=uploaded_by_display_name,
+            can_delete=_required_bool(payload, "can_delete"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "session_name": self.session_name,
+            "relative_path": self.relative_path,
+            "file_type": self.file_type,
+            "size_bytes": self.size_bytes,
+            "size_text": self.size_text,
+            "modified_at": self.modified_at,
+            "uploaded_by_display_name": self.uploaded_by_display_name,
+            "can_delete": self.can_delete,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeBlueprintList:
+    app_name: str
+    app_friendly: str
+    node: str
+    blueprints: tuple[NodeBlueprintEntry, ...]
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintList":
+        app_name = _required_string(payload, "app_name")
+        app_friendly = _required_string(payload, "app_friendly")
+        node = _required_string(payload, "node")
+        raw_blueprints = payload.get("blueprints")
+        if not isinstance(raw_blueprints, Sequence) or isinstance(raw_blueprints, (str, bytes)):
+            raise ValueError("Node blueprint list blueprints are invalid.")
+        blueprints: list[NodeBlueprintEntry] = []
+        for raw_blueprint in raw_blueprints:
+            if not isinstance(raw_blueprint, Mapping):
+                raise ValueError("Node blueprint list contains an invalid blueprint entry.")
+            blueprints.append(NodeBlueprintEntry.from_mapping(raw_blueprint))
+        return cls(
+            app_name=app_name,
+            app_friendly=app_friendly,
+            node=node,
+            blueprints=tuple(blueprints),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "blueprints": [entry.to_mapping() for entry in self.blueprints],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeBlueprintMutationResult:
+    app_name: str
+    app_friendly: str
+    node: str
+    message: str
+    blueprint: NodeBlueprintEntry
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintMutationResult":
+        raw_blueprint = payload.get("blueprint")
+        if not isinstance(raw_blueprint, Mapping):
+            raise ValueError("Node blueprint mutation result blueprint is invalid.")
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            message=_required_string(payload, "message"),
+            blueprint=NodeBlueprintEntry.from_mapping(raw_blueprint),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "message": self.message,
+            "blueprint": self.blueprint.to_mapping(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -2592,6 +2728,101 @@ class NodeApiService:
             )
             return result.to_mapping()
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/blueprints")
+        async def _list_blueprints(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API blueprint list request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.BLUEPRINTS_READ,))
+            app = self._resolve_app(app_name)
+            actor_user_id: int = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.BLUEPRINTS_READ,),
+                verified_grant=grant,
+            )
+            return self.build_blueprint_list(app, actor_user_id=actor_user_id).to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/blueprints/upload")
+        async def _upload_blueprint(
+            app_name: str,
+            request: Request,
+            session_name: Annotated[str, Form()],
+            upload: Annotated[UploadFile, File()],
+            filename: Annotated[str | None, Form()] = None,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API blueprint upload request: node=%s app=%s session=%s",
+                self.node_name,
+                app_name,
+                session_name,
+            )
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.BLUEPRINTS_WRITE,))
+            app = self._resolve_app(app_name)
+            actor_user_id: int = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
+                verified_grant=grant,
+            )
+            result: NodeBlueprintMutationResult = await self.upload_blueprint_file(
+                app=app,
+                session_name=session_name,
+                upload=upload,
+                upload_name=filename,
+                actor_user_id=actor_user_id,
+            )
+            audit_log(
+                "blueprint.file_uploaded",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                blueprint_id=result.blueprint.id,
+                session_name=session_name,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.delete(f"{_NODE_API_PREFIX}/apps/{{app_name}}/blueprints/{{blueprint_id:path}}")
+        async def _delete_blueprint(
+            app_name: str,
+            blueprint_id: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API blueprint delete request: node=%s app=%s blueprint=%s",
+                self.node_name,
+                app_name,
+                blueprint_id,
+            )
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.BLUEPRINTS_WRITE,))
+            app = self._resolve_app(app_name)
+            actor_user_id: int = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
+                verified_grant=grant,
+            )
+            result = self.delete_blueprint_file(
+                app=app,
+                blueprint_id=blueprint_id,
+                actor_user_id=actor_user_id,
+            )
+            audit_log(
+                "blueprint.file_deleted",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                blueprint_id=blueprint_id,
+            )
+            return result.to_mapping()
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/settings")
         async def _list_settings(
             app_name: str,
@@ -2780,9 +3011,11 @@ class NodeApiService:
                     supports_saves=app.supports_save_files,
                     supports_save_uploads=app.supports_save_uploads,
                     supports_save_rename=app.supports_save_rename,
+                    supports_blueprints=bool(getattr(app, "supports_blueprints", False)),
                     supports_settings=app.supports_settings,
                     supports_console_actions=bool(getattr(app, "supports_console_actions", False)),
                     supports_chat=app.supports_chat_relay,
+                    runtime_fault=getattr(app, "runtime_fault", None),
                     config_read_level=app.lowest_config_file_read_level,
                     config_write_level=app.config_file_write_level,
                     save_write_level=app.save_file_write_level,
@@ -3225,6 +3458,7 @@ class NodeApiService:
             storage_free_bytes=storage_free_bytes,
             storage_total_bytes=storage_total_bytes,
             footprint_bytes=footprint_bytes,
+            runtime_fault=getattr(app, "runtime_fault", None),
         )
 
     async def build_live_app_runtime_summary(self, app: App) -> NodeAppRuntimeSummary:
@@ -4164,6 +4398,140 @@ class NodeApiService:
             node=self.node_name,
             message=f"Renamed save to `{updated.label}` for {app.friendly}.",
             save=self._save_entry(updated),
+        )
+
+    def build_blueprint_list(self, app: App, *, actor_user_id: int) -> NodeBlueprintList:
+        if not app.supports_blueprints:
+            raise _http_exception(409, f"{app.friendly} does not support blueprint files.")
+        blueprints = app.list_blueprint_files()
+        traffic_log.info(
+            "Node API built blueprint list: node=%s app=%s blueprints=%s",
+            self.node_name,
+            app.name,
+            len(blueprints),
+        )
+        return NodeBlueprintList(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            blueprints=tuple(
+                self._blueprint_entry(blueprint_file, actor_user_id=actor_user_id) for blueprint_file in blueprints
+            ),
+        )
+
+    async def upload_blueprint_file(
+        self,
+        *,
+        app: App,
+        session_name: str,
+        upload: UploadFile,
+        upload_name: str | None,
+        actor_user_id: int,
+    ) -> NodeBlueprintMutationResult:
+        if not app.supports_blueprints:
+            raise _http_exception(409, f"{app.friendly} does not support blueprint uploads.")
+        raw_upload_name = upload_name or upload.filename or ""
+        if raw_upload_name != raw_upload_name.strip():
+            raise _http_exception(400, "Blueprint filenames must not start or end with spaces.")
+        resolved_upload_name = self._validated_upload_filename(
+            raw_upload_name,
+            kind="Blueprint",
+        )
+        temp_path = await self._persist_upload_to_temp(upload)
+        try:
+            return self.upload_blueprint_path(
+                app=app,
+                session_name=session_name,
+                source_path=temp_path,
+                upload_name=resolved_upload_name,
+                actor_user_id=actor_user_id,
+            )
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    def upload_blueprint_path(
+        self,
+        *,
+        app: App,
+        session_name: str,
+        source_path: Path,
+        upload_name: str,
+        actor_user_id: int,
+    ) -> NodeBlueprintMutationResult:
+        if not app.supports_blueprints:
+            raise _http_exception(409, f"{app.friendly} does not support blueprint uploads.")
+        if upload_name != upload_name.strip():
+            raise _http_exception(400, "Blueprint filenames must not start or end with spaces.")
+        resolved_upload_name = self._validated_upload_filename(upload_name, kind="Blueprint")
+        try:
+            uploaded = app.upload_blueprint_file(
+                session_name=session_name,
+                upload_name=resolved_upload_name,
+                source_path=source_path,
+                actor_user_id=actor_user_id,
+            )
+        except FileNotFoundError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        except FileExistsError as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except Exception as xcp:
+            raise _http_exception(500, f"Blueprint upload failed: {xcp}") from xcp
+
+        traffic_log.info(
+            "Node API blueprint uploaded: node=%s app=%s blueprint=%s actor=%s",
+            self.node_name,
+            app.name,
+            uploaded.id,
+            actor_user_id,
+        )
+        return NodeBlueprintMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            message=f"Uploaded blueprint `{uploaded.label}` for {app.friendly}.",
+            blueprint=self._blueprint_entry(uploaded, actor_user_id=actor_user_id),
+        )
+
+    def delete_blueprint_file(
+        self,
+        *,
+        app: App,
+        blueprint_id: str,
+        actor_user_id: int,
+    ) -> NodeBlueprintMutationResult:
+        if not app.supports_blueprints:
+            raise _http_exception(409, f"{app.friendly} does not support blueprint deletion.")
+        actor_is_sudo: bool = self._require_acl().can(actor_user_id, Power_Level.sudo)
+        try:
+            deleted = app.delete_blueprint_file(
+                file_id=blueprint_id,
+                actor_user_id=actor_user_id,
+                actor_is_sudo=actor_is_sudo,
+            )
+        except FileNotFoundError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        except PermissionError as xcp:
+            raise _http_exception(403, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except Exception as xcp:
+            raise _http_exception(500, f"Blueprint delete failed: {xcp}") from xcp
+
+        traffic_log.info(
+            "Node API blueprint deleted: node=%s app=%s blueprint=%s actor=%s",
+            self.node_name,
+            app.name,
+            blueprint_id,
+            actor_user_id,
+        )
+        return NodeBlueprintMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            message=f"Deleted blueprint `{deleted.label}` from {app.friendly}.",
+            blueprint=self._blueprint_entry(deleted, actor_user_id=actor_user_id),
         )
 
     def build_setting_list(self, *, app: App, actor_user_id: int) -> NodeSettingList:
@@ -5138,6 +5506,30 @@ class NodeApiService:
             size_bytes=size_bytes,
             size_text=size_text,
             modified_at=save_file.modified_at.isoformat(sep=" ", timespec="seconds"),
+        )
+
+    def _blueprint_entry(self, blueprint_file: AppBlueprintEntry, *, actor_user_id: int) -> NodeBlueprintEntry:
+        uploaded_by_user_id: int | None = blueprint_file.uploaded_by_user_id
+        uploaded_by_display_name: str | None = None
+        if uploaded_by_user_id is not None:
+            uploaded_by_display_name = config.Name_Cache().cached_display_name(
+                uploaded_by_user_id,
+                f"User {uploaded_by_user_id}",
+            )
+        can_delete: bool = uploaded_by_user_id == actor_user_id
+        if not can_delete and self._acl is not None:
+            can_delete = self._acl.can(actor_user_id, Power_Level.sudo)
+        return NodeBlueprintEntry(
+            id=blueprint_file.id,
+            label=blueprint_file.label,
+            session_name=blueprint_file.session_name,
+            relative_path=blueprint_file.relative_path,
+            file_type=blueprint_file.file_type.value,
+            size_bytes=blueprint_file.size_bytes,
+            size_text=Utilities.humanise_bytes(blueprint_file.size_bytes),
+            modified_at=blueprint_file.modified_at.isoformat(sep=" ", timespec="seconds"),
+            uploaded_by_display_name=uploaded_by_display_name,
+            can_delete=can_delete,
         )
 
     @staticmethod

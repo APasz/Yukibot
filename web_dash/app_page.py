@@ -344,12 +344,18 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         elif app_stats.running:
             status_text = "Running"
             status_tone = "purple"
+        elif not app_stats.enabled:
+            status_text = "Disabled"
+            status_tone = "red"
+        elif app_stats.runtime_fault is not None:
+            status_text = "Crashed"
+            status_tone = "red"
         elif app_stats.enabled:
             status_text = "Stopped"
             status_tone = "warn"
         else:
-            status_text = "Disabled"
-            status_tone = "red"
+            status_text = "Stopped"
+            status_tone = "warn"
 
         badges: list[_ModWebBadgeSpec] = [
             _ModWebBadgeSpec(text=f"{app_stats.relay_support.display_value}", tone="grey"),
@@ -600,6 +606,31 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         return tuple[_ModWebBadgeSpec, ...](badges)
 
     @staticmethod
+    def _blueprint_section_badges(
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
+        del user
+        blueprints = model.blueprints
+        if blueprints is None:
+            return ()
+        module_count: int = sum(1 for blueprint in blueprints.blueprints if blueprint.file_type == "module")
+        config_count: int = sum(1 for blueprint in blueprints.blueprints if blueprint.file_type == "config")
+        badges: list[_ModWebBadgeSpec] = [
+            _ModWebBadgeSpec(
+                text=f"{len(blueprints.blueprints)} files",
+                tone="black" if blueprints.blueprints else "grey",
+            ),
+            _ModWebBadgeSpec(text="User upload", tone="purple"),
+        ]
+        if module_count > 0:
+            badges.append(_ModWebBadgeSpec(text=f"{module_count} modules", tone="grey"))
+        if config_count > 0:
+            badges.append(_ModWebBadgeSpec(text=f"{config_count} configs", tone="grey"))
+        return tuple(badges)
+
+    @staticmethod
     def _console_section_badges(*, model: ModWebBasePageModel) -> tuple[_ModWebBadgeSpec, ...]:
         console_actions: NodeConsoleActionList | None = model.console_actions
         if console_actions is None:
@@ -611,6 +642,16 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 tone="black" if action_count > 0 else "grey",
             ),
         )
+
+    def _blueprint_tab_badges(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        tab: ModWebAppTabDefinition,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
+        del tab
+        return self._blueprint_section_badges(model=model, user=user)
 
     @staticmethod
     def _section_badge_rows(
@@ -865,6 +906,18 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 )
             case _:
                 assert_never(tab.builtin_kind)
+
+    def _render_blueprints_section(
+        self,
+        *,
+        ui: ModWebUi,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        tab: ModWebAppTabDefinition,
+    ) -> None:
+        del tab
+        self._render_blueprints_editor(ui=ui, model=model, user=user)
+        return None
 
     def _render_mods_section(
         self,

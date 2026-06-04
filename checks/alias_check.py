@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, create_autospec, patch
 
 import hikari
@@ -20,6 +21,16 @@ class _FakeAcl:
     async def perm_check(self, user_id: int, required: Power_Level) -> bool:
         del user_id, required
         return True
+
+
+def _component_custom_ids(components: list[hikari.api.MessageActionRowBuilder]) -> tuple[str, ...]:
+    custom_ids: list[str] = []
+    for row in components:
+        for component in row.components:
+            custom_id = getattr(cast(object, component), "custom_id", None)
+            if isinstance(custom_id, str):
+                custom_ids.append(custom_id)
+    return tuple(custom_ids)
 
 
 class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
@@ -309,6 +320,33 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
         modal_id = service._minecraft_profile_modal.build_id(action, scope_id=user_id, user_id=user_id)
 
         self.assertLessEqual(len(modal_id), 100)
+
+    def test_app_scope_editor_component_custom_ids_are_unique(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = object.__new__(config.Name_Cache)
+            cache.pointer = Path(tmp) / "discord_names.json"
+            cache.by_id = {42: config.UserNames()}
+            cache.by_alias = {}
+            cache.by_platform_id = {}
+            manager = SimpleNamespace(
+                apps={
+                    "valheim_alpha": SimpleNamespace(scope="valheim"),
+                    "minecraft_alpha": SimpleNamespace(scope="minecraft"),
+                }
+            )
+            service = cmd_alias.AliasEditorService()
+
+            _embed, components = service._render_editor(
+                target_user_id=42,
+                actor_user_id=42,
+                locale=hikari.Locale.EN_US,
+                names_cache=cache,
+                manager=manager,  # type: ignore[arg-type]
+                state=cmd_alias.AliasEditorState(section=cmd_alias.AliasEditorSection.APP_SCOPES, page=0),
+            )
+
+        custom_ids = _component_custom_ids(components)
+        self.assertEqual(len(custom_ids), len(set(custom_ids)))
 
 
 if __name__ == "__main__":

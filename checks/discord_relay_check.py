@@ -13,7 +13,7 @@ import hikari
 from hikari import messages as hikari_messages
 
 import config
-from _discord import App_Bound, DC_Relay, Message, URLVariant, normalise_attachment_relay_name
+from _discord import App_Bound, DC_Bound, DC_Relay, Message, URLVariant, normalise_attachment_relay_name
 from _file import File_Utils
 from _minecraft_heads import (
     MinecraftDefaultSkin,
@@ -152,6 +152,21 @@ class DiscordRelayAttachmentNameTests(unittest.TestCase):
 
 
 class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_event_from_dc_bound_preserves_explicit_player_id(self) -> None:
+        message = DC_Bound(
+            cast(Any, SimpleNamespace(name="minecraft_alpha", scope="minecraft")),
+            DC_Bound.generics.join,
+            "Alice",
+            player_id=42,
+        )
+
+        event = DC_Relay._event_from_dc_bound(message)
+
+        self.assertEqual(event.author.display_name, "Alice")
+        self.assertEqual(event.author.id, "42")
+        self.assertEqual(event.author.discord_user_id, 42)
+        self.assertTrue(event.is_template)
+
     def test_minecraft_dev_bypass_skin_mapping_matches_expected_levels(self) -> None:
         self.assertEqual(
             minecraft_default_skin_for_dev_bypass_user(Access_Control.dev_bypass_user_id(Power_Level.root)),

@@ -58,9 +58,22 @@ class ModWebTabsMixin(ModWebServiceSupport):
         context: ModWebAppTabContext,
         is_detail_page: bool,
     ) -> tuple[ModWebAppTabDefinition, ...]:
-        """Override to register extra app tabs without touching the shared tab renderer."""
-        del context, is_detail_page
-        return ()
+        del is_detail_page
+        if not context.supports_blueprints:
+            return ()
+        return (
+            ModWebAppTabDefinition.custom(
+                tab_id="blueprints",
+                label="Blueprints",
+                page_order=450,
+                app_card_order=650,
+                app_card_tone="black",
+                show_on_app_card=False,
+                render_handler_name="_render_blueprints_section",
+                badge_handler_name="_blueprint_tab_badges",
+                app_card_badge_handler_name="_blueprint_app_card_badges",
+            ),
+        )
 
     @staticmethod
     def _page_tab_context(model: ModWebBasePageModel) -> ModWebAppTabContext:
@@ -83,11 +96,16 @@ class ModWebTabsMixin(ModWebServiceSupport):
             app_version=model.app_stats.version if model.app_stats is not None else None,
             mod_names=mod_names,
             settings=settings,
+            supports_blueprints=model.blueprints is not None,
         )
 
     @staticmethod
     def _app_link_tab_context(app: ModWebAppLink) -> ModWebAppTabContext:
-        return ModWebAppTabContext(app_name=app.name, app_friendly=app.friendly)
+        return ModWebAppTabContext(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            supports_blueprints=app.supports_blueprints,
+        )
 
     @staticmethod
     def _setting_snapshot_text(setting: NodeSettingEntry) -> str:

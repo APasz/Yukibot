@@ -14,8 +14,8 @@ import lightbulb
 
 import config
 from _discord import App_Bound, DC_Bound, DC_Relay
-from _relay_embeds import build_app_lifecycle_embed
-from apps._app import App
+from _relay_embeds import build_app_crash_embed, build_app_lifecycle_embed
+from apps._app import App, AppRuntimeFaultKind
 from apps._config import App_Config, RelayChannelSource, normalise_optional_channel_id, normalise_optional_channel_ids
 from config import Activity_Manager, Activity_Provider
 
@@ -132,8 +132,22 @@ class App_Manager(metaclass=config.Singleton):
         while True:
             if app := self.get_current:
                 if not app.check_running():
-                    self.current = None
+                    await self._handle_inactive_app(app)
             await asyncio.sleep(1)
+
+    async def _handle_inactive_app(self, app: ManagedApp) -> None:
+        started_at = app.lifecycle_started_at
+        uptime = datetime.now(timezone.utc) - started_at if started_at is not None else None
+        try:
+            await app.handle_unexpected_stop()
+        except Exception:
+            log.exception("Failed to finalise inactive app: %s", app.name)
+        runtime_fault = getattr(app, "runtime_fault", None)
+        if runtime_fault is not None and runtime_fault.kind is AppRuntimeFaultKind.CRASH:
+            self._notify_app_crash(app, summary=runtime_fault.summary, uptime=uptime)
+        app.lifecycle_started_at = None
+        if self.current == app.name:
+            self.current = None
 
     def dump_enabled(self) -> int:
         config.ENABLED_DUMP_FILE.parent.mkdir(exist_ok=True, parents=True)
@@ -241,6 +255,9 @@ class App_Manager(metaclass=config.Singleton):
             app.lifecycle_started_at = datetime.now(timezone.utc)
             self._notify_app_lifecycle(app, started=True)
         except Exception:
+            runtime_fault = getattr(app, "runtime_fault", None)
+            if not app.check_running() or runtime_fault is not None:
+                await self._handle_inactive_app(app)
             if self.current == name:
                 self.current = None
             raise
@@ -349,11 +366,23 @@ class App_Manager(metaclass=config.Singleton):
         started: bool,
         uptime: timedelta | None = None,
     ) -> None:
-        if app.chat_channel is None:
+        if app.chat_channel is None and not app.supports_chat_relay:
             return
         relay_embed = build_app_lifecycle_embed(app, started=started, uptime=uptime)
         content = "Started" if started else "Stopped"
         DC_Relay.add(DC_Bound(app, content, "System", relay_embed=relay_embed))
+
+    def _notify_app_crash(
+        self,
+        app: ManagedApp,
+        *,
+        summary: str | None,
+        uptime: timedelta | None = None,
+    ) -> None:
+        if app.chat_channel is None and not app.supports_chat_relay:
+            return
+        relay_embed = build_app_crash_embed(app, summary=summary, uptime=uptime)
+        DC_Relay.add(DC_Bound(app, "Crashed", "System", relay_embed=relay_embed))
 
     async def notify_running_app_relays(self, content: str, *, player: str = "System") -> int:
         if self.bot is None:

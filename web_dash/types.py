@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .runtime_imports import (
+    AppRuntimeFault,
     Awaitable,
     Button,
     Callable,
@@ -12,6 +13,7 @@ from .runtime_imports import (
     NodeAppMutationAction,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    NodeBlueprintList,
     NodeChatRoomSnapshot,
     NodeConfigList,
     NodeConsoleActionList,
@@ -84,6 +86,7 @@ class _ModWebAppRuntimeState:
     transition_state: NodeAppTransitionState
     player_count: int | None
     player_capacity: int | None
+    runtime_fault: AppRuntimeFault | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,8 +248,10 @@ class ModWebAppLink:
     transition_state: NodeAppTransitionState = NodeAppTransitionState.NONE
     player_count: int | None = None
     player_capacity: int | None = None
+    runtime_fault: AppRuntimeFault | None = None
     saves_api_url: str | None = None
     settings_api_url: str | None = None
+    supports_blueprints: bool = field(default=False, kw_only=True)
     supports_console_actions: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
@@ -298,6 +303,7 @@ class ModWebBasePageModel:
     app_start_blocked: bool
     settings: NodeSettingList | None
     console_actions: NodeConsoleActionList | None = field(default=None, kw_only=True)
+    blueprints: NodeBlueprintList | None = field(default=None, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
     tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
@@ -383,6 +389,7 @@ class ModWebAppTabContext:
     app_version: str | None = None
     mod_names: tuple[str, ...] = ()
     settings: tuple[ModWebAppTabSettingSnapshot, ...] = ()
+    supports_blueprints: bool = False
 
     def has_mod(self, mod_name: str) -> bool:
         target_name: str = mod_name.strip().casefold()
@@ -484,6 +491,7 @@ class ModWebAppTabDefinition:
     builtin_kind: ModWebAppSectionKind | None = None
     render_handler_name: str | None = None
     badge_handler_name: str | None = None
+    app_card_badge_handler_name: str | None = None
     action_handler_name: str | None = None
 
     def __post_init__(self) -> None:
@@ -501,6 +509,8 @@ class ModWebAppTabDefinition:
             raise ValueError("App tab definitions require a non-empty render handler name.")
         if self.badge_handler_name is not None and not self.badge_handler_name.strip():
             raise ValueError("App tab badge handler names must be non-empty when provided.")
+        if self.app_card_badge_handler_name is not None and not self.app_card_badge_handler_name.strip():
+            raise ValueError("App tab app-card badge handler names must be non-empty when provided.")
         if self.action_handler_name is not None and not self.action_handler_name.strip():
             raise ValueError("App tab action handler names must be non-empty when provided.")
         object.__setattr__(self, "tab_id", tab_id)
@@ -509,6 +519,8 @@ class ModWebAppTabDefinition:
             object.__setattr__(self, "render_handler_name", self.render_handler_name.strip())
         if self.badge_handler_name is not None:
             object.__setattr__(self, "badge_handler_name", self.badge_handler_name.strip())
+        if self.app_card_badge_handler_name is not None:
+            object.__setattr__(self, "app_card_badge_handler_name", self.app_card_badge_handler_name.strip())
         if self.action_handler_name is not None:
             object.__setattr__(self, "action_handler_name", self.action_handler_name.strip())
 
@@ -547,6 +559,7 @@ class ModWebAppTabDefinition:
         visibility_rule: ModWebAppTabVisibilityRule | None = None,
         show_on_app_card: bool = True,
         badge_handler_name: str | None = None,
+        app_card_badge_handler_name: str | None = None,
         action_handler_name: str | None = None,
     ) -> "ModWebAppTabDefinition":
         return cls(
@@ -559,6 +572,7 @@ class ModWebAppTabDefinition:
             show_on_app_card=show_on_app_card,
             render_handler_name=render_handler_name,
             badge_handler_name=badge_handler_name,
+            app_card_badge_handler_name=app_card_badge_handler_name,
             action_handler_name=action_handler_name,
         )
 
