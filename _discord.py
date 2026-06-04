@@ -462,6 +462,13 @@ class FileDeliveryMode(Enum):
     DIRECT = "direct"
 
 
+class RelayWorkerStatus(Enum):
+    STOPPED = "stopped"
+    RUNNING = "running"
+    RESTARTING = "restarting"
+    FAILED = "failed"
+
+
 class RelayMessageReferenceKind(Enum):
     NONE = "none"
     REPLY = "reply"
@@ -500,6 +507,20 @@ class Fileish:
     uri: str
     name: str
     source_url: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class DiscordAttachmentDownloadBatch:
+    files: tuple[Fileish, ...]
+    failed_count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.failed_count < 0:
+            raise ValueError("failed_count must not be negative.")
+
+    @property
+    def has_failures(self) -> bool:
+        return self.failed_count > 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -1265,6 +1286,7 @@ class DC_Relay(metaclass=Singleton):
     _RELAY_OWNER_BOT_CACHE_SECONDS: float = 5 * 60
     _MAX_ACTIVE_CHAT_TEXT_CHANNELS: int = 2
     _MAX_TRACKED_DISCORD_CHAT_MESSAGES: int = 5_000
+    _QUEUE_WORKER_RESTART_DELAY_SECONDS: float = 1.0
     "channel: Apps"
     names = Name_Cache()
 
@@ -1275,6 +1297,9 @@ class DC_Relay(metaclass=Singleton):
         self._voice_tts: RelayTTSService | None = None
         self._relay_loop: asyncio.AbstractEventLoop | None = None
         self._read_task: asyncio.Task[None] | None = None
+        self._queue_worker_restart_task: asyncio.Task[None] | None = None
+        self._queue_worker_should_run: bool = False
+        self._queue_worker_status: RelayWorkerStatus = RelayWorkerStatus.STOPPED
         self._author_color_cache: dict[tuple[int, int], tuple[str | None, float]] = {}
         self._channel_resolution_miss_at: dict[hikari.Snowflake, float] = {}
         self._relay_owner_bot_ids_cache: tuple[float, frozenset[int]] | None = None
@@ -1287,10 +1312,120 @@ class DC_Relay(metaclass=Singleton):
 
     async def setup(self):
         self.set_event_loop()
-        self._read_task = asyncio.create_task(self._queue_task())
+        self._queue_worker_should_run = True
+        self._start_queue_worker()
+
+    async def close(self) -> None:
+        self._queue_worker_should_run = False
+
+        restart_task = getattr(self, "_queue_worker_restart_task", None)
+        if restart_task is not None and not restart_task.done():
+            restart_task.cancel()
+            try:
+                await restart_task
+            except asyncio.CancelledError:
+                pass
+        self._queue_worker_restart_task = None
+
+        read_task = getattr(self, "_read_task", None)
+        if read_task is not None and not read_task.done():
+            read_task.cancel()
+            try:
+                await read_task
+            except asyncio.CancelledError:
+                pass
+        self._read_task = None
+        self._queue_worker_status = RelayWorkerStatus.STOPPED
 
     def set_voice_tts_service(self, voice_tts: RelayTTSService | None) -> None:
         self._voice_tts = voice_tts
+
+    def _start_queue_worker(self) -> None:
+        existing_task = getattr(self, "_read_task", None)
+        if existing_task is not None and not existing_task.done():
+            self._queue_worker_status = RelayWorkerStatus.RUNNING
+            return
+
+        loop = self._relay_loop
+        if loop is None:
+            loop = asyncio.get_running_loop()
+            self._relay_loop = loop
+        if loop.is_closed():
+            raise RuntimeError("Discord relay worker event loop is closed.")
+
+        task = loop.create_task(self._queue_task(), name="discord-relay-queue")
+        self._read_task = task
+        self._queue_worker_status = RelayWorkerStatus.RUNNING
+        task.add_done_callback(self._handle_queue_worker_done)
+
+    async def _restart_queue_worker_after_delay(self) -> None:
+        try:
+            await asyncio.sleep(self._QUEUE_WORKER_RESTART_DELAY_SECONDS)
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._queue_worker_restart_task = None
+
+        if not self._queue_worker_should_run:
+            self._queue_worker_status = RelayWorkerStatus.STOPPED
+            return
+
+        try:
+            self._start_queue_worker()
+        except Exception:
+            self._queue_worker_status = RelayWorkerStatus.FAILED
+            log.exception("Discord relay worker restart failed.")
+
+    def _schedule_queue_worker_restart(self) -> None:
+        if not self._queue_worker_should_run:
+            self._queue_worker_status = RelayWorkerStatus.STOPPED
+            return
+
+        restart_task = getattr(self, "_queue_worker_restart_task", None)
+        if restart_task is not None and not restart_task.done():
+            return
+
+        loop = self._relay_loop
+        if loop is None or loop.is_closed():
+            self._queue_worker_status = RelayWorkerStatus.FAILED
+            log.error("Discord relay worker restart skipped because the event loop is unavailable.")
+            return
+
+        self._queue_worker_status = RelayWorkerStatus.RESTARTING
+        self._queue_worker_restart_task = loop.create_task(
+            self._restart_queue_worker_after_delay(),
+            name="discord-relay-queue-restart",
+        )
+
+    def _handle_queue_worker_done(self, task: asyncio.Task[None]) -> None:
+        if task is not getattr(self, "_read_task", None):
+            return
+
+        self._read_task = None
+
+        if task.cancelled():
+            if self._queue_worker_should_run:
+                log.warning("Discord relay worker was cancelled unexpectedly; scheduling restart.")
+                self._schedule_queue_worker_restart()
+            else:
+                self._queue_worker_status = RelayWorkerStatus.STOPPED
+            return
+
+        exception = task.exception()
+        if exception is None:
+            if self._queue_worker_should_run:
+                log.error("Discord relay worker exited unexpectedly without an exception; scheduling restart.")
+                self._schedule_queue_worker_restart()
+            else:
+                self._queue_worker_status = RelayWorkerStatus.STOPPED
+            return
+
+        self._queue_worker_status = RelayWorkerStatus.FAILED
+        log.exception(
+            "Discord relay worker stopped unexpectedly.",
+            exc_info=(type(exception), exception, exception.__traceback__),
+        )
+        self._schedule_queue_worker_restart()
 
     @classmethod
     def add(cls, x: DC_Bound, /):
@@ -1698,7 +1833,17 @@ class DC_Relay(metaclass=Singleton):
             if not config.SILENT_DEBUG:
                 log.debug(f"DC.Queue: {self.queue}")
             mess = self.queue.popleft()
-            await self._send_dc(mess)
+            try:
+                await self._send_dc(mess)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "App -> Discord relay worker dropped message: app=%s player=%r content=%r",
+                    getattr(getattr(mess, "app", None), "name", None),
+                    getattr(mess, "player", None),
+                    getattr(mess, "content", None),
+                )
 
     @classmethod
     def playerplate(cls, mess: DC_Bound) -> str:
@@ -2585,6 +2730,25 @@ class DC_Relay(metaclass=Singleton):
             return
         log.debug("Chat -> App sent: app=%s event=%s", app_name, event.id)
 
+    async def _run_isolated_delivery(
+        self,
+        delivery: Awaitable[None],
+        *,
+        event: ChatEvent,
+        target: ChatEndpointId,
+    ) -> None:
+        try:
+            await delivery
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception(
+                "Chat bridge delivery failed: room=%s event=%s target=%s",
+                event.room_id,
+                event.id,
+                target.stable_key,
+            )
+
     async def _deliver_chat_event(
         self,
         event: ChatEvent,
@@ -2624,42 +2788,95 @@ class DC_Relay(metaclass=Singleton):
                 if channel_id in active_text_channel_ids:
                     source_app = getattr(source_message, "app", None)
                     if source_app is None:
-                        deliveries.append(self._send_chat_event_to_discord(event, channel_id))
+                        deliveries.append(
+                            self._run_isolated_delivery(
+                                self._send_chat_event_to_discord(event, channel_id),
+                                event=event,
+                                target=target.id,
+                            )
+                        )
                     else:
                         deliveries.append(
-                            self._send_chat_event_to_discord(
-                                event,
-                                channel_id,
-                                source_app=source_app,
+                            self._run_isolated_delivery(
+                                self._send_chat_event_to_discord(
+                                    event,
+                                    channel_id,
+                                    source_app=source_app,
+                                ),
+                                event=event,
+                                target=target.id,
                             )
                         )
             elif target.id.kind is ChatEndpointKind.DISCORD_TTS:
                 deliveries.append(
-                    self._send_chat_event_to_discord_tts(
-                        event,
-                        self._discord_tts_route_for_endpoint(target.id),
-                        source_message=source_message,
+                    self._run_isolated_delivery(
+                        self._send_chat_event_to_discord_tts(
+                            event,
+                            self._discord_tts_route_for_endpoint(target.id),
+                            source_message=source_message,
+                        ),
+                        event=event,
+                        target=target.id,
                     )
                 )
             elif target.id.kind is ChatEndpointKind.APP:
                 app = self._chat_apps.get(target.id.value)
                 if app is not None:
-                    deliveries.append(self._send_chat_event_to_app(event, app))
+                    deliveries.append(
+                        self._run_isolated_delivery(
+                            self._send_chat_event_to_app(event, app),
+                            event=event,
+                            target=target.id,
+                        )
+                    )
         if deliveries:
             await asyncio.gather(*deliveries)
 
     def _record_chat_event(self, event: ChatEvent) -> None:
         self._chat_hub(self).publish(event)
 
+    def _attachment_download_failure_notice(self, failed_count: int) -> str:
+        if failed_count <= 0:
+            raise ValueError("failed_count must be positive.")
+        if failed_count == 1:
+            return "[1 attachment failed to download]"
+        return f"[{failed_count} attachments failed to download]"
+
+    def _apply_attachment_download_failure_notice(self, message: App_Bound, failed_count: int) -> None:
+        if failed_count <= 0:
+            return
+        notice = self._attachment_download_failure_notice(failed_count)
+        base_content = message._string.strip()
+        message._string = f"{base_content} {notice}".strip() if base_content else notice
+
     @staticmethod
     async def _download_discord_message_attachments(
         attachments: Sequence[hikari.Attachment],
-    ) -> list[Fileish]:
-        downloaded_paths = await asyncio.gather(*(File_Utils.download_temp(attachment) for attachment in attachments))
-        return [
-            Fileish(str(path), normalise_attachment_relay_name(attachment), source_url=attachment.url)
-            for attachment, path in zip(attachments, downloaded_paths, strict=True)
-        ]
+    ) -> DiscordAttachmentDownloadBatch:
+        download_results = await asyncio.gather(
+            *(File_Utils.download_temp(attachment) for attachment in attachments),
+            return_exceptions=True,
+        )
+
+        downloaded_files: list[Fileish] = []
+        failed_count = 0
+        for attachment, result in zip(attachments, download_results, strict=True):
+            if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                failed_count += 1
+                log.warning(
+                    "Discord attachment download failed: filename=%s url=%s error=%s",
+                    getattr(attachment, "filename", "<unknown>"),
+                    getattr(attachment, "url", None),
+                    result,
+                )
+                continue
+            downloaded_files.append(
+                Fileish(str(result), normalise_attachment_relay_name(attachment), source_url=attachment.url)
+            )
+
+        return DiscordAttachmentDownloadBatch(files=tuple(downloaded_files), failed_count=failed_count)
 
     async def _send_dc(self, message: DC_Bound | Message):
         if not isinstance(message, DC_Bound):
@@ -2768,7 +2985,7 @@ class DC_Relay(metaclass=Singleton):
 
         shushPylance = hikari.TextableChannel(app=self.bot, id=hikari.Snowflake(0), name="UNKNOWN", type=1)
         remote_files = [_discord_attachment_fileish(attachment) for attachment in ctx.message.attachments]
-        downloaded_files: list[Fileish] | None = None
+        downloaded_attachments: DiscordAttachmentDownloadBatch | None = None
 
         message = App_Bound(
             chan or shushPylance,
@@ -2815,10 +3032,11 @@ class DC_Relay(metaclass=Singleton):
                     app.name,
                     int(ctx.channel_id),
                 )
-                if remote_files and downloaded_files is None:
-                    downloaded_files = await self._download_discord_message_attachments(ctx.message.attachments)
-                if downloaded_files is not None:
-                    message.files = set(downloaded_files)
+                if remote_files and downloaded_attachments is None:
+                    downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
+                    self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)
+                if downloaded_attachments is not None:
+                    message.files = set(downloaded_attachments.files)
                 event = self._event_from_app_bound(message, app, author_color_hex=author_color_hex)
                 self._record_chat_event(event)
                 await self._send_chat_event_to_app(event, app)
@@ -2828,10 +3046,11 @@ class DC_Relay(metaclass=Singleton):
                 event = self._event_from_app_bound(message, app, author_color_hex=author_color_hex)
                 self._record_chat_event(event)
                 continue
-            if remote_files and downloaded_files is None:
-                downloaded_files = await self._download_discord_message_attachments(ctx.message.attachments)
-            if downloaded_files is not None:
-                message.files = set(downloaded_files)
+            if remote_files and downloaded_attachments is None:
+                downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
+                self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)
+            if downloaded_attachments is not None:
+                message.files = set(downloaded_attachments.files)
             else:
                 message.files = set(remote_files)
             event = self._event_from_app_bound(message, app, author_color_hex=author_color_hex)
@@ -2840,10 +3059,11 @@ class DC_Relay(metaclass=Singleton):
             message.files = set(remote_files)
         for app_name, send_func in self._special_channels.get(ctx.channel_id, ()):
             log.debug(f"{app_name} | {send_func} | {bool(send_func)}")
-            if remote_files and downloaded_files is None:
-                downloaded_files = await self._download_discord_message_attachments(ctx.message.attachments)
-            if downloaded_files is not None:
-                message.files = set(downloaded_files)
+            if remote_files and downloaded_attachments is None:
+                downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
+                self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)
+            if downloaded_attachments is not None:
+                message.files = set(downloaded_attachments.files)
             await send_func(message)
 
 

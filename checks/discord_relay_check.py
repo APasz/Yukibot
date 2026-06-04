@@ -13,7 +13,15 @@ import hikari
 from hikari import messages as hikari_messages
 
 import config
-from _discord import App_Bound, DC_Bound, DC_Relay, Message, URLVariant, normalise_attachment_relay_name
+from _discord import (
+    App_Bound,
+    DC_Bound,
+    DC_Relay,
+    Message,
+    RelayWorkerStatus,
+    URLVariant,
+    normalise_attachment_relay_name,
+)
 from _file import File_Utils
 from _minecraft_heads import (
     MinecraftDefaultSkin,
@@ -647,6 +655,46 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(delivery_order, ["app", "discord"])
 
+    async def test_deliver_chat_event_keeps_other_targets_running_when_one_target_fails(self) -> None:
+        relay = object.__new__(DC_Relay)
+        discord_endpoint = ChatEndpoint(ChatEndpointId.discord_channel("111"), "Discord 111")
+        app_endpoint = ChatEndpoint(ChatEndpointId.app("minecraft_alpha"), "Minecraft Alpha")
+        relay.chat_hub = cast(Any, SimpleNamespace(publish=Mock(return_value=(discord_endpoint, app_endpoint))))
+        cast(Any, relay)._chat_apps = {
+            "minecraft_alpha": SimpleNamespace(name="minecraft_alpha", _running=True, am_receiver=AsyncMock()),
+        }
+        cast(Any, relay)._active_discord_text_routes = AsyncMock(
+            return_value=(SimpleNamespace(channel_id=hikari.Snowflake(111), guild_id=hikari.Snowflake(10)),)
+        )
+        delivered_targets: list[str] = []
+
+        async def send_discord(event: ChatEvent, channel_id: hikari.Snowflakeish) -> None:
+            del event, channel_id
+            raise RuntimeError("discord send failed")
+
+        async def send_app(event: ChatEvent, app: object) -> None:
+            del event, app
+            delivered_targets.append("app")
+
+        cast(Any, relay)._send_chat_event_to_discord = send_discord
+        cast(Any, relay)._send_chat_event_to_app = send_app
+        cast(Any, relay)._send_chat_event_to_discord_tts = AsyncMock()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.web_session("session-1"),
+            author=ChatAuthor(ChatAuthorKind.WEB_USER, "Tester"),
+            content="hello",
+        )
+
+        with patch("_discord.log.exception") as exception_mock:
+            await relay._deliver_chat_event(event)
+
+        self.assertEqual(delivered_targets, ["app"])
+        self.assertEqual(exception_mock.call_args.args[0], "Chat bridge delivery failed: room=%s event=%s target=%s")
+        self.assertEqual(exception_mock.call_args.args[1], "minecraft_alpha")
+        self.assertEqual(exception_mock.call_args.args[2], event.id)
+        self.assertEqual(exception_mock.call_args.args[3], "discord_channel:111")
+
     async def test_discord_text_mentions_author_when_user_is_in_target_guild(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay).names = _NamesStub()
@@ -831,10 +879,10 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         embeds = DC_Relay._embedify_event(event)
 
         self.assertEqual(len(embeds), 1)
-        self.assertEqual(embeds[0].title, "minecraft_alpha")
-        self.assertEqual(embeds[0].description, "Relay Alex: Forwarded")
+        self.assertEqual(embeds[0].title, "Relay")
+        self.assertEqual(embeds[0].description, "Forwarded")
 
-    def test_embedify_event_uses_app_title_and_compact_description_for_explicit_embed(self) -> None:
+    def test_embedify_event_preserves_explicit_embed_title_and_description(self) -> None:
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
@@ -849,8 +897,8 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(embeds), 1)
-        self.assertEqual(embeds[0].title, "Minecraft Alpha")
-        self.assertEqual(embeds[0].description, "Advancement Alex: Stone Age")
+        self.assertEqual(embeds[0].title, "Advancement")
+        self.assertEqual(embeds[0].description, "Stone Age")
         self.assertEqual(embeds[0].color, 0x336699)
 
     async def test_discord_text_and_embeds_synthesise_join_embed_for_generic_events(self) -> None:
@@ -1214,6 +1262,72 @@ class DiscordRelaySeenMessageTests(unittest.TestCase):
         self.assertTrue(args[3])
         self.assertEqual(args[4], "minecraft_alpha")
         self.assertEqual(args[5], "minecraft_alpha,minecraft_beta,minecraft_gamma")
+
+
+class DiscordRelayQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queue_task_continues_after_send_dc_failure(self) -> None:
+        relay = object.__new__(DC_Relay)
+        first_message = cast(
+            Any,
+            SimpleNamespace(app=SimpleNamespace(name="minecraft_alpha"), player="Alex", content="bad"),
+        )
+        second_message = cast(
+            Any,
+            SimpleNamespace(app=SimpleNamespace(name="minecraft_alpha"), player="Erin", content="good"),
+        )
+        relay.queue = deque((first_message, second_message))
+        cast(Any, relay)._send_dc = AsyncMock(side_effect=(RuntimeError("boom"), None))
+
+        with (
+            self.assertRaises(asyncio.CancelledError),
+            patch("_discord.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError)),
+            patch("_discord.log.exception") as exception_mock,
+        ):
+            await relay._queue_task()
+
+        self.assertEqual(cast(Any, relay)._send_dc.await_count, 2)
+        exception_mock.assert_called_once_with(
+            "App -> Discord relay worker dropped message: app=%s player=%r content=%r",
+            "minecraft_alpha",
+            "Alex",
+            "bad",
+        )
+
+    async def test_queue_worker_done_schedules_restart_after_unexpected_exception(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay._queue_worker_should_run = True
+        relay._queue_worker_status = RelayWorkerStatus.RUNNING
+        cast(Any, relay)._schedule_queue_worker_restart = Mock()
+
+        async def boom() -> None:
+            raise RuntimeError("boom")
+
+        task = asyncio.create_task(boom())
+        with self.assertRaises(RuntimeError):
+            await task
+        relay._read_task = task
+
+        with patch("_discord.log.exception") as exception_mock:
+            relay._handle_queue_worker_done(task)
+
+        self.assertIsNone(relay._read_task)
+        self.assertEqual(relay._queue_worker_status, RelayWorkerStatus.FAILED)
+        cast(Any, relay)._schedule_queue_worker_restart.assert_called_once_with()
+        exception_mock.assert_called_once()
+
+    async def test_close_stops_worker_without_scheduling_restart(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay._queue_worker_should_run = True
+        relay._queue_worker_status = RelayWorkerStatus.RUNNING
+        relay._queue_worker_restart_task = asyncio.create_task(asyncio.sleep(60))
+        relay._read_task = asyncio.create_task(asyncio.sleep(60))
+
+        await relay.close()
+
+        self.assertFalse(relay._queue_worker_should_run)
+        self.assertIsNone(relay._queue_worker_restart_task)
+        self.assertIsNone(relay._read_task)
+        self.assertEqual(relay._queue_worker_status, RelayWorkerStatus.STOPPED)
 
 
 class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
@@ -1580,6 +1694,85 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         sent_event, sent_app = cast(Any, relay)._send_chat_event_to_app.await_args.args
         self.assertEqual(sent_event.attachments[0].uri, "/tmp/cat.png")
         self.assertIs(sent_app, first_app)
+
+    async def test_on_dc_message_keeps_partial_attachment_downloads_and_appends_failure_notice(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay.bot = cast(Any, object())
+        relay._channel_objects = {}
+        relay.seen_messages_id = set()
+        relay.seen_messages_order = deque()
+        setattr(cast(Any, relay), "names", _NamesStub())
+        cast(Any, relay)._chat_author_color = AsyncMock(return_value=None)
+        cast(Any, relay)._owns_shared_relay_channel = Mock(return_value=False)
+        cast(Any, relay)._is_active_app_chat_channel = AsyncMock(return_value=True)
+        cast(Any, relay)._deliver_chat_event = AsyncMock()
+        cast(Any, relay)._record_chat_event = Mock()
+        cast(Any, relay)._send_chat_event_to_app = AsyncMock()
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
+        cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
+        channel_id = hikari.Snowflake(101)
+        app = Mock()
+        app.name = "minecraft_alpha"
+        app.chat_channel_source = SimpleNamespace(value="default")
+        DC_Relay._chat_channels = {channel_id: {cast(Any, app)}}
+        first_attachment = cast(
+            hikari.Attachment,
+            cast(
+                object,
+                SimpleNamespace(
+                    filename="cat.png",
+                    title="cat",
+                    media_type="image/png",
+                    url="https://cdn.example.invalid/cat.png",
+                ),
+            ),
+        )
+        second_attachment = cast(
+            hikari.Attachment,
+            cast(
+                object,
+                SimpleNamespace(
+                    filename="dog.png",
+                    title="dog",
+                    media_type="image/png",
+                    url="https://cdn.example.invalid/dog.png",
+                ),
+            ),
+        )
+
+        ctx = SimpleNamespace(
+            is_human=True,
+            author=SimpleNamespace(is_bot=False),
+            channel_id=channel_id,
+            content="hello",
+            message_id=hikari.Snowflake(99),
+            guild_id=hikari.Snowflake(1),
+            author_id=hikari.Snowflake(456),
+            message=SimpleNamespace(
+                author=SimpleNamespace(is_bot=False),
+                type=hikari.MessageType.DEFAULT,
+                attachments=(first_attachment, second_attachment),
+                get_member_mentions=Mock(return_value=hikari.UNDEFINED),
+                user_mentions=hikari.UNDEFINED,
+                message_reference=None,
+            ),
+        )
+
+        try:
+            with patch.object(
+                File_Utils,
+                "download_temp",
+                new=AsyncMock(side_effect=(Path("/tmp/cat.png"), RuntimeError("boom"))),
+            ):
+                await relay.on_dc_message(cast(Any, ctx))
+        finally:
+            DC_Relay._chat_channels.clear()
+
+        sent_event, sent_app = cast(Any, relay)._send_chat_event_to_app.await_args.args
+        self.assertEqual(sent_event.content, "hello [1 attachment failed to download]")
+        self.assertEqual(len(sent_event.attachments), 1)
+        self.assertEqual(sent_event.attachments[0].uri, "/tmp/cat.png")
+        self.assertIs(sent_app, app)
 
     async def test_on_dc_message_records_history_for_all_applicable_web_chat_rooms(self) -> None:
         relay = object.__new__(DC_Relay)

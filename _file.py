@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shutil
+import tempfile
 import zipfile
 from collections.abc import AsyncIterator, Collection
 from pathlib import Path
@@ -325,12 +326,24 @@ class File_Utils:
 
     @staticmethod
     async def download_temp(attachment: hikari.Attachment) -> Path:
-        path = config.DIR_TMP / attachment.filename
-        async with aiofiles.open(path, "wb") as f:
-            async with attachment.stream() as stream:
-                byte_stream = cast(AsyncIterator[bytes], cast(object, stream))
-                async for chunk_bytes in byte_stream:
-                    await f.write(chunk_bytes)
+        suffix = Path(getattr(attachment, "filename", "")).suffix
+        with tempfile.NamedTemporaryFile(
+            prefix="yukibot-discord-attachment-",
+            suffix=suffix,
+            dir=config.DIR_TMP,
+            delete=False,
+        ) as handle:
+            path = Path(handle.name)
+
+        try:
+            async with aiofiles.open(path, "wb") as f:
+                async with attachment.stream() as stream:
+                    byte_stream = cast(AsyncIterator[bytes], cast(object, stream))
+                    async for chunk_bytes in byte_stream:
+                        await f.write(chunk_bytes)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
         return path
 
     @staticmethod

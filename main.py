@@ -576,6 +576,8 @@ def main():
         await remote_node.stop()
         await authority_server.stop()
         await app_manager.end()
+        if profile.has_service(config.BotService.GAME_RELAY):
+            await dc_relay.close()
         is_silent_restart = config.IS_RESTARTING and Path("silent_restart").exists()
         if not config.STARTED_CHANNEL or is_silent_restart:
             return
