@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
-from urllib.parse import parse_qs, quote, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit
 
 import hikari
 from pydantic import field_validator
@@ -32,7 +32,7 @@ from _discord import (
     render_plain_reference_prefix,
 )
 from _file import File_Utils
-from _relay_embeds import build_app_relay_embed
+from _minecraft_heads import minecraft_avatar_uri
 from _security import Power_Level
 from apps._app import AM_Receiver, App, AppRuntimeFaultKind, RelayAdvancementTerms
 from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType, normalise_app_version
@@ -60,6 +60,17 @@ from apps._settings import (
 )
 from apps._tailer import Tailer
 from config import Activity_Manager
+from relay_notices import (
+    GameDeathKind,
+    GameDeathNotice,
+    GameProgressKind,
+    GameProgressNotice,
+    PlayerSessionAction,
+    PlayerSessionNotice,
+    RelayNoticeSource,
+    notice_embed_spec,
+    render_notice_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -166,7 +177,6 @@ PLAYER_LIST_COUNT_RE = re.compile(
 )
 PLAYER_LIST_FALLBACK_RE = re.compile(r"(?P<online>\d+)\D+(?P<max>\d+)")
 _PLAYER_NAME_RE = re.compile(_PLAYER_NAME_PATTERN)
-_MC_HEADS_AVATAR_URL_TEMPLATE = "https://mc-heads.net/avatar/{identifier}/32"
 DEFAULT_MINECRAFT_RCON_PORT = 25575
 GAMEMODE_CHOICES = ChoiceSpec(
     ChoiceOption("survival"),
@@ -688,7 +698,7 @@ def _supports_chatimage_extension(extension: str | None) -> bool:
 
 
 def _mc_heads_avatar_uri(identifier: str) -> str:
-    return _MC_HEADS_AVATAR_URL_TEMPLATE.format(identifier=quote(identifier, safe=""))
+    return minecraft_avatar_uri(identifier)
 
 
 def _build_chatimage_code(url: str, *, name: str | None = None) -> str:
@@ -782,6 +792,19 @@ def _validate_advancement_kind(kind: str) -> None:
         "has just earned the achievement",
     }:
         return
+    raise ValueError(f"unsupported advancement kind {kind!r}")
+
+
+def _minecraft_progress_kind(kind: str) -> GameProgressKind:
+    normalised = kind.casefold().strip()
+    if normalised == "has made the advancement":
+        return GameProgressKind.ADVANCEMENT
+    if normalised == "has reached the goal":
+        return GameProgressKind.GOAL
+    if normalised == "has completed the challenge":
+        return GameProgressKind.CHALLENGE
+    if normalised == "has just earned the achievement":
+        return GameProgressKind.ACHIEVEMENT
     raise ValueError(f"unsupported advancement kind {kind!r}")
 
 
@@ -1715,6 +1738,9 @@ class Minecraft(App[Minecraft_Config]):
     async def player_count(self):
         return await self._players.count()
 
+    def connected_player_names(self) -> tuple[str, ...]:
+        return self._players.connected_player_names()
+
 
 class Receiver(AM_Receiver):
     def __init__(self, app: Minecraft) -> None:
@@ -1807,21 +1833,34 @@ class Matchers:
             return
         if match := ADVANCEMENT_RE.match(line):
             player = match.group("player")
-            _validate_advancement_kind(match.group("kind"))
+            raw_kind = match.group("kind")
+            _validate_advancement_kind(raw_kind)
             advancement_type = self.app.relay_advancement_term
             advancement_title = match.group("title").strip()
-            relay_embed: RelayEmbedPayload = build_app_relay_embed(
-                self.app,
-                title=advancement_type,
-                description=advancement_title,
+            app_friendly = getattr(self.app, "friendly", self.app.name)
+            notice = GameProgressNotice(
+                progress_kind=_minecraft_progress_kind(raw_kind),
+                label=advancement_type,
+                title=advancement_title,
+                source=RelayNoticeSource.APP_LOG,
             )
-            content = f"{advancement_type}: {advancement_title}"
+            embed_spec = notice_embed_spec(notice, app_name=app_friendly, author_name=player)
+            relay_embed = (
+                None
+                if embed_spec is None
+                else RelayEmbedPayload(
+                    title=embed_spec.title,
+                    description=embed_spec.description,
+                    color=self.app.manage_embed_color,
+                )
+            )
             DC_Relay.add(
                 DC_Bound(
                     self.app,
-                    content,
+                    f"{advancement_type}: {advancement_title}",
                     player,
                     relay_embed=relay_embed,
+                    notice=notice,
                     player_avatar_uri=self._player_avatar_uri(player),
                 )
             )
@@ -1830,11 +1869,17 @@ class Matchers:
         if match := DEATH_RE.match(line):
             player, content = match.groups()
             content = _resolve_minecraft_death_mentions(content, app=self.app)
+            notice = GameDeathNotice(
+                death_kind=GameDeathKind.UNKNOWN,
+                detail_text=content,
+                source=RelayNoticeSource.APP_LOG,
+            )
             DC_Relay.add(
                 DC_Bound(
                     self.app,
                     content,
                     player,
+                    notice=notice,
                     player_avatar_uri=self._player_avatar_uri(player),
                 )
             )
@@ -1849,12 +1894,12 @@ class Matchers:
     async def match_join(self, line: str):
         if match := JOIN_RE.match(line):
             player = match.group(1)
-            self.app._players.note_join(player)
+            self.app._players.note_join(player, source=RelayNoticeSource.APP_LOG)
 
     async def match_left(self, line: str):
         if match := LEAVE_RE.match(line):
             player = match.group(1)
-            self.app._players.note_leave(player)
+            self.app._players.note_leave(player, source=RelayNoticeSource.APP_LOG)
 
     async def match_ready(self, line: str):
         if READY_RE.search(line):
@@ -2007,31 +2052,37 @@ class Players:
         for player in sorted(joins):
             self.note_join(player)
 
-    def note_join(self, player: str) -> None:
+    def note_join(self, player: str, *, source: RelayNoticeSource = RelayNoticeSource.APP_POLL) -> None:
         if player in self._players:
             return
         self._players.add(player)
         relay_player_id = _resolve_minecraft_player_user_id(player, app=self.app)
+        notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=source)
+        app_friendly = getattr(self.app, "friendly", self.app.name)
         DC_Relay.add(
             DC_Bound(
                 self.app,
-                DC_Bound.generics.join,
+                render_notice_text(notice, author_name=player, app_name=app_friendly),
                 player,
+                notice=notice,
                 player_id=relay_player_id,
                 player_avatar_uri=self.avatar_uri(player),
             )
         )
 
-    def note_leave(self, player: str) -> None:
+    def note_leave(self, player: str, *, source: RelayNoticeSource = RelayNoticeSource.APP_POLL) -> None:
         if player not in self._players:
             return
         relay_player_id = _resolve_minecraft_player_user_id(player, app=self.app)
         self._players.discard(player)
+        notice = PlayerSessionNotice(action=PlayerSessionAction.LEFT, source=source)
+        app_friendly = getattr(self.app, "friendly", self.app.name)
         DC_Relay.add(
             DC_Bound(
                 self.app,
-                DC_Bound.generics.left,
+                render_notice_text(notice, author_name=player, app_name=app_friendly),
                 player,
+                notice=notice,
                 player_id=relay_player_id,
                 player_avatar_uri=self.avatar_uri(player),
             )
@@ -2080,6 +2131,9 @@ class Players:
                 return None
             identifier = normalised_player
         return _mc_heads_avatar_uri(identifier)
+
+    def connected_player_names(self) -> tuple[str, ...]:
+        return tuple[str, ...](sorted(self._players, key=str.casefold))
 
 
 class Activities:

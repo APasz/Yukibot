@@ -8,6 +8,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import config
+from relay_notices import (
+    MaintenanceNotice,
+    MaintenanceStage,
+    RelayNoticeSeverity,
+    RelayNoticeSource,
+    render_system_notice_text,
+)
 from restart_targets import RestartTarget, coalesce_restart_targets
 
 log = logging.getLogger(__name__)
@@ -219,8 +226,56 @@ class MaintenanceService:
         return f"{lead_minutes}m"
 
     @classmethod
+    def build_restart_warning_notice(cls, warning: ScheduledRestartWarning) -> MaintenanceNotice:
+        return MaintenanceNotice(
+            stage=MaintenanceStage.WARNING,
+            target=warning.effective_target,
+            source=RelayNoticeSource.BOT,
+            severity=RelayNoticeSeverity.WARNING,
+            matched_targets=warning.matched_targets,
+            lead_minutes=warning.lead_minutes,
+            scheduled_time_text=cls._format_scheduled_time_text(warning.scheduled_for),
+        )
+
+    @classmethod
+    def build_restart_executing_notice(
+        cls,
+        *,
+        effective_target: RestartTarget,
+        matched_targets: Sequence[RestartTarget],
+        scheduled_for: datetime,
+    ) -> MaintenanceNotice:
+        return MaintenanceNotice(
+            stage=MaintenanceStage.EXECUTING,
+            target=effective_target,
+            source=RelayNoticeSource.BOT,
+            severity=RelayNoticeSeverity.WARNING,
+            matched_targets=tuple(matched_targets),
+            scheduled_time_text=cls._format_scheduled_time_text(scheduled_for),
+        )
+
+    @classmethod
+    def build_restart_completed_notice(
+        cls,
+        *,
+        effective_target: RestartTarget,
+        matched_targets: Sequence[RestartTarget],
+        scheduled_for: datetime,
+        summary_lines: Sequence[str] = (),
+    ) -> MaintenanceNotice:
+        return MaintenanceNotice(
+            stage=MaintenanceStage.COMPLETED,
+            target=effective_target,
+            source=RelayNoticeSource.BOT,
+            severity=RelayNoticeSeverity.INFO,
+            matched_targets=tuple(matched_targets),
+            scheduled_time_text=cls._format_scheduled_time_text(scheduled_for),
+            summary_lines=tuple(summary_lines),
+        )
+
+    @classmethod
     def format_restart_warning_notice(cls, warning: ScheduledRestartWarning) -> str:
-        return f"Scheduled maintenance: restart in {cls._format_minutes_short(warning.lead_minutes)}."
+        return render_system_notice_text(cls.build_restart_warning_notice(warning))
 
     @staticmethod
     def _was_triggered_for_slot(
@@ -267,5 +322,5 @@ class MaintenanceService:
         return tuple(sorted(offsets, reverse=True))
 
     @staticmethod
-    def _format_minutes_short(minutes: int) -> str:
-        return f"{minutes}m"
+    def _format_scheduled_time_text(scheduled_for: datetime) -> str:
+        return scheduled_for.astimezone().strftime("%H:%M")

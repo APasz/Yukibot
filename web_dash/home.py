@@ -14,17 +14,23 @@ from .runtime_imports import (
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
     NodeStateStreamEvent,
+    NodeSystemSummary,
     Request,
     asyncio,
     config,
+    dataclass,
+    json,
     mod_web_badge_class,
     quote,
     replace,
 )
 from .constants import (
     _APP_SECTION_QUERY_PARAM,
+    _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
+    _HOME_NODE_LATENCY_TIMEOUT_SECONDS,
     _SAME_ORIGIN_NODE_API_BASE,
     _SAME_ORIGIN_NODE_PROXY_BASE,
+    _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
 )
 from .nicegui_protocols import ModWebUi
 from .types import (
@@ -46,6 +52,45 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nicegui.element import Element
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebNodeLatencyBadgeSpec:
+    badge_id: int
+    node_label: str
+    fallback_text: str
+    probe_url: str | None
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "badge_id": self.badge_id,
+            "node_label": self.node_label,
+            "fallback_text": self.fallback_text,
+            "probe_url": self.probe_url,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebHomeMetricSpec:
+    label: str
+    icon: str
+    value: str
+    tone: BadgeTone
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebHomeNodeStatSpec:
+    node_name: str
+    node_label: str
+    node_subtitle: str | None
+    status_text: str | None
+    status_tone: BadgeTone
+    card_tone: BadgeTone
+    metrics: tuple[_ModWebHomeMetricSpec, ...]
+    running_text: str
+    running_tone: BadgeTone
+    running_tooltip: str | None = None
+
 
 class ModWebHomeMixin(ModWebServiceSupport):
     def _home_app_card_target(
@@ -92,90 +137,81 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 summaries_by_node[node_name] for node_name in node_order if node_name in summaries_by_node
             )
 
-        async def _refresh_title_stats() -> tuple[ModWebTitleStat, ...]:
-            refreshed_summaries: tuple[ModWebHomeNodeSummary, ...] = await self._home_node_summaries(
+        async def _refresh_home_node_summaries() -> tuple[ModWebHomeNodeSummary, ...]:
+            return await self._home_node_summaries(
                 sections=_current_sections(), user=user
             )
-            return self._build_home_title_stats(refreshed_summaries)
 
-        with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
-            self._render_user_header(ui=ui, user=user)
-            with ui.card().classes(self._hero_card_classes()):
-                with ui.column().classes(self._hero_shell_classes()):
-                    with ui.row().classes(self._hero_header_classes()):
-                        with ui.column().classes(self._hero_header_main_classes()):
-                            ui.label("Yukibot Dashboard").classes(self._hero_title_classes())
-                        with ui.column().classes(self._hero_badges_classes(wide=True)):
+        with ui.column().classes("w-full gap-6 px-4 py-8 md:px-8"):
+            with ui.column().classes("mod-page w-full gap-6"):
+                self._render_user_header(ui=ui, user=user)
+                with ui.card().classes(self._hero_card_classes()):
+                    with ui.column().classes(self._hero_shell_classes()):
+                        with ui.row().classes(self._hero_header_classes()):
+                            with ui.column().classes(self._hero_header_main_classes()):
+                                ui.label("Yukibot Dashboard").classes(self._hero_title_classes())
+                            with ui.column().classes(self._hero_badges_classes(wide=True)):
 
-                            @ui.refreshable
-                            def _render_home_badges(current_sections: tuple[ModWebNodeAppSection, ...]) -> None:
-                                app_links: tuple[ModWebAppLink, ...] = tuple[ModWebAppLink, ...](
-                                    app for section in current_sections for app in section.app_links
-                                )
-                                unavailable_sections: tuple[ModWebNodeAppSection, ...] = tuple(
-                                    section for section in current_sections if section.error is not None
-                                )
-                                with ui.row().classes(self._hero_badge_row_classes()):
-                                    for section in current_sections:
-                                        badge_toggle_url: str | None = None
-                                        badge_tooltip: str | None = None
-                                        if dev_mode_enabled and not section.node.is_current:
-                                            badge_toggle_url = self._toggle_simulated_down_node_url(
-                                                current_url=request_path,
-                                                node_name=section.node.node_name,
-                                                simulated_down_node_names=simulated_down_node_names,
+                                @ui.refreshable
+                                def _render_home_badges(current_sections: tuple[ModWebNodeAppSection, ...]) -> None:
+                                    home_node_latency_badges: list[_ModWebNodeLatencyBadgeSpec] = []
+                                    app_links: tuple[ModWebAppLink, ...] = tuple[ModWebAppLink, ...](
+                                        app for section in current_sections for app in section.app_links
+                                    )
+                                    unavailable_sections: tuple[ModWebNodeAppSection, ...] = tuple(
+                                        section for section in current_sections if section.error is not None
+                                    )
+                                    with ui.row().classes(self._hero_badge_row_classes()):
+                                        for section in current_sections:
+                                            badge_toggle_url: str | None = None
+                                            badge_tooltip: str | None = None
+                                            if dev_mode_enabled and not section.node.is_current:
+                                                badge_toggle_url = self._toggle_simulated_down_node_url(
+                                                    current_url=request_path,
+                                                    node_name=section.node.node_name,
+                                                    simulated_down_node_names=simulated_down_node_names,
+                                                )
+                                                badge_tooltip = (
+                                                    "Restore this simulated outage."
+                                                    if section.is_simulated_down
+                                                    else "Simulate this node going down."
+                                                )
+                                            badge = self._interactive_badge(
+                                                ui=ui,
+                                                text=self._home_node_badge_initial_text(section),
+                                                tone=self._node_status_badge_tone(section),
+                                                url=badge_toggle_url,
+                                                tooltip_text=badge_tooltip,
+                                                extra_classes="mod-node-status-badge",
                                             )
-                                            badge_tooltip = (
-                                                "Restore this simulated outage."
-                                                if section.is_simulated_down
-                                                else "Simulate this node going down."
+                                            badge_spec = self._home_node_latency_badge_spec(
+                                                badge=badge,
+                                                section=section,
                                             )
-                                        self._interactive_badge(
-                                            ui=ui,
-                                            text=self._node_status_badge_text(section),
-                                            tone=self._node_status_badge_tone(section),
-                                            url=badge_toggle_url,
-                                            tooltip_text=badge_tooltip,
+                                            if badge_spec is not None:
+                                                home_node_latency_badges.append(badge_spec)
+                                    for badge_row in self._section_badge_rows(
+                                        self._node_capability_badges(
+                                            app_links=app_links,
+                                            unavailable_count=len(unavailable_sections),
                                         )
-                                with ui.row().classes(self._hero_badge_row_classes()):
-                                    self._badge(ui=ui, text=f"{len(current_sections)} nodes", tone="black")
-                                    self._badge(ui=ui, text=f"{len(app_links)} apps", tone="black")
-                                    self._badge(
+                                    ):
+                                        with ui.row().classes(self._hero_badge_row_classes()):
+                                            for badge in badge_row:
+                                                self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                                    self._run_home_node_latency_badges_javascript(
                                         ui=ui,
-                                        text=f"{sum(1 for app in app_links if app.supports_mods)} mod-enabled",
-                                        tone="purple",
+                                        badge_specs=tuple(home_node_latency_badges),
                                     )
-                                    self._badge(
-                                        ui=ui,
-                                        text=f"{sum(1 for app in app_links if app.supports_saves)} save-enabled",
-                                        tone="black",
-                                    )
-                                    self._badge(
-                                        ui=ui,
-                                        text=f"{sum(1 for app in app_links if app.supports_configs)} config-enabled",
-                                        tone="grey",
-                                    )
-                                    self._badge(
-                                        ui=ui,
-                                        text=(
-                                            f"{sum(1 for app in app_links if app.supports_console_actions)} "
-                                            "console-enabled"
-                                        ),
-                                        tone="black",
-                                    )
-                                    if unavailable_sections:
-                                        self._badge(
-                                            ui=ui,
-                                            text=f"{len(unavailable_sections)} unavailable",
-                                            tone="red",
-                                        )
 
-                            _render_home_badges(_current_sections())
-                    apply_title_stats: Callable[[tuple[ModWebTitleStat, ...]], None] = self._render_live_title_stats(
-                        ui=ui,
-                        initial_stats=self._build_home_title_stats(home_node_summaries),
-                        refresh_async_stats=_refresh_title_stats,
-                    )
+                                _render_home_badges(_current_sections())
+                        apply_home_node_stats: Callable[[tuple[ModWebHomeNodeSummary, ...]], None] = (
+                            self._render_live_home_node_stats(
+                                ui=ui,
+                                initial_summaries=home_node_summaries,
+                                refresh_async_summaries=_refresh_home_node_summaries,
+                            )
+                        )
 
             @ui.refreshable
             def _render_home_sections(current_sections: tuple[ModWebNodeAppSection, ...]) -> None:
@@ -232,7 +268,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if not self._sections_equal_for_card_render(previous_sections, current_sections):
                     _render_home_badges.refresh(current_sections)
                     _render_home_sections.refresh(current_sections)
-                apply_title_stats(self._build_home_title_stats(_current_summaries()))
+                apply_home_node_stats(_current_summaries())
 
             def _node_state_callback(node: ModWebNodeLink) -> Callable[[NodeStateStreamEvent], None]:
                 def _handle_event(event: NodeStateStreamEvent) -> None:
@@ -263,6 +299,165 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
             self._register_client_cleanup(ui=ui, cleanup=_cleanup_live_updates)
 
+    @classmethod
+    def _home_node_status_entry(
+        cls,
+        *,
+        system_summary: NodeSystemSummary | None,
+        app_count: int,
+    ) -> tuple[str | None, BadgeTone]:
+        if system_summary is None:
+            return ("Unavailable", "red")
+        running_count: int = len(system_summary.running_names)
+        if app_count <= 0 or running_count <= 0:
+            return (None, "black")
+        if running_count == 1:
+            return ("App Running", "purple")
+        return (f"{running_count} Running", "purple")
+
+    @staticmethod
+    def _home_node_card_tone(*, system_summary: NodeSystemSummary | None, app_count: int) -> BadgeTone:
+        if system_summary is None:
+            return "red"
+        if app_count <= 0:
+            return "grey"
+        if system_summary.running_names:
+            return "purple"
+        return "black"
+
+    @classmethod
+    def _build_home_node_stat_specs(
+        cls,
+        node_summaries: tuple[ModWebHomeNodeSummary, ...],
+    ) -> tuple[_ModWebHomeNodeStatSpec, ...]:
+        node_stats: list[_ModWebHomeNodeStatSpec] = []
+        for node_summary in node_summaries:
+            system_summary: NodeSystemSummary | None = node_summary.system_summary
+            cpu_value, cpu_tone = cls._system_cpu_entry(system_summary)
+            ram_value, ram_tone = cls._system_ram_entry(system_summary)
+            storage_value, storage_tone = cls._system_storage_entry(system_summary)
+            uptime_value, uptime_tone = cls._system_uptime_entry(system_summary)
+            running_tooltip: str | None = None
+            if system_summary is None:
+                running_text = "Unavailable"
+                running_tone = "red"
+            elif not system_summary.running_names:
+                running_text = "Nothin Running"
+                running_tone = "grey"
+            else:
+                running_text = cls._running_value(system_summary.running_names)
+                running_tone = "purple"
+            if system_summary is not None and len(system_summary.running_names) > 2:
+                running_tooltip = ", ".join(system_summary.running_names)
+            status_text, status_tone = cls._home_node_status_entry(
+                system_summary=system_summary,
+                app_count=node_summary.app_count,
+            )
+            node_stats.append(
+                _ModWebHomeNodeStatSpec(
+                    node_name=node_summary.node.node_name,
+                    node_label=node_summary.node.label,
+                    node_subtitle=cls._node_display_subtitle(
+                        label=node_summary.node.label,
+                        node_name=node_summary.node.node_name,
+                    ),
+                    status_text=status_text,
+                    status_tone=status_tone,
+                    card_tone=cls._home_node_card_tone(
+                        system_summary=system_summary,
+                        app_count=node_summary.app_count,
+                    ),
+                    metrics=(
+                        _ModWebHomeMetricSpec(label="CPU", icon="speed", value=cpu_value, tone=cpu_tone),
+                        _ModWebHomeMetricSpec(label="RAM", icon="memory", value=ram_value, tone=ram_tone),
+                        _ModWebHomeMetricSpec(
+                            label="Storage",
+                            icon="storage",
+                            value=storage_value,
+                            tone=storage_tone,
+                        ),
+                        _ModWebHomeMetricSpec(label="Uptime", icon="schedule", value=uptime_value, tone=uptime_tone),
+                    ),
+                    running_text=running_text,
+                    running_tone=running_tone,
+                    running_tooltip=running_tooltip,
+                )
+            )
+        return tuple[_ModWebHomeNodeStatSpec, ...](node_stats)
+
+    def _render_live_home_node_stats_renderer(
+        self,
+        *,
+        ui: ModWebUi,
+        initial_summaries: tuple[ModWebHomeNodeSummary, ...],
+    ) -> Callable[[tuple[ModWebHomeNodeSummary, ...]], None]:
+        @ui.refreshable
+        def _render_stats(node_summaries: tuple[ModWebHomeNodeSummary, ...]) -> None:
+            with ui.row().classes("mod-home-node-grid w-full gap-3"):
+                for stat in self._build_home_node_stat_specs(node_summaries):
+                    with ui.card().classes(f"mod-home-node-card mod-home-node-card-{stat.card_tone}"):
+                        with ui.column().classes("w-full gap-3 p-3"):
+                            with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
+                                node_text_style: str | None = self._node_text_style(node_name=stat.node_name)
+                                with ui.column().classes("gap-0 min-w-0"):
+                                    node_title: Label = ui.label(stat.node_label).classes("mod-home-node-title")
+                                    if node_text_style is not None:
+                                        node_title.style(node_text_style)
+                                    if stat.node_subtitle is not None:
+                                        node_subtitle: Label = ui.label(stat.node_subtitle).classes(
+                                            "mod-home-node-subtitle"
+                                        )
+                                        if node_text_style is not None:
+                                            node_subtitle.style(node_text_style)
+                                if stat.status_text is not None:
+                                    self._badge(ui=ui, text=stat.status_text, tone=stat.status_tone)
+                            with ui.element("div").classes("mod-home-node-metrics"):
+                                for metric in stat.metrics:
+                                    metric_row: Element = ui.row().classes("mod-home-node-metric")
+                                    with metric_row:
+                                        ui.icon(metric.icon).classes(
+                                            f"mod-home-node-metric-icon mod-tone-{metric.tone}"
+                                        )
+                                        ui.label(metric.value).classes("mod-home-node-metric-value")
+                                    self._attach_text_tooltip(ui=ui, target=metric_row, text=metric.label)
+                            running_row: Element = ui.row().classes("mod-home-node-running")
+                            with running_row:
+                                ui.icon("dns").classes(
+                                    f"mod-home-node-running-icon mod-tone-{stat.running_tone}"
+                                )
+                                ui.label(stat.running_text).classes("mod-home-node-running-value")
+                            if stat.running_tooltip is not None:
+                                self._attach_text_tooltip(ui=ui, target=running_row, text=stat.running_tooltip)
+
+        _render_stats(initial_summaries)
+        return _render_stats.refresh
+
+    def _render_live_home_node_stats(
+        self,
+        *,
+        ui: ModWebUi,
+        initial_summaries: tuple[ModWebHomeNodeSummary, ...],
+        refresh_async_summaries: Callable[[], Awaitable[tuple[ModWebHomeNodeSummary, ...]]] | None = None,
+    ) -> Callable[[tuple[ModWebHomeNodeSummary, ...]], None]:
+        apply_summaries: Callable[[tuple[ModWebHomeNodeSummary, ...]], None] = (
+            self._render_live_home_node_stats_renderer(
+                ui=ui,
+                initial_summaries=initial_summaries,
+            )
+        )
+        if refresh_async_summaries is not None:
+            refresh_async = self._build_async_refreshable_updater(
+                refresh_async_value=refresh_async_summaries,
+                apply_value=apply_summaries,
+                error_context="Mod web home node stats",
+            )
+            refresh_timer = ui.timer(
+                _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
+                lambda: asyncio.create_task(refresh_async()),
+            )
+            self._register_timer_cleanup(ui=ui, timer=refresh_timer)
+        return apply_summaries
+
     def _render_home_page_sections(
         self,
         *,
@@ -281,48 +476,49 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 ui.label("No apps are currently available.").classes("p-8 text-lg mod-subtitle")
             return
 
-        for section in sections:
-            with ui.column().classes("w-full gap-3"):
-                node_text_style: str | None = self._node_text_style(node_name=section.node.node_name)
-                with ui.row().classes("w-full items-center justify-between gap-1 flex-wrap"):
-                    with ui.column().classes("gap-1"):
-                        section_title: Label = ui.label(section.node.label).classes("text-xl font-bold mod-title-small")
-                        if node_text_style is not None:
-                            section_title.style(node_text_style)
-                        node_subtitle: str | None = self._node_display_subtitle(
-                            label=section.node.label,
-                            node_name=section.node.node_name,
-                        )
-                        if node_subtitle is not None:
-                            subtitle: Label = ui.label(node_subtitle).classes("text-sm mod-subtitle")
+        with ui.element("div").classes("mod-home-section-grid w-full"):
+            for section in sections:
+                with ui.column().classes("mod-home-section w-full gap-3"):
+                    node_text_style: str | None = self._node_text_style(node_name=section.node.node_name)
+                    with ui.row().classes("w-full items-center justify-between gap-1 flex-wrap"):
+                        with ui.column().classes("gap-1"):
+                            section_title: Label = ui.label(section.node.label).classes("text-xl font-bold mod-title-small")
                             if node_text_style is not None:
-                                subtitle.style(node_text_style)
-                    with ui.row().classes("gap-2 flex-wrap"):
-                        self._badge(ui=ui, text=f"{len(section.app_links)} apps", tone="black")
-                        if section.error is not None:
-                            self._badge(ui=ui, text="Unavailable", tone="red")
-                if section.error is not None:
-                    self._render_node_unavailable_card(ui=ui, message=section.error)
-                elif not section.app_links:
-                    with ui.card().classes("mod-card mod-card-empty w-full"):
-                        ui.label("No apps are currently available on this node.").classes("p-5 text-sm mod-subtitle")
-                else:
-                    for app in section.app_links:
-                        card_target: str | None = self._home_app_card_target(
-                            app=app,
-                            show_api_actions=show_api_actions,
-                        )
-                        card: Card = (
-                            ui.card().classes(self._app_card_link_classes(app)).style(self._app_card_link_style(app))
-                        )
-                        if card_target is not None:
-                            card.on("click", lambda _=None, target_url=card_target: ui.navigate.to(target_url))
-                        with card:
-                            self._render_app_card_content(
-                                ui=ui,
+                                section_title.style(node_text_style)
+                            node_subtitle: str | None = self._node_display_subtitle(
+                                label=section.node.label,
+                                node_name=section.node.node_name,
+                            )
+                            if node_subtitle is not None:
+                                subtitle: Label = ui.label(node_subtitle).classes("text-sm mod-subtitle")
+                                if node_text_style is not None:
+                                    subtitle.style(node_text_style)
+                        with ui.row().classes("gap-2 flex-wrap"):
+                            self._badge(ui=ui, text=f"{len(section.app_links)} apps", tone="black")
+                            if section.error is not None:
+                                self._badge(ui=ui, text="Unavailable", tone="red")
+                    if section.error is not None:
+                        self._render_node_unavailable_card(ui=ui, message=section.error)
+                    elif not section.app_links:
+                        with ui.card().classes("mod-card mod-card-empty w-full"):
+                            ui.label("No apps are currently available on this node.").classes("p-5 text-sm mod-subtitle")
+                    else:
+                        for app in section.app_links:
+                            card_target: str | None = self._home_app_card_target(
                                 app=app,
                                 show_api_actions=show_api_actions,
                             )
+                            card: Card = (
+                                ui.card().classes(self._app_card_link_classes(app)).style(self._app_card_link_style(app))
+                            )
+                            if card_target is not None:
+                                card.on("click", lambda _=None, target_url=card_target: ui.navigate.to(target_url))
+                            with card:
+                                self._render_app_card_content(
+                                    ui=ui,
+                                    app=app,
+                                    show_api_actions=show_api_actions,
+                                )
 
     def _render_node_apps_page(
         self,
@@ -359,31 +555,12 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
                             @ui.refreshable
                             def _render_node_badges(current_app_links: tuple[ModWebAppLink, ...]) -> None:
-                                with ui.row().classes(self._hero_badge_row_classes()):
-                                    self._badge(ui=ui, text=f"{len(current_app_links)} apps", tone="black")
-                                    self._badge(
-                                        ui=ui,
-                                        text=f"{sum(1 for app in current_app_links if app.supports_mods)} mod-enabled",
-                                        tone="purple",
-                                    )
-                                    self._badge(
-                                        ui=ui,
-                                        text=f"{sum(1 for app in current_app_links if app.supports_saves)} save-enabled",
-                                        tone="black",
-                                    )
-                                    self._badge(
-                                        ui=ui,
-                                        text=f"{sum(1 for app in current_app_links if app.supports_configs)} config-enabled",
-                                        tone="grey",
-                                    )
-                                    self._badge(
-                                        ui=ui,
-                                        text=(
-                                            f"{sum(1 for app in current_app_links if app.supports_console_actions)} "
-                                            "console-enabled"
-                                        ),
-                                        tone="black",
-                                    )
+                                for badge_row in self._section_badge_rows(
+                                    self._node_capability_badges(app_links=current_app_links)
+                                ):
+                                    with ui.row().classes(self._hero_badge_row_classes()):
+                                        for badge in badge_row:
+                                            self._badge(ui=ui, text=badge.text, tone=badge.tone)
 
                             _render_node_badges(current_app_links)
                     with ui.row().classes(self._hero_action_row_classes()):
@@ -464,12 +641,188 @@ class ModWebHomeMixin(ModWebServiceSupport):
         return f"{section.node.label}: {'Alive' if section.error is None else 'Down'}"
 
     @staticmethod
+    def _node_capability_badges(
+        *,
+        app_links: tuple[ModWebAppLink, ...],
+        unavailable_count: int = 0,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
+        badges: list[_ModWebBadgeSpec] = [
+            _ModWebBadgeSpec(text=f"{len(app_links)} apps", tone="black"),
+            _ModWebBadgeSpec(
+                text=f"{sum(1 for app in app_links if app.supports_mods)} Modly",
+                tone="purple",
+            ),
+            _ModWebBadgeSpec(
+                text=f"{sum(1 for app in app_links if app.supports_saves)} Savely",
+                tone="black",
+            ),
+            _ModWebBadgeSpec(
+                text=f"{sum(1 for app in app_links if app.supports_configs)} Configy",
+                tone="black",
+            ),
+            _ModWebBadgeSpec(
+                text=f"{sum(1 for app in app_links if app.supports_console_actions)} Consolely",
+                tone="black",
+            ),
+            _ModWebBadgeSpec(
+                text=f"{sum(1 for app in app_links if app.supports_chat)} Chatty",
+                tone="purple",
+            ),
+        ]
+        if unavailable_count > 0:
+            badges.append(_ModWebBadgeSpec(text=f"{unavailable_count} unavailable", tone="red"))
+        return tuple(badges)
+
+    @staticmethod
+    def _home_node_badge_initial_text(section: ModWebNodeAppSection) -> str:
+        if section.error is not None:
+            return ModWebHomeMixin._node_status_badge_text(section)
+        return f"{section.node.label}: ..."
+
+    @staticmethod
+    def _home_node_latency_badge_spec(
+        *,
+        badge: Element,
+        section: ModWebNodeAppSection,
+    ) -> _ModWebNodeLatencyBadgeSpec | None:
+        badge_id = getattr(badge, "id", None)
+        if section.error is None and not isinstance(badge_id, int):
+            raise RuntimeError(f"Healthy node badge is missing its element id: {section.node.node_name}")
+        if not isinstance(badge_id, int):
+            return None
+        probe_url: str | None = section.node.latency_probe_url if section.error is None else None
+        return _ModWebNodeLatencyBadgeSpec(
+            badge_id=badge_id,
+            node_label=section.node.label,
+            fallback_text=ModWebHomeMixin._node_status_badge_text(section),
+            probe_url=probe_url,
+        )
+
+    @classmethod
+    def _run_home_node_latency_badges_javascript(
+        cls,
+        *,
+        ui: ModWebUi,
+        badge_specs: tuple[_ModWebNodeLatencyBadgeSpec, ...],
+    ) -> None:
+        if not badge_specs:
+            return
+        ui.run_javascript(cls._home_node_latency_badges_javascript(badge_specs), timeout=0.1)
+
+    @classmethod
+    def _home_node_latency_badges_javascript(
+        cls,
+        badge_specs: tuple[_ModWebNodeLatencyBadgeSpec, ...],
+    ) -> str:
+        specs_json: str = json.dumps([badge_spec.to_mapping() for badge_spec in badge_specs], separators=(",", ":"))
+        refresh_interval_ms: int = int(_HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS * 1000)
+        timeout_ms: int = int(_HOME_NODE_LATENCY_TIMEOUT_SECONDS * 1000)
+        return f"""
+            (() => {{
+                const controllerKey = 'modWebHomeNodeLatency';
+                const specs = {specs_json};
+                const refreshIntervalMs = {refresh_interval_ms};
+                const timeoutMs = {timeout_ms};
+                const findBadge = (badgeId) => getElement(badgeId) || getHtmlElement(badgeId);
+                const existing = window[controllerKey];
+                const controllerState = existing && typeof existing === 'object'
+                    ? existing
+                    : {{intervalId: null, inFlight: false, sampleId: 0, lastTextByBadgeId: {{}}}};
+                controllerState.lastTextByBadgeId = controllerState.lastTextByBadgeId || {{}};
+                const renderText = (spec, text) => {{
+                    const badge = findBadge(spec.badge_id);
+                    if (!badge) {{
+                        return false;
+                    }}
+                    badge.textContent = text;
+                    return true;
+                }};
+                const probeLatency = async (spec) => {{
+                    if (!spec.probe_url) {{
+                        return null;
+                    }}
+                    const controller = new AbortController();
+                    const timeoutHandle = window.setTimeout(() => controller.abort(), timeoutMs);
+                    const probeUrl = new URL(spec.probe_url, window.location.href);
+                    probeUrl.searchParams.set('_mod_web_latency_probe', `${{Date.now()}}`);
+                    const startedAt = performance.now();
+                    try {{
+                        await fetch(probeUrl.toString(), {{
+                            method: 'GET',
+                            mode: 'no-cors',
+                            cache: 'no-store',
+                            credentials: 'omit',
+                            signal: controller.signal,
+                        }});
+                        return `${{Math.max(1, Math.round(performance.now() - startedAt))}} ms`;
+                    }} catch (_error) {{
+                        return 'n/a';
+                    }} finally {{
+                        window.clearTimeout(timeoutHandle);
+                    }}
+                }};
+                const latencyText = (spec, latency) => `${{spec.node_label}}: ${{latency}}`;
+                const cachedText = (spec) => {{
+                    const cached = controllerState.lastTextByBadgeId[String(spec.badge_id)];
+                    if (typeof cached === 'string' && cached) {{
+                        return cached;
+                    }}
+                    if (!spec.probe_url) {{
+                        return spec.fallback_text;
+                    }}
+                    return latencyText(spec, '...');
+                }};
+                const sample = async () => {{
+                    if (controllerState.inFlight) {{
+                        return;
+                    }}
+                    controllerState.inFlight = true;
+                    const sampleId = controllerState.sampleId + 1;
+                    controllerState.sampleId = sampleId;
+                    const visibleSpecs = specs.filter((spec) => renderText(spec, cachedText(spec)));
+                    if (!visibleSpecs.length) {{
+                        if (controllerState.intervalId) {{
+                            window.clearInterval(controllerState.intervalId);
+                        }}
+                        delete window[controllerKey];
+                        controllerState.inFlight = false;
+                        return;
+                    }}
+                    try {{
+                        await Promise.all(visibleSpecs.map(async (spec) => {{
+                            if (!spec.probe_url) {{
+                                return;
+                            }}
+                            if (!(String(spec.badge_id) in controllerState.lastTextByBadgeId)) {{
+                                renderText(spec, latencyText(spec, '...'));
+                            }}
+                            const latency = await probeLatency(spec);
+                            const nextText = latencyText(spec, latency ?? 'n/a');
+                            controllerState.lastTextByBadgeId[String(spec.badge_id)] = nextText;
+                            if (controllerState.sampleId === sampleId) {{
+                                renderText(spec, nextText);
+                            }}
+                        }}));
+                    }} finally {{
+                        controllerState.inFlight = false;
+                    }}
+                }};
+                if (controllerState.intervalId) {{
+                    window.clearInterval(controllerState.intervalId);
+                }}
+                controllerState.intervalId = window.setInterval(() => {{ void sample(); }}, refreshIntervalMs);
+                window[controllerKey] = controllerState;
+                void sample();
+            }})();
+        """
+
+    @staticmethod
     def _node_status_badge_tone(section: ModWebNodeAppSection) -> BadgeTone:
+        if section.is_simulated_down:
+            return "warn"
         if section.error is not None:
             return "red"
-        if section.node.is_current:
-            return "purple"
-        return "grey"
+        return "black"
 
     @staticmethod
     def _login_node_status_badge_text(status: ModWebNodeStatus) -> str:
@@ -479,11 +832,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
     @staticmethod
     def _login_node_status_badge_tone(status: ModWebNodeStatus) -> BadgeTone:
+        if status.is_simulated_down:
+            return "warn"
         if not status.alive:
             return "red"
-        if status.node.is_current:
-            return "purple"
-        return "grey"
+        return "black"
 
     def _render_app_card_content(
         self,
@@ -502,12 +855,19 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     runtime_badge_classes = "mod-app-runtime-chip"
                     if app.runtime_changed:
                         runtime_badge_classes: LiteralString = f"{runtime_badge_classes} mod-app-runtime-chip-live"
-                    self._badge(
+                    runtime_badge_label = self._badge(
                         ui=ui,
                         text=runtime_badge.text,
                         tone=runtime_badge.tone,
                         extra_classes=runtime_badge_classes,
                     )
+                    runtime_badge_tooltip_html: str | None = self._player_count_tooltip_html(
+                        player_count=app.player_count,
+                        player_capacity=app.player_capacity,
+                        connected_player_names=app.connected_player_names,
+                    )
+                    if runtime_badge_tooltip_html is not None:
+                        self._attach_html_tooltip(ui=ui, target=runtime_badge_label, html=runtime_badge_tooltip_html)
                 with ui.row().classes("mod-app-card-badges items-center gap-3 flex-wrap"):
                     for badge in self._app_card_badges(app):
                         badge_target: str | None = self._app_card_badge_target(
@@ -728,6 +1088,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             transition_state=app.transition_state,
             player_count=app.player_count,
             player_capacity=app.player_capacity,
+            connected_player_names=app.connected_player_names,
             runtime_fault=app.runtime_fault,
         )
 
@@ -787,6 +1148,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             transition_state=app_stats.transition_state,
             player_count=app_stats.player_count,
             player_capacity=app_stats.player_capacity,
+            connected_player_names=app_stats.connected_player_names,
             runtime_fault=app_stats.runtime_fault,
         )
         return self._app_link_with_tabs(ModWebHomeMixin._with_runtime_change_flag(app=updated_app, previous_app=app))
@@ -816,16 +1178,20 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         app_stats, system_summary = await asyncio.gather(
-            asyncio.to_thread(self._remote_app_runtime_summary, node, model.app_name, user),
-            asyncio.to_thread(self._remote_node_system_summary, node, user),
+            self._remote_app_runtime_summary_async(node, model.app_name, user),
+            self._remote_node_system_summary_or_none_async(
+                node,
+                user,
+                error_context="Remote mod web runtime model system summary failed",
+            ),
         )
         return self._model_with_runtime_state(
             model,
             app_stats=app_stats,
             app_start_blocked=self._app_start_blocked_remote(
-                app_friendly=model.app_friendly,
+                app_name=model.app_name,
                 app_stats=app_stats,
-                running_names=system_summary.running_names,
+                running_app_ids=() if system_summary is None else system_summary.running_app_ids,
             ),
         )
 
@@ -897,9 +1263,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 transition_state=entry.transition_state,
                 player_count=entry.player_count,
                 player_capacity=entry.player_capacity,
+                connected_player_names=entry.connected_player_names,
                 runtime_fault=entry.runtime_fault,
                 saves_api_url=saves_api_url,
                 settings_api_url=settings_api_url,
+                map_url=entry.map_url,
                 supports_blueprints=entry.supports_blueprints,
                 supports_console_actions=entry.supports_console_actions,
                 supports_chat=entry.supports_chat,

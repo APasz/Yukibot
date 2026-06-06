@@ -6,7 +6,7 @@ import zipfile
 from logging import Logger
 from pathlib import Path
 from re import Match
-from typing import Any, Literal
+from typing import Any
 
 import hikari
 import tomli_w
@@ -17,7 +17,6 @@ from _discord import (
     App_Bound,
     DC_Bound,
     DC_Relay,
-    Generics,
     OutboundRelayFormatter,
     RelayOutboundFormatOptions,
     render_plain_reference_prefix,
@@ -39,6 +38,12 @@ from apps._settings import (
 )
 from apps._tailer import Tailer
 from config import Activity_Manager
+from relay_notices import (
+    PlayerSessionAction,
+    PlayerSessionNotice,
+    RelayNoticeSource,
+    render_notice_text,
+)
 
 log: Logger = logging.getLogger(__name__)
 
@@ -291,11 +296,19 @@ class Matchers:
         if match:
             player: str = match.group(1)
             action: str = match.group(2).lower()
-            txt: Literal[Generics.join, Generics.left] = (
-                DC_Bound.generics.join if "synced" in action else DC_Bound.generics.left
+            notice = PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED if "synced" in action else PlayerSessionAction.LEFT,
+                source=RelayNoticeSource.APP_LOG,
             )
-
-            DC_Relay.add(DC_Bound(self.app, txt, player or hikari.UNDEFINED))
+            app_friendly = getattr(self.app, "friendly", self.app.name)
+            DC_Relay.add(
+                DC_Bound(
+                    self.app,
+                    render_notice_text(notice, author_name=player, app_name=app_friendly),
+                    player or hikari.UNDEFINED,
+                    notice=notice,
+                )
+            )
 
     async def match_player_count(self, line: str):
         match: Match[str] | None = re.search(r"Total Players:\s+(\d+)", line)

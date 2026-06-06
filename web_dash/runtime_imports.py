@@ -58,7 +58,7 @@ from starlette.responses import Response as StarletteResponse
 
 import config
 from _authority import AuthorityResource, read_json_object
-from _discord import Generics, cached_member_role_color, color_int_to_hex
+from _discord import cached_member_role_color, color_int_to_hex
 from _manager import App_Manager, ManagedApp
 from _security import Access_Control, Power_Level
 from _utils import Utilities
@@ -75,6 +75,7 @@ from chat_hub import (
     ChatEvent,
     ChatHub,
     ChatLink,
+    ChatMediaProvider,
     ChatMessageReference,
     ChatReferenceKind,
 )
@@ -90,6 +91,7 @@ from node_api import (
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
     NodeBlueprintEntry,
+    NodeBlueprintFileEntry,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
     NodeChatRoomSnapshot,
@@ -150,6 +152,7 @@ __all__: tuple[str, ...] = (
     "ChatEvent",
     "ChatHub",
     "ChatLink",
+    "ChatMediaProvider",
     "ChatMessageReference",
     "ChatReferenceKind",
     "Checkbox",
@@ -159,7 +162,6 @@ __all__: tuple[str, ...] = (
     "DEFAULT_CHAT_AUTHOR_COLOR_HEX",
     "Enum",
     "GatewayBot",
-    "Generics",
     "Html",
     "Input",
     "Iterable",
@@ -185,6 +187,7 @@ __all__: tuple[str, ...] = (
     "NodeAppStateStreamEvent",
     "NodeAppTransitionState",
     "NodeBlueprintEntry",
+    "NodeBlueprintFileEntry",
     "NodeBlueprintList",
     "NodeBlueprintMutationResult",
     "NodeChatRoomSnapshot",

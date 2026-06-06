@@ -369,6 +369,18 @@ class App(Generic[ConfigT], ABC):
         return None
 
     @property
+    def supports_map(self) -> bool:
+        return self.public_map_url is not None
+
+    @property
+    def map_annotations_path(self) -> Path:
+        return self.directory / ".yukibot" / "map_annotations.json"
+
+    @property
+    def map_cache_path(self) -> Path:
+        return self.directory / ".yukibot" / "map_cache.json"
+
+    @property
     def has_mod_manager(self) -> Mod_Manager:
         if self.mods:
             return self.mods
@@ -486,6 +498,10 @@ class App(Generic[ConfigT], ABC):
     def supports_blueprints(self) -> bool:
         return False
 
+    @property
+    def default_blueprint_session_name(self) -> str | None:
+        return None
+
     def list_blueprint_files(self) -> tuple[AppBlueprintEntry, ...]:
         raise ValueError(f"{self.friendly} does not support blueprint files.")
 
@@ -496,6 +512,8 @@ class App(Generic[ConfigT], ABC):
         upload_name: str,
         source_path: Path,
         actor_user_id: int,
+        config_upload_name: str | None = None,
+        config_source_path: Path | None = None,
     ) -> AppBlueprintEntry:
         raise ValueError(f"{self.friendly} does not support blueprint uploads.")
 
@@ -560,6 +578,9 @@ class App(Generic[ConfigT], ABC):
 
     async def player_count(self) -> tuple[int, int] | None:
         return None
+
+    def connected_player_names(self) -> tuple[str, ...]:
+        return ()
 
     async def _tee(self, stream: IO[str] | None, dest: Path, label: str):
         if not stream:

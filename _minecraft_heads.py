@@ -5,6 +5,7 @@ import enum
 import logging
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 
@@ -33,6 +34,7 @@ _DEFAULT_SKIN_DOWNLOAD_BASE_URL: str = (
 _DEFAULT_SKIN_DOWNLOAD_TIMEOUT_SECONDS: float = 10.0
 _DEFAULT_SKIN_DIMENSIONS: tuple[int, int] = (64, 64)
 _PNG_SIGNATURE: bytes = b"\x89PNG\r\n\x1a\n"
+_MC_HEADS_AVATAR_URL_TEMPLATE: str = "https://mc-heads.net/avatar/{identifier}/32"
 _DEV_BYPASS_DEFAULT_SKIN_BY_LEVEL: dict[Power_Level, MinecraftDefaultSkin] = {
     Power_Level.guest: MinecraftDefaultSkin.SUNNY,
     Power_Level.visitor: MinecraftDefaultSkin.STEVE,
@@ -48,6 +50,13 @@ def minecraft_default_skin_for_dev_bypass_user(user_id: int) -> MinecraftDefault
     if level is None:
         return None
     return _DEV_BYPASS_DEFAULT_SKIN_BY_LEVEL.get(level)
+
+
+def minecraft_avatar_uri(identifier: str) -> str:
+    normalised_identifier: str = identifier.strip()
+    if not normalised_identifier:
+        raise ValueError("Minecraft avatar identifier must not be empty.")
+    return _MC_HEADS_AVATAR_URL_TEMPLATE.format(identifier=quote(normalised_identifier, safe=""))
 
 
 def minecraft_default_skin_head_data_uri(skin: MinecraftDefaultSkin) -> str | None:

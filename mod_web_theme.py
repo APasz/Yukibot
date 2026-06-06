@@ -942,7 +942,13 @@ class ModWebTheme:
                     width: 100%;
                 }}
                 .mod-mods-toolbar-actions {{
+                    flex: 0 1 auto;
+                    width: auto;
                     margin-left: 0;
+                }}
+                .mod-mods-toolbar-search {{
+                    flex: 999 1 24rem;
+                    min-width: min(24rem, 100%);
                 }}
                 .mod-toolbar-button {{
                     flex: 1 1 11rem;
@@ -2269,6 +2275,134 @@ class ModWebTheme:
                 .mod-badge.red {{ background: #3a1117 !important; border-color: #dc2626; color: #fecaca !important; }}
                 .mod-badge.warn {{ background: #22161a !important; border-color: #7f1d1d; color: #fca5a5 !important; }}
                 .mod-badge.grey {{ background: #18181f !important; border-color: #3f3f46; color: #d4d4d8 !important; }}
+                .mod-node-status-badge {{
+                    justify-content: center;
+                    min-width: 10.75rem;
+                }}
+                .mod-home-section-grid {{
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr);
+                    gap: 1.5rem;
+                }}
+                .mod-home-section {{
+                    min-width: 0;
+                }}
+                @media (min-width: 1280px) {{
+                    .mod-home-section-grid {{
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                    }}
+                }}
+                .mod-home-node-grid {{
+                    align-items: stretch;
+                }}
+                .mod-home-node-card {{
+                    min-width: min(19rem, 100%);
+                    flex: 1 1 19rem;
+                    border-radius: 0 !important;
+                    background: rgba(10, 10, 14, 0.86) !important;
+                    border: 1px solid #2f2f37 !important;
+                    box-shadow: none !important;
+                }}
+                .mod-home-node-card-black {{
+                    border-color: #4b5563 !important;
+                }}
+                .mod-home-node-card-purple {{
+                    border-color: rgba(124, 58, 237, 0.72) !important;
+                }}
+                .mod-home-node-card-red {{
+                    border-color: rgba(220, 38, 38, 0.78) !important;
+                }}
+                .mod-home-node-card-warn {{
+                    border-color: rgba(127, 29, 29, 0.82) !important;
+                }}
+                .mod-home-node-card-grey {{
+                    border-color: #3f3f46 !important;
+                }}
+                .mod-home-node-title {{
+                    color: var(--mod-text) !important;
+                    font-size: 0.98rem !important;
+                    font-weight: 900 !important;
+                    line-height: 1.1 !important;
+                }}
+                .mod-home-node-subtitle {{
+                    color: var(--mod-muted) !important;
+                    font-size: 0.74rem !important;
+                    font-weight: 700 !important;
+                    letter-spacing: 0.04em;
+                    text-transform: uppercase;
+                }}
+                .mod-home-node-metrics {{
+                    display: flex;
+                    flex-wrap: wrap;
+                    align-items: stretch;
+                    gap: 0.55rem 1rem;
+                }}
+                .mod-home-node-metric {{
+                    min-width: 0;
+                    max-width: 100%;
+                    align-items: center;
+                    gap: 0.55rem;
+                    flex: 0 1 auto;
+                    flex-wrap: nowrap !important;
+                }}
+                .mod-home-node-metric-icon,
+                .mod-home-node-running-icon {{
+                    font-size: 1rem !important;
+                    flex: 0 0 auto;
+                }}
+                .mod-home-node-metric-icon.mod-tone-black,
+                .mod-home-node-running-icon.mod-tone-black {{
+                    color: #9ca3af !important;
+                }}
+                .mod-home-node-metric-icon.mod-tone-purple,
+                .mod-home-node-running-icon.mod-tone-purple {{
+                    color: #a78bfa !important;
+                }}
+                .mod-home-node-metric-icon.mod-tone-red,
+                .mod-home-node-running-icon.mod-tone-red {{
+                    color: #f87171 !important;
+                }}
+                .mod-home-node-metric-icon.mod-tone-warn,
+                .mod-home-node-running-icon.mod-tone-warn {{
+                    color: #fca5a5 !important;
+                }}
+                .mod-home-node-metric-icon.mod-tone-grey,
+                .mod-home-node-running-icon.mod-tone-grey {{
+                    color: #a1a1aa !important;
+                }}
+                .mod-home-node-metric-value {{
+                    color: var(--mod-text) !important;
+                    font-size: 0.82rem !important;
+                    font-weight: 850 !important;
+                    line-height: 1.2 !important;
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }}
+                .mod-home-node-running {{
+                    min-width: 0;
+                    align-items: center;
+                    gap: 0.55rem;
+                    padding-top: 0.3rem;
+                    border-top: 1px solid rgba(63, 63, 70, 0.45);
+                    flex-wrap: nowrap !important;
+                }}
+                .mod-home-node-running-value {{
+                    color: var(--mod-muted) !important;
+                    font-size: 0.8rem !important;
+                    font-weight: 750 !important;
+                    line-height: 1.2 !important;
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }}
+                @media (max-width: 640px) {{
+                    .mod-home-node-card {{
+                        min-width: 100%;
+                    }}
+                }}
                 .mod-stat-grid {{ align-items: stretch; }}
                 .mod-stat-card {{
                     border-radius: 0 !important;
@@ -2623,11 +2757,67 @@ class ModWebTheme:
                     margin: 0;
                     max-width: 100%;
                 }}
+                .mod-chat-markup-heading {{
+                    margin: 0;
+                    max-width: 100%;
+                    color: #f5f3ff;
+                    font-weight: 950;
+                    letter-spacing: -0.02em;
+                    line-height: 1.08;
+                    text-wrap: balance;
+                }}
+                .mod-chat-markup-heading-1 {{
+                    font-size: 1.26rem;
+                }}
+                .mod-chat-markup-heading-2 {{
+                    font-size: 1.08rem;
+                }}
+                .mod-chat-markup-heading-3 {{
+                    font-size: 0.98rem;
+                    text-transform: uppercase;
+                    letter-spacing: 0.05em;
+                }}
+                .mod-chat-markup-subtext {{
+                    margin: 0;
+                    max-width: 100%;
+                    color: rgba(161, 161, 170, 0.9);
+                    font-size: 0.78rem;
+                    font-weight: 700;
+                    line-height: 1.28;
+                }}
+                .mod-chat-markup-list {{
+                    margin: 0;
+                    max-width: 100%;
+                    padding-left: 1.15rem;
+                }}
+                .mod-chat-markup-list + .mod-chat-markup-list {{
+                    margin-top: 0.2rem;
+                }}
+                .mod-chat-markup-list .mod-chat-markup-list {{
+                    margin-top: 0.18rem;
+                    padding-left: 1.1rem;
+                }}
+                .mod-chat-markup-list li {{
+                    margin: 0.08rem 0;
+                    padding-left: 0.08rem;
+                }}
                 .mod-chat-markup strong,
                 .mod-chat-markup em,
                 .mod-chat-markup u,
                 .mod-chat-markup s {{
                     color: inherit;
+                }}
+                .mod-chat-markup a {{
+                    color: #c4b5fd;
+                    text-decoration: underline;
+                    text-decoration-color: rgba(196, 181, 253, 0.58);
+                    text-underline-offset: 0.12rem;
+                    overflow-wrap: anywhere;
+                    word-break: break-word;
+                }}
+                .mod-chat-markup a:hover {{
+                    color: #ddd6fe;
+                    text-decoration-color: rgba(221, 214, 254, 0.86);
                 }}
                 .mod-chat-inline-code {{
                     display: inline-block;

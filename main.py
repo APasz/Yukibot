@@ -34,6 +34,14 @@ from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, Voice
 from config import Activity_Provider, Name_Cache
 from maintenance import MaintenanceService
 from node_api import RemoteRelayTTSForwarder
+from relay_notices import (
+    BotLifecycleNotice,
+    BotLifecycleStage,
+    RelayNotice,
+    RelayNoticeSeverity,
+    RelayNoticeSource,
+    render_system_notice_text,
+)
 from online import Online_Tracker
 from remote_node import RemoteNodeSupervisor
 from restart_targets import RestartTarget
@@ -92,6 +100,65 @@ async def _launch_restart_auto_app(
     log.info("Auto-launching: %s", auto_app.friendly)
     await app_manager.launch(auto_app)
     log.info("Auto-launched: %s", auto_app.friendly)
+
+
+def _build_startup_notice(
+    *,
+    auto_launch: RestartAutoLaunchSelection,
+    startup_disabled_lines: tuple[str, ...],
+    error_lines: tuple[str, ...],
+) -> BotLifecycleNotice:
+    severity = RelayNoticeSeverity.WARNING if startup_disabled_lines or error_lines else RelayNoticeSeverity.INFO
+    auto_launch_app_name = auto_launch.app.friendly if auto_launch.app is not None else None
+    return BotLifecycleNotice(
+        stage=BotLifecycleStage.STARTED,
+        source=RelayNoticeSource.BOT,
+        severity=severity,
+        debug_mode=config.IS_DEBUG,
+        auto_launch_app_name=auto_launch_app_name,
+        startup_disabled_lines=startup_disabled_lines,
+        error_lines=error_lines,
+    )
+
+
+def _build_shutdown_notice(*, started_at: datetime, now: datetime) -> BotLifecycleNotice:
+    uptime_seconds = max(0, int((now - started_at).total_seconds()))
+    return BotLifecycleNotice(
+        stage=BotLifecycleStage.STOPPING,
+        source=RelayNoticeSource.BOT,
+        uptime_seconds=uptime_seconds,
+    )
+
+
+def _build_bot_error_notice(error_text: str) -> BotLifecycleNotice:
+    summary = error_text.strip()
+    if not summary:
+        raise ValueError("Bot lifecycle error notice text must not be blank.")
+    return BotLifecycleNotice(
+        stage=BotLifecycleStage.ERROR,
+        source=RelayNoticeSource.BOT,
+        severity=RelayNoticeSeverity.ERROR,
+        summary=summary,
+    )
+
+
+async def _post_started_channel_notice(
+    bot: hikari.GatewayBot,
+    notice: RelayNotice,
+    *,
+    error_context: str,
+) -> None:
+    if not config.STARTED_CHANNEL:
+        return
+    flags = hikari.MessageFlag.SUPPRESS_NOTIFICATIONS
+    try:
+        await bot.rest.create_message(
+            config.STARTED_CHANNEL,
+            render_system_notice_text(notice),
+            flags=flags,
+        )
+    except Exception:
+        log.exception(error_context)
 
 
 class _CleanupDisk(Protocol):
@@ -443,16 +510,18 @@ def main():
         now = datetime.now().astimezone()
         due_warnings = maintenance.due_restart_warnings(now=now, available_targets=available_targets)
         for warning in due_warnings:
-            warning_notice = maintenance.format_restart_warning_notice(warning)
+            warning_notice = maintenance.build_restart_warning_notice(warning)
+            warning_text = render_system_notice_text(warning_notice)
             sent_count = await manager.notify_running_app_relays(
-                warning_notice,
+                warning_text,
+                notice=warning_notice,
             )
             auto_start_app: str | None = None
             tts_notice_count = 0
             if warning.lead_minutes == 1:
                 auto_start_app = manager.set_current_restart_auto_start_app()
                 if voice_tts is not None:
-                    tts_notice_count = await voice_tts.notify_connected_tts_channels(warning_notice)
+                    tts_notice_count = await voice_tts.notify_connected_tts_channels(warning_text)
             log.info(
                 "Maintenance.Warning; effective=%s due=%s lead=%sm slot=%s relays=%s auto_start=%s tts=%s",
                 warning.effective_target.value,
@@ -475,6 +544,7 @@ def main():
         maintenance.mark_triggered(due_targets, triggered_at=now)
         schedule = maintenance.schedule_for(effective_target)
         due_names = ", ".join(target.value for target in due_targets)
+        scheduled_for = now.replace(hour=schedule.hour, minute=schedule.minute, second=0, microsecond=0)
         log.critical(
             "Maintenance.Restart; effective=%s due=%s slot=%02d:%02d",
             effective_target.value,
@@ -488,27 +558,25 @@ def main():
                 log.warning("Skipping scheduled voice restart because the voice service is unavailable")
                 return
             summary = await reset_voice_runtime_services(voice_tts, music)
-            if config.STARTED_CHANNEL:
-                lines = [
-                    f"Scheduled maintenance completed: `{effective_target.value}` at `{schedule.hour:02d}:{schedule.minute:02d}`.",
-                    f"Matched targets: `{due_names}`",
-                    *voice_runtime_reset_lines(summary),
-                ]
-                await bot.rest.create_message(
-                    config.STARTED_CHANNEL,
-                    "\n".join(lines),
-                    flags=hikari.MessageFlag.SUPPRESS_NOTIFICATIONS,
-                )
+            completion_notice = maintenance.build_restart_completed_notice(
+                effective_target=effective_target,
+                matched_targets=due_targets,
+                scheduled_for=scheduled_for,
+                summary_lines=voice_runtime_reset_lines(summary),
+            )
+            await _post_started_channel_notice(bot, completion_notice, error_context="MAINTENANCE COMPLETE MESSAGE")
             return
 
+        restart_notice = maintenance.build_restart_executing_notice(
+            effective_target=effective_target,
+            matched_targets=due_targets,
+            scheduled_for=scheduled_for,
+        )
         await _sys.scheduled_restart(
             bot=bot,
             manager=manager,
             restart_type=effective_target.value,
-            reason=(
-                f"Scheduled maintenance restarting `{effective_target.value}`"
-                f" at `{schedule.hour:02d}:{schedule.minute:02d}`."
-            ),
+            reason=render_system_notice_text(restart_notice),
             message_channel_id=config.STARTED_CHANNEL,
         )
 
@@ -530,16 +598,12 @@ def main():
 
         silent = Path("silent_restart")
         if config.STARTED_CHANNEL and not silent.exists():
-            txt = ["Started: DEBUG" if config.IS_DEBUG else "Started"]
-            if auto_launch.started_notice_line is not None:
-                txt.append(auto_launch.started_notice_line)
-            txt.extend(app_manager.startup_disabled_notice_lines())
-            txt.extend(starting_xcp)
-            flags = hikari.MessageFlag.SUPPRESS_NOTIFICATIONS
-            try:
-                await bot.rest.create_message(config.STARTED_CHANNEL, "\n".join(txt), flags=flags)
-            except Exception:
-                log.exception("STARTED MESSAGE")
+            startup_notice = _build_startup_notice(
+                auto_launch=auto_launch,
+                startup_disabled_lines=app_manager.startup_disabled_notice_lines(),
+                error_lines=tuple(starting_xcp),
+            )
+            await _post_started_channel_notice(bot, startup_notice, error_context="STARTED MESSAGE")
         silent.unlink(missing_ok=True)
 
         rmid_file = Path("restart_message_id")
@@ -555,9 +619,8 @@ def main():
                 await _launch_restart_auto_app(app_manager, auto_launch.app)
             except Exception as xcp:
                 log.exception(f"AUTO_LAUNCH: {auto_launch.app}")
-                if config.STARTED_CHANNEL:
-                    flags = hikari.MessageFlag.SUPPRESS_NOTIFICATIONS
-                    await bot.rest.create_message(config.STARTED_CHANNEL, f"Error: {xcp}", flags=flags)
+                error_notice = _build_bot_error_notice(str(xcp))
+                await _post_started_channel_notice(bot, error_notice, error_context="AUTO LAUNCH ERROR MESSAGE")
 
         # await se_app.setup()
 
@@ -581,13 +644,8 @@ def main():
         is_silent_restart = config.IS_RESTARTING and Path("silent_restart").exists()
         if not config.STARTED_CHANNEL or is_silent_restart:
             return
-        rd = utilities.create_rdelta(start_time, datetime.now())
-        txt = f"Shutting Down; uptime: {utilities.format_rdelta(rd)}"
-        flags = hikari.MessageFlag.SUPPRESS_NOTIFICATIONS
-        try:
-            await bot.rest.create_message(config.STARTED_CHANNEL, txt, flags=flags)
-        except Exception:
-            log.exception("STOPPED MESSAGE")
+        shutdown_notice = _build_shutdown_notice(started_at=start_time, now=datetime.now())
+        await _post_started_channel_notice(bot, shutdown_notice, error_context="STOPPED MESSAGE")
 
     @bot.listen(hikari.GuildAvailableEvent)
     async def _on_guild(event: hikari.GuildAvailableEvent):

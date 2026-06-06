@@ -25,6 +25,7 @@ from _discord import (
 from _file import File_Utils
 from _minecraft_heads import (
     MinecraftDefaultSkin,
+    minecraft_avatar_uri,
     minecraft_default_skin_for_dev_bypass_user,
     minecraft_dev_bypass_head_data_uri,
 )
@@ -44,6 +45,7 @@ from chat_hub import (
     ChatMessageReference,
     ChatReferenceKind,
 )
+from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource
 
 
 def _make_attachment(*, title: str, filename: str, media_type: str | None) -> hikari.Attachment:
@@ -163,8 +165,12 @@ class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
     async def test_event_from_dc_bound_preserves_explicit_player_id(self) -> None:
         message = DC_Bound(
             cast(Any, SimpleNamespace(name="minecraft_alpha", scope="minecraft")),
-            DC_Bound.generics.join,
+            "Alice joined minecraft_alpha",
             "Alice",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+            ),
             player_id=42,
         )
 
@@ -173,7 +179,9 @@ class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.author.display_name, "Alice")
         self.assertEqual(event.author.id, "42")
         self.assertEqual(event.author.discord_user_id, 42)
-        self.assertTrue(event.is_template)
+        self.assertIsInstance(event.notice, PlayerSessionNotice)
+        assert isinstance(event.notice, PlayerSessionNotice)
+        self.assertIs(event.notice.action, PlayerSessionAction.JOINED)
 
     def test_minecraft_dev_bypass_skin_mapping_matches_expected_levels(self) -> None:
         self.assertEqual(
@@ -244,6 +252,58 @@ class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.author.avatar_uri, minecraft_dev_bypass_head_data_uri(discord_user_id))
         delivered.assert_awaited_once_with(event)
 
+    async def test_publish_web_chat_uses_minecraft_head_for_known_game_uuid(self) -> None:
+        relay = object.__new__(DC_Relay)
+        delivered = AsyncMock()
+        cast(Any, relay)._deliver_chat_event = delivered
+        cast(Any, relay)._chat_apps = {
+            "minecraft_alpha": SimpleNamespace(
+                scope="minecraft",
+                name_cache=SimpleNamespace(
+                    get_game_uuid=Mock(return_value="123e4567-e89b-12d3-a456-426614174000"),
+                    get_game_alias=Mock(return_value="AliceGame"),
+                ),
+            )
+        }
+
+        event = await relay.publish_web_chat(
+            room_id="minecraft_alpha",
+            session_id="session-1",
+            author_display_name="Tester",
+            author_id="42",
+            discord_user_id=42,
+            content="hello from web",
+        )
+
+        self.assertEqual(event.author.avatar_uri, minecraft_avatar_uri("123e4567-e89b-12d3-a456-426614174000"))
+        delivered.assert_awaited_once_with(event)
+
+    async def test_publish_web_chat_uses_minecraft_head_for_known_game_alias_without_uuid(self) -> None:
+        relay = object.__new__(DC_Relay)
+        delivered = AsyncMock()
+        cast(Any, relay)._deliver_chat_event = delivered
+        cast(Any, relay)._chat_apps = {
+            "minecraft_alpha": SimpleNamespace(
+                scope="minecraft",
+                name_cache=SimpleNamespace(
+                    get_game_uuid=Mock(return_value=None),
+                    get_game_alias=Mock(return_value="AliceGame"),
+                ),
+            )
+        }
+
+        event = await relay.publish_web_chat(
+            room_id="minecraft_alpha",
+            session_id="session-1",
+            author_display_name="Tester",
+            author_id="42",
+            discord_user_id=42,
+            content="hello from web",
+        )
+
+        self.assertEqual(event.author.avatar_uri, minecraft_avatar_uri("AliceGame"))
+        delivered.assert_awaited_once_with(event)
+
     async def test_publish_web_chat_does_not_use_default_head_outside_minecraft(self) -> None:
         relay = object.__new__(DC_Relay)
         delivered = AsyncMock()
@@ -272,8 +332,11 @@ class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
-            content="{player} joined {app}",
-            is_template=True,
+            content="Alex joined minecraft_alpha",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+            ),
         )
 
         result = await relay.publish_chat_event(event=event)
@@ -539,6 +602,34 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([variant.label for variant in next(iter(getattr(payload, "urls"))).variants], ["original"])
         enrich_mock.assert_not_awaited()
 
+    async def test_send_chat_event_to_app_renders_typed_notice_content(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay).bot = cast(hikari.GatewayBot, object())
+        receiver = _RecordingReceiver()
+        app = SimpleNamespace(
+            _running=True,
+            am_receiver=receiver,
+            friendly="Minecraft Alpha",
+            name_cache=SimpleNamespace(get_game_alias=Mock(return_value=None)),
+            scope="minecraft",
+        )
+        notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=RelayNoticeSource.WEB)
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.web_session("session-1"),
+            author=ChatAuthor(kind=ChatAuthorKind.WEB_USER, display_name="Tester"),
+            content="placeholder",
+            notice=notice,
+        )
+
+        await relay._send_chat_event_to_app(event, cast(Any, app))
+
+        payload = receiver.payload
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload.content, "Tester joined Minecraft Alpha")
+        self.assertIs(payload.notice, notice)
+
 
 class _NamesStub:
     def __init__(
@@ -616,6 +707,29 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         event = relay._event_from_app_bound(message, cast(Any, app))
 
         self.assertEqual(event.author.display_name, "AliceGame")
+
+    async def test_event_from_app_bound_uses_minecraft_head_for_known_discord_user(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay).names = _NamesStub(relay_display_name="AliceGame")
+        channel = hikari.TextableChannel(
+            app=cast(Any, object()),
+            id=hikari.Snowflake(321),
+            name="relay-chat",
+            type=1,
+        )
+        message = App_Bound(channel, "hello", 42, source_guild_id=hikari.Snowflake(100))
+        app = SimpleNamespace(
+            name="minecraft_alpha",
+            scope="minecraft",
+            name_cache=SimpleNamespace(
+                get_game_uuid=Mock(return_value="123e4567-e89b-12d3-a456-426614174000"),
+                get_game_alias=Mock(return_value="AliceGame"),
+            ),
+        )
+
+        event = relay._event_from_app_bound(message, cast(Any, app))
+
+        self.assertEqual(event.author.avatar_uri, minecraft_avatar_uri("123e4567-e89b-12d3-a456-426614174000"))
 
     async def test_deliver_chat_event_fans_out_targets_concurrently(self) -> None:
         relay = object.__new__(DC_Relay)
@@ -901,7 +1015,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embeds[0].description, "Stone Age")
         self.assertEqual(embeds[0].color, 0x336699)
 
-    async def test_discord_text_and_embeds_synthesise_join_embed_for_generic_events(self) -> None:
+    async def test_discord_text_for_explicit_player_embed_keeps_player_plate(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay)._chat_apps = {
             "minecraft_alpha": SimpleNamespace(friendly="Minecraft Alpha", manage_embed_color=0x22C55E),
@@ -911,8 +1025,30 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
-            content="{player} joined {app}",
-            is_template=True,
+            content="Advancement: Stone Age",
+            embed=ChatEmbed(title="Advancement", description="Stone Age", color=0x336699),
+        )
+
+        text, mentions = await relay._discord_text_for_event(event, guild_id=None)
+
+        self.assertEqual(text, "<Alex>")
+        self.assertEqual(mentions, set())
+
+    async def test_discord_text_and_embeds_synthesise_join_embed_for_typed_notice(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay)._chat_apps = {
+            "minecraft_alpha": SimpleNamespace(friendly="Minecraft Alpha", manage_embed_color=0x22C55E),
+        }
+
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            content="Alex joined Minecraft Alpha",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+            ),
         )
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=None)
@@ -1572,7 +1708,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         recorded_event = cast(Any, relay)._record_chat_event.call_args.args[0]
         self.assertEqual(recorded_event.room_id, "minecraft_beta")
 
-    async def test_on_dc_message_non_owner_sends_only_selected_default_app_to_game(self) -> None:
+    async def test_on_dc_message_non_owner_sends_all_running_shared_default_apps_to_game(self) -> None:
         relay = object.__new__(DC_Relay)
         relay.bot = cast(Any, object())
         relay._channel_objects = {}
@@ -1591,9 +1727,13 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         first_app = Mock()
         first_app.name = "minecraft_alpha"
         first_app.chat_channel_source = SimpleNamespace(value="default")
+        first_app._running = True
+        first_app.am_receiver = object()
         second_app = Mock()
         second_app.name = "minecraft_beta"
         second_app.chat_channel_source = SimpleNamespace(value="default")
+        second_app._running = True
+        second_app.am_receiver = object()
         DC_Relay._chat_channels = {channel_id: {cast(Any, second_app), cast(Any, first_app)}}
 
         ctx = SimpleNamespace(
@@ -1621,10 +1761,69 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
 
         cast(Any, relay)._deliver_chat_event.assert_not_awaited()
         self.assertEqual(cast(Any, relay)._record_chat_event.call_count, 2)
-        cast(Any, relay)._send_chat_event_to_app.assert_awaited_once()
-        sent_event, sent_app = cast(Any, relay)._send_chat_event_to_app.await_args.args
-        self.assertEqual(sent_event.room_id, "minecraft_alpha")
-        self.assertIs(sent_app, first_app)
+        self.assertEqual(cast(Any, relay)._send_chat_event_to_app.await_count, 2)
+        sent_calls = cast(Any, relay)._send_chat_event_to_app.await_args_list
+        self.assertEqual([call.args[0].room_id for call in sent_calls], ["minecraft_alpha", "minecraft_beta"])
+        self.assertEqual([call.args[1] for call in sent_calls], [first_app, second_app])
+
+    async def test_on_dc_message_owner_sends_non_selected_running_shared_default_app_to_game(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay.bot = cast(Any, object())
+        relay._channel_objects = {}
+        relay.seen_messages_id = set()
+        relay.seen_messages_order = deque()
+        setattr(cast(Any, relay), "names", _NamesStub())
+        cast(Any, relay)._chat_author_color = AsyncMock(return_value=None)
+        cast(Any, relay)._owns_shared_relay_channel = Mock(return_value=True)
+        cast(Any, relay)._is_active_app_chat_channel = AsyncMock(return_value=True)
+        cast(Any, relay)._deliver_chat_event = AsyncMock()
+        cast(Any, relay)._record_chat_event = Mock()
+        cast(Any, relay)._send_chat_event_to_app = AsyncMock()
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
+        cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
+        channel_id = hikari.Snowflake(101)
+        first_app = Mock()
+        first_app.name = "minecraft_alpha"
+        first_app.chat_channel_source = SimpleNamespace(value="default")
+        first_app._running = False
+        first_app.am_receiver = None
+        second_app = Mock()
+        second_app.name = "sevendays_alpha"
+        second_app.chat_channel_source = SimpleNamespace(value="default")
+        second_app._running = True
+        second_app.am_receiver = object()
+        DC_Relay._chat_channels = {channel_id: {cast(Any, second_app), cast(Any, first_app)}}
+
+        ctx = SimpleNamespace(
+            is_human=True,
+            author=SimpleNamespace(is_bot=False),
+            channel_id=channel_id,
+            content="hello",
+            message_id=hikari.Snowflake(99),
+            guild_id=hikari.Snowflake(1),
+            author_id=hikari.Snowflake(456),
+            message=SimpleNamespace(
+                author=SimpleNamespace(is_bot=False),
+                type=hikari.MessageType.DEFAULT,
+                attachments=(),
+                get_member_mentions=Mock(return_value=hikari.UNDEFINED),
+                user_mentions=hikari.UNDEFINED,
+                message_reference=None,
+            ),
+        )
+
+        try:
+            await relay.on_dc_message(cast(Any, ctx))
+        finally:
+            DC_Relay._chat_channels.clear()
+
+        cast(Any, relay)._deliver_chat_event.assert_awaited_once()
+        delivered_event = cast(Any, relay)._deliver_chat_event.await_args.args[0]
+        self.assertEqual(delivered_event.room_id, "minecraft_alpha")
+        cast(Any, relay)._record_chat_event.assert_called_once()
+        recorded_event = cast(Any, relay)._record_chat_event.call_args.args[0]
+        self.assertEqual(recorded_event.room_id, "sevendays_alpha")
+        cast(Any, relay)._send_chat_event_to_app.assert_awaited_once_with(recorded_event, second_app)
 
     async def test_on_dc_message_materialises_downloads_only_for_delivery_branch(self) -> None:
         relay = object.__new__(DC_Relay)

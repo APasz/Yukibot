@@ -24,7 +24,6 @@ from _discord import (
     render_plain_reference_prefix,
 )
 from _file import File_Utils
-from _relay_embeds import build_app_relay_embed
 from _security import Power_Level
 from apps._app import AM_Receiver, App, RelayAdvancementTerms
 from apps._config import App_Config, AppVersion, Mod_Config
@@ -53,6 +52,17 @@ from apps._settings import (
 from apps._tailer import Tailer
 from apps._updater import Update_Manager
 from config import Activity_Manager
+from relay_notices import (
+    GameDeathKind,
+    GameDeathNotice,
+    GameProgressKind,
+    GameProgressNotice,
+    PlayerSessionAction,
+    PlayerSessionNotice,
+    RelayNoticeSource,
+    notice_embed_spec,
+    render_notice_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -762,6 +772,9 @@ class Factorio(App[App_Config]):
     async def player_count(self) -> tuple[int, int] | None:
         return await self._players.count()
 
+    def connected_player_names(self) -> tuple[str, ...]:
+        return self._players.connected_player_names()
+
 
 class Factorio_Updater(Update_Manager):
     def __init__(self, app: Factorio, *, base: bool = False, mods: bool = False) -> None:
@@ -896,22 +909,50 @@ class Matchers:
         if match:
             mode, player, cause = match.groups()
             log.debug(f"Match_Death: {player=} | {cause=} | {mode=}")
-            fmt: dict[str, str] = {"cause": str(cause).replace("-", " ").title()}
-            if cause and mode == "PVE":
-                DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.died_pve, player, extra_fmt=fmt))
-            elif cause and mode == "PVP":
-                DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.died_pvp, player, extra_fmt=fmt))
-            elif cause:
-                DC_Relay.add(DC_Bound(self.app, cause, player))
+            detail_text = str(cause).replace("-", " ").title() if cause else "died"
+            if mode == "PVE":
+                detail_text = f"died to {detail_text}" if cause else "died"
+                death_kind = GameDeathKind.PVE
+            elif mode == "PVP":
+                detail_text = f"killed by {detail_text}" if cause else "killed by another player"
+                death_kind = GameDeathKind.PVP
+            else:
+                death_kind = GameDeathKind.UNKNOWN
+            notice = GameDeathNotice(
+                death_kind=death_kind,
+                detail_text=detail_text,
+                source=RelayNoticeSource.APP_LOG,
+            )
+            app_friendly = getattr(self.app, "friendly", self.app.name)
+            DC_Relay.add(
+                DC_Bound(
+                    self.app,
+                    render_notice_text(notice, author_name=player, app_name=app_friendly),
+                    player,
+                    notice=notice,
+                )
+            )
 
     async def match_research(self, line: str) -> None:
         if match := _FACTORIO_RESEARCH_FINISHED_RE.search(line):
             research_name: str = _render_factorio_research_name(match.group("research"))
             research_label = self.app.relay_advancement_term
-            relay_embed: RelayEmbedPayload = build_app_relay_embed(
-                self.app,
-                title=research_label,
-                description=research_name,
+            app_friendly = getattr(self.app, "friendly", self.app.name)
+            notice = GameProgressNotice(
+                progress_kind=GameProgressKind.RESEARCH,
+                label=research_label,
+                title=research_name,
+                source=RelayNoticeSource.APP_LOG,
+            )
+            embed_spec = notice_embed_spec(notice, app_name=app_friendly, author_name="System")
+            relay_embed = (
+                None
+                if embed_spec is None
+                else RelayEmbedPayload(
+                    title=embed_spec.title,
+                    description=embed_spec.description,
+                    color=self.app.manage_embed_color,
+                )
             )
             DC_Relay.add(
                 DC_Bound(
@@ -919,6 +960,7 @@ class Matchers:
                     f"{research_label}: {research_name}",
                     "System",
                     relay_embed=relay_embed,
+                    notice=notice,
                 )
             )
 
@@ -999,11 +1041,29 @@ class Players:
                 joins, leaves = is_join(players)
 
                 for player in leaves:
-                    DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.left, player))
+                    notice = PlayerSessionNotice(action=PlayerSessionAction.LEFT, source=RelayNoticeSource.APP_POLL)
+                    app_friendly = getattr(self.app, "friendly", self.app.name)
+                    DC_Relay.add(
+                        DC_Bound(
+                            self.app,
+                            render_notice_text(notice, author_name=player, app_name=app_friendly),
+                            player,
+                            notice=notice,
+                        )
+                    )
                     self._players.discard(player)
                     log.debug(f"Players.discard.{self._players=}")
                 for player in joins:
-                    DC_Relay.add(DC_Bound(self.app, DC_Bound.generics.join, player))
+                    notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=RelayNoticeSource.APP_POLL)
+                    app_friendly = getattr(self.app, "friendly", self.app.name)
+                    DC_Relay.add(
+                        DC_Bound(
+                            self.app,
+                            render_notice_text(notice, author_name=player, app_name=app_friendly),
+                            player,
+                            notice=notice,
+                        )
+                    )
                     self._players.add(player)
                     log.debug(f"Players.add.{self._players=}")
 
@@ -1020,6 +1080,9 @@ class Players:
         if self._online is not None and self._max is not None:
             return (self._online, self._max)
         return None
+
+    def connected_player_names(self) -> tuple[str, ...]:
+        return tuple[str, ...](sorted(self._players, key=str.casefold))
 
 
 # AiviA APasz

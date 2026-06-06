@@ -8,6 +8,7 @@ from .runtime_imports import (
     ChatAuthorKind,
     ChatEndpointKind,
     ChatEvent,
+    ChatReferenceKind,
     Enum,
     Literal,
     NodeAppMutationAction,
@@ -77,6 +78,7 @@ class _ModWebAppHeroRuntimeDetails:
     status_text: str
     status_tone: BadgeTone
     badges: tuple[_ModWebBadgeSpec, ...] = ()
+    player_count_badge: _ModWebBadgeSpec | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +88,7 @@ class _ModWebAppRuntimeState:
     transition_state: NodeAppTransitionState
     player_count: int | None
     player_capacity: int | None
+    connected_player_names: tuple[str, ...]
     runtime_fault: AppRuntimeFault | None
 
 
@@ -206,6 +209,17 @@ class _ModWebFakeChatMessageMode(Enum):
     LEAVE = "leave"
     DEATH = "death"
     PVP_KILL = "pvp_kill"
+    ADVANCEMENT = "advancement"
+    GOAL = "goal"
+    CHALLENGE = "challenge"
+    RESEARCH = "research"
+    GAME_EVENT = "game_event"
+    APP_STARTED = "app_started"
+    APP_STOPPED = "app_stopped"
+    APP_CRASHED = "app_crashed"
+    MAINTENANCE_WARNING = "maintenance_warning"
+    BOT_STARTED = "bot_started"
+    BOT_ERROR = "bot_error"
     EMBED = "embed"
 
 
@@ -215,12 +229,21 @@ class _ModWebFakeChatPreviewState:
     source_kind: ChatEndpointKind = ChatEndpointKind.APP
     author_kind: ChatAuthorKind = ChatAuthorKind.GAME_PLAYER
     author_name: str = "Alex"
+    author_color_hex: str = ""
+    author_avatar_uri: str = ""
     message_mode: _ModWebFakeChatMessageMode = _ModWebFakeChatMessageMode.TEXT
     content_text: str = "hello from preview"
     detail_text: str = "Skeleton"
     embed_title: str = "Advancement"
     embed_description: str = "Stone Age"
     source_label: str = ""
+    reference_kind: ChatReferenceKind = ChatReferenceKind.NONE
+    reference_author_name: str = "Taylor"
+    reference_content: str = "Can you check this?"
+    link_url: str = ""
+    link_label: str = "preview.png"
+    attachment_url: str = ""
+    attachment_name: str = "preview.png"
 
 
 class ModDownloadKind(Enum):
@@ -248,9 +271,11 @@ class ModWebAppLink:
     transition_state: NodeAppTransitionState = NodeAppTransitionState.NONE
     player_count: int | None = None
     player_capacity: int | None = None
+    connected_player_names: tuple[str, ...] = ()
     runtime_fault: AppRuntimeFault | None = None
     saves_api_url: str | None = None
     settings_api_url: str | None = None
+    map_url: str | None = field(default=None, kw_only=True)
     supports_blueprints: bool = field(default=False, kw_only=True)
     supports_console_actions: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
@@ -267,6 +292,7 @@ class ModWebNodeLink:
     api_base_url: str
     api_url: str
     is_current: bool
+    latency_probe_url: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +330,9 @@ class ModWebBasePageModel:
     settings: NodeSettingList | None
     console_actions: NodeConsoleActionList | None = field(default=None, kw_only=True)
     blueprints: NodeBlueprintList | None = field(default=None, kw_only=True)
+    map_url: str | None = field(default=None, kw_only=True)
+    map_api_url: str | None = field(default=None, kw_only=True)
+    can_write_map_annotations: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
     tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
@@ -389,6 +418,7 @@ class ModWebAppTabContext:
     app_version: str | None = None
     mod_names: tuple[str, ...] = ()
     settings: tuple[ModWebAppTabSettingSnapshot, ...] = ()
+    supports_map: bool = False
     supports_blueprints: bool = False
 
     def has_mod(self, mod_name: str) -> bool:

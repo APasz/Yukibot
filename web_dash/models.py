@@ -56,10 +56,12 @@ from .runtime_imports import (
     Response,
     Timer,
     Utilities,
+    aiohttp,
     asyncio,
     cast,
     config,
     issue_node_token,
+    json,
     quote,
     read_json_object,
     requests,
@@ -151,6 +153,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 settings=settings,
                 console_actions=console_actions,
                 blueprints=blueprints,
+                map_url=app.public_map_url,
+                map_api_url=(
+                    self._node_api.map_api_url(app.name, base_url=_SAME_ORIGIN_NODE_API_BASE) if app.supports_map else None
+                ),
+                can_write_map_annotations=app.supports_map and can_manage_app,
                 supports_chat=app.supports_chat_relay,
                 chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
                 download_all_url=self._node_api.mod_download_url(
@@ -239,6 +246,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 settings=settings,
                 console_actions=console_actions,
                 blueprints=blueprints,
+                map_url=app.public_map_url,
+                map_api_url=(
+                    self._node_api.map_api_url(app.name, base_url=_SAME_ORIGIN_NODE_API_BASE) if app.supports_map else None
+                ),
+                can_write_map_annotations=app.supports_map and can_manage_app,
                 supports_chat=app.supports_chat_relay,
                 chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
             )
@@ -260,6 +272,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         blueprints: NodeBlueprintList | None,
         settings: NodeSettingList | None,
         console_actions: NodeConsoleActionList | None,
+        map_url: str | None,
+        can_write_map_annotations: bool,
         supports_chat: bool,
         chat_url: str | None,
         app_start_blocked: bool,
@@ -287,6 +301,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 settings=settings,
                 console_actions=console_actions,
                 blueprints=blueprints,
+                map_url=map_url,
+                map_api_url=f"{app_path}/map" if map_url is not None else None,
+                can_write_map_annotations=map_url is not None and can_write_map_annotations,
                 supports_chat=supports_chat,
                 chat_url=chat_url,
                 download_all_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'false'})}",
@@ -317,11 +334,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
         blueprints: NodeBlueprintList | None,
         settings: NodeSettingList | None,
         console_actions: NodeConsoleActionList | None,
+        map_url: str | None,
+        can_write_map_annotations: bool,
         supports_chat: bool,
         chat_url: str | None,
         app_stats: NodeAppRuntimeSummary | None,
         app_start_blocked: bool,
     ) -> ModWebOverviewPageModel:
+        app_path: str = f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node.node_name, safe='')}/apps/{quote(app_name, safe='')}"
         return self._page_model_with_tabs(
             ModWebOverviewPageModel(
                 node_name=node.node_name,
@@ -341,6 +361,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 settings=settings,
                 console_actions=console_actions,
                 blueprints=blueprints,
+                map_url=map_url,
+                map_api_url=f"{app_path}/map" if map_url is not None else None,
+                can_write_map_annotations=map_url is not None and can_write_map_annotations,
                 supports_chat=supports_chat,
                 chat_url=chat_url,
             )
@@ -355,6 +378,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             api_base_url=_SAME_ORIGIN_NODE_API_BASE,
             api_url=self._node_api.apps_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
             is_current=True,
+            latency_probe_url=self._node_api.ping_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
         )
         links[current.node_name.casefold()] = current
 
@@ -373,6 +397,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 api_base_url=mod_web.node_api_base_url.rstrip("/"),
                 api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
                 is_current=False,
+                latency_probe_url=self._node_api.ping_url(base_url=mod_web.node_api_base_url),
             )
         return tuple(links.values())
 
@@ -407,6 +432,21 @@ class ModWebModelsMixin(ModWebServiceSupport):
             user=user,
             timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
         )
+        return self._remote_apps_from_payload(payload)
+
+    async def _remote_apps_async(self, node: ModWebNodeLink, user: ModWebUser) -> tuple[NodeAppEntry, ...]:
+        payload: dict[str, object] = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/apps",
+            scopes=(NodeApiScope.APPS_READ,),
+            user=user,
+            timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
+        )
+        return self._remote_apps_from_payload(payload)
+
+    @staticmethod
+    def _remote_apps_from_payload(payload: Mapping[str, object]) -> tuple[NodeAppEntry, ...]:
         raw_apps: object | None = payload.get("apps")
         if not isinstance(raw_apps, list):
             raise RuntimeError("Remote node apps response did not include an apps list.")
@@ -418,6 +458,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
     def _remote_app_entry(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeAppEntry:
         key: str = app_name.casefold()
         for entry in self._remote_apps(node, user):
+            if entry.name.casefold() == key:
+                return entry
+        raise RuntimeError(f"Remote node did not expose app {app_name!r}.")
+
+    async def _remote_app_entry_async(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeAppEntry:
+        key: str = app_name.casefold()
+        for entry in await self._remote_apps_async(node, user):
             if entry.name.casefold() == key:
                 return entry
         raise RuntimeError(f"Remote node did not expose app {app_name!r}.")
@@ -542,8 +589,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         node: ModWebNodeLink,
         app_name: str,
         session_name: str,
-        upload_path: Path,
-        upload_name: str,
+        upload_files: tuple[tuple[str, Path], ...],
         user: ModWebUser,
     ) -> NodeBlueprintMutationResult:
         token: str = self._remote_token(
@@ -553,17 +599,25 @@ class ModWebModelsMixin(ModWebServiceSupport):
             user=user,
         )
         url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/blueprints/upload"
+        opened_handles: list[object] = []
         try:
-            with upload_path.open("rb") as handle:
-                response: Response = requests.post(
-                    url,
-                    data={"session_name": session_name, "filename": upload_name},
-                    files={"upload": (upload_name, handle, "application/octet-stream")},
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                )
+            request_files: list[tuple[str, tuple[str, object, str]]] = []
+            for upload_name, upload_path in upload_files:
+                handle = upload_path.open("rb")
+                opened_handles.append(handle)
+                request_files.append(("upload", (upload_name, handle, "application/octet-stream")))
+            response: Response = requests.post(
+                url,
+                data={"session_name": session_name},
+                files=request_files,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+            )
         except requests.RequestException as xcp:
             raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        finally:
+            for handle in opened_handles:
+                handle.close()
         if response.status_code >= 400:
             raise RuntimeError(
                 f"Remote node rejected the request: url={url} status={response.status_code} "
@@ -623,6 +677,21 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeAppRuntimeSummary.from_mapping(payload)
 
+    async def _remote_app_runtime_summary_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeAppRuntimeSummary:
+        payload: dict[str, object] = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/runtime",
+            scopes=(NodeApiScope.MODS_READ,),
+            user=user,
+        )
+        return NodeAppRuntimeSummary.from_mapping(payload)
+
     def _remote_node_system_summary(self, node: ModWebNodeLink, user: ModWebUser) -> NodeSystemSummary:
         payload: dict[str, object] = self._remote_json(
             node=node,
@@ -634,15 +703,40 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSystemSummary.from_mapping(payload)
 
+    async def _remote_node_system_summary_async(self, node: ModWebNodeLink, user: ModWebUser) -> NodeSystemSummary:
+        payload: dict[str, object] = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/system",
+            scopes=(NodeApiScope.APPS_READ,),
+            user=user,
+            timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
+        )
+        return NodeSystemSummary.from_mapping(payload)
+
+    async def _remote_node_system_summary_or_none_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        *,
+        error_context: str,
+    ) -> NodeSystemSummary | None:
+        try:
+            return await self._remote_node_system_summary_async(node, user)
+        except Exception as xcp:
+            if not (self._shutting_down or config.IS_SHUTTINGDOWN):
+                log.warning("%s: node=%s error=%s", error_context, node.node_name, xcp)
+            return None
+
     @staticmethod
     def _app_start_blocked_remote(
-        *, app_friendly: str, app_stats: NodeAppRuntimeSummary | None, running_names: tuple[str, ...]
+        *, app_name: str, app_stats: NodeAppRuntimeSummary | None, running_app_ids: tuple[str, ...]
     ) -> bool:
         if app_stats is not None and app_stats.running:
             return False
-        if not running_names:
+        if not running_app_ids:
             return False
-        return app_friendly not in running_names
+        return app_name not in running_app_ids
 
     def _remote_config_content(
         self,
@@ -815,6 +909,106 @@ class ModWebModelsMixin(ModWebServiceSupport):
         except ValueError as xcp:
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
         return _json_object(payload, context="Remote node response")
+
+    async def _remote_json_async(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str | None,
+        path: str,
+        scopes: tuple[NodeApiScope, ...],
+        user: ModWebUser,
+        method: str = "GET",
+        json_payload: Mapping[str, object] | None = None,
+        timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> dict[str, object]:
+        token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
+        url: str = f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        request_kwargs: dict[str, object] = {
+            "headers": {"Authorization": f"Bearer {token}"},
+        }
+        if method != "GET":
+            request_kwargs["json"] = _json_request_object(json_payload)
+        try:
+            async with aiohttp.ClientSession(timeout=self._aiohttp_client_timeout(timeout)) as session:
+                async with session.request(
+                    method,
+                    url,
+                    **request_kwargs,
+                ) as response:
+                    if response.status >= 400:
+                        raise RuntimeError(
+                            f"Remote node rejected the request: url={url} status={response.status} "
+                            f"detail={await self._aiohttp_response_detail(response)}"
+                        )
+                    try:
+                        payload: object = cast(object, await response.json())
+                    except (aiohttp.ContentTypeError, ValueError, json.JSONDecodeError) as xcp:
+                        raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        return _json_object(payload, context="Remote node response")
+
+    async def _remote_bytes_async(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str | None,
+        path: str,
+        scopes: tuple[NodeApiScope, ...],
+        user: ModWebUser,
+        timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> tuple[bytes, str | None, tuple[tuple[str, str], ...]]:
+        token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
+        url: str = f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        try:
+            async with aiohttp.ClientSession(timeout=self._aiohttp_client_timeout(timeout)) as session:
+                async with session.get(url, headers={"Authorization": f"Bearer {token}"}) as response:
+                    if response.status >= 400:
+                        raise RuntimeError(
+                            f"Remote node rejected the request: url={url} status={response.status} "
+                            f"detail={await self._aiohttp_response_detail(response)}"
+                        )
+                    content = await response.read()
+                    media_type = response.headers.get("Content-Type")
+                    forwarded_headers = tuple(
+                        (header_name, header_value)
+                        for header_name in ("Cache-Control", "ETag", "Last-Modified", "Expires")
+                        if (header_value := response.headers.get(header_name))
+                    )
+                    return content, media_type, forwarded_headers
+        except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+
+    @staticmethod
+    def _aiohttp_client_timeout(timeout: float | tuple[float, float]) -> aiohttp.ClientTimeout:
+        if isinstance(timeout, tuple):
+            connect_timeout, read_timeout = timeout
+            return aiohttp.ClientTimeout(
+                total=connect_timeout + read_timeout,
+                connect=connect_timeout,
+                sock_connect=connect_timeout,
+                sock_read=read_timeout,
+            )
+        return aiohttp.ClientTimeout(
+            total=timeout,
+            connect=timeout,
+            sock_connect=timeout,
+            sock_read=timeout,
+        )
+
+    @staticmethod
+    async def _aiohttp_response_detail(response: aiohttp.ClientResponse) -> str:
+        response_text: str = await response.text()
+        try:
+            payload: object = cast(object, json.loads(response_text))
+        except ValueError:
+            return response_text or response.reason
+        if isinstance(payload, Mapping):
+            detail: object | None = cast(Mapping[object, object], payload).get("detail")
+            if isinstance(detail, str) and detail:
+                return detail
+        return response_text or response.reason
 
     @staticmethod
     async def _persist_uploaded_file(upload_file: "FileUpload") -> Path:
@@ -1230,16 +1424,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 )
 
         async def _remote_summary(index: int, section: ModWebNodeAppSection) -> tuple[int, ModWebHomeNodeSummary]:
-            try:
-                system_summary: NodeSystemSummary | None = await asyncio.to_thread(
-                    self._remote_node_system_summary, section.node, user
-                )
-            except Exception as xcp:
-                if not (self._shutting_down or config.IS_SHUTTINGDOWN):
-                    log.warning(
-                        "Remote mod web home system summary failed: node=%s error=%s", section.node.node_name, xcp
-                    )
-                system_summary = None
+            system_summary = await self._remote_node_system_summary_or_none_async(
+                section.node,
+                user,
+                error_context="Remote mod web home system summary failed",
+            )
             return (
                 index,
                 ModWebHomeNodeSummary(

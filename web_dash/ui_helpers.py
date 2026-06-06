@@ -4,14 +4,18 @@ from typing import TYPE_CHECKING
 
 from .runtime_imports import (
     BadgeTone,
+    Html,
     Label,
     MOD_WEB_ACTION_BASE_CLASSES,
     Request,
+    Tooltip,
     apply_mod_web_theme,
     config,
+    escape,
     json,
     mod_web_badge_class,
     parse_qsl,
+    cast,
     urlencode,
     urlsplit,
     urlunsplit,
@@ -44,11 +48,12 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         tone: BadgeTone,
         url: str | None = None,
         tooltip_text: str | None = None,
-    ) -> Label:
-        extra_classes = "cursor-pointer" if url is not None else ""
-        badge = self._badge(ui=ui, text=text, tone=tone, extra_classes=extra_classes)
-        if url is not None:
-            badge.on("click", lambda _=None, target_url=url: ui.navigate.to(target_url))
+        extra_classes: str = "",
+    ) -> "Element":
+        if url is None:
+            badge = cast("Element", self._badge(ui=ui, text=text, tone=tone, extra_classes=extra_classes))
+        else:
+            badge = self._badge_link(ui=ui, text=text, tone=tone, url=url, extra_classes=extra_classes)
         if tooltip_text is not None:
             self._attach_text_tooltip(ui=ui, target=badge, text=tooltip_text)
         return badge
@@ -109,6 +114,37 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
             link.props('target="_blank" rel="noopener noreferrer"')
         if stop_propagation:
             link.on("click", js_handler="(event) => event.stopPropagation()")
+
+    @staticmethod
+    def _attach_html_tooltip(*, ui: ModWebUi, target: "Element", html: str = "") -> tuple[Tooltip, Html]:
+        with target:
+            with ui.tooltip() as tooltip:
+                tooltip_content = cast(Html, ui.html(html))
+        return tooltip, tooltip_content
+
+    @staticmethod
+    def _set_html_tooltip_state(tooltip: Tooltip, tooltip_content: Html, html: str) -> None:
+        tooltip_content.set_content(html)
+        tooltip_content.update()
+        tooltip.update()
+
+    @staticmethod
+    def _tooltip_lines_html(lines: tuple[str, ...]) -> str | None:
+        tooltip_lines: tuple[str, ...] = tuple[str, ...](line for line in lines if line.strip())
+        if not tooltip_lines:
+            return None
+        return "<br>".join(escape(line) for line in tooltip_lines)
+
+    def _player_count_tooltip_html(
+        self,
+        *,
+        player_count: int | None,
+        player_capacity: int | None,
+        connected_player_names: tuple[str, ...],
+    ) -> str | None:
+        if player_count is None or player_capacity is None:
+            return None
+        return self._tooltip_lines_html(connected_player_names)
 
     @staticmethod
     def _app_list_api_actions_enabled(request: Request) -> bool:

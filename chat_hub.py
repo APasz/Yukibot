@@ -10,6 +10,12 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from config import Singleton
+from relay_notices import (
+    RelayNotice,
+    relay_notice_from_mapping,
+    relay_notice_to_mapping,
+    render_notice_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -434,8 +440,7 @@ class ChatEvent:
     links: tuple[ChatLink, ...] = ()
     reference_kind: ChatReferenceKind = ChatReferenceKind.NONE
     reference: ChatMessageReference | None = None
-    is_template: bool = False
-    template_values: Mapping[str, str] = field(default_factory=dict)
+    notice: RelayNotice | None = None
     embed: ChatEmbed | None = None
     source_guild_id: int | None = None
     source_channel_id: int | None = None
@@ -448,14 +453,16 @@ class ChatEvent:
         if self.reference is not None and self.reference_kind is ChatReferenceKind.NONE:
             raise ValueError("Chat reference kind must not be none when a reference is present.")
 
+    def resolved_notice(self) -> RelayNotice | None:
+        return self.notice
+
     def render_content(self, *, player_name: str | None = None, app_name: str | None = None) -> str:
-        if not self.is_template:
-            return self.content
         resolved_player_name = player_name or self.author.display_name
         resolved_app_name = app_name or self.room_id
-        return self.content.format_map(
-            {"player": resolved_player_name, "app": resolved_app_name} | dict(self.template_values)
-        )
+        notice = self.resolved_notice()
+        if notice is not None:
+            return render_notice_text(notice, author_name=resolved_player_name, app_name=resolved_app_name)
+        return self.content
 
     def to_reference(self, *, player_name: str | None = None, app_name: str | None = None) -> ChatMessageReference:
         preview_content = self.embed.description.strip() if self.embed is not None else ""
@@ -493,17 +500,11 @@ class ChatEvent:
             reference_kind = ChatReferenceKind(reference_kind_value)
         except ValueError as xcp:
             raise ValueError("reference_kind is invalid.") from xcp
-        raw_is_template = payload.get("is_template", False)
-        if not isinstance(raw_is_template, bool):
-            raise ValueError("is_template is invalid.")
-        raw_template_values = payload.get("template_values", {})
-        if not isinstance(raw_template_values, Mapping):
-            raise ValueError("template_values are invalid.")
-        template_values: dict[str, str] = {}
-        for key, value in raw_template_values.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                raise ValueError("template_values are invalid.")
-            template_values[key] = value
+        raw_notice = payload.get("notice")
+        if raw_notice is not None and not isinstance(raw_notice, Mapping):
+            raise ValueError("notice is invalid.")
+        if "is_template" in payload or "template_values" in payload:
+            raise ValueError("Legacy template chat event payloads are no longer supported.")
         raw_created_at = payload.get("created_at", time.time())
         if isinstance(raw_created_at, bool) or not isinstance(raw_created_at, (int, float)):
             raise ValueError("created_at is invalid.")
@@ -556,8 +557,7 @@ class ChatEvent:
             links=tuple(links),
             reference_kind=reference_kind,
             reference=ChatMessageReference.from_mapping(raw_reference) if raw_reference is not None else None,
-            is_template=raw_is_template,
-            template_values=template_values,
+            notice=relay_notice_from_mapping(raw_notice) if raw_notice is not None else None,
             embed=ChatEmbed.from_mapping(raw_embed) if raw_embed is not None else None,
             source_guild_id=raw_source_guild_id,
             source_channel_id=raw_source_channel_id,
@@ -577,8 +577,7 @@ class ChatEvent:
             "links": [link.to_mapping() for link in self.links],
             "reference_kind": self.reference_kind.value,
             "reference": self.reference.to_mapping() if self.reference is not None else None,
-            "is_template": self.is_template,
-            "template_values": dict(self.template_values),
+            "notice": relay_notice_to_mapping(self.notice) if self.notice is not None else None,
             "embed": self.embed.to_mapping() if self.embed is not None else None,
             "source_guild_id": self.source_guild_id,
             "source_channel_id": self.source_channel_id,

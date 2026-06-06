@@ -59,21 +59,35 @@ class ModWebTabsMixin(ModWebServiceSupport):
         is_detail_page: bool,
     ) -> tuple[ModWebAppTabDefinition, ...]:
         del is_detail_page
-        if not context.supports_blueprints:
-            return ()
-        return (
-            ModWebAppTabDefinition.custom(
-                tab_id="blueprints",
-                label="Blueprints",
-                page_order=450,
-                app_card_order=650,
-                app_card_tone="black",
-                show_on_app_card=False,
-                render_handler_name="_render_blueprints_section",
-                badge_handler_name="_blueprint_tab_badges",
-                app_card_badge_handler_name="_blueprint_app_card_badges",
-            ),
-        )
+        definitions: list[ModWebAppTabDefinition] = []
+        if context.supports_map:
+            definitions.append(
+                ModWebAppTabDefinition.custom(
+                    tab_id="map",
+                    label="Map",
+                    page_order=350,
+                    app_card_order=150,
+                    app_card_tone="purple",
+                    render_handler_name="_render_map_section",
+                    badge_handler_name="_map_tab_badges",
+                    action_handler_name="_map_tab_actions",
+                )
+            )
+        if context.supports_blueprints:
+            definitions.append(
+                ModWebAppTabDefinition.custom(
+                    tab_id="blueprints",
+                    label="Blueprints",
+                    page_order=450,
+                    app_card_order=650,
+                    app_card_tone="black",
+                    show_on_app_card=False,
+                    render_handler_name="_render_blueprints_section",
+                    badge_handler_name="_blueprint_tab_badges",
+                    app_card_badge_handler_name="_blueprint_app_card_badges",
+                )
+            )
+        return tuple(definitions)
 
     @staticmethod
     def _page_tab_context(model: ModWebBasePageModel) -> ModWebAppTabContext:
@@ -96,6 +110,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
             app_version=model.app_stats.version if model.app_stats is not None else None,
             mod_names=mod_names,
             settings=settings,
+            supports_map=model.map_api_url is not None,
             supports_blueprints=model.blueprints is not None,
         )
 
@@ -104,6 +119,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
         return ModWebAppTabContext(
             app_name=app.name,
             app_friendly=app.friendly,
+            supports_map=app.map_url is not None,
             supports_blueprints=app.supports_blueprints,
         )
 

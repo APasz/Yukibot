@@ -41,6 +41,14 @@ from apps._settings import (
 from apps._tailer import Tailer
 from apps._telnet import TelnetClient
 from config import Activity_Manager
+from relay_notices import (
+    GameDeathKind,
+    GameDeathNotice,
+    PlayerSessionAction,
+    PlayerSessionNotice,
+    RelayNoticeSource,
+    render_notice_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -1090,7 +1098,7 @@ class Receiver(AM_Receiver):
                 reference_renderer=render_plain_reference_prefix,
             ),
         )
-        txt = f'say "{payload.alias}: {content}"'
+        txt = f"say {_quote_console_argument(f'{payload.alias}: {content}')}"
         await self.app._relay.send(txt)
 
 
@@ -1121,9 +1129,19 @@ class Matchers:
         if match := _SEVENDAYS_TRANSIENT_RE.search(line):
             player = match.group(1)
             action = str(match.group(2)).lower()
-            txt = DC_Bound.generics.join if "join" in action else DC_Bound.generics.left
-
-            DC_Relay.add(DC_Bound(self.app, txt, player or hikari.UNDEFINED))
+            notice = PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED if "join" in action else PlayerSessionAction.LEFT,
+                source=RelayNoticeSource.APP_LOG,
+            )
+            app_friendly = getattr(self.app, "friendly", self.app.name)
+            DC_Relay.add(
+                DC_Bound(
+                    self.app,
+                    render_notice_text(notice, author_name=player, app_name=app_friendly),
+                    player or hikari.UNDEFINED,
+                    notice=notice,
+                )
+            )
 
     async def match_chat(self, line: str):
         player = None
@@ -1137,7 +1155,20 @@ class Matchers:
     async def match_death(self, line: str) -> None:
         if match := _SEVENDAYS_DEATH_RE.search(line):
             player = match.group("player")
-            DC_Relay.add(DC_Bound(self.app, "died", player or hikari.UNDEFINED))
+            notice = GameDeathNotice(
+                death_kind=GameDeathKind.UNKNOWN,
+                detail_text="died",
+                source=RelayNoticeSource.APP_LOG,
+            )
+            app_friendly = getattr(self.app, "friendly", self.app.name)
+            DC_Relay.add(
+                DC_Bound(
+                    self.app,
+                    render_notice_text(notice, author_name=player, app_name=app_friendly),
+                    player or hikari.UNDEFINED,
+                    notice=notice,
+                )
+            )
 
 
 class Players:

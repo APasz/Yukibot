@@ -31,7 +31,7 @@ import config
 from _audit import tenor_log
 from _authority import AuthorityResource, read_json_object
 from _file import File_Utils
-from _minecraft_heads import minecraft_dev_bypass_head_data_uri
+from _minecraft_heads import minecraft_avatar_uri, minecraft_dev_bypass_head_data_uri
 from _resolator import Resolutator
 from _security import Access_Control
 from _utils import Utilities
@@ -52,6 +52,13 @@ from chat_hub import (
     ChatReferenceKind,
 )
 from config import Name_Cache, NameResolutionResult, NameResolutionStatus, Singleton
+from relay_notices import (
+    RelayNotice,
+    notice_hides_body_content,
+    notice_embed_spec,
+    render_notice_body,
+    render_notice_text,
+)
 
 if TYPE_CHECKING:
     from apps._app import App
@@ -449,13 +456,6 @@ class Distils:
         await ctx.respond([acb(*caller(k, v)) for k, v in to_send.items() if foc_val in k.lower()][:25])
 
 
-class Generics(Enum):
-    join = "{player} joined {app}"
-    left = "{player} left {app}"
-    died_pve = "{player} died to {cause}"
-    died_pvp = "{player} killed by {cause}"
-
-
 class FileDeliveryMode(Enum):
     ATTACHMENTS = "attachments"
     ZIP = "zip"
@@ -552,16 +552,14 @@ class URLish:
 
 
 class Message:
-    generics = Generics
     app: "App"
     _string: str
-    is_generic: bool
     player: str | int | hikari.UndefinedType
     urls: set["URLish"]
     files: set["Fileish"]
     enrich_task: asyncio.Task[set["URLish"]] | None
-    extra_fmt: dict[str, str]
     relay_embed: RelayEmbedPayload | None
+    notice: RelayNotice | None
 
     _md_link_re: re.Pattern[str] = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+|www\.[^\s)]+)\)")
     _url_re: re.Pattern[str] = re.compile(r"\b(https?://[^\s<>()\[\]]+|www\.[^\s<>()\[\]]+)")
@@ -584,25 +582,19 @@ class Message:
         }
     )
 
-    __slots__ = ("app", "_string", "is_generic", "player", "urls", "files", "enrich_task", "extra_fmt", "relay_embed")
+    __slots__ = ("app", "_string", "player", "urls", "files", "enrich_task", "relay_embed", "notice")
 
     def __init__(
         self,
-        content: str | Generics,
+        content: str,
         player: str | int | hikari.UndefinedType,
         files: Sequence[Fileish] | None,
         enrich: bool = True,
-        extra_fmt: dict[str, str] | None = None,
         relay_embed: RelayEmbedPayload | None = None,
+        notice: RelayNotice | None = None,
     ) -> None:
         self.app = cast("App", object())
-        if isinstance(content, str):
-            self._string = content
-            self.is_generic = False
-        else:
-            self._string = content.value
-            self.is_generic = True
-
+        self._string = content
         self.player = player
         self.urls = set()
         self.files = set(files or ())
@@ -612,8 +604,8 @@ class Message:
         else:
             self.enrich_task = None
 
-        self.extra_fmt = extra_fmt or {}
         self.relay_embed = relay_embed
+        self.notice = notice
 
     @staticmethod
     def demojise_discord(text: str) -> str:
@@ -628,10 +620,7 @@ class Message:
         return emoji.demojize(self.content)
 
     async def find_urls(self):
-        if self.is_generic:
-            self.urls = set()
-        else:
-            self.urls = await self._enrich_links(self._match_urls(self._string))
+        self.urls = await self._enrich_links(self._match_urls(self._string))
         return self.urls
 
     def _match_urls(self, text: str) -> dict[str, str | None]:
@@ -967,7 +956,6 @@ class DC_Bound(Message):
     __slots__ = (
         "app",
         "_string",
-        "is_generic",
         "player",
         "player_id",
         "player_avatar_uri",
@@ -975,7 +963,8 @@ class DC_Bound(Message):
         "urls",
         "files",
         "enrich_task",
-        "extra_fmt",
+        "relay_embed",
+        "notice",
     )
     player_id: int | None
     player_avatar_uri: str | None
@@ -984,15 +973,15 @@ class DC_Bound(Message):
     def __init__(
         self,
         app: "App",
-        content: str | Generics,
+        content: str,
         player: str | int | hikari.UndefinedType,
         files: Sequence[Fileish] | None = None,
-        extra_fmt: dict[str, str] | None = None,
         relay_embed: RelayEmbedPayload | None = None,
+        notice: RelayNotice | None = None,
         player_id: int | None = None,
         player_avatar_uri: str | None = None,
     ) -> None:
-        super().__init__(content, player, files, extra_fmt=extra_fmt, relay_embed=relay_embed)
+        super().__init__(content, player, files, relay_embed=relay_embed, notice=notice)
         self.app = app
         if player_id is None:
             self.player_resolution = Name_Cache().resolve_name(str(player), app.scope)
@@ -1020,12 +1009,12 @@ class App_Bound(Message):
         "source_guild_id",
         "source_message_id",
         "_string",
-        "is_generic",
         "player",
         "urls",
         "files",
         "enrich_task",
-        "extra_fmt",
+        "relay_embed",
+        "notice",
         "reference_kind",
         "reference",
     )
@@ -1033,19 +1022,19 @@ class App_Bound(Message):
     def __init__(
         self,
         chan: hikari.TextableChannel,
-        content: str | Generics,
+        content: str,
         player: str | int | hikari.UndefinedType,
         files: Sequence[Fileish] | None = None,
         *,
         enrich: bool = True,
-        extra_fmt: dict[str, str] | None = None,
         reference_kind: RelayMessageReferenceKind = RelayMessageReferenceKind.NONE,
         reference: ChatMessageReference | None = None,
         relay_embed: RelayEmbedPayload | None = None,
+        notice: RelayNotice | None = None,
         source_guild_id: hikari.Snowflakeish | None = None,
         source_message_id: hikari.Snowflakeish | None = None,
     ) -> None:
-        super().__init__(content, player, files, enrich=enrich, extra_fmt=extra_fmt, relay_embed=relay_embed)
+        super().__init__(content, player, files, enrich=enrich, relay_embed=relay_embed, notice=notice)
         self.chan = chan
         self.reference_kind = reference_kind
         self.reference = reference
@@ -1552,6 +1541,13 @@ class DC_Relay(metaclass=Singleton):
             return name
         return repr(app)
 
+    @staticmethod
+    def _app_can_receive_chat(app: "App") -> bool:
+        is_running = getattr(app, "_running", False)
+        if not isinstance(is_running, bool) or not is_running:
+            return False
+        return getattr(app, "am_receiver", None) is not None
+
     @classmethod
     def _default_relay_pickup_app(cls, apps: Collection["App"]) -> "App | None":
         default_apps = tuple(app for app in apps if cls._app_uses_default_relay_channels(app))
@@ -1898,9 +1894,10 @@ class DC_Relay(metaclass=Singleton):
 
     @staticmethod
     def _relay_tts_text(message: DC_Bound) -> str:
-        if message.is_generic:
-            player = str(message.player) if isinstance(message.player, (str, int, hikari.Snowflake)) else "someone"
-            return message.content.format_map({"player": player, "app": message.app.friendly} | message.extra_fmt)
+        notice = message.notice
+        if notice is not None:
+            player_name = str(message.player) if isinstance(message.player, (str, int, hikari.Snowflake)) else "someone"
+            return render_notice_text(notice, author_name=player_name, app_name=message.app.friendly)
         return message.content_demojised
 
     @staticmethod
@@ -1909,10 +1906,10 @@ class DC_Relay(metaclass=Singleton):
         return hikari.Snowflake(int.from_bytes(digest, "big"))
 
     def _relay_tts_text_for_event(self, event: ChatEvent, app: "App | None") -> str:
-        if event.is_template:
+        notice = event.resolved_notice()
+        if notice is not None:
             app_friendly = app.friendly if app is not None else event.room_id
-            text = event.render_content(app_name=app_friendly)
-            return emoji.demojize(Message.demojise_discord(text))
+            return render_notice_text(notice, author_name=event.author.display_name, app_name=app_friendly)
         return emoji.demojize(Message.demojise_discord(event.content))
 
     async def _send_chat_event_to_discord_tts(
@@ -2032,8 +2029,7 @@ class DC_Relay(metaclass=Singleton):
             content=message.content,
             attachments=tuple(_chat_attachment(file) for file in OutboundRelayFormatter._sorted_files(message.files)),
             links=tuple(_chat_link(link) for link in OutboundRelayFormatter._sorted_urls(message.urls)),
-            is_template=message.is_generic,
-            template_values=dict(message.extra_fmt),
+            notice=message.notice,
             embed=_chat_embed(message.relay_embed),
         )
 
@@ -2055,6 +2051,11 @@ class DC_Relay(metaclass=Singleton):
             if author_id is not None
             else str(message.player or "UNDEFINED")
         )
+        author_avatar_uri = self._minecraft_chat_author_avatar_uri(
+            room_id=app.name,
+            discord_user_id=author_id,
+            app=app,
+        )
         source_channel_id = int(message.chan.id) if getattr(message.chan, "id", None) is not None else None
         source_label = message.chan.name if getattr(message.chan, "name", None) else None
         return ChatEvent(
@@ -2066,12 +2067,14 @@ class DC_Relay(metaclass=Singleton):
                 display_name=author_display,
                 discord_user_id=author_id,
                 color_hex=author_color_hex,
+                avatar_uri=author_avatar_uri,
             ),
             content=message.content,
             attachments=tuple(_chat_attachment(file) for file in OutboundRelayFormatter._sorted_files(message.files)),
             links=tuple(_chat_link(link) for link in OutboundRelayFormatter._sorted_urls(message.urls)),
             reference_kind=_chat_reference_kind(message.reference_kind),
             reference=message.reference,
+            notice=message.notice,
             source_guild_id=int(message.source_guild_id) if message.source_guild_id is not None else None,
             source_channel_id=source_channel_id,
             source_message_id=int(message.source_message_id) if message.source_message_id is not None else None,
@@ -2430,11 +2433,35 @@ class DC_Relay(metaclass=Singleton):
         room_id: str,
         discord_user_id: int | None,
     ) -> str | None:
+        return self._minecraft_chat_author_avatar_uri(room_id=room_id, discord_user_id=discord_user_id)
+
+    def _minecraft_chat_author_avatar_uri(
+        self,
+        *,
+        room_id: str,
+        discord_user_id: int | None,
+        app: object | None = None,
+    ) -> str | None:
         if discord_user_id is None:
             return None
-        app = self._chat_apps.get(room_id)
-        if getattr(app, "scope", None) != "minecraft":
+        target_app = app
+        if target_app is None:
+            chat_apps = cast(Mapping[str, object], getattr(self, "_chat_apps", {}))
+            target_app = chat_apps.get(room_id)
+        scope = getattr(target_app, "scope", None)
+        if scope != "minecraft":
             return None
+        name_cache = getattr(target_app, "name_cache", None)
+        get_game_uuid = getattr(name_cache, "get_game_uuid", None)
+        if callable(get_game_uuid):
+            uuid = cast(Callable[[int, str], str | None], get_game_uuid)(discord_user_id, scope)
+            if isinstance(uuid, str) and uuid.strip():
+                return minecraft_avatar_uri(uuid)
+        get_game_alias = getattr(name_cache, "get_game_alias", None)
+        if callable(get_game_alias):
+            alias = cast(Callable[[int, str], str | None], get_game_alias)(discord_user_id, scope)
+            if isinstance(alias, str) and alias.strip():
+                return minecraft_avatar_uri(alias)
         return minecraft_dev_bypass_head_data_uri(discord_user_id)
 
     def _discord_author_fallback_name(self, event: ChatEvent, app: "App | None") -> str:
@@ -2506,21 +2533,36 @@ class DC_Relay(metaclass=Singleton):
         app = app or self._chat_apps.get(event.room_id)
         app_friendly = getattr(app, "friendly", event.room_id) if app is not None else event.room_id
         player_plate = await self._playerplate_for_event(event, guild_id=guild_id, app=app)
+        notice = event.resolved_notice()
         relay_embed = self._relay_embed_payload_for_event(event, app=app)
-        if event.is_template:
+        reference_prefix = self._discord_reference_prefix(event) if include_reference_prefix else None
+        if notice is not None:
             if relay_embed is not None:
-                reference_prefix = self._discord_reference_prefix(event) if include_reference_prefix else None
-                return reference_prefix or "", set()
-            return event.render_content(player_name=player_plate, app_name=app_friendly), set()
+                if notice_hides_body_content(notice):
+                    return reference_prefix or "", set()
+                return self._discord_text_for_embed_event(
+                    event,
+                    player_plate=player_plate,
+                    reference_prefix=reference_prefix,
+                ), set()
+            notice_body = render_notice_body(notice, app_name=app_friendly)
+            if reference_prefix is not None:
+                notice_body = f"{reference_prefix} {notice_body}".strip() if notice_body else reference_prefix
+            if event.author.kind is ChatAuthorKind.SYSTEM:
+                return notice_body, set()
+            return f"{player_plate} {notice_body}".strip(), set()
 
         parsed_content, mentions = self.names.parse_mentions(event.content)
-        reference_prefix = self._discord_reference_prefix(event) if include_reference_prefix else None
         body = parsed_content
         if reference_prefix is not None:
             body = f"{reference_prefix} {body}".strip() if body else reference_prefix
         text = f"{player_plate} {body}".strip()
         if relay_embed is not None:
-            text = reference_prefix or ""
+            text = self._discord_text_for_embed_event(
+                event,
+                player_plate=player_plate,
+                reference_prefix=reference_prefix,
+            )
         return text, mentions
 
     @staticmethod
@@ -2536,16 +2578,17 @@ class DC_Relay(metaclass=Singleton):
         return None
 
     @staticmethod
-    def _generic_template_embed_title(template: str) -> str | None:
-        if template == Generics.join.value:
-            return "Joined"
-        if template == Generics.left.value:
-            return "Left"
-        if template == Generics.died_pve.value:
-            return "Death"
-        if template == Generics.died_pvp.value:
-            return "PVP Kill"
-        return None
+    def _discord_text_for_embed_event(
+        event: ChatEvent,
+        *,
+        player_plate: str,
+        reference_prefix: str | None,
+    ) -> str:
+        if event.author.kind is ChatAuthorKind.SYSTEM:
+            return reference_prefix or ""
+        if reference_prefix is None:
+            return player_plate
+        return f"{reference_prefix} {player_plate}".strip()
 
     @classmethod
     def _relay_embed_payload_for_event(
@@ -2562,38 +2605,21 @@ class DC_Relay(metaclass=Singleton):
                 description=event.embed.description.strip(),
                 color=event.embed.color,
             )
-        if not event.is_template or app is None:
+        notice = event.resolved_notice()
+        if notice is not None and app is not None:
+            embed_spec = notice_embed_spec(
+                notice,
+                app_name=embed_title,
+                author_name=event.author.display_name,
+            )
+            if embed_spec is not None:
+                return RelayEmbedPayload(
+                    title=embed_spec.title,
+                    description=embed_spec.description,
+                    color=app.manage_embed_color,
+                )
             return None
-        description = cls._discord_embed_description_for_template_event(event)
-        if description is None:
-            return None
-        return RelayEmbedPayload(
-            title=embed_title,
-            description=description,
-            color=app.manage_embed_color,
-        )
-
-    @classmethod
-    def _discord_embed_description_for_template_event(cls, event: ChatEvent) -> str | None:
-        author_name = event.author.display_name
-        if event.content == Generics.join.value:
-            return f"Joined {author_name}"
-        if event.content == Generics.left.value:
-            return f"Left {author_name}"
-        if event.content == Generics.died_pve.value:
-            cause = event.template_values.get("cause", "").strip()
-            if cause:
-                return f"Death {author_name}: {cause}"
-            return f"Death {author_name}"
-        if event.content == Generics.died_pvp.value:
-            cause = event.template_values.get("cause", "").strip()
-            if cause:
-                return f"PVP Kill {author_name}: {cause}"
-            return f"PVP Kill {author_name}"
-        generic_title = cls._generic_template_embed_title(event.content)
-        if generic_title is None:
-            return None
-        return f"{generic_title} {author_name}"
+        return None
 
     @classmethod
     def _embedify_event(cls, event: ChatEvent, *, app: "App | None" = None) -> list[hikari.Embed]:
@@ -2663,6 +2689,7 @@ class DC_Relay(metaclass=Singleton):
 
     async def _send_chat_event_to_app(self, event: ChatEvent, app: "App") -> None:
         app_name = getattr(app, "name", event.room_id)
+        app_friendly = getattr(app, "friendly", event.room_id)
         if not app._running:
             log.info(
                 "Chat -> App skipped: app=%s event=%s source=%s reason=not_running",
@@ -2692,14 +2719,16 @@ class DC_Relay(metaclass=Singleton):
             )
         else:
             author = event.author.display_name
+        notice = event.resolved_notice()
         payload = App_Bound(
             channel,
-            event.content,
+            event.render_content(app_name=app_friendly),
             author,
             files=[_fileish(attachment) for attachment in event.attachments],
             enrich=not event.links,
             reference_kind=_relay_reference_kind(event.reference_kind),
             relay_embed=_relay_embed(event.embed),
+            notice=notice,
             source_guild_id=event.source_guild_id,
         )
         if event.links:
@@ -3018,13 +3047,27 @@ class DC_Relay(metaclass=Singleton):
             message.app = app
             should_deliver = True
             if app_uses_default_channels and app is not default_pickup_app:
+                can_receive_chat = self._app_can_receive_chat(app)
                 should_deliver = False
                 log.debug(
-                    "Shared default relay channel recorded without pickup by non-selected app: app=%s selected=%s channel=%s",
+                    "Shared default relay channel mirrored to non-selected app room: app=%s selected=%s channel=%s deliver_to_app=%s",
                     app.name,
                     getattr(default_pickup_app, "name", None),
                     int(ctx.channel_id),
+                    can_receive_chat,
                 )
+                if remote_files and can_receive_chat and downloaded_attachments is None:
+                    downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
+                    self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)
+                if can_receive_chat and downloaded_attachments is not None:
+                    message.files = set(downloaded_attachments.files)
+                else:
+                    message.files = set(remote_files)
+                event = self._event_from_app_bound(message, app, author_color_hex=author_color_hex)
+                self._record_chat_event(event)
+                if can_receive_chat:
+                    await self._send_chat_event_to_app(event, app)
+                continue
             if app_uses_default_channels and app is default_pickup_app and not owns_shared_relay_channel:
                 should_deliver = False
                 log.info(

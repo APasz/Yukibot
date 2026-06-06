@@ -34,10 +34,17 @@ from _security import Power_Level
 from apps._app import App
 from apps._blueprint_files import (
     AppBlueprintEntry,
-    describe_blueprint_file,
+    AppBlueprintFileType,
+    BlueprintUploadPair,
+    blueprint_file_type_from_name,
+    describe_blueprint,
+    find_matching_blueprint_config_relative_path,
+    find_matching_blueprint_module_relative_path,
     list_blueprint_files,
     resolve_blueprint_file_path,
     resolve_blueprint_upload_target,
+    validate_blueprint_upload_pair,
+    validate_blueprint_session_name,
 )
 from apps._config import App_Config, AppVersion, resolve_config_path
 from apps._settings import (
@@ -84,6 +91,18 @@ class SatisfactoryNetworkQuality(enum.IntEnum):
     MEDIUM = 1
     HIGH = 2
     ULTRA = 3
+
+
+def _validated_blueprint_session_name_or_none(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        return validate_blueprint_session_name(raw)
+    except ValueError:
+        log.warning("Ignoring invalid Satisfactory blueprint session name: %r", raw)
+        return None
 
 
 def _candidate_satisfactory_logs(*, directory: Path, server_log: Path | None) -> tuple[Path, ...]:
@@ -830,6 +849,22 @@ class Satisfactory(App[Satisfactory_Config]):
     def supports_blueprints(self) -> bool:
         return True
 
+    @property
+    def default_blueprint_session_name(self) -> str | None:
+        players = getattr(self, "_players", None)
+        state: SatisfactoryServerState | None = getattr(players, "state", None)
+        if state is not None:
+            if active_session_name := _validated_blueprint_session_name_or_none(state.active_session_name):
+                return active_session_name
+            if auto_load_session_name := _validated_blueprint_session_name_or_none(state.auto_load_session_name):
+                return auto_load_session_name
+        settings = getattr(self, "_settings", None)
+        if isinstance(settings, App_Settings):
+            setting = settings.get_setting("auto_load_session_name")
+            if setting is not None and isinstance(setting.value, str):
+                return _validated_blueprint_session_name_or_none(setting.value)
+        return None
+
     def _blueprint_root_path(self) -> Path:
         override = getattr(self, "_blueprint_root_override", None)
         if isinstance(override, Path):
@@ -842,6 +877,21 @@ class Satisfactory(App[Satisfactory_Config]):
             uploaded_by_user_id_by_relative_path=self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path(),
         )
 
+    @staticmethod
+    def _require_blueprint_delete_permission(
+        *,
+        relative_path: str,
+        uploaded_by_user_id_by_relative_path: dict[str, int],
+        actor_user_id: int,
+        actor_is_sudo: bool,
+    ) -> int | None:
+        uploaded_by_user_id: int | None = uploaded_by_user_id_by_relative_path.get(relative_path)
+        if uploaded_by_user_id is not None and uploaded_by_user_id != actor_user_id and not actor_is_sudo:
+            raise PermissionError("Only the uploader or a sudo user can delete this blueprint file.")
+        if uploaded_by_user_id is None and not actor_is_sudo:
+            raise PermissionError("Only a sudo user can delete blueprint files with no recorded uploader.")
+        return uploaded_by_user_id
+
     def upload_blueprint_file(
         self,
         *,
@@ -849,22 +899,58 @@ class Satisfactory(App[Satisfactory_Config]):
         upload_name: str,
         source_path: Path,
         actor_user_id: int,
+        config_upload_name: str | None = None,
+        config_source_path: Path | None = None,
     ) -> AppBlueprintEntry:
+        if (config_upload_name is None) != (config_source_path is None):
+            raise ValueError("Blueprint config upload requires both a filename and source path.")
         root = self._blueprint_root_path()
-        destination, relative_path = resolve_blueprint_upload_target(
+        upload_pair: BlueprintUploadPair = validate_blueprint_upload_pair(
+            module_filename=upload_name,
+            config_filename=config_upload_name,
+        )
+        module_destination, module_relative_path = resolve_blueprint_upload_target(
             root,
             session_name=session_name,
-            upload_name=upload_name,
+            upload_name=upload_pair.module_filename,
         )
-        if destination.exists():
-            raise FileExistsError(f"Blueprint file already exists: {relative_path}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        File_Utils.copy(source_path, destination, overwrite=False)
-        self._blueprint_ownership_store.record_upload(relative_path=relative_path, actor_user_id=actor_user_id)
-        return describe_blueprint_file(
+        config_target: tuple[Path, str] | None = None
+        if upload_pair.config_filename is not None:
+            config_destination, config_relative_path = resolve_blueprint_upload_target(
+                root,
+                session_name=session_name,
+                upload_name=upload_pair.config_filename,
+            )
+            config_target = (config_destination, config_relative_path)
+        if module_destination.exists():
+            raise FileExistsError(f"Blueprint file already exists: {module_relative_path}")
+        if config_target is not None and config_target[0].exists():
+            raise FileExistsError(f"Blueprint config file already exists: {config_target[1]}")
+
+        module_destination.parent.mkdir(parents=True, exist_ok=True)
+        cleanup_paths: list[Path] = [module_destination]
+        if config_target is not None:
+            cleanup_paths.append(config_target[0])
+        try:
+            File_Utils.copy(source_path, module_destination, overwrite=False)
+            if config_target is not None:
+                if config_source_path is None:
+                    raise ValueError("Blueprint config upload requires a source path.")
+                File_Utils.copy(config_source_path, config_target[0], overwrite=False)
+        except Exception:
+            for cleanup_path in reversed(cleanup_paths):
+                cleanup_path.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                module_destination.parent.rmdir()
+            raise
+
+        self._blueprint_ownership_store.record_upload(relative_path=module_relative_path, actor_user_id=actor_user_id)
+        if config_target is not None:
+            self._blueprint_ownership_store.record_upload(relative_path=config_target[1], actor_user_id=actor_user_id)
+        return describe_blueprint(
             root,
-            relative_path=relative_path,
-            uploaded_by_user_id=actor_user_id,
+            relative_path=module_relative_path,
+            uploaded_by_user_id_by_relative_path=self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path(),
         )
 
     def delete_blueprint_file(
@@ -876,21 +962,54 @@ class Satisfactory(App[Satisfactory_Config]):
     ) -> AppBlueprintEntry:
         root = self._blueprint_root_path()
         blueprint_path, relative_path = resolve_blueprint_file_path(root, file_id)
-        ownership_index = self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path()
-        uploaded_by_user_id: int | None = ownership_index.get(relative_path)
-        if uploaded_by_user_id is not None and uploaded_by_user_id != actor_user_id and not actor_is_sudo:
-            raise PermissionError("Only the uploader or a sudo user can delete this blueprint file.")
-        if uploaded_by_user_id is None and not actor_is_sudo:
-            raise PermissionError("Only a sudo user can delete blueprint files with no recorded uploader.")
-        deleted_entry = describe_blueprint_file(
-            root,
-            relative_path=relative_path,
-            uploaded_by_user_id=uploaded_by_user_id,
-        )
         if not blueprint_path.exists():
             raise FileNotFoundError(f"Blueprint file does not exist: {relative_path}")
+        ownership_index = self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path()
+        file_type = blueprint_file_type_from_name(blueprint_path.name)
+        self._require_blueprint_delete_permission(
+            relative_path=relative_path,
+            uploaded_by_user_id_by_relative_path=ownership_index,
+            actor_user_id=actor_user_id,
+            actor_is_sudo=actor_is_sudo,
+        )
+
+        if file_type is AppBlueprintFileType.CONFIG:
+            module_relative_path = find_matching_blueprint_module_relative_path(root, relative_path)
+            if module_relative_path is None:
+                raise FileNotFoundError(f"Blueprint module does not exist for config file: {relative_path}")
+            module_path, _ = resolve_blueprint_file_path(root, module_relative_path)
+            if not module_path.exists():
+                raise FileNotFoundError(f"Blueprint module does not exist for config file: {relative_path}")
+            blueprint_path.unlink()
+            self._blueprint_ownership_store.clear(relative_path=relative_path)
+            with contextlib.suppress(OSError):
+                blueprint_path.parent.rmdir()
+            return describe_blueprint(
+                root,
+                relative_path=module_relative_path,
+                uploaded_by_user_id_by_relative_path=self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path(),
+            )
+
+        deleted_entry = describe_blueprint(
+            root,
+            relative_path=relative_path,
+            uploaded_by_user_id_by_relative_path=ownership_index,
+        )
+        config_relative_path = find_matching_blueprint_config_relative_path(root, relative_path)
+        config_path: Path | None = None
+        if config_relative_path is not None:
+            config_path, _ = resolve_blueprint_file_path(root, config_relative_path)
+            self._require_blueprint_delete_permission(
+                relative_path=config_relative_path,
+                uploaded_by_user_id_by_relative_path=ownership_index,
+                actor_user_id=actor_user_id,
+                actor_is_sudo=actor_is_sudo,
+            )
         blueprint_path.unlink()
         self._blueprint_ownership_store.clear(relative_path=relative_path)
+        if config_path is not None and config_path.exists() and config_relative_path is not None:
+            config_path.unlink()
+            self._blueprint_ownership_store.clear(relative_path=config_relative_path)
         with contextlib.suppress(OSError):
             blueprint_path.parent.rmdir()
         return deleted_entry

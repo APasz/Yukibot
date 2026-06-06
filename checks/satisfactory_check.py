@@ -7,6 +7,7 @@ import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import cast
 
 from pydantic import ValidationError
@@ -261,18 +262,25 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         app = self._blueprint_app()
         upload_path = self.temp_path / "Awesome.sbp"
         upload_path.write_text("module", encoding="utf-8")
+        config_upload_path = self.temp_path / "Awesome.sbpcfg"
+        config_upload_path.write_text("config", encoding="utf-8")
 
         uploaded = app.upload_blueprint_file(
             session_name="Session Alpha",
             upload_name="Awesome.sbp",
             source_path=upload_path,
             actor_user_id=101,
+            config_upload_name="Awesome.sbpcfg",
+            config_source_path=config_upload_path,
         )
 
         self.assertEqual(uploaded.relative_path, "Session Alpha/Awesome.sbp")
+        self.assertIsNotNone(uploaded.config_file)
         listed = app.list_blueprint_files()
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0].uploaded_by_user_id, 101)
+        self.assertIsNotNone(listed[0].config_file)
+        self.assertEqual(listed[0].config_file.uploaded_by_user_id, 101)
 
         with self.assertRaises(PermissionError):
             app.delete_blueprint_file(file_id=uploaded.id, actor_user_id=202, actor_is_sudo=False)
@@ -281,13 +289,50 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(deleted.id, uploaded.id)
         self.assertFalse((self.temp_path / "blueprints" / "Session Alpha" / "Awesome.sbp").exists())
+        self.assertFalse((self.temp_path / "blueprints" / "Session Alpha" / "Awesome.sbpcfg").exists())
         self.assertEqual(app.list_blueprint_files(), ())
+
+    def test_blueprint_upload_rejects_mismatched_optional_config(self) -> None:
+        app = self._blueprint_app()
+        upload_path = self.temp_path / "Awesome.sbp"
+        upload_path.write_text("module", encoding="utf-8")
+        config_upload_path = self.temp_path / "Different.sbpcfg"
+        config_upload_path.write_text("config", encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            app.upload_blueprint_file(
+                session_name="Session Alpha",
+                upload_name="Awesome.sbp",
+                source_path=upload_path,
+                actor_user_id=101,
+                config_upload_name="Different.sbpcfg",
+                config_source_path=config_upload_path,
+            )
+
+    def test_default_blueprint_session_name_prefers_active_session_then_cached_auto_load(self) -> None:
+        app = self._blueprint_app()
+        app._players = SimpleNamespace(  # type: ignore[attr-defined]
+            state=SatisfactoryServerState(
+                active_session_name="Active Session",
+                auto_load_session_name="Configured Session",
+            )
+        )
+        app._settings = self.settings  # type: ignore[attr-defined]
+
+        self.assertEqual(app.default_blueprint_session_name, "Active Session")
+
+        app._players = SimpleNamespace(state=None)  # type: ignore[attr-defined]
+        self._setting("auto_load_session_name").update("Configured Session")
+
+        self.assertEqual(app.default_blueprint_session_name, "Configured Session")
 
     def test_blueprint_delete_requires_sudo_when_owner_is_unknown(self) -> None:
         app = self._blueprint_app()
-        blueprint_path = self.temp_path / "blueprints" / "Session Beta" / "Imported.sbpcfg"
+        blueprint_path = self.temp_path / "blueprints" / "Session Beta" / "Imported.sbp"
+        config_path = self.temp_path / "blueprints" / "Session Beta" / "Imported.sbpcfg"
         blueprint_path.parent.mkdir(parents=True, exist_ok=True)
-        blueprint_path.write_text("config", encoding="utf-8")
+        blueprint_path.write_text("module", encoding="utf-8")
+        config_path.write_text("config", encoding="utf-8")
 
         with self.assertRaises(PermissionError):
             app.delete_blueprint_file(
@@ -302,7 +347,36 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
             actor_is_sudo=True,
         )
 
-        self.assertEqual(deleted.relative_path, "Session Beta/Imported.sbpcfg")
+        self.assertEqual(deleted.relative_path, "Session Beta/Imported.sbp")
+        self.assertTrue(blueprint_path.exists())
+        self.assertFalse(config_path.exists())
+
+    def test_blueprint_list_and_delete_tolerate_legacy_filename_rules(self) -> None:
+        app = self._blueprint_app()
+        blueprint_path = self.temp_path / "blueprints" / "Session Legacy" / "Legacy .sbp"
+        blueprint_path.parent.mkdir(parents=True, exist_ok=True)
+        blueprint_path.write_text("module", encoding="utf-8")
+
+        listed = app.list_blueprint_files()
+
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0].relative_path, "Session Legacy/Legacy .sbp")
+        self.assertIsNone(listed[0].uploaded_by_user_id)
+
+        with self.assertRaises(PermissionError):
+            app.delete_blueprint_file(
+                file_id="Session Legacy/Legacy .sbp",
+                actor_user_id=101,
+                actor_is_sudo=False,
+            )
+
+        deleted = app.delete_blueprint_file(
+            file_id="Session Legacy/Legacy .sbp",
+            actor_user_id=202,
+            actor_is_sudo=True,
+        )
+
+        self.assertEqual(deleted.relative_path, "Session Legacy/Legacy .sbp")
         self.assertFalse(blueprint_path.exists())
 
     async def test_save_persists_cache_without_bridge_when_stopped(self) -> None:

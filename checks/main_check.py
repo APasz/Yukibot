@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -12,6 +12,7 @@ import main
 from _manager import App_Manager
 from apps._app import App
 from apps._config import App_Config
+from relay_notices import BotLifecycleStage, RelayNoticeSeverity, render_system_notice_text
 
 
 class _FakeApp(App[App_Config]):
@@ -118,6 +119,40 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(selection.app)
         self.assertEqual(selection.error_text, "unknown app")
         self.assertIsNone(selection.started_notice_line)
+
+    def test_build_startup_notice_renders_existing_lines(self) -> None:
+        auto_app = _build_fake_app(friendly="Minecraft Alpha")
+        auto_launch = main.RestartAutoLaunchSelection(app=auto_app)
+
+        with patch.object(config, "IS_DEBUG", False):
+            notice = main._build_startup_notice(
+                auto_launch=auto_launch,
+                startup_disabled_lines=("Auto-disabled: BeamMP (missing file)",),
+                error_lines=("unknown app",),
+            )
+
+        self.assertEqual(notice.stage, BotLifecycleStage.STARTED)
+        self.assertEqual(notice.severity, RelayNoticeSeverity.WARNING)
+        self.assertEqual(
+            render_system_notice_text(notice),
+            "Started\n\tAuto-Launch Scheduled: Minecraft Alpha\nAuto-disabled: BeamMP (missing file)\nunknown app",
+        )
+
+    def test_build_shutdown_notice_renders_uptime(self) -> None:
+        notice = main._build_shutdown_notice(
+            started_at=datetime.fromisoformat("2026-06-05T12:00:00"),
+            now=datetime.fromisoformat("2026-06-05T13:02:03"),
+        )
+
+        self.assertEqual(notice.stage, BotLifecycleStage.STOPPING)
+        self.assertEqual(render_system_notice_text(notice), "Shutting Down; uptime: 1h 2m 3s")
+
+    def test_build_bot_error_notice_renders_error_summary(self) -> None:
+        notice = main._build_bot_error_notice("launcher failed")
+
+        self.assertEqual(notice.stage, BotLifecycleStage.ERROR)
+        self.assertEqual(notice.severity, RelayNoticeSeverity.ERROR)
+        self.assertEqual(render_system_notice_text(notice), "Error: launcher failed")
 
     async def test_launch_restart_auto_app_waits_then_launches(self) -> None:
         auto_app = _build_fake_app(friendly="Minecraft Alpha")

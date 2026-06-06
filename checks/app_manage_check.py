@@ -59,6 +59,8 @@ from cmd_app import (
     _state_value,
 )
 from cmd_dashboard import DashboardEditorService
+from relay_notices import MaintenanceNotice, MaintenanceStage, RelayNoticeSeverity, RelayNoticeSource
+from restart_targets import RestartTarget
 
 
 class _RunningProcess:
@@ -514,6 +516,9 @@ class AppManageTests(unittest.TestCase):
         service = AppManageService()
         app = _build_dummy_app(has_receiver=True)
         app.chat_channels = (hikari.Snowflake(101), hikari.Snowflake(202))
+        app.chat_channel_overrides = app.chat_channels
+        app.chat_channel_override = app.chat_channels[0]
+        app.chat_channel_source = RelayChannelSource.INSTANCE
         manager = Mock()
         manager.get.return_value = app
         manager.set_app_chat_channels = Mock()
@@ -550,6 +555,49 @@ class AppManageTests(unittest.TestCase):
         )
         assert response is not None
         self.assertEqual(response.content, "Dummy relay text channel for this guild set to <#303>.")
+
+    def test_save_relay_channel_action_uses_default_without_creating_override(self) -> None:
+        service = AppManageService()
+        app = _build_dummy_app(has_receiver=True)
+        app.chat_channels = (hikari.Snowflake(101), hikari.Snowflake(202))
+        app.chat_channel = app.chat_channels[0]
+        app.chat_channel_overrides = ()
+        app.chat_channel_override = None
+        app.chat_channel_source = RelayChannelSource.DEFAULT
+        manager = Mock()
+        manager.get.return_value = app
+        manager.set_app_chat_channels = Mock()
+        manager.default_chat_channels = (hikari.Snowflake(101), hikari.Snowflake(202))
+        manager.default_chat_channel = hikari.Snowflake(101)
+        acl = Mock()
+        acl.can.return_value = True
+        bot = _build_channel_resolution_bot({101: 10, 202: 20})
+        req = type(
+            "_Req",
+            (),
+            {
+                "action": service._action_codec.build(
+                    AppManageActionKind.SAVE_RELAY_CHANNEL,
+                    page=0,
+                    value=_state_value(AppManageState(mode=AppManageMode.RELAY, page=0, app_name=app.name)),
+                ),
+                "values": ["101"],
+                "user_id": 123,
+                "locale": hikari.Locale.EN_US,
+                "interaction": Mock(message=None, guild_id=hikari.Snowflake(10)),
+            },
+        )()
+
+        with (
+            patch.object(AppManageService, "_require_manager", return_value=cast(Any, manager)),
+            patch.object(AppManageService, "_require_acl", return_value=cast(Any, acl)),
+            patch.object(AppManageService, "_require_bot", return_value=cast(Any, bot)),
+        ):
+            response = asyncio.run(service._on_editor_action(cast(Any, req), {}))
+
+        manager.set_app_chat_channels.assert_called_once_with(app, ())
+        assert response is not None
+        self.assertEqual(response.content, "Dummy already uses the default relay channel for this guild.")
 
     def test_save_relay_channel_action_syncs_existing_voice_target(self) -> None:
         service = AppManageService()
@@ -658,6 +706,9 @@ class AppManageTests(unittest.TestCase):
         service = AppManageService()
         app = _build_dummy_app(has_receiver=True)
         app.chat_channels = (hikari.Snowflake(101), hikari.Snowflake(202))
+        app.chat_channel_overrides = app.chat_channels
+        app.chat_channel_override = app.chat_channels[0]
+        app.chat_channel_source = RelayChannelSource.INSTANCE
         manager = Mock()
         manager.get.return_value = app
         manager.set_app_chat_channels = Mock()
@@ -690,6 +741,51 @@ class AppManageTests(unittest.TestCase):
         manager.set_app_chat_channels.assert_called_once_with(app, (hikari.Snowflake(202),))
         assert response is not None
         self.assertEqual(response.content, "Dummy relay text channel removed for this guild.")
+
+    def test_clear_relay_channel_action_reports_inherited_default_without_override(self) -> None:
+        service = AppManageService()
+        app = _build_dummy_app(has_receiver=True)
+        app.chat_channels = (hikari.Snowflake(101),)
+        app.chat_channel = app.chat_channels[0]
+        app.chat_channel_overrides = ()
+        app.chat_channel_override = None
+        app.chat_channel_source = RelayChannelSource.DEFAULT
+        manager = Mock()
+        manager.get.return_value = app
+        manager.set_app_chat_channels = Mock()
+        manager.default_chat_channels = (hikari.Snowflake(101),)
+        manager.default_chat_channel = hikari.Snowflake(101)
+        acl = Mock()
+        acl.can.return_value = True
+        bot = _build_channel_resolution_bot({101: 10})
+        req = type(
+            "_Req",
+            (),
+            {
+                "action": service._action_codec.build(
+                    AppManageActionKind.CLEAR_RELAY_CHANNEL,
+                    page=0,
+                    value=_state_value(AppManageState(mode=AppManageMode.RELAY, page=0, app_name=app.name)),
+                ),
+                "user_id": 123,
+                "locale": hikari.Locale.EN_US,
+                "interaction": Mock(message=None, guild_id=hikari.Snowflake(10)),
+            },
+        )()
+
+        with (
+            patch.object(AppManageService, "_require_manager", return_value=cast(Any, manager)),
+            patch.object(AppManageService, "_require_acl", return_value=cast(Any, acl)),
+            patch.object(AppManageService, "_require_bot", return_value=cast(Any, bot)),
+        ):
+            response = asyncio.run(service._on_editor_action(cast(Any, req), {}))
+
+        manager.set_app_chat_channels.assert_called_once_with(app, ())
+        assert response is not None
+        self.assertEqual(
+            response.content,
+            "Dummy has no relay override configured for this guild. The default relay channel still applies here.",
+        )
 
     def test_save_default_relay_channel_action_updates_only_current_guild_channels(self) -> None:
         service = AppManageService()
@@ -2185,6 +2281,13 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_notify_running_app_relays_targets_only_running_inbound_apps(self) -> None:
         manager = object.__new__(App_Manager)
         manager.bot = cast(Any, object())
+        restart_notice = MaintenanceNotice(
+            stage=MaintenanceStage.WARNING,
+            target=RestartTarget.SYSTEM,
+            source=RelayNoticeSource.BOT,
+            severity=RelayNoticeSeverity.WARNING,
+            lead_minutes=1,
+        )
         running_app = _build_dummy_app(has_receiver=True)
         running_app._running = True
         running_receiver = _RecordingReceiver()
@@ -2205,12 +2308,16 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             outbound_only_app.name: outbound_only_app,
         }
 
-        sent_count = await manager.notify_running_app_relays("Scheduled maintenance: restart in 1m.")
+        sent_count = await manager.notify_running_app_relays(
+            "Scheduled maintenance: restart in 1m.",
+            notice=restart_notice,
+        )
 
         self.assertEqual(sent_count, 1)
         self.assertEqual(len(running_receiver.payloads), 1)
         self.assertEqual(running_receiver.payloads[0].content, "Scheduled maintenance: restart in 1m.")
         self.assertEqual(running_receiver.payloads[0].player, "System")
+        self.assertIs(running_receiver.payloads[0].notice, restart_notice)
         self.assertEqual(len(stopped_receiver.payloads), 0)
 
     def test_set_current_restart_auto_start_app_persists_then_consume_clears(self) -> None:

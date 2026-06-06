@@ -1426,6 +1426,20 @@ class AppManageService:
         )
 
     @classmethod
+    async def _configured_app_relay_override_channel_for_guild(
+        cls,
+        *,
+        bot: hikari.GatewayBot,
+        app: App,
+        guild_id: hikari.Snowflakeish,
+    ) -> hikari.Snowflake | None:
+        return await cls._configured_relay_channel_for_guild(
+            bot=bot,
+            channel_ids=_app_override_channels(app),
+            guild_id=guild_id,
+        )
+
+    @classmethod
     async def _configured_default_relay_channel_for_guild(
         cls,
         *,
@@ -1482,7 +1496,7 @@ class AppManageService:
     ) -> tuple[hikari.Snowflake, ...]:
         return await cls._next_relay_channels_for_guild(
             bot=bot,
-            channel_ids=app.chat_channels,
+            channel_ids=_app_override_channels(app),
             guild_id=guild_id,
             selected_channel_id=selected_channel_id,
         )
@@ -2193,24 +2207,43 @@ class AppManageService:
             channel_guild_id = await self._resolve_channel_guild_id(bot=bot, channel_id=channel_id)
             if channel_guild_id != current_guild_id:
                 return EditorResponse.ephemeral("Choose a text channel from this server.")
+            previous_override_channel_id = await self._configured_app_relay_override_channel_for_guild(
+                bot=bot,
+                app=app,
+                guild_id=current_guild_id,
+            )
+            default_channel_id = await self._configured_default_relay_channel_for_guild(
+                bot=bot,
+                manager=manager,
+                guild_id=current_guild_id,
+            )
+            selected_override_channel_id = None if channel_id == default_channel_id else channel_id
             channel_ids = await self._next_app_relay_channels_for_guild(
                 bot=bot,
                 app=app,
                 guild_id=current_guild_id,
-                selected_channel_id=channel_id,
+                selected_channel_id=selected_override_channel_id,
             )
             manager.set_app_chat_channels(app, channel_ids)
             self._sync_voice_target_to_relay_channel(
                 guild_id=current_guild_id,
                 relay_text_channel_id=channel_id,
             )
+            status_text = f"{app.friendly} relay text channel for this guild set to <#{int(channel_id)}>."
+            if selected_override_channel_id is None:
+                status_text = (
+                    f"{app.friendly} already uses the default relay channel for this guild."
+                    if previous_override_channel_id is None
+                    else f"{app.friendly} relay override cleared for this guild. "
+                    "The default relay channel still applies here."
+                )
             return self._build_editor_response(
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 acl=acl,
                 manager=manager,
                 state=state,
-                status=f"{app.friendly} relay text channel for this guild set to <#{int(channel_id)}>.",
+                status=status_text,
                 current_guild_id=current_guild_id,
             )
         if action.kind is AppManageActionKind.SAVE_RELAY_VOICE_CHANNEL:
@@ -2323,7 +2356,7 @@ class AppManageService:
             app = manager.get(state.app_name)
             if not app.supports_chat_relay:
                 return EditorResponse.ephemeral(f"{app.friendly} does not support chat relay.")
-            removed_channel_id = await self._configured_app_relay_channel_for_guild(
+            removed_channel_id = await self._configured_app_relay_override_channel_for_guild(
                 bot=bot,
                 app=app,
                 guild_id=current_guild_id,
@@ -2336,19 +2369,23 @@ class AppManageService:
             )
             manager.set_app_chat_channels(app, channel_ids)
             status_text = f"{app.friendly} relay text channel removed for this guild."
+            default_channel_id = await self._configured_default_relay_channel_for_guild(
+                bot=bot,
+                manager=manager,
+                guild_id=current_guild_id,
+            )
             if removed_channel_id is None:
-                status_text = f"{app.friendly} has no relay text channel configured for this guild."
-            elif not channel_ids:
-                default_channel_id = await self._configured_default_relay_channel_for_guild(
-                    bot=bot,
-                    manager=manager,
-                    guild_id=current_guild_id,
+                status_text = (
+                    f"{app.friendly} has no relay override configured for this guild. "
+                    "The default relay channel still applies here."
+                    if default_channel_id is not None
+                    else f"{app.friendly} has no relay text channel configured for this guild."
                 )
-                if default_channel_id is not None:
-                    status_text = (
-                        f"{app.friendly} relay override cleared for this guild. "
-                        "The default relay channel still applies here."
-                    )
+            elif not channel_ids and default_channel_id is not None:
+                status_text = (
+                    f"{app.friendly} relay override cleared for this guild. "
+                    "The default relay channel still applies here."
+                )
             return self._build_editor_response(
                 actor_user_id=actor_user_id,
                 locale=req.locale,

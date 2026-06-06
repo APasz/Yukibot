@@ -19,7 +19,6 @@ from .runtime_imports import (
     ChatReferenceKind,
     Column,
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
-    Generics,
     Html,
     Input,
     Label,
@@ -55,13 +54,23 @@ from .constants import (
     _CHAT_HISTORY_REFRESH_INTERVAL_SECONDS,
     _CHAT_MARKUP_BOLD_RE,
     _CHAT_MARKUP_CODE_BLOCK_RE,
+    _CHAT_MARKUP_DISCORD_CHANNEL_RE,
     _CHAT_MARKUP_DISCORD_MENTION_RE,
+    _CHAT_MARKUP_DISCORD_ROLE_RE,
+    _CHAT_MARKUP_DISCORD_TIMESTAMP_RE,
+    _CHAT_MARKUP_ESCAPE_RE,
+    _CHAT_MARKUP_HEADER_RE,
     _CHAT_MARKUP_INLINE_CODE_RE,
+    _CHAT_MARKUP_LINK_RE,
+    _CHAT_MARKUP_ORDERED_LIST_RE,
+    _CHAT_MARKUP_RAW_URL_RE,
     _CHAT_MARKUP_ITALIC_STAR_RE,
     _CHAT_MARKUP_ITALIC_UNDERSCORE_RE,
     _CHAT_MARKUP_SPOILER_RE,
     _CHAT_MARKUP_STRIKETHROUGH_RE,
+    _CHAT_MARKUP_SUBTEXT_RE,
     _CHAT_MARKUP_UNDERLINE_RE,
+    _CHAT_MARKUP_UNORDERED_LIST_RE,
     _CHAT_MEDIA_AUDIO_EXTENSIONS,
     _CHAT_MEDIA_IMAGE_EXTENSIONS,
     _CHAT_MEDIA_VIDEO_EXTENSIONS,
@@ -91,6 +100,7 @@ from .types import (
 from .service_base import ModWebServiceSupport
 from .streams import ModWebStreamsMixin
 from .ui_helpers import ModWebUiHelpersMixin
+from relay_notices import notice_badge_spec, notice_hides_body_content, relay_notice_badge_spec_from_label
 
 from typing import TYPE_CHECKING
 
@@ -287,7 +297,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         resolved_app_entry = (
             app_entry
             if app_entry is not None
-            else await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+            else await self._remote_app_entry_async(node, app_name, user)
         )
         if not resolved_app_entry.supports_chat:
             raise ValueError(f"{resolved_app_entry.friendly} does not expose a chat relay.")
@@ -303,10 +313,10 @@ class ModWebChatMixin(ModWebServiceSupport):
         )
         initial_app_stats = app_stats
         if initial_app_stats is None:
-            initial_app_stats = await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
+            initial_app_stats = await self._remote_app_runtime_summary_async(node, app_name, user)
 
         async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
-            return await asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user)
+            return await self._remote_app_runtime_summary_async(node, app_name, user)
 
         hero_badges: tuple[_ModWebBadgeSpec, ...] = ()
         if initial_app_stats is not None:
@@ -527,7 +537,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             return
         try:
             node = self._remote_node_link(node_name)
-            app_entry = await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+            app_entry = await self._remote_app_entry_async(node, app_name, user)
             chat_surface = await self._remote_chat_surface_config(
                 node=node,
                 app_name=app_name,
@@ -586,6 +596,13 @@ class ModWebChatMixin(ModWebServiceSupport):
         can_send = chat_surface.panel.send_message is not None
         app_status_label, app_status_tone = self._chat_app_status_badge(chat_surface.app_stats)
         player_count_badge = self._chat_player_count_badge(chat_surface.app_stats)
+        player_count_tooltip_html: str | None = self._player_count_tooltip_html(
+            player_count=chat_surface.app_stats.player_count if chat_surface.app_stats is not None else None,
+            player_capacity=chat_surface.app_stats.player_capacity if chat_surface.app_stats is not None else None,
+            connected_player_names=chat_surface.app_stats.connected_player_names
+            if chat_surface.app_stats is not None
+            else (),
+        )
         with (
             ui.card()
             .classes(f"{self._hero_card_classes()} mod-chat-shell-card")
@@ -627,6 +644,11 @@ class ModWebChatMixin(ModWebServiceSupport):
                                 text=player_count_badge.text if player_count_badge is not None else "",
                                 tone=player_count_badge.tone if player_count_badge is not None else "grey",
                             )
+                            player_count_tooltip, player_count_tooltip_content = self._attach_html_tooltip(
+                                ui=ui,
+                                target=player_count_badge_label,
+                                html=player_count_tooltip_html or "",
+                            )
                             self._set_optional_badge_state(
                                 player_count_badge_label,
                                 player_count_badge,
@@ -643,6 +665,8 @@ class ModWebChatMixin(ModWebServiceSupport):
                     endpoint_count_tooltip_content=endpoint_count_tooltip_content,
                     app_status_badge_label=app_status_badge_label,
                     player_count_badge_label=player_count_badge_label,
+                    player_count_tooltip=player_count_tooltip,
+                    player_count_tooltip_content=player_count_tooltip_content,
                     embedded=True,
                 )
 
@@ -661,6 +685,8 @@ class ModWebChatMixin(ModWebServiceSupport):
         endpoint_count_tooltip_content: Html | None = None,
         app_status_badge_label: Label | None = None,
         player_count_badge_label: Label | None = None,
+        player_count_tooltip: "Tooltip | None" = None,
+        player_count_tooltip_content: Html | None = None,
         popout_url: str | None = None,
         embedded: bool = False,
     ) -> Callable[[NodeAppRuntimeSummary | None], None]:
@@ -675,6 +701,8 @@ class ModWebChatMixin(ModWebServiceSupport):
         endpoint_count_display = endpoint_count_label
         endpoint_count_tooltip_display = endpoint_count_tooltip
         endpoint_count_tooltip_content_display = endpoint_count_tooltip_content
+        player_count_tooltip_display = player_count_tooltip
+        player_count_tooltip_content_display = player_count_tooltip_content
         timeline_column: Column | None = None
         unread_bar: Row | None = None
         unread_count_label: Label | None = None
@@ -697,10 +725,21 @@ class ModWebChatMixin(ModWebServiceSupport):
                 latest_status_label, latest_status_tone = self._chat_app_status_badge(next_app_stats)
                 self._set_badge_state(app_status_badge_label, latest_status_label, latest_status_tone)
             if player_count_badge_label is not None:
+                player_count_tooltip_html = self._player_count_tooltip_html(
+                    player_count=next_app_stats.player_count if next_app_stats is not None else None,
+                    player_capacity=next_app_stats.player_capacity if next_app_stats is not None else None,
+                    connected_player_names=next_app_stats.connected_player_names if next_app_stats is not None else (),
+                )
                 self._set_optional_badge_state(
                     player_count_badge_label,
                     self._chat_player_count_badge(next_app_stats),
                 )
+                if player_count_tooltip_display is not None and player_count_tooltip_content_display is not None:
+                    self._set_html_tooltip_state(
+                        player_count_tooltip_display,
+                        player_count_tooltip_content_display,
+                        player_count_tooltip_html or "",
+                    )
 
         def clear_reply_target() -> None:
             nonlocal reply_reference, reply_reference_source_guild_id, reply_to_event_id
@@ -970,6 +1009,20 @@ class ModWebChatMixin(ModWebServiceSupport):
                                 text=player_count_badge.text if player_count_badge is not None else "",
                                 tone=player_count_badge.tone if player_count_badge is not None else "grey",
                             )
+                            player_count_tooltip_display, player_count_tooltip_content_display = (
+                                self._attach_html_tooltip(
+                                    ui=ui,
+                                    target=player_count_badge_label,
+                                    html=self._player_count_tooltip_html(
+                                        player_count=app_stats.player_count if app_stats is not None else None,
+                                        player_capacity=app_stats.player_capacity if app_stats is not None else None,
+                                        connected_player_names=app_stats.connected_player_names
+                                        if app_stats is not None
+                                        else (),
+                                    )
+                                    or "",
+                                )
+                            )
                             self._set_optional_badge_state(player_count_badge_label, player_count_badge)
                             if popout_url is not None:
                                 self._action_link(
@@ -1107,6 +1160,130 @@ class ModWebChatMixin(ModWebServiceSupport):
                   }}
                   return atBottom;
                 }};
+                const relativeTime = (unixSeconds) => {{
+                  const deltaSeconds = unixSeconds - Math.floor(Date.now() / 1000);
+                  const absoluteDeltaSeconds = Math.abs(deltaSeconds);
+                  let amount = absoluteDeltaSeconds;
+                  let unit = 'second';
+                  if (absoluteDeltaSeconds >= 86400) {{
+                    amount = Math.floor(absoluteDeltaSeconds / 86400);
+                    unit = 'day';
+                  }} else if (absoluteDeltaSeconds >= 3600) {{
+                    amount = Math.floor(absoluteDeltaSeconds / 3600);
+                    unit = 'hour';
+                  }} else if (absoluteDeltaSeconds >= 60) {{
+                    amount = Math.floor(absoluteDeltaSeconds / 60);
+                    unit = 'minute';
+                  }}
+                  const suffix = amount === 1 ? '' : 's';
+                  if (deltaSeconds >= 0) {{
+                    return `in ${{amount}} ${{unit}}${{suffix}}`;
+                  }}
+                  return `${{amount}} ${{unit}}${{suffix}} ago`;
+                }};
+                const defaultTimePreferences = Object.freeze({{use24HourTime: true}});
+                const timePreferences = () => {{
+                  const preferences = window.modWebPreferences;
+                  if (!preferences || typeof preferences !== 'object') {{
+                    return defaultTimePreferences;
+                  }}
+                  if (typeof preferences.use24HourTime !== 'boolean') {{
+                    return defaultTimePreferences;
+                  }}
+                  return {{use24HourTime: preferences.use24HourTime}};
+                }};
+                const withTimePreferences = (options) => {{
+                  const preferences = timePreferences();
+                  if (!preferences.use24HourTime) {{
+                    return options;
+                  }}
+                  return {{{{...options, hour12: false, hourCycle: 'h23'}}}};
+                }};
+                const timestampText = (unixSeconds, style) => {{
+                  const date = new Date(unixSeconds * 1000);
+                  if (Number.isNaN(date.getTime())) {{
+                    return null;
+                  }}
+                  const resolvedStyle = style || 'f';
+                  if (resolvedStyle === 'R') {{
+                    return relativeTime(unixSeconds);
+                  }}
+                  if (resolvedStyle === 't') {{
+                    return new Intl.DateTimeFormat(undefined, withTimePreferences({{timeStyle: 'short'}})).format(date);
+                  }}
+                  if (resolvedStyle === 'T') {{
+                    return new Intl.DateTimeFormat(undefined, withTimePreferences({{timeStyle: 'medium'}})).format(date);
+                  }}
+                  if (resolvedStyle === 'd') {{
+                    return new Intl.DateTimeFormat(undefined, withTimePreferences({{dateStyle: 'short'}})).format(date);
+                  }}
+                  if (resolvedStyle === 'D') {{
+                    return new Intl.DateTimeFormat(undefined, withTimePreferences({{dateStyle: 'long'}})).format(date);
+                  }}
+                  if (resolvedStyle === 'F') {{
+                    return new Intl.DateTimeFormat(
+                      undefined,
+                      withTimePreferences({{dateStyle: 'full', timeStyle: 'short'}}),
+                    ).format(date);
+                  }}
+                  return new Intl.DateTimeFormat(
+                    undefined,
+                    withTimePreferences({{dateStyle: 'long', timeStyle: 'short'}}),
+                  ).format(date);
+                }};
+                const timestampTitle = (unixSeconds) => {{
+                  const date = new Date(unixSeconds * 1000);
+                  if (Number.isNaN(date.getTime())) {{
+                    return '';
+                  }}
+                  return new Intl.DateTimeFormat(
+                    undefined,
+                    withTimePreferences({{
+                      dateStyle: 'full',
+                      timeStyle: 'long',
+                    }}),
+                  ).format(date);
+                }};
+                const localizeTimes = (root) => {{
+                  const scope = root || document;
+                  for (const element of scope.querySelectorAll('.mod-chat-client-time[data-mod-chat-unix]')) {{
+                    const unixSeconds = Number.parseInt(element.dataset.modChatUnix || '', 10);
+                    if (!Number.isFinite(unixSeconds)) {{
+                      continue;
+                    }}
+                    const style = element.dataset.modChatTimeStyle || 'f';
+                    const text = timestampText(unixSeconds, style);
+                    if (text !== null) {{
+                      element.textContent = text;
+                    }}
+                    const title = timestampTitle(unixSeconds);
+                    if (title) {{
+                      element.title = title;
+                    }}
+                  }}
+                }};
+                const observeLocalizedTimes = () => {{
+                  if (window.modWebChatTimeObserver || !document.body) {{
+                    return;
+                  }}
+                  window.modWebChatTimeObserver = new MutationObserver((mutations) => {{
+                    for (const mutation of mutations) {{
+                      for (const node of mutation.addedNodes) {{
+                        if (!(node instanceof Element)) {{
+                          continue;
+                        }}
+                        if (node.matches('.mod-chat-client-time[data-mod-chat-unix]')) {{
+                          localizeTimes(node.parentElement || node);
+                          continue;
+                        }}
+                        if (node.querySelector('.mod-chat-client-time[data-mod-chat-unix]')) {{
+                          localizeTimes(node);
+                        }}
+                      }}
+                    }}
+                  }});
+                  window.modWebChatTimeObserver.observe(document.body, {{childList: true, subtree: true}});
+                }};
                 const attachMediaListeners = (timelineId, unreadBarId, unreadCountId) => {{
                   const timeline = get(timelineId);
                   if (!timeline) {{
@@ -1150,6 +1327,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                   }}
                   sync(timelineId, unreadBarId, unreadCountId);
                   attachMediaListeners(timelineId, unreadBarId, unreadCountId);
+                  localizeTimes(timeline);
                 }};
                 const beforeRefresh = (timelineId, unreadBarId, unreadCountId) => {{
                   bind(timelineId, unreadBarId, unreadCountId);
@@ -1188,6 +1366,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                   }}
                   const wasPinned = forceScroll || timeline.dataset.modChatWasPinned !== '0';
                   timeline.dataset.modChatWasPinned = '0';
+                  localizeTimes(timeline);
                   if (wasPinned || shouldAutoScrollAfterRefresh(timeline, appendedCount)) {{
                     jump(timelineId, unreadBarId, unreadCountId);
                     return;
@@ -1195,7 +1374,10 @@ class ModWebChatMixin(ModWebServiceSupport):
                   const currentUnread = Number.parseInt(timeline.dataset.modChatUnread || '0', 10) || 0;
                   setUnread(timelineId, unreadBarId, unreadCountId, currentUnread + Math.max(0, appendedCount));
                 }};
-                return {{bind, beforeRefresh, jump, afterRefresh}};
+                localizeTimes(document);
+                observeLocalizedTimes();
+                window.setInterval(() => localizeTimes(document), 30000);
+                return {{bind, beforeRefresh, jump, afterRefresh, localizeTimes}};
               }})();
             }}
             </script>
@@ -1320,7 +1502,7 @@ class ModWebChatMixin(ModWebServiceSupport):
     def _is_groupable_chat_event(cls, event: ChatEvent) -> bool:
         if event.author.kind is ChatAuthorKind.SYSTEM:
             return False
-        if event.is_template or event.embed is not None:
+        if event.notice is not None or event.embed is not None:
             return False
         return not cls._chat_event_badges(event)
 
@@ -1390,7 +1572,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                 self._render_chat_event_body(ui=ui, event=event)
             with ui.row().classes("mod-chat-entry-meta items-start justify-end gap-1"):
                 if show_time:
-                    ui.label(self._chat_event_time(event)).classes("mod-chat-entry-time")
+                    ui.html(self._chat_event_time_markup(event)).classes("mod-chat-entry-time")
             if can_reply:
                 with ui.context_menu().classes("mod-chat-entry-menu"):
                     ui.menu_item("Reply", on_click=lambda event=event: on_reply(event)).classes(
@@ -1509,8 +1691,21 @@ class ModWebChatMixin(ModWebServiceSupport):
         if not text:
             return ""
         text_with_placeholders, placeholders = cls._chat_markup_preserve_code(text)
+        text_with_placeholders, placeholders = cls._chat_markup_preserve_escapes(text_with_placeholders, placeholders)
         if text_transform is not None:
             text_with_placeholders = text_transform(text_with_placeholders)
+        text_with_placeholders, placeholders = cls._chat_markup_preserve_links(
+            text_with_placeholders,
+            placeholders,
+        )
+        text_with_placeholders, placeholders = cls._chat_markup_preserve_discord_timestamps(
+            text_with_placeholders,
+            placeholders,
+        )
+        text_with_placeholders, placeholders = cls._chat_markup_preserve_raw_urls(
+            text_with_placeholders,
+            placeholders,
+        )
         segments = cls._chat_markup_segments(text_with_placeholders, placeholders)
         return "".join(segments)
 
@@ -1555,7 +1750,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         scope = self._chat_room_scope(room_id)
         name_cache = config.Name_Cache()
 
-        def replace_mention(match: re.Match[str]) -> str:
+        def replace_user_mention(match: re.Match[str]) -> str:
             raw_user_id = match.group("discord_user_id") or match.group("raw_discord_user_id")
             if raw_user_id is None:
                 raise ValueError("Chat mention match is missing a Discord user ID.")
@@ -1568,7 +1763,23 @@ class ModWebChatMixin(ModWebServiceSupport):
             )
             return f"{prefix}{display_name}"
 
-        return _CHAT_MARKUP_DISCORD_MENTION_RE.sub(replace_mention, text)
+        def replace_channel_mention(match: re.Match[str]) -> str:
+            channel_id = int(match.group("channel_id"))
+            channel_name = self._discord_chat_channel_name_by_id(channel_id)
+            return f"#{channel_name or channel_id}"
+
+        def replace_role_mention(match: re.Match[str]) -> str:
+            role_id = int(match.group("role_id"))
+            role_name = self._discord_role_name_by_id(role_id)
+            return f"@{role_name or role_id}"
+
+        def replace_timestamp(match: re.Match[str]) -> str:
+            return match.group(0)
+
+        resolved = _CHAT_MARKUP_DISCORD_MENTION_RE.sub(replace_user_mention, text)
+        resolved = _CHAT_MARKUP_DISCORD_CHANNEL_RE.sub(replace_channel_mention, resolved)
+        resolved = _CHAT_MARKUP_DISCORD_ROLE_RE.sub(replace_role_mention, resolved)
+        return _CHAT_MARKUP_DISCORD_TIMESTAMP_RE.sub(replace_timestamp, resolved)
 
     def _chat_event_author_display_name(self, event: ChatEvent) -> str:
         return self._chat_identity_display_name(
@@ -1628,25 +1839,149 @@ class ModWebChatMixin(ModWebServiceSupport):
     @classmethod
     def _chat_markup_preserve_code(cls, text: str) -> tuple[str, dict[str, str]]:
         placeholders: dict[str, str] = {}
-        next_placeholder_index = 0
-
-        def store(fragment_html: str) -> str:
-            nonlocal next_placeholder_index
-            placeholder = f"MODWEBCHATPLACEHOLDER{next_placeholder_index}TOKEN"
-            next_placeholder_index += 1
-            placeholders[placeholder] = fragment_html
-            return placeholder
 
         def replace_code_block(match: re.Match[str]) -> str:
             code_text = match.group(1).strip("\n")
-            return store(f'<pre class="mod-chat-code-block"><code>{escape(code_text)}</code></pre>')
+            return cls._chat_markup_store_fragment(
+                placeholders,
+                f'<pre class="mod-chat-code-block"><code>{escape(code_text)}</code></pre>',
+            )
 
         def replace_inline_code(match: re.Match[str]) -> str:
-            return store(f'<code class="mod-chat-inline-code">{escape(match.group(1))}</code>')
+            return cls._chat_markup_store_fragment(
+                placeholders,
+                f'<code class="mod-chat-inline-code">{escape(match.group(1))}</code>',
+            )
 
         with_code_blocks = _CHAT_MARKUP_CODE_BLOCK_RE.sub(replace_code_block, text)
         with_inline_code = _CHAT_MARKUP_INLINE_CODE_RE.sub(replace_inline_code, with_code_blocks)
         return with_inline_code, placeholders
+
+    @classmethod
+    def _chat_markup_preserve_escapes(
+        cls,
+        text: str,
+        placeholders: dict[str, str],
+    ) -> tuple[str, dict[str, str]]:
+        if not text:
+            return text, placeholders
+
+        def replace_escape(match: re.Match[str]) -> str:
+            return cls._chat_markup_store_fragment(placeholders, escape(match.group("escaped")))
+
+        return _CHAT_MARKUP_ESCAPE_RE.sub(replace_escape, text), placeholders
+
+    @staticmethod
+    def _chat_markup_store_fragment(placeholders: dict[str, str], fragment_html: str) -> str:
+        placeholder = f"MODWEBCHATPLACEHOLDER{len(placeholders)}TOKEN"
+        placeholders[placeholder] = fragment_html
+        return placeholder
+
+    @classmethod
+    def _chat_markup_preserve_links(
+        cls,
+        text: str,
+        placeholders: dict[str, str],
+    ) -> tuple[str, dict[str, str]]:
+        if not text:
+            return text, placeholders
+
+        def replace_link(match: re.Match[str]) -> str:
+            url = match.group("url")
+            if not cls._is_safe_chat_media_url(url):
+                return escape(match.group(0))
+            safe_url = escape(url, quote=True)
+            safe_label = escape(match.group("label"))
+            return cls._chat_markup_store_fragment(
+                placeholders,
+                f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{safe_label}</a>'
+            )
+
+        return _CHAT_MARKUP_LINK_RE.sub(replace_link, text), placeholders
+
+    @classmethod
+    def _chat_markup_preserve_raw_urls(
+        cls,
+        text: str,
+        placeholders: dict[str, str],
+    ) -> tuple[str, dict[str, str]]:
+        if not text:
+            return text, placeholders
+
+        def replace_url(match: re.Match[str]) -> str:
+            matched_url = match.group("url")
+            url, trailing_punctuation = cls._split_chat_trailing_url_punctuation(matched_url)
+            if not url or not cls._is_safe_chat_media_url(url):
+                return escape(matched_url)
+            safe_url = escape(url, quote=True)
+            safe_label = escape(url)
+            anchor_html = (
+                f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">{safe_label}</a>'
+            )
+            trailing_html = escape(trailing_punctuation)
+            return cls._chat_markup_store_fragment(placeholders, f"{anchor_html}{trailing_html}")
+
+        return _CHAT_MARKUP_RAW_URL_RE.sub(replace_url, text), placeholders
+
+    @classmethod
+    def _chat_markup_preserve_discord_timestamps(
+        cls,
+        text: str,
+        placeholders: dict[str, str],
+    ) -> tuple[str, dict[str, str]]:
+        if not text:
+            return text, placeholders
+
+        def replace_timestamp(match: re.Match[str]) -> str:
+            unix_timestamp = int(match.group("unix"))
+            style = match.group("style") or "f"
+            return cls._chat_markup_store_fragment(
+                placeholders,
+                cls._client_local_time_markup(unix_timestamp=unix_timestamp, style=style),
+            )
+
+        return _CHAT_MARKUP_DISCORD_TIMESTAMP_RE.sub(replace_timestamp, text), placeholders
+
+    @staticmethod
+    def _split_chat_trailing_url_punctuation(url: str) -> tuple[str, str]:
+        trimmed_url = url
+        trailing_characters: list[str] = []
+        while trimmed_url and trimmed_url[-1] in ".,!?;:":
+            trailing_characters.append(trimmed_url[-1])
+            trimmed_url = trimmed_url[:-1]
+        while trimmed_url.endswith(")") and trimmed_url.count(")") > trimmed_url.count("("):
+            trailing_characters.append(")")
+            trimmed_url = trimmed_url[:-1]
+        return trimmed_url, "".join(reversed(trailing_characters))
+
+    @classmethod
+    def _client_local_time_markup(cls, *, unix_timestamp: int, style: str) -> str:
+        safe_style = escape(style, quote=True)
+        fallback_text = escape(cls._discord_timestamp_fallback_text(unix_timestamp=unix_timestamp, style=style))
+        iso_datetime = escape(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(unix_timestamp)), quote=True)
+        return (
+            '<time class="mod-chat-client-time"'
+            f' datetime="{iso_datetime}"'
+            f' data-mod-chat-unix="{unix_timestamp}"'
+            f' data-mod-chat-time-style="{safe_style}">{fallback_text}</time>'
+        )
+
+    @classmethod
+    def _discord_timestamp_fallback_text(cls, *, unix_timestamp: int, style: str) -> str:
+        if style == "R":
+            return cls._discord_relative_timestamp_text(unix_timestamp=unix_timestamp)
+        timestamp = time.gmtime(unix_timestamp)
+        if style == "t":
+            return time.strftime("%H:%M UTC", timestamp)
+        if style == "T":
+            return time.strftime("%H:%M:%S UTC", timestamp)
+        if style == "d":
+            return time.strftime("%Y-%m-%d UTC", timestamp)
+        if style == "D":
+            return time.strftime("%B %d, %Y UTC", timestamp)
+        if style == "F":
+            return time.strftime("%A, %B %d, %Y %H:%M UTC", timestamp)
+        return time.strftime("%B %d, %Y %H:%M UTC", timestamp)
 
     @classmethod
     def _chat_markup_segments(cls, text: str, placeholders: Mapping[str, str]) -> tuple[str, ...]:
@@ -1671,6 +2006,28 @@ class ModWebChatMixin(ModWebServiceSupport):
 
         while index < line_count:
             line: str = lines[index]
+            header_match = _CHAT_MARKUP_HEADER_RE.fullmatch(line)
+            if header_match is not None:
+                flush_normal_lines()
+                content = cls._chat_markup_inline_html(header_match.group("content"), placeholders)
+                level = len(header_match.group("level"))
+                segments.append(
+                    f'<div class="mod-chat-markup-heading mod-chat-markup-heading-{level}">{content}</div>'
+                )
+                index += 1
+                continue
+            subtext_match = _CHAT_MARKUP_SUBTEXT_RE.fullmatch(line)
+            if subtext_match is not None:
+                flush_normal_lines()
+                content = cls._chat_markup_inline_html(subtext_match.group("content"), placeholders)
+                segments.append(f'<div class="mod-chat-markup-subtext">{content}</div>')
+                index += 1
+                continue
+            if cls._chat_markup_list_item_info(line) is not None:
+                flush_normal_lines()
+                list_markup, index = cls._chat_markup_list_html(lines, index, placeholders)
+                segments.append(list_markup)
+                continue
             if line.startswith(">>>"):
                 flush_normal_lines()
                 quote_lines = [cls._chat_markup_strip_quote_prefix(line, prefix=">>>")]
@@ -1695,6 +2052,103 @@ class ModWebChatMixin(ModWebServiceSupport):
             index += 1
         flush_normal_lines()
         return tuple[str, ...](segments)
+
+    @classmethod
+    def _chat_markup_list_html(
+        cls,
+        lines: list[str],
+        start_index: int,
+        placeholders: Mapping[str, str],
+    ) -> tuple[str, int]:
+        first_item = cls._chat_markup_list_item_info(lines[start_index])
+        if first_item is None:
+            raise ValueError("List markup rendering requires a list item at the starting index.")
+        return cls._chat_markup_render_list_block(
+            lines,
+            start_index,
+            placeholders,
+            expected_depth=first_item[0],
+        )
+
+    @classmethod
+    def _chat_markup_render_list_block(
+        cls,
+        lines: list[str],
+        start_index: int,
+        placeholders: Mapping[str, str],
+        *,
+        expected_depth: int,
+    ) -> tuple[str, int]:
+        first_item = cls._chat_markup_list_item_info(lines[start_index])
+        if first_item is None or first_item[0] != expected_depth:
+            raise ValueError("List block rendering requires a matching starting depth.")
+        ordered = first_item[1]
+        start_number = first_item[2]
+        list_tag = "ol" if ordered else "ul"
+        list_classes = (
+            "mod-chat-markup-list mod-chat-markup-list-ordered"
+            if ordered
+            else "mod-chat-markup-list mod-chat-markup-list-unordered"
+        )
+        start_attribute = ""
+        if ordered and start_number is not None and start_number != 1:
+            start_attribute = f' start="{start_number}"'
+        html_parts: list[str] = [f"<{list_tag} class=\"{list_classes}\"{start_attribute}>"]
+        index = start_index
+        opened_item = False
+        while index < len(lines):
+            item = cls._chat_markup_list_item_info(lines[index])
+            if item is None or item[0] < expected_depth:
+                break
+            if item[0] > expected_depth:
+                if item[0] != expected_depth + 1 or not opened_item:
+                    break
+                nested_html, index = cls._chat_markup_render_list_block(
+                    lines,
+                    index,
+                    placeholders,
+                    expected_depth=item[0],
+                )
+                html_parts.append(nested_html)
+                continue
+            if item[1] != ordered:
+                break
+            if opened_item:
+                html_parts.append("</li>")
+            html_parts.append("<li>")
+            html_parts.append(cls._chat_markup_inline_html(item[3], placeholders))
+            opened_item = True
+            index += 1
+        if opened_item:
+            html_parts.append("</li>")
+        html_parts.append(f"</{list_tag}>")
+        return "".join(html_parts), index
+
+    @staticmethod
+    def _chat_markup_list_item_info(line: str) -> tuple[int, bool, int | None, str] | None:
+        ordered_match = _CHAT_MARKUP_ORDERED_LIST_RE.fullmatch(line)
+        if ordered_match is not None:
+            indent = ordered_match.group("indent")
+            if len(indent) % 2 != 0:
+                return None
+            return (
+                len(indent) // 2,
+                True,
+                int(ordered_match.group("number")),
+                ordered_match.group("content"),
+            )
+        unordered_match = _CHAT_MARKUP_UNORDERED_LIST_RE.fullmatch(line)
+        if unordered_match is None:
+            return None
+        indent = unordered_match.group("indent")
+        if len(indent) % 2 != 0:
+            return None
+        return (
+            len(indent) // 2,
+            False,
+            None,
+            unordered_match.group("content"),
+        )
 
     @staticmethod
     def _chat_markup_strip_quote_prefix(line: str, *, prefix: str) -> str:
@@ -1816,9 +2270,10 @@ class ModWebChatMixin(ModWebServiceSupport):
             f"{safe_label}</a></div>"
         )
 
-    @staticmethod
-    def _chat_event_time(event: ChatEvent) -> str:
-        return time.strftime("%H:%M:%S", time.localtime(event.created_at))
+    @classmethod
+    def _chat_event_time_markup(cls, event: ChatEvent) -> str:
+        unix_timestamp = int(event.created_at)
+        return cls._client_local_time_markup(unix_timestamp=unix_timestamp, style="T")
 
     @staticmethod
     def _chat_endpoint_count_text(snapshot: NodeChatRoomSnapshot) -> str:
@@ -1838,9 +2293,11 @@ class ModWebChatMixin(ModWebServiceSupport):
         snapshot: NodeChatRoomSnapshot,
     ) -> tuple["Label", "Tooltip", Html]:
         badge: Label = ModWebUiHelpersMixin._badge(ui=ui, text=cls._chat_endpoint_count_text(snapshot), tone="black")
-        with badge:
-            with ui.tooltip() as tooltip:
-                tooltip_content = cast(Html, ui.html(cls._chat_endpoint_count_tooltip(snapshot) or ""))
+        tooltip, tooltip_content = ModWebUiHelpersMixin._attach_html_tooltip(
+            ui=ui,
+            target=badge,
+            html=cls._chat_endpoint_count_tooltip(snapshot) or "",
+        )
         return badge, tooltip, tooltip_content
 
     @classmethod
@@ -1852,9 +2309,11 @@ class ModWebChatMixin(ModWebServiceSupport):
         snapshot: NodeChatRoomSnapshot,
     ) -> None:
         badge.set_text(cls._chat_endpoint_count_text(snapshot))
-        tooltip_content.set_content(cls._chat_endpoint_count_tooltip(snapshot) or "")
-        tooltip_content.update()
-        tooltip.update()
+        ModWebUiHelpersMixin._set_html_tooltip_state(
+            tooltip,
+            tooltip_content,
+            cls._chat_endpoint_count_tooltip(snapshot) or "",
+        )
         badge.update()
 
     def _chat_event_content(self, event: ChatEvent) -> str:
@@ -1874,57 +2333,33 @@ class ModWebChatMixin(ModWebServiceSupport):
 
     @staticmethod
     def _chat_event_hides_body_content(event: ChatEvent) -> bool:
-        if not event.is_template:
+        notice = event.resolved_notice()
+        if notice is None:
             return False
-        return event.content in {Generics.join.value, Generics.left.value}
+        return notice_hides_body_content(notice)
 
     @classmethod
     def _chat_event_badges(cls, event: ChatEvent) -> tuple[_ModWebBadgeSpec, ...]:
+        notice = event.resolved_notice()
+        if notice is not None:
+            notice_badge = notice_badge_spec(notice)
+            if notice_badge is None:
+                return ()
+            return (_ModWebBadgeSpec(text=notice_badge.text, tone=notice_badge.tone),)
         embed: ChatEmbed | None = event.embed
-        if embed is not None:
-            badge = cls._chat_event_badge_for_label(embed.title)
-            if badge is not None:
-                return (badge,)
-        if not event.is_template:
+        if embed is None:
             return ()
-        badge: _ModWebBadgeSpec | None = cls._chat_event_badge_for_template(event.content)
+        badge = cls._chat_event_badge_for_label(embed.title)
         if badge is None:
             return ()
         return (badge,)
 
-    @classmethod
-    def _chat_event_badge_for_template(cls, template: str) -> _ModWebBadgeSpec | None:
-        if template == Generics.join.value:
-            return _ModWebBadgeSpec(text="Joined", tone="purple")
-        if template == Generics.left.value:
-            return _ModWebBadgeSpec(text="Left", tone="grey")
-        if template == Generics.died_pve.value:
-            return _ModWebBadgeSpec(text="Death", tone="red")
-        if template == Generics.died_pvp.value:
-            return _ModWebBadgeSpec(text="PVP Kill", tone="red")
-        return None
-
     @staticmethod
     def _chat_event_badge_for_label(label: str) -> _ModWebBadgeSpec | None:
-        text: str = label.strip()
-        if not text:
+        badge = relay_notice_badge_spec_from_label(label)
+        if badge is None:
             return None
-        lower: str = text.casefold()
-        if "started" in lower:
-            return _ModWebBadgeSpec(text=text, tone="purple")
-        if "stopped" in lower or "ended" in lower:
-            return _ModWebBadgeSpec(text=text, tone="grey")
-        if "crashed" in lower:
-            return _ModWebBadgeSpec(text=text, tone="red")
-        if "joined" in lower:
-            return _ModWebBadgeSpec(text=text, tone="purple")
-        if "left" in lower:
-            return _ModWebBadgeSpec(text=text, tone="grey")
-        if any(token in lower for token in ("death", "died", "killed")):
-            return _ModWebBadgeSpec(text=text, tone="red")
-        if any(token in lower for token in ("advancement", "challenge", "goal", "research")):
-            return _ModWebBadgeSpec(text=text, tone="black")
-        return _ModWebBadgeSpec(text=text, tone="warn")
+        return _ModWebBadgeSpec(text=badge.text, tone=badge.tone)
 
     @staticmethod
     def _chat_author_color_hex(event: ChatEvent) -> str:
@@ -2051,6 +2486,54 @@ class ModWebChatMixin(ModWebServiceSupport):
             if channel is not None:
                 return channel
         return None
+
+    def _discord_chat_channel_name_by_id(self, channel_id: int) -> str | None:
+        channel = self._discord_chat_source_channel_by_id(channel_id)
+        channel_name = getattr(channel, "name", None)
+        if isinstance(channel_name, str) and channel_name.strip():
+            return channel_name
+        return None
+
+    def _discord_role_name_by_id(self, role_id: int) -> str | None:
+        manager = self._manager
+        if manager is None:
+            return None
+        manager_object: object = manager
+        bot: object | None = getattr(manager_object, "bot", None)
+        cache: object | None = getattr(bot, "cache", None) if bot is not None else None
+        get_role_candidate: object | None = getattr(cache, "get_role", None) if cache is not None else None
+        get_role = cast(
+            Callable[[int], object | None] | None,
+            get_role_candidate if callable(get_role_candidate) else None,
+        )
+        if get_role is None:
+            return None
+        role = get_role(role_id)
+        role_name = getattr(role, "name", None)
+        if isinstance(role_name, str) and role_name.strip():
+            return role_name
+        return None
+
+    @staticmethod
+    def _discord_relative_timestamp_text(*, unix_timestamp: int) -> str:
+        delta_seconds = unix_timestamp - int(time.time())
+        absolute_delta_seconds = abs(delta_seconds)
+        if absolute_delta_seconds < 60:
+            amount = absolute_delta_seconds
+            unit = "second"
+        elif absolute_delta_seconds < 3600:
+            amount = absolute_delta_seconds // 60
+            unit = "minute"
+        elif absolute_delta_seconds < 86400:
+            amount = absolute_delta_seconds // 3600
+            unit = "hour"
+        else:
+            amount = absolute_delta_seconds // 86400
+            unit = "day"
+        suffix = "" if amount == 1 else "s"
+        if delta_seconds >= 0:
+            return f"in {amount} {unit}{suffix}"
+        return f"{amount} {unit}{suffix} ago"
 
     def _discord_guild_has_multiple_room_channels(self, room_id: str, *, guild_id: int | None) -> bool:
         if guild_id is None:

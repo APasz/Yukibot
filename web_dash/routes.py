@@ -298,8 +298,168 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         async def _proxy_apps(node_name: str, request: Request) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.user)
             node = self._remote_node_link(node_name)
-            apps = await asyncio.to_thread(self._remote_apps, node, user)
+            apps = await self._remote_apps_async(node, user)
             return {"node": node.node_name, "apps": [entry.to_mapping() for entry in apps]}
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/manifest")
+        async def _proxy_map_manifest(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            return await self._remote_json_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/manifest",
+                scopes=(NodeApiScope.MAP_READ,),
+                user=user,
+            )
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/annotations")
+        async def _proxy_map_annotations(node_name: str, app_name: str, request: Request) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            return await self._remote_json_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/annotations",
+                scopes=(NodeApiScope.MAP_READ,),
+                user=user,
+            )
+
+        @nicegui_app.post(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/annotations")
+        async def _proxy_create_map_annotation(
+            node_name: str,
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+        ) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            return await self._remote_json_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/annotations",
+                scopes=(NodeApiScope.MAP_WRITE,),
+                user=user,
+                method="POST",
+                json_payload=payload,
+            )
+
+        @nicegui_app.post(
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/annotations/{{annotation_id}}/delete"
+        )
+        async def _proxy_delete_map_annotation(
+            node_name: str,
+            app_name: str,
+            annotation_id: str,
+            request: Request,
+        ) -> dict[str, object]:
+            user = self._require_http_user(request=request, required_level=Power_Level.user)
+            node = self._remote_node_link(node_name)
+            return await self._remote_json_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/annotations/{quote(annotation_id, safe='')}/delete",
+                scopes=(NodeApiScope.MAP_WRITE,),
+                user=user,
+                method="POST",
+                json_payload={},
+            )
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/players")
+        async def _proxy_map_players(node_name: str, app_name: str, request: Request) -> StarletteResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            content, media_type, headers = await self._remote_bytes_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/players",
+                scopes=(NodeApiScope.MAP_READ,),
+                user=user,
+            )
+            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
+
+        @nicegui_app.get(
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/worlds/{{world_name}}/settings"
+        )
+        async def _proxy_map_world_settings(
+            node_name: str,
+            app_name: str,
+            world_name: str,
+            request: Request,
+        ) -> StarletteResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            content, media_type, headers = await self._remote_bytes_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/settings",
+                scopes=(NodeApiScope.MAP_READ,),
+                user=user,
+            )
+            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
+
+        @nicegui_app.get(
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/worlds/{{world_name}}/markers"
+        )
+        async def _proxy_map_world_markers(
+            node_name: str,
+            app_name: str,
+            world_name: str,
+            request: Request,
+        ) -> StarletteResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            content, media_type, headers = await self._remote_bytes_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/markers",
+                scopes=(NodeApiScope.MAP_READ,),
+                user=user,
+            )
+            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
+
+        @nicegui_app.get(
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/worlds/{{world_name}}/tiles/{{z}}/{{tile_name}}"
+        )
+        async def _proxy_map_world_tile(
+            node_name: str,
+            app_name: str,
+            world_name: str,
+            z: int,
+            tile_name: str,
+            request: Request,
+        ) -> StarletteResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            content, media_type, headers = await self._remote_bytes_async(
+                node=node,
+                app_name=app_name,
+                path=(
+                    f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/tiles/"
+                    f"{z}/{quote(tile_name, safe='')}"
+                ),
+                scopes=(NodeApiScope.MAP_READ,),
+                user=user,
+            )
+            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
+
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/assets/{{asset_path:path}}")
+        async def _proxy_map_asset(
+            node_name: str,
+            app_name: str,
+            asset_path: str,
+            request: Request,
+        ) -> StarletteResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            content, media_type, headers = await self._remote_bytes_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/map/assets/{quote(asset_path, safe='/')}",
+                scopes=(NodeApiScope.MAP_READ,),
+                user=user,
+            )
+            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods")
         async def _proxy_mods(node_name: str, app_name: str, request: Request) -> dict[str, object]:
@@ -332,7 +492,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         async def _proxy_configs(node_name: str, app_name: str, request: Request) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            app_entry = await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+            app_entry = await self._remote_app_entry_async(node, app_name, user)
             self._require_user_level(user=user, required_level=app_entry.config_read_level)
             configs = await asyncio.to_thread(self._remote_config_list, node, app_name, user)
             return configs.to_mapping()
@@ -390,7 +550,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            app_entry = await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+            app_entry = await self._remote_app_entry_async(node, app_name, user)
             self._require_user_level(user=user, required_level=app_entry.config_read_level)
             content = await asyncio.to_thread(self._remote_config_content, node, app_name, config_id, user)
             return content.to_mapping()
@@ -405,7 +565,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.user)
             node = self._remote_node_link(node_name)
-            app_entry = await asyncio.to_thread(self._remote_app_entry, node, app_name, user)
+            app_entry = await self._remote_app_entry_async(node, app_name, user)
             self._require_user_level(user=user, required_level=app_entry.config_write_level)
             content = payload.get("content")
             if not isinstance(content, str):

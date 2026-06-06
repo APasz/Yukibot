@@ -7,7 +7,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import config
-from maintenance import MaintenanceService
+from maintenance import MaintenanceService, ScheduledRestartWarning
+from relay_notices import MaintenanceStage, RelayNoticeSeverity, render_system_notice_text
 from restart_targets import RestartTarget
 
 
@@ -104,6 +105,40 @@ class MaintenanceServiceTests(unittest.TestCase):
         self.assertEqual(MaintenanceService.parse_warning_minutes_text("15"), 15)
         with self.assertRaisesRegex(ValueError, "0 to disable"):
             MaintenanceService.parse_warning_minutes_text("4")
+
+    def test_build_restart_warning_notice_matches_legacy_text(self) -> None:
+        warning = ScheduledRestartWarning(
+            effective_target=RestartTarget.SYSTEM,
+            matched_targets=(RestartTarget.SYSTEM, RestartTarget.BOT),
+            scheduled_for=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
+            lead_minutes=15,
+        )
+
+        notice = MaintenanceService.build_restart_warning_notice(warning)
+
+        self.assertEqual(notice.stage, MaintenanceStage.WARNING)
+        self.assertEqual(notice.severity, RelayNoticeSeverity.WARNING)
+        self.assertEqual(render_system_notice_text(notice), "Scheduled maintenance: restart in 15m.")
+        self.assertEqual(MaintenanceService.format_restart_warning_notice(warning), "Scheduled maintenance: restart in 15m.")
+
+    def test_build_restart_completed_notice_renders_targets_and_summary(self) -> None:
+        notice = MaintenanceService.build_restart_completed_notice(
+            effective_target=RestartTarget.VOICE,
+            matched_targets=(RestartTarget.VOICE,),
+            scheduled_for=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
+            summary_lines=("Reloaded voice runtime.", "Reconnected playback."),
+        )
+
+        self.assertEqual(notice.stage, MaintenanceStage.COMPLETED)
+        self.assertEqual(
+            render_system_notice_text(notice),
+            (
+                "Scheduled maintenance completed: `voice` at `04:30`.\n"
+                "Matched targets: `voice`\n"
+                "Reloaded voice runtime.\n"
+                "Reconnected playback."
+            ),
+        )
 
     def test_due_restart_warnings_emit_configured_warning_then_one_minute_warning_once(self) -> None:
         with TemporaryDirectory() as temp_dir:

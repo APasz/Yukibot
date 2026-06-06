@@ -13,11 +13,18 @@ import hikari
 import lightbulb
 
 import config
-from _discord import App_Bound, DC_Bound, DC_Relay
-from _relay_embeds import build_app_crash_embed, build_app_lifecycle_embed
+from _discord import App_Bound, DC_Bound, DC_Relay, RelayEmbedPayload
 from apps._app import App, AppRuntimeFaultKind
 from apps._config import App_Config, RelayChannelSource, normalise_optional_channel_id, normalise_optional_channel_ids
 from config import Activity_Manager, Activity_Provider
+from relay_notices import (
+    AppLifecycleNotice,
+    AppLifecycleState,
+    RelayNotice,
+    RelayNoticeSeverity,
+    RelayNoticeSource,
+    notice_embed_spec,
+)
 
 log = logging.getLogger(__name__)
 
@@ -368,9 +375,33 @@ class App_Manager(metaclass=config.Singleton):
     ) -> None:
         if app.chat_channel is None and not app.supports_chat_relay:
             return
-        relay_embed = build_app_lifecycle_embed(app, started=started, uptime=uptime)
-        content = "Started" if started else "Stopped"
-        DC_Relay.add(DC_Bound(app, content, "System", relay_embed=relay_embed))
+        uptime_seconds = None if uptime is None else max(0, round(uptime.total_seconds()))
+        notice = AppLifecycleNotice(
+            state=AppLifecycleState.STARTED if started else AppLifecycleState.STOPPED,
+            source=RelayNoticeSource.APP_MANAGER,
+            join_address=app.cfg.join_display_address if started else None,
+            detail_lines=app.lifecycle_relay_description_lines(started=started, uptime=uptime),
+            uptime_seconds=uptime_seconds,
+        )
+        embed_spec = notice_embed_spec(notice, app_name=app.friendly, author_name="System")
+        relay_embed = (
+            None
+            if embed_spec is None
+            else RelayEmbedPayload(
+                title=embed_spec.title,
+                description=embed_spec.description,
+                color=app.manage_embed_color,
+            )
+        )
+        DC_Relay.add(
+            DC_Bound(
+                app,
+                "Started" if started else "Stopped",
+                "System",
+                relay_embed=relay_embed,
+                notice=notice,
+            )
+        )
 
     def _notify_app_crash(
         self,
@@ -381,10 +412,41 @@ class App_Manager(metaclass=config.Singleton):
     ) -> None:
         if app.chat_channel is None and not app.supports_chat_relay:
             return
-        relay_embed = build_app_crash_embed(app, summary=summary, uptime=uptime)
-        DC_Relay.add(DC_Bound(app, "Crashed", "System", relay_embed=relay_embed))
+        uptime_seconds = None if uptime is None else max(0, round(uptime.total_seconds()))
+        notice = AppLifecycleNotice(
+            state=AppLifecycleState.CRASHED,
+            source=RelayNoticeSource.APP_MANAGER,
+            severity=RelayNoticeSeverity.ERROR,
+            uptime_seconds=uptime_seconds,
+            summary=summary,
+        )
+        embed_spec = notice_embed_spec(notice, app_name=app.friendly, author_name="System")
+        relay_embed = (
+            None
+            if embed_spec is None
+            else RelayEmbedPayload(
+                title=embed_spec.title,
+                description=embed_spec.description,
+                color=app.manage_embed_color,
+            )
+        )
+        DC_Relay.add(
+            DC_Bound(
+                app,
+                "Crashed",
+                "System",
+                relay_embed=relay_embed,
+                notice=notice,
+            )
+        )
 
-    async def notify_running_app_relays(self, content: str, *, player: str = "System") -> int:
+    async def notify_running_app_relays(
+        self,
+        content: str,
+        *,
+        player: str = "System",
+        notice: RelayNotice | None = None,
+    ) -> int:
         if self.bot is None:
             log.warning("Skipping app relay notice because the manager bot is unavailable.")
             return 0
@@ -394,10 +456,10 @@ class App_Manager(metaclass=config.Singleton):
         for app in sorted(self.apps.values(), key=lambda item: item.name.casefold()):
             if not app.supports_relay_system_notices or not app._running or app.am_receiver is None:
                 continue
-            notice = App_Bound(system_channel, content, player)
-            notice.app = app
+            relay_message = App_Bound(system_channel, content, player, notice=notice)
+            relay_message.app = app
             try:
-                await app.am_receiver.send(notice)
+                await app.am_receiver.send(relay_message)
             except Exception:
                 log.exception("Failed to send relay system notice to %s", app.name)
                 continue

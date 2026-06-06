@@ -19,6 +19,8 @@ _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT: tuple[float, float] = (
     _REMOTE_NODE_PRESENCE_CONNECT_TIMEOUT_SECONDS,
     _REMOTE_NODE_PRESENCE_READ_TIMEOUT_SECONDS,
 )
+_HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS: float = 15.0
+_HOME_NODE_LATENCY_TIMEOUT_SECONDS: float = 4.0
 _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS: float = 2.0
 _REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS: float = 30.0
 _DOWNLOAD_FEEDBACK_DELAY_SECONDS: float = 0.15
@@ -57,6 +59,9 @@ _CHAT_MEDIA_VIDEO_EXTENSIONS: set[str] = {".m4v", ".mov", ".mp4", ".ogg", ".ogv"
 _CHAT_MEDIA_AUDIO_EXTENSIONS: set[str] = {".aac", ".flac", ".m4a", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".weba"}
 _CHAT_MARKUP_CODE_BLOCK_RE: Pattern[str] = re.compile(r"```(?:[^\n`]*)\n?(.*?)```", re.DOTALL)
 _CHAT_MARKUP_INLINE_CODE_RE: Pattern[str] = re.compile(r"`([^`\n]+)`")
+_CHAT_MARKUP_ESCAPE_RE: Pattern[str] = re.compile(r"\\(?P<escaped>[\\`*_{}\[\]()#+\-.!>|~])")
+_CHAT_MARKUP_LINK_RE: Pattern[str] = re.compile(r"(?<!!)\[(?P<label>[^\]\n]+)\]\((?P<url>[^)\s]+)\)")
+_CHAT_MARKUP_RAW_URL_RE: Pattern[str] = re.compile(r"(?P<url>https?://[^\s<]+)")
 _CHAT_MARKUP_BOLD_RE: Pattern[str] = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
 _CHAT_MARKUP_UNDERLINE_RE: Pattern[str] = re.compile(r"__(?=\S)(.+?)(?<=\S)__")
 _CHAT_MARKUP_STRIKETHROUGH_RE: Pattern[str] = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
@@ -66,6 +71,13 @@ _CHAT_MARKUP_SPOILER_RE: Pattern[str] = re.compile(r"\|\|(.+?)\|\|")
 _CHAT_MARKUP_DISCORD_MENTION_RE: Pattern[str] = re.compile(
     r"<@!?(?P<discord_user_id>\d+)>|(?<![\w</])@(?P<raw_discord_user_id>\d+)\b"
 )
+_CHAT_MARKUP_DISCORD_CHANNEL_RE: Pattern[str] = re.compile(r"<#(?P<channel_id>\d+)>")
+_CHAT_MARKUP_DISCORD_ROLE_RE: Pattern[str] = re.compile(r"<@&(?P<role_id>\d+)>")
+_CHAT_MARKUP_DISCORD_TIMESTAMP_RE: Pattern[str] = re.compile(r"<t:(?P<unix>\d+)(?::(?P<style>[tTdDfFR]))?>")
+_CHAT_MARKUP_HEADER_RE: Pattern[str] = re.compile(r"^(?P<level>#{1,3}) (?P<content>.+)$")
+_CHAT_MARKUP_ORDERED_LIST_RE: Pattern[str] = re.compile(r"^(?P<indent> *)(?P<number>\d+)\. (?P<content>.+)$")
+_CHAT_MARKUP_SUBTEXT_RE: Pattern[str] = re.compile(r"^-# (?P<content>.+)$")
+_CHAT_MARKUP_UNORDERED_LIST_RE: Pattern[str] = re.compile(r"^(?P<indent> *)(?P<marker>[-*]) (?P<content>.+)$")
 
 
 __all__: tuple[str, ...] = (
@@ -80,7 +92,17 @@ __all__: tuple[str, ...] = (
     "_CHAT_MARKUP_BOLD_RE",
     "_CHAT_MARKUP_CODE_BLOCK_RE",
     "_CHAT_MARKUP_DISCORD_MENTION_RE",
+    "_CHAT_MARKUP_DISCORD_CHANNEL_RE",
+    "_CHAT_MARKUP_DISCORD_ROLE_RE",
+    "_CHAT_MARKUP_DISCORD_TIMESTAMP_RE",
+    "_CHAT_MARKUP_ESCAPE_RE",
+    "_CHAT_MARKUP_HEADER_RE",
     "_CHAT_MARKUP_INLINE_CODE_RE",
+    "_CHAT_MARKUP_LINK_RE",
+    "_CHAT_MARKUP_ORDERED_LIST_RE",
+    "_CHAT_MARKUP_RAW_URL_RE",
+    "_CHAT_MARKUP_SUBTEXT_RE",
+    "_CHAT_MARKUP_UNORDERED_LIST_RE",
     "_CHAT_MARKUP_ITALIC_STAR_RE",
     "_CHAT_MARKUP_ITALIC_UNDERSCORE_RE",
     "_CHAT_MARKUP_SPOILER_RE",
@@ -96,6 +118,8 @@ __all__: tuple[str, ...] = (
     "_CONFIG_EDITOR_THEME",
     "_DEV_SIMULATED_DOWN_NODE_QUERY_PARAM",
     "_DOWNLOAD_FEEDBACK_DELAY_SECONDS",
+    "_HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS",
+    "_HOME_NODE_LATENCY_TIMEOUT_SECONDS",
     "_HIDDEN_SETTING_CYCLE_VARIANT_COUNT",
     "_HIDDEN_SETTING_GLYPHS",
     "_MOD_WEB_PAGE_PATH",

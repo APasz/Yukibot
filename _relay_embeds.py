@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from _discord import RelayEmbedPayload
+from relay_notices import AppLifecycleNotice, AppLifecycleState, RelayNoticeSeverity, RelayNoticeSource, notice_embed_spec
 
 if TYPE_CHECKING:
     from apps._app import App
@@ -37,21 +38,17 @@ def build_app_lifecycle_embed(
     started: bool,
     uptime: timedelta | None = None,
 ) -> RelayEmbedPayload:
-    action = "Started" if started else "Ended"
-    title = f"{app.friendly} {action}"
-    description_lines: list[str] = []
-    if started:
-        if app.cfg.join_display_address is not None:
-            description_lines.append(f"Join: `{app.cfg.join_display_address}`")
-        description_lines.extend(app.lifecycle_relay_description_lines(started=True))
-    else:
-        if uptime is not None:
-            description_lines.append(f"Uptime: `{format_uptime(uptime)}`")
-    return build_app_relay_embed(
-        app,
-        title=title,
-        description="\n".join(description_lines),
+    notice = AppLifecycleNotice(
+        state=AppLifecycleState.STARTED if started else AppLifecycleState.STOPPED,
+        source=RelayNoticeSource.APP_MANAGER,
+        join_address=app.cfg.join_display_address if started else None,
+        detail_lines=app.lifecycle_relay_description_lines(started=started, uptime=uptime),
+        uptime_seconds=None if uptime is None else max(0, round(uptime.total_seconds())),
     )
+    embed_spec = notice_embed_spec(notice, app_name=app.friendly, author_name="System")
+    if embed_spec is None:
+        raise ValueError("App lifecycle notice did not produce an embed.")
+    return build_app_relay_embed(app, title=embed_spec.title, description=embed_spec.description)
 
 
 def build_app_crash_embed(
@@ -60,13 +57,14 @@ def build_app_crash_embed(
     summary: str | None = None,
     uptime: timedelta | None = None,
 ) -> RelayEmbedPayload:
-    description_lines: list[str] = []
-    if summary is not None:
-        description_lines.append(summary)
-    if uptime is not None:
-        description_lines.append(f"Uptime: `{format_uptime(uptime)}`")
-    return build_app_relay_embed(
-        app,
-        title=f"{app.friendly} Crashed",
-        description="\n".join(description_lines),
+    notice = AppLifecycleNotice(
+        state=AppLifecycleState.CRASHED,
+        source=RelayNoticeSource.APP_MANAGER,
+        severity=RelayNoticeSeverity.ERROR,
+        uptime_seconds=None if uptime is None else max(0, round(uptime.total_seconds())),
+        summary=summary,
     )
+    embed_spec = notice_embed_spec(notice, app_name=app.friendly, author_name="System")
+    if embed_spec is None:
+        raise ValueError("App crash notice did not produce an embed.")
+    return build_app_relay_embed(app, title=embed_spec.title, description=embed_spec.description)

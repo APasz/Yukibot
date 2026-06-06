@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 import zipfile
 from dataclasses import replace
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import hikari
+import requests
 from fastapi import Request
 from fastapi import HTTPException
 from fastapi import WebSocketDisconnect
@@ -36,8 +38,9 @@ from apps._settings import (
     StringSettingSpec,
 )
 from apps._updater import Update_Manager
-from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore
+from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore, SatisfactoryServerState
 from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
+from map_annotations import MapAnnotationDraft
 from node_api import (
     NodeApiService,
     NodeAppEntry,
@@ -497,6 +500,42 @@ class NodeApiTests(unittest.TestCase):
         )
         self.assertEqual(grant.subject, "42")
 
+    def test_ping_url_uses_base_path_without_token(self) -> None:
+        server = replace(
+            config.MOD_WEB_SERVER,
+            node_api_base_url="https://erin.example/api/node",
+            token_secret="secret",
+        )
+        with patch.object(config, "MOD_WEB_SERVER", server):
+            service = NodeApiService()
+            self.assertEqual(service.ping_url(), "https://erin.example/api/node/ping")
+            self.assertEqual(service.ping_url(base_url="/api/node"), "/api/node/ping")
+
+    def test_map_api_url_is_signed_and_escaped(self) -> None:
+        server = replace(
+            config.MOD_WEB_SERVER,
+            node_name="erin",
+            node_api_base_url="https://erin.example/api/node",
+            token_secret="secret",
+        )
+        with patch.object(config, "MOD_WEB_SERVER", server):
+            service = NodeApiService()
+            url = service.map_api_url("minecraft alpha", subject="42", base_url="/api/node")
+
+        parsed = urlsplit(url)
+        query = parse_qs(parsed.query)
+        token = query["access_token"][0]
+
+        self.assertEqual(parsed.path, "/api/node/apps/minecraft%20alpha/map")
+        grant = verify_node_token(
+            secret="secret",
+            token=token,
+            node="erin",
+            app="minecraft alpha",
+            required_scopes=(NodeApiScope.MAP_READ,),
+        )
+        self.assertEqual(grant.subject, "42")
+
     def test_mod_download_url_omits_token_when_secret_is_unset(self) -> None:
         server = replace(
             config.MOD_WEB_SERVER,
@@ -680,6 +719,7 @@ class NodeApiTests(unittest.TestCase):
         route = handlers["/api/node/apps/{app_name}/mods/{mod_name}/download"]
         hints = get_type_hints(route)
         self.assertIs(hints["request"], Request)
+        self.assertIn("/api/node/ping", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
 
     def test_mod_mutation_result_round_trips_mapping(self) -> None:
@@ -731,6 +771,7 @@ class NodeApiTests(unittest.TestCase):
             storage_total_bytes=None,
             footprint_bytes=None,
             transition_state=NodeAppTransitionState.NONE,
+            connected_player_names=("Alex", "Bea"),
         )
         event = NodeChatStreamEvent(
             kind=NodeChatStreamEventKind.RUNTIME_CHANGED,
@@ -758,6 +799,7 @@ class NodeApiTests(unittest.TestCase):
             footprint_bytes=None,
             runtime_fault=AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"),
             transition_state=NodeAppTransitionState.NONE,
+            connected_player_names=("Alex", "Bea"),
         )
         system_summary = NodeSystemSummary(
             cpu_percent=20,
@@ -768,6 +810,7 @@ class NodeApiTests(unittest.TestCase):
             storage_free_bytes=20,
             storage_total_bytes=30,
             running_names=("Minecraft Alpha",),
+            running_app_ids=("minecraft_alpha",),
         )
         event = NodeAppStateStreamEvent.initial(
             app_name="minecraft_alpha",
@@ -792,6 +835,7 @@ class NodeApiTests(unittest.TestCase):
             transition_state=NodeAppTransitionState.NONE,
             player_count=2,
             player_capacity=8,
+            connected_player_names=("Alex", "Bea"),
             supports_saves=True,
             supports_save_uploads=True,
             supports_save_rename=True,
@@ -809,6 +853,7 @@ class NodeApiTests(unittest.TestCase):
             storage_free_bytes=20,
             storage_total_bytes=30,
             running_names=("Minecraft Alpha",),
+            running_app_ids=("minecraft_alpha",),
         )
         event = NodeStateStreamEvent.initial(
             node_name="erin",
@@ -1225,11 +1270,15 @@ class NodeApiTests(unittest.TestCase):
             app = _build_blueprint_app(root)
             source = root / "module.sbp"
             source.write_text("module", encoding="utf-8")
+            config_source = root / "module.sbpcfg"
+            config_source.write_text("config", encoding="utf-8")
             app.upload_blueprint_file(
                 session_name="Session Alpha",
                 upload_name="module.sbp",
                 source_path=source,
                 actor_user_id=101,
+                config_upload_name="module.sbpcfg",
+                config_source_path=config_source,
             )
 
             service = NodeApiService()
@@ -1245,6 +1294,85 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(sudo_list.blueprints[0].can_delete)
         self.assertFalse(other_list.blueprints[0].can_delete)
         self.assertEqual(owner_list.blueprints[0].uploaded_by_display_name, "User 101")
+        self.assertIsNotNone(owner_list.blueprints[0].config_file)
+        self.assertEqual(owner_list.blueprints[0].config_file.uploaded_by_display_name, "User 101")
+
+    def test_build_blueprint_list_includes_default_session_name(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = _build_blueprint_app(root)
+            app._players = SimpleNamespace(  # type: ignore[attr-defined]
+                state=SatisfactoryServerState(active_session_name="Session Current")
+            )
+
+            result: NodeBlueprintList = NodeApiService().build_blueprint_list(app, actor_user_id=101)
+            round_trip = NodeBlueprintList.from_mapping(result.to_mapping())
+
+        self.assertEqual(result.default_session_name, "Session Current")
+        self.assertEqual(round_trip.default_session_name, "Session Current")
+
+    def test_build_blueprint_list_blocks_main_delete_when_config_has_different_owner(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = _build_blueprint_app(root)
+            module_path = root / "blueprints" / "Session Alpha" / "module.sbp"
+            config_path = root / "blueprints" / "Session Alpha" / "module.sbpcfg"
+            module_path.parent.mkdir(parents=True, exist_ok=True)
+            module_path.write_text("module", encoding="utf-8")
+            config_path.write_text("config", encoding="utf-8")
+            app._blueprint_ownership_store.record_upload(relative_path="Session Alpha/module.sbp", actor_user_id=101)
+            app._blueprint_ownership_store.record_upload(relative_path="Session Alpha/module.sbpcfg", actor_user_id=202)
+
+            service = NodeApiService()
+            acl = Mock()
+            acl.can = Mock(side_effect=lambda user_id, level: user_id == 999 and level == Power_Level.sudo)
+            service.set_acl(cast(Any, acl))
+
+            owner_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=101)
+            sudo_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=999)
+
+        self.assertFalse(owner_list.blueprints[0].can_delete)
+        self.assertIsNotNone(owner_list.blueprints[0].config_file)
+        self.assertFalse(owner_list.blueprints[0].config_file.can_delete)
+        self.assertTrue(sudo_list.blueprints[0].can_delete)
+
+    def test_build_blueprint_list_tolerates_legacy_blueprint_filenames(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = _build_blueprint_app(root)
+            legacy_path = root / "blueprints" / "Session Legacy" / "Legacy .sbp"
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_path.write_text("module", encoding="utf-8")
+
+            service = NodeApiService()
+            acl = Mock()
+            acl.can = Mock(side_effect=lambda user_id, level: user_id == 999 and level == Power_Level.sudo)
+            service.set_acl(cast(Any, acl))
+
+            user_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=101)
+            sudo_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=999)
+
+        self.assertEqual(user_list.blueprints[0].relative_path, "Session Legacy/Legacy .sbp")
+        self.assertFalse(user_list.blueprints[0].can_delete)
+        self.assertTrue(sudo_list.blueprints[0].can_delete)
+
+    def test_upload_blueprint_path_rejects_config_only_upload(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = _build_blueprint_app(root)
+            config_source = root / "module.sbpcfg"
+            config_source.write_text("config", encoding="utf-8")
+
+            with self.assertRaises(HTTPException) as raised:
+                NodeApiService().upload_blueprint_path(
+                    app=app,
+                    session_name="Session Alpha",
+                    source_path=config_source,
+                    upload_name="module.sbpcfg",
+                    actor_user_id=101,
+                )
+
+        self.assertEqual(raised.exception.status_code, 400)
 
     def test_upload_and_delete_blueprint_path_return_mutation_results(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1252,6 +1380,8 @@ class NodeApiTests(unittest.TestCase):
             app = _build_blueprint_app(root)
             source = root / "module.sbp"
             source.write_text("module", encoding="utf-8")
+            config_source = root / "module.sbpcfg"
+            config_source.write_text("config", encoding="utf-8")
             service = NodeApiService()
             acl = Mock()
             acl.can = Mock(side_effect=lambda user_id, level: user_id == 999 and level == Power_Level.sudo)
@@ -1263,6 +1393,8 @@ class NodeApiTests(unittest.TestCase):
                 source_path=source,
                 upload_name="module.sbp",
                 actor_user_id=101,
+                config_source_path=config_source,
+                config_upload_name="module.sbpcfg",
             )
 
             with self.assertRaises(Exception) as raised:
@@ -1280,7 +1412,9 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertIsInstance(uploaded, NodeBlueprintMutationResult)
         self.assertEqual(uploaded.blueprint.relative_path, "Session Alpha/module.sbp")
+        self.assertIsNotNone(uploaded.blueprint.config_file)
         self.assertIn("Uploaded blueprint", uploaded.message)
+        self.assertIn("with config", uploaded.message)
         self.assertEqual(getattr(raised.exception, "status_code"), 403)
         self.assertIsInstance(deleted, NodeBlueprintMutationResult)
         self.assertEqual(deleted.blueprint.id, uploaded.blueprint.id)
@@ -1596,6 +1730,124 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(entries[0].supports_chat)
         self.assertEqual(entries[0].scope, "minecraft")
         self.assertEqual(entries[0].map_url, "https://example.invalid/squaremap/?world=minecraft_overworld")
+
+    def test_build_map_manifest_uses_squaremap_settings_and_initial_world(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def public_map_url(self) -> str | None:
+                return "https://example.invalid/squaremap/?world=minecraft_nether"
+
+        app = _build_app(Mock())
+        app.__class__ = _MappedApp
+        response = Mock(status_code=200)
+        response.content = (
+            b'{"worlds":[{"name":"minecraft_overworld","display_name":"Overworld","type":"normal","order":2},'
+            b'{"name":"minecraft_nether","display_name":"Nether","type":"nether","order":1}]}'
+        )
+        response.headers = {"Content-Type": "application/json"}
+
+        with patch("node_api.requests.get", return_value=response) as get_mock:
+            manifest = NodeApiService().build_map_manifest(app)
+
+        self.assertEqual(manifest.initial_world_name, "minecraft_nether")
+        self.assertEqual([world.name for world in manifest.worlds], ["minecraft_nether", "minecraft_overworld"])
+        self.assertEqual(manifest.icon_base_url, "./assets")
+        self.assertEqual(get_mock.call_args.args[0], "https://example.invalid/squaremap/tiles/settings.json")
+
+    def test_build_map_manifest_uses_cached_squaremap_settings_when_upstream_is_unavailable(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def public_map_url(self) -> str | None:
+                return "https://example.invalid/squaremap/?world=minecraft_nether"
+
+        live_response = Mock(status_code=200)
+        live_response.content = (
+            b'{"worlds":[{"name":"minecraft_overworld","display_name":"Overworld","type":"normal","order":2},'
+            b'{"name":"minecraft_nether","display_name":"Nether","type":"nether","order":1}]}'
+        )
+        live_response.headers = {"Content-Type": "application/json"}
+
+        with TemporaryDirectory() as temp_dir:
+            app = _build_app(Mock())
+            app.__class__ = _MappedApp
+            app.directory = Path(temp_dir)
+            service = NodeApiService()
+            with patch("node_api.requests.get", return_value=live_response):
+                service.build_map_manifest(app)
+            with patch("node_api.requests.get", side_effect=requests.ConnectionError("offline")):
+                cached_manifest = service.build_map_manifest(app)
+
+        self.assertEqual(cached_manifest.initial_world_name, "minecraft_nether")
+        self.assertEqual([world.name for world in cached_manifest.worlds], ["minecraft_nether", "minecraft_overworld"])
+
+    def test_squaremap_proxy_response_uses_cached_world_settings_when_upstream_is_unavailable(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def public_map_url(self) -> str | None:
+                return "https://example.invalid/squaremap/?world=minecraft_overworld"
+
+        live_response = Mock(status_code=200)
+        live_response.content = (
+            b'{"spawn":{"x":0,"z":0},"zoom":{"def":1,"max":4,"extra":2},"player_tracker":{"enabled":true}}'
+        )
+        live_response.headers = {"Content-Type": "application/json"}
+
+        with TemporaryDirectory() as temp_dir:
+            app = _build_app(Mock())
+            app.__class__ = _MappedApp
+            app.directory = Path(temp_dir)
+            service = NodeApiService()
+            with patch("node_api.requests.get", return_value=live_response):
+                service._squaremap_proxy_response(
+                    app,
+                    "tiles/minecraft_overworld/settings.json",
+                    allow_stale_on_error=True,
+                )
+            with patch("node_api.requests.get", side_effect=requests.Timeout("slow")):
+                cached_response = service._squaremap_proxy_response(
+                    app,
+                    "tiles/minecraft_overworld/settings.json",
+                    allow_stale_on_error=True,
+                )
+
+        self.assertTrue(cached_response.is_stale)
+        self.assertEqual(
+            json.loads(cached_response.content.decode("utf-8")),
+            {"spawn": {"x": 0, "z": 0}, "zoom": {"def": 1, "max": 4, "extra": 2}, "player_tracker": {"enabled": True}},
+        )
+        self.assertIsNotNone(cached_response.cache_updated_at_unix_ms)
+
+    def test_map_annotation_round_trip_uses_shared_store(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def public_map_url(self) -> str | None:
+                return "https://example.invalid/squaremap/?world=minecraft_overworld"
+
+        with TemporaryDirectory() as temp_dir:
+            app = _build_app(Mock())
+            app.__class__ = _MappedApp
+            app.directory = Path(temp_dir)
+            service = NodeApiService()
+            draft = MapAnnotationDraft.from_mapping(
+                {
+                    "world_name": "minecraft_overworld",
+                    "shape": "marker",
+                    "label": "Home Base",
+                    "color_hex": "#22C55E",
+                    "points": [{"x": 12, "z": -48}],
+                }
+            )
+
+            created = service.create_map_annotation(app, draft, 42, "Taylor")
+            listed = service.build_map_annotation_list(app)
+            deleted = service.delete_map_annotation(app, created.annotation.annotation_id)  # type: ignore[union-attr]
+            after_delete = service.build_map_annotation_list(app)
+
+        self.assertEqual(created.annotation.label, "Home Base")  # type: ignore[union-attr]
+        self.assertEqual(created.annotation.created_by_name, "Taylor")  # type: ignore[union-attr]
+        self.assertEqual(len(listed.annotations), 1)
+        self.assertEqual(deleted.deleted_annotation_id, created.annotation.annotation_id)  # type: ignore[union-attr]
+        self.assertEqual(after_delete.annotations, ())
 
     def test_list_apps_includes_player_counts_for_running_apps(self) -> None:
         app = _build_app(Mock())
@@ -2096,12 +2348,11 @@ class NodeApiTests(unittest.TestCase):
             server = replace(config.MOD_WEB_SERVER, node_name="erin")
             fake_disk = SimpleNamespace(
                 percent=42,
-                usage=SimpleNamespace(free=20 * 1024**3, total=50 * 1024**3),
+                free_bytes=20 * 1024**3,
+                total_bytes=50 * 1024**3,
             )
             fake_stats = Mock()
-            fake_stats.update = Mock()
-            fake_stats.disk_for_path.return_value = fake_disk
-            fake_stats.primary_disk = fake_disk
+            fake_stats.disk_snapshot_for_path.return_value = fake_disk
             with (
                 patch.object(config, "MOD_WEB_SERVER", server),
                 patch("node_api.Stats_System", return_value=fake_stats),
@@ -2162,12 +2413,11 @@ class NodeApiTests(unittest.TestCase):
 
             fake_disk = SimpleNamespace(
                 percent=55,
-                usage=SimpleNamespace(free=100 * 1024**3, total=200 * 1024**3),
+                free_bytes=100 * 1024**3,
+                total_bytes=200 * 1024**3,
             )
             fake_stats = Mock()
-            fake_stats.update = Mock()
-            fake_stats.disk_for_path.return_value = fake_disk
-            fake_stats.primary_disk = fake_disk
+            fake_stats.disk_snapshot_for_path.return_value = fake_disk
             with patch("node_api.Stats_System", return_value=fake_stats):
                 summary = asyncio.run(NodeApiService().build_app_runtime_summary(app))
 
@@ -2421,14 +2671,17 @@ class NodeApiTests(unittest.TestCase):
     def test_build_system_summary_uses_primary_disk(self) -> None:
         fake_primary_disk = SimpleNamespace(
             percent=55,
-            usage=SimpleNamespace(free=100 * 1024**3, total=200 * 1024**3),
+            free_bytes=100 * 1024**3,
+            total_bytes=200 * 1024**3,
         )
-        fake_stats = Mock(
-            cpu=SimpleNamespace(r_total=22),
-            ram=SimpleNamespace(percent=44, used=8 * 1024**3, raw=SimpleNamespace(total=16 * 1024**3)),
+        fake_stats = Mock()
+        fake_stats.system_snapshot.return_value = SimpleNamespace(
+            cpu_percent=22,
+            ram_percent=44,
+            ram_used_bytes=8 * 1024**3,
+            ram_total_bytes=16 * 1024**3,
             primary_disk=fake_primary_disk,
         )
-        fake_stats.update = Mock()
 
         with (
             patch("node_api.Stats_System", return_value=fake_stats),
@@ -2456,21 +2709,35 @@ class NodeApiTests(unittest.TestCase):
         )
 
     def test_build_system_summary_lists_running_app_names(self) -> None:
-        fake_stats = Mock(
-            cpu=SimpleNamespace(r_total=12),
-            ram=SimpleNamespace(percent=30, used=2 * 1024**3, raw=SimpleNamespace(total=8 * 1024**3)),
+        fake_stats = Mock()
+        fake_stats.system_snapshot.return_value = SimpleNamespace(
+            cpu_percent=12,
+            ram_percent=30,
+            ram_used_bytes=2 * 1024**3,
+            ram_total_bytes=8 * 1024**3,
             primary_disk=None,
         )
-        fake_stats.update = Mock()
         service = NodeApiService()
         service.set_manager(
             cast(
                 Any,
                 SimpleNamespace(
                     apps={
-                        "minecraft_alpha": SimpleNamespace(friendly="Minecraft Alpha", check_running=lambda: True),
-                        "factorio_lab": SimpleNamespace(friendly="Factorio Lab", check_running=lambda: True),
-                        "beammp_test": SimpleNamespace(friendly="BeamMP Test", check_running=lambda: False),
+                        "minecraft_alpha": SimpleNamespace(
+                            name="minecraft_alpha",
+                            friendly="Minecraft Alpha",
+                            check_running=lambda: True,
+                        ),
+                        "factorio_lab": SimpleNamespace(
+                            name="factorio_lab",
+                            friendly="Factorio Lab",
+                            check_running=lambda: True,
+                        ),
+                        "beammp_test": SimpleNamespace(
+                            name="beammp_test",
+                            friendly="BeamMP Test",
+                            check_running=lambda: False,
+                        ),
                     }
                 ),
             )
@@ -2486,6 +2753,7 @@ class NodeApiTests(unittest.TestCase):
             summary = service.build_system_summary()
 
         self.assertEqual(summary.running_names, ("Factorio Lab", "Minecraft Alpha"))
+        self.assertEqual(summary.running_app_ids, ("factorio_lab", "minecraft_alpha"))
         self.assertEqual(summary.bot_uptime_seconds, 300)
         self.assertEqual(summary.uptime_seconds, 1_800)
 

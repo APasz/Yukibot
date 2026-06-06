@@ -41,6 +41,7 @@ from apps.minecraft import (
     _minecraft_crash_summary_from_log_line,
     _runtime_info_from_log_line,
 )
+from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource
 
 
 class _NamesStub:
@@ -364,9 +365,9 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(players._players, {"Bob", "Carol"})
         self.assertEqual(add_mock.call_count, 2)
         calls = add_mock.call_args_list
-        self.assertEqual(calls[0].args[0].content, "{player} left {app}")
+        self.assertEqual(calls[0].args[0].content, "Alice left minecraft_demo")
         self.assertEqual(calls[0].args[0].player, "Alice")
-        self.assertEqual(calls[1].args[0].content, "{player} joined {app}")
+        self.assertEqual(calls[1].args[0].content, "Carol joined minecraft_demo")
         self.assertEqual(calls[1].args[0].player, "Carol")
 
     async def test_log_join_does_not_duplicate_reconcile_join_notice(self) -> None:
@@ -413,7 +414,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
         add_mock.assert_called_once()
         relayed_message = add_mock.call_args.args[0]
-        self.assertEqual(relayed_message.content, "{player} joined {app}")
+        self.assertEqual(relayed_message.content, "Alice joined minecraft_demo")
         self.assertEqual(relayed_message.player, "Alice")
         self.assertEqual(relayed_message.player_id, 42)
         app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
@@ -434,7 +435,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
         add_mock.assert_called_once()
         relayed_message = add_mock.call_args.args[0]
-        self.assertEqual(relayed_message.content, "{player} left {app}")
+        self.assertEqual(relayed_message.content, "Alice left minecraft_demo")
         self.assertEqual(relayed_message.player, "Alice")
         self.assertEqual(relayed_message.player_id, 42)
         app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
@@ -1301,7 +1302,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         if await_args is None:
             raise AssertionError("Expected relay send to be awaited.")
         send_kwargs = await_args.kwargs
-        self.assertIs(send_kwargs["content"], hikari.UNDEFINED)
+        self.assertEqual(send_kwargs["content"], "<Alice>")
         self.assertIn("embeds", send_kwargs)
         embed = send_kwargs["embeds"][0]
         self.assertEqual(embed.title, "Advancement")
@@ -1394,8 +1395,12 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
         message = DC_Bound(
             app,
-            DC_Bound.generics.join,
+            "Alice joined Minecraft Demo",
             "Alice",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+            ),
         )
 
         await relay._send_dc(message)

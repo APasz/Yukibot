@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
-import threading
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -12,13 +13,24 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, TypeAlias, cast
-from urllib.parse import quote, urlencode
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias, cast
+from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import hikari
 import psutil
 import requests
-from fastapi import HTTPException, File, Form, Request, UploadFile, WebSocket, WebSocketDisconnect, WebSocketException, status
+from fastapi import (
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    WebSocketException,
+    status,
+)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -37,23 +49,40 @@ from _mod_ops import (
     download_paths as build_mod_download_paths,
 )
 from _security import Access_Control, Power_Level
-from _sys import Stats_Disk, Stats_System
+from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
 from _utils import Utilities
 from apps._app import App, AppRuntimeFault, ChatRelaySupport
-from apps._console import (
-    ConsoleAction,
-    ConsoleActionParameter,
-    ConsoleResponseSource,
-    execute_console_action,
+from apps._blueprint_files import (
+    AppBlueprintEntry,
+    AppBlueprintFileEntry,
+    AppBlueprintFileType,
+    BlueprintUploadPair,
+    blueprint_file_type_from_name,
+    classify_blueprint_upload_filenames,
 )
 from apps._config import ModDownloadBlockReason, ModType
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
-from apps._blueprint_files import AppBlueprintEntry
-from apps._mod import Mod
+from apps._console import (
+    ConsoleAction,
+    ConsoleActionParameter,
+    ConsoleActionResult,
+    ConsoleResponseSource,
+    execute_console_action,
+)
+from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub
-from mod_web_auth import ModWebAuthService
+from mod_web_auth import ModWebAuthService, ModWebUser
+from map_annotations import (
+    AppMapAnnotationStore,
+    MapAnnotationDraft,
+    MapAnnotationList,
+    MapAnnotationMutationResult,
+    MapManifest,
+    MapWorldSummary,
+)
+from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
 from node_auth import NodeAccessGrant, NodeApiScope, NodeTokenError, issue_node_token, verify_node_token
 
 if TYPE_CHECKING:
@@ -68,10 +97,15 @@ _APP_TRANSITION_TTL_SECONDS = 15.0
 _LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS = 0.75
 _LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 1.0
 _NODE_CHAT_HISTORY_LIMIT = 100
+_SQUAREMAP_REQUEST_TIMEOUT_SECONDS = 10.0
+_MAP_SOURCE_HEADER_NAME = "X-Yukibot-Map-Source"
+_MAP_CACHE_UPDATED_AT_HEADER_NAME = "X-Yukibot-Map-Cache-Updated-At"
 _DEFAULT_REMOTE_CONFIG_READ_LEVEL = Power_Level.sudo
 _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL = Power_Level.root
 _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.APPS_READ: Power_Level.visitor,
+    NodeApiScope.MAP_READ: Power_Level.visitor,
+    NodeApiScope.MAP_WRITE: Power_Level.user,
     NodeApiScope.CHAT_READ: Power_Level.visitor,
     NodeApiScope.CHAT_WRITE: Power_Level.visitor,
     NodeApiScope.MODS_READ: Power_Level.visitor,
@@ -124,6 +158,18 @@ def _optional_string(payload: Mapping[str, object], key: str) -> str | None:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{key} is invalid.")
     return value
+
+
+def _string_tuple(payload: Mapping[str, object], key: str) -> tuple[str, ...]:
+    value = payload.get(key, ())
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise ValueError(f"{key} is invalid.")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{key} is invalid.")
+        items.append(item)
+    return tuple[str, ...](items)
 
 
 def _power_level(payload: Mapping[str, object], key: str, *, default: Power_Level) -> Power_Level:
@@ -231,6 +277,7 @@ class NodeAppEntry:
     transition_state: NodeAppTransitionState = NodeAppTransitionState.NONE
     player_count: int | None = None
     player_capacity: int | None = None
+    connected_player_names: tuple[str, ...] = ()
     supports_saves: bool = False
     supports_save_uploads: bool = False
     supports_save_rename: bool = False
@@ -258,6 +305,7 @@ class NodeAppEntry:
         transition_state = _app_transition_state(payload, "transition_state")
         player_count = _optional_int(payload, "player_count")
         player_capacity = _optional_int(payload, "player_capacity")
+        connected_player_names = _string_tuple(payload, "connected_player_names")
         supports_saves = payload.get("supports_saves", False)
         supports_save_uploads = payload.get("supports_save_uploads", False)
         supports_save_rename = payload.get("supports_save_rename", False)
@@ -319,6 +367,7 @@ class NodeAppEntry:
             transition_state=transition_state,
             player_count=player_count,
             player_capacity=player_capacity,
+            connected_player_names=connected_player_names,
             supports_saves=supports_saves,
             supports_save_uploads=supports_save_uploads,
             supports_save_rename=supports_save_rename,
@@ -349,6 +398,7 @@ class NodeAppEntry:
             "transition_state": self.transition_state.value,
             "player_count": self.player_count,
             "player_capacity": self.player_capacity,
+            "connected_player_names": self.connected_player_names,
             "supports_saves": self.supports_saves,
             "supports_save_uploads": self.supports_save_uploads,
             "supports_save_rename": self.supports_save_rename,
@@ -642,6 +692,22 @@ class NodeAppTransitionSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class _NodeAppPlayerSnapshot:
+    player_count: int
+    player_capacity: int
+    connected_player_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _SquaremapProxyResponse:
+    content: bytes
+    media_type: str | None
+    headers: tuple[tuple[str, str], ...] = ()
+    is_stale: bool = False
+    cache_updated_at_unix_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class NodeAppRuntimeSummary:
     running: bool
     enabled: bool
@@ -655,6 +721,7 @@ class NodeAppRuntimeSummary:
     footprint_bytes: int | None = None
     runtime_fault: AppRuntimeFault | None = None
     transition_state: NodeAppTransitionState = NodeAppTransitionState.NONE
+    connected_player_names: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeAppRuntimeSummary:
@@ -664,6 +731,7 @@ class NodeAppRuntimeSummary:
         transition_state = _app_transition_state(payload, "transition_state")
         player_count = _optional_int(payload, "player_count")
         player_capacity = _optional_int(payload, "player_capacity")
+        connected_player_names = _string_tuple(payload, "connected_player_names")
         relay_support = payload.get("relay_support")
         storage_percent = _optional_int(payload, "storage_percent")
         storage_free_bytes = _optional_int(payload, "storage_free_bytes")
@@ -702,6 +770,7 @@ class NodeAppRuntimeSummary:
             runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
             if raw_runtime_fault is not None
             else None,
+            connected_player_names=connected_player_names,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -712,6 +781,7 @@ class NodeAppRuntimeSummary:
             "transition_state": self.transition_state.value,
             "player_count": self.player_count,
             "player_capacity": self.player_capacity,
+            "connected_player_names": self.connected_player_names,
             "relay_support": self.relay_support.value,
             "storage_percent": self.storage_percent,
             "storage_free_bytes": self.storage_free_bytes,
@@ -966,6 +1036,7 @@ class NodeSystemSummary:
     bot_uptime_seconds: int | None = None
     uptime_seconds: int | None = None
     running_names: tuple[str, ...] = ()
+    running_app_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemSummary:
@@ -977,6 +1048,14 @@ class NodeSystemSummary:
             if not isinstance(raw_name, str) or not raw_name:
                 raise ValueError("running_names is invalid.")
             running_names.append(raw_name)
+        raw_running_app_ids = payload.get("running_app_ids", ())
+        if not isinstance(raw_running_app_ids, Sequence) or isinstance(raw_running_app_ids, (str, bytes)):
+            raise ValueError("running_app_ids is invalid.")
+        running_app_ids: list[str] = []
+        for raw_app_id in raw_running_app_ids:
+            if not isinstance(raw_app_id, str) or not raw_app_id:
+                raise ValueError("running_app_ids is invalid.")
+            running_app_ids.append(raw_app_id)
         return cls(
             cpu_percent=_optional_int(payload, "cpu_percent"),
             ram_percent=_optional_int(payload, "ram_percent"),
@@ -988,6 +1067,7 @@ class NodeSystemSummary:
             bot_uptime_seconds=_optional_int(payload, "bot_uptime_seconds"),
             uptime_seconds=_optional_int(payload, "uptime_seconds"),
             running_names=tuple(running_names),
+            running_app_ids=tuple(running_app_ids),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1002,6 +1082,7 @@ class NodeSystemSummary:
             "bot_uptime_seconds": self.bot_uptime_seconds,
             "uptime_seconds": self.uptime_seconds,
             "running_names": list(self.running_names),
+            "running_app_ids": list(self.running_app_ids),
         }
 
 
@@ -1305,12 +1386,10 @@ class NodeSaveRenameRequest(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
-class NodeBlueprintEntry:
+class NodeBlueprintFileEntry:
     id: str
     label: str
-    session_name: str
     relative_path: str
-    file_type: str
     size_bytes: int
     size_text: str
     modified_at: str
@@ -1318,14 +1397,12 @@ class NodeBlueprintEntry:
     can_delete: bool
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintEntry":
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintFileEntry":
         uploaded_by_display_name = _optional_string(payload, "uploaded_by_display_name")
         return cls(
             id=_required_string(payload, "id"),
             label=_required_string(payload, "label"),
-            session_name=_required_string(payload, "session_name"),
             relative_path=_required_string(payload, "relative_path"),
-            file_type=_required_string(payload, "file_type"),
             size_bytes=_required_int(payload, "size_bytes"),
             size_text=_required_string(payload, "size_text"),
             modified_at=_required_string(payload, "modified_at"),
@@ -1337,9 +1414,7 @@ class NodeBlueprintEntry:
         return {
             "id": self.id,
             "label": self.label,
-            "session_name": self.session_name,
             "relative_path": self.relative_path,
-            "file_type": self.file_type,
             "size_bytes": self.size_bytes,
             "size_text": self.size_text,
             "modified_at": self.modified_at,
@@ -1349,17 +1424,66 @@ class NodeBlueprintEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeBlueprintEntry:
+    id: str
+    label: str
+    session_name: str
+    relative_path: str
+    size_bytes: int
+    size_text: str
+    modified_at: str
+    uploaded_by_display_name: str | None
+    can_delete: bool
+    config_file: NodeBlueprintFileEntry | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintEntry":
+        uploaded_by_display_name = _optional_string(payload, "uploaded_by_display_name")
+        raw_config_file = payload.get("config_file")
+        if raw_config_file is not None and not isinstance(raw_config_file, Mapping):
+            raise ValueError("Node blueprint entry config_file is invalid.")
+        return cls(
+            id=_required_string(payload, "id"),
+            label=_required_string(payload, "label"),
+            session_name=_required_string(payload, "session_name"),
+            relative_path=_required_string(payload, "relative_path"),
+            size_bytes=_required_int(payload, "size_bytes"),
+            size_text=_required_string(payload, "size_text"),
+            modified_at=_required_string(payload, "modified_at"),
+            uploaded_by_display_name=uploaded_by_display_name,
+            can_delete=_required_bool(payload, "can_delete"),
+            config_file=NodeBlueprintFileEntry.from_mapping(raw_config_file) if raw_config_file is not None else None,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "session_name": self.session_name,
+            "relative_path": self.relative_path,
+            "size_bytes": self.size_bytes,
+            "size_text": self.size_text,
+            "modified_at": self.modified_at,
+            "uploaded_by_display_name": self.uploaded_by_display_name,
+            "can_delete": self.can_delete,
+            "config_file": self.config_file.to_mapping() if self.config_file is not None else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeBlueprintList:
     app_name: str
     app_friendly: str
     node: str
     blueprints: tuple[NodeBlueprintEntry, ...]
+    default_session_name: str | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintList":
         app_name = _required_string(payload, "app_name")
         app_friendly = _required_string(payload, "app_friendly")
         node = _required_string(payload, "node")
+        default_session_name = _optional_string(payload, "default_session_name")
         raw_blueprints = payload.get("blueprints")
         if not isinstance(raw_blueprints, Sequence) or isinstance(raw_blueprints, (str, bytes)):
             raise ValueError("Node blueprint list blueprints are invalid.")
@@ -1373,6 +1497,7 @@ class NodeBlueprintList:
             app_friendly=app_friendly,
             node=node,
             blueprints=tuple(blueprints),
+            default_session_name=default_session_name,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1381,6 +1506,7 @@ class NodeBlueprintList:
             "app_friendly": self.app_friendly,
             "node": self.node,
             "blueprints": [entry.to_mapping() for entry in self.blueprints],
+            "default_session_name": self.default_session_name,
         }
 
 
@@ -2250,6 +2376,10 @@ class NodeApiService:
             self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
             return {"node": self.node_name, "apps": [entry.to_mapping() for entry in await self.list_apps()]}
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/ping")
+        async def _ping() -> Response:
+            return Response(status_code=status.HTTP_204_NO_CONTENT)
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/system")
         async def _system_summary(request: Request, access_token: str | None = None) -> dict[str, object]:
             traffic_log.info("Node API system summary request: node=%s", self.node_name)
@@ -2354,6 +2484,218 @@ class NodeApiService:
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
             app = self._resolve_app(app_name)
             return (await self.build_app_runtime_summary(app)).to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/manifest")
+        async def _map_manifest(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> Response:
+            traffic_log.info("Node API map manifest request: node=%s app=%s", self.node_name, app_name)
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+            app = self._resolve_app(app_name)
+            manifest, source = await asyncio.to_thread(self._build_map_manifest_result, app)
+            return Response(
+                content=json.dumps(manifest.to_mapping()),
+                media_type="application/json",
+                headers=self._squaremap_response_headers(source),
+            )
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/annotations")
+        async def _map_annotations(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API map annotation list request: node=%s app=%s", self.node_name, app_name)
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+            app = self._resolve_app(app_name)
+            annotations = await asyncio.to_thread(self.build_map_annotation_list, app)
+            return annotations.to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/annotations")
+        async def _create_map_annotation(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API map annotation create request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_WRITE,))
+            actor_user_id: int = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MAP_WRITE,),
+                verified_grant=grant,
+            )
+            app = self._resolve_app(app_name)
+            draft = MapAnnotationDraft.from_mapping(payload)
+            created_by_name: str | None = None
+            if self._web_auth is not None:
+                user: ModWebUser | None = self._web_auth.current_user(request)
+                created_by_name = None if user is None else user.display_name
+            result = await asyncio.to_thread(
+                self.create_map_annotation,
+                app,
+                draft,
+                actor_user_id,
+                created_by_name,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/annotations/{{annotation_id}}/delete")
+        async def _delete_map_annotation(
+            app_name: str,
+            annotation_id: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API map annotation delete request: node=%s app=%s annotation_id=%s",
+                self.node_name,
+                app_name,
+                annotation_id,
+            )
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_WRITE,))
+            app = self._resolve_app(app_name)
+            result = await asyncio.to_thread(self.delete_map_annotation, app, annotation_id)
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/players")
+        async def _map_players(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> Response:
+            traffic_log.info("Node API map players request: node=%s app=%s", self.node_name, app_name)
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+            app = self._resolve_app(app_name)
+            proxy_response = await asyncio.to_thread(
+                self._squaremap_proxy_response,
+                app,
+                "tiles/players.json",
+                request.url.query,
+            )
+            return Response(
+                content=proxy_response.content,
+                media_type=proxy_response.media_type,
+                headers=self._squaremap_response_headers(proxy_response),
+            )
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/worlds/{{world_name}}/settings")
+        async def _map_world_settings(
+            app_name: str,
+            world_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> Response:
+            traffic_log.info(
+                "Node API map world settings request: node=%s app=%s world=%s",
+                self.node_name,
+                app_name,
+                world_name,
+            )
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+            app = self._resolve_app(app_name)
+            proxy_response = await asyncio.to_thread(
+                self._squaremap_proxy_response,
+                app,
+                f"tiles/{quote(world_name, safe='')}/settings.json",
+                request.url.query,
+                allow_stale_on_error=True,
+            )
+            return Response(
+                content=proxy_response.content,
+                media_type=proxy_response.media_type,
+                headers=self._squaremap_response_headers(proxy_response),
+            )
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/worlds/{{world_name}}/markers")
+        async def _map_world_markers(
+            app_name: str,
+            world_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> Response:
+            traffic_log.info(
+                "Node API map world markers request: node=%s app=%s world=%s",
+                self.node_name,
+                app_name,
+                world_name,
+            )
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+            app = self._resolve_app(app_name)
+            proxy_response = await asyncio.to_thread(
+                self._squaremap_proxy_response,
+                app,
+                f"tiles/{quote(world_name, safe='')}/markers.json",
+                request.url.query,
+                allow_stale_on_error=True,
+            )
+            return Response(
+                content=proxy_response.content,
+                media_type=proxy_response.media_type,
+                headers=self._squaremap_response_headers(proxy_response),
+            )
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/worlds/{{world_name}}/tiles/{{z}}/{{tile_name}}")
+        async def _map_world_tile(
+            app_name: str,
+            world_name: str,
+            z: int,
+            tile_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> Response:
+            traffic_log.info(
+                "Node API map tile request: node=%s app=%s world=%s z=%s tile=%s",
+                self.node_name,
+                app_name,
+                world_name,
+                z,
+                tile_name,
+            )
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+            app = self._resolve_app(app_name)
+            proxy_response = await asyncio.to_thread(
+                self._squaremap_proxy_response,
+                app,
+                f"tiles/{quote(world_name, safe='')}/{z}/{quote(tile_name, safe='')}",
+                request.url.query,
+            )
+            return Response(
+                content=proxy_response.content,
+                media_type=proxy_response.media_type,
+                headers=self._squaremap_response_headers(proxy_response),
+            )
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/assets/{{asset_path:path}}")
+        async def _map_asset(
+            app_name: str,
+            asset_path: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> Response:
+            traffic_log.info(
+                "Node API map asset request: node=%s app=%s asset=%s",
+                self.node_name,
+                app_name,
+                asset_path,
+            )
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
+            app = self._resolve_app(app_name)
+            proxy_response = await asyncio.to_thread(
+                self._squaremap_proxy_response,
+                app,
+                f"images/{quote(asset_path, safe='/')}",
+                request.url.query,
+            )
+            return Response(
+                content=proxy_response.content,
+                media_type=proxy_response.media_type,
+                headers=self._squaremap_response_headers(proxy_response),
+            )
 
         @nicegui_app.websocket(f"{_NODE_API_PREFIX}/apps/{{app_name}}/state/stream")
         async def _app_state_stream(
@@ -2751,8 +3093,7 @@ class NodeApiService:
             app_name: str,
             request: Request,
             session_name: Annotated[str, Form()],
-            upload: Annotated[UploadFile, File()],
-            filename: Annotated[str | None, Form()] = None,
+            upload: Annotated[list[UploadFile], File()],
             access_token: str | None = None,
         ) -> dict[str, object]:
             traffic_log.info(
@@ -2770,11 +3111,10 @@ class NodeApiService:
                 scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
                 verified_grant=grant,
             )
-            result: NodeBlueprintMutationResult = await self.upload_blueprint_file(
+            result: NodeBlueprintMutationResult = await self.upload_blueprint_files(
                 app=app,
                 session_name=session_name,
-                upload=upload,
-                upload_name=filename,
+                uploads=upload,
                 actor_user_id=actor_user_id,
             )
             audit_log(
@@ -2992,8 +3332,11 @@ class NodeApiService:
         for app, player_snapshot in zip(apps, player_snapshots, strict=True):
             player_count: int | None = None
             player_capacity: int | None = None
+            connected_player_names: tuple[str, ...] = ()
             if player_snapshot is not None:
-                player_count, player_capacity = player_snapshot
+                player_count = player_snapshot.player_count
+                player_capacity = player_snapshot.player_capacity
+                connected_player_names = player_snapshot.connected_player_names
             app_scope = getattr(app, "scope", None)
             entries.append(
                 NodeAppEntry(
@@ -3008,6 +3351,7 @@ class NodeApiService:
                     transition_state=self._cached_app_transition_state(app.name),
                     player_count=player_count,
                     player_capacity=player_capacity,
+                    connected_player_names=connected_player_names,
                     supports_saves=app.supports_save_files,
                     supports_save_uploads=app.supports_save_uploads,
                     supports_save_rename=app.supports_save_rename,
@@ -3124,22 +3468,23 @@ class NodeApiService:
         bot_uptime_seconds: int | None = None
         uptime_seconds: int | None = None
         running_names: tuple[str, ...] = ()
+        running_app_ids: tuple[str, ...] = ()
 
         try:
             system_stats: Stats_System = Stats_System()
-            system_stats.update()
+            snapshot: StatsSystemSnapshot = system_stats.system_snapshot(refresh=True)
         except Exception as xcp:
             log.warning("Node API system stats failed: node=%s error=%s", self.node_name, xcp)
         else:
-            cpu_percent = int(system_stats.cpu.r_total)
-            ram_percent = int(system_stats.ram.percent)
-            ram_used_bytes = int(system_stats.ram.used)
-            ram_total_bytes = int(system_stats.ram.raw.total)
-            primary_disk: Stats_Disk | None = system_stats.primary_disk
+            cpu_percent = snapshot.cpu_percent
+            ram_percent = snapshot.ram_percent
+            ram_used_bytes = snapshot.ram_used_bytes
+            ram_total_bytes = snapshot.ram_total_bytes
+            primary_disk: StatsDiskSnapshot | None = snapshot.primary_disk
             if primary_disk is not None:
                 storage_percent = primary_disk.percent
-                storage_free_bytes = int(primary_disk.usage.free)
-                storage_total_bytes = int(primary_disk.usage.total)
+                storage_free_bytes = primary_disk.free_bytes
+                storage_total_bytes = primary_disk.total_bytes
         try:
             bot_uptime_seconds = max(0, int(time.time() - psutil.Process().create_time()))
         except Exception as xcp:
@@ -3149,11 +3494,13 @@ class NodeApiService:
         except Exception as xcp:
             log.warning("Node API uptime probe failed: node=%s error=%s", self.node_name, xcp)
         if self._manager is not None:
-            running_names = tuple(
-                app.friendly
+            running_apps = tuple(
+                (app.name, app.friendly)
                 for app in sorted(self._manager.apps.values(), key=lambda item: item.friendly.casefold())
                 if app.check_running()
             )
+            running_names = tuple(app_friendly for _app_name, app_friendly in running_apps)
+            running_app_ids = tuple(app_name for app_name, _app_friendly in running_apps)
 
         return NodeSystemSummary(
             cpu_percent=cpu_percent,
@@ -3166,6 +3513,7 @@ class NodeApiService:
             bot_uptime_seconds=bot_uptime_seconds,
             uptime_seconds=uptime_seconds,
             running_names=running_names,
+            running_app_ids=running_app_ids,
         )
 
     @staticmethod
@@ -3414,9 +3762,12 @@ class NodeApiService:
     ) -> NodeAppRuntimeSummary:
         player_count: int | None = None
         player_capacity: int | None = None
+        connected_player_names: tuple[str, ...] = ()
         player_snapshot = await self._app_player_snapshot(app)
         if player_snapshot is not None:
-            player_count, player_capacity = player_snapshot
+            player_count = player_snapshot.player_count
+            player_capacity = player_snapshot.player_capacity
+            connected_player_names = player_snapshot.connected_player_names
         transition_state = self._cached_app_transition_state(app.name)
 
         storage_percent: int | None = None
@@ -3426,15 +3777,14 @@ class NodeApiService:
         if include_storage:
             try:
                 system_stats = Stats_System()
-                system_stats.update()
-                storage_disk = system_stats.disk_for_path(app.directory) or system_stats.primary_disk
+                storage_disk = system_stats.disk_snapshot_for_path(app.directory, refresh=True)
             except Exception as xcp:
                 log.warning("Node API storage stats failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
             else:
                 if storage_disk is not None:
                     storage_percent = storage_disk.percent
-                    storage_free_bytes = int(storage_disk.usage.free)
-                    storage_total_bytes = int(storage_disk.usage.total)
+                    storage_free_bytes = storage_disk.free_bytes
+                    storage_total_bytes = storage_disk.total_bytes
         if include_footprint and not config.IS_SHUTTINGDOWN and not self._shutting_down:
             try:
                 footprint_bytes = await asyncio.to_thread(self._app_footprint_size_bytes, app)
@@ -3459,10 +3809,280 @@ class NodeApiService:
             storage_total_bytes=storage_total_bytes,
             footprint_bytes=footprint_bytes,
             runtime_fault=getattr(app, "runtime_fault", None),
+            connected_player_names=connected_player_names,
         )
 
     async def build_live_app_runtime_summary(self, app: App) -> NodeAppRuntimeSummary:
         return await self.build_app_runtime_summary(app, include_storage=False, include_footprint=False)
+
+    def build_map_manifest(self, app: App) -> MapManifest:
+        manifest, _ = self._build_map_manifest_result(app)
+        return manifest
+
+    def _build_map_manifest_result(self, app: App) -> tuple[MapManifest, _SquaremapProxyResponse]:
+        public_map_url: str = self._require_map_app(app)
+        settings_response = self._squaremap_proxy_response(app, "tiles/settings.json", allow_stale_on_error=True)
+        settings = self._squaremap_json_object_from_response(settings_response, "tiles/settings.json")
+        worlds = self._squaremap_world_summaries(settings)
+        if not worlds:
+            raise _http_exception(502, f"Squaremap did not expose any worlds for {app.friendly}.")
+        initial_world_name = self._squaremap_initial_world_name(public_map_url)
+        known_world_names = {world.name.casefold() for world in worlds}
+        if initial_world_name is None or initial_world_name.casefold() not in known_world_names:
+            initial_world_name = worlds[0].name
+        return MapManifest(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node_name=self.node_name,
+            public_map_url=public_map_url,
+            icon_base_url="./assets",
+            initial_world_name=initial_world_name,
+            worlds=worlds,
+        ), settings_response
+
+    def build_map_annotation_list(self, app: App) -> MapAnnotationList:
+        self._require_map_app(app)
+        annotations = self._map_annotation_store(app).list_annotations()
+        return MapAnnotationList(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node_name=self.node_name,
+            annotations=annotations,
+        )
+
+    def create_map_annotation(
+        self,
+        app: App,
+        draft: MapAnnotationDraft,
+        created_by_user_id: int | None,
+        created_by_name: str | None,
+    ) -> MapAnnotationMutationResult:
+        self._require_map_app(app)
+        annotation = self._map_annotation_store(app).create_annotation(
+            draft=draft,
+            created_by_user_id=created_by_user_id,
+            created_by_name=created_by_name,
+        )
+        return MapAnnotationMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node_name=self.node_name,
+            message=f"Created map annotation {annotation.annotation_id}.",
+            annotation=annotation,
+        )
+
+    def delete_map_annotation(self, app: App, annotation_id: str) -> MapAnnotationMutationResult:
+        self._require_map_app(app)
+        try:
+            removed = self._map_annotation_store(app).delete_annotation(annotation_id)
+        except KeyError as xcp:
+            raise _http_exception(404, f"Unknown map annotation: {annotation_id}") from xcp
+        return MapAnnotationMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node_name=self.node_name,
+            message=f"Deleted map annotation {removed.annotation_id}.",
+            deleted_annotation_id=removed.annotation_id,
+        )
+
+    @staticmethod
+    def _map_annotation_store(app: App) -> AppMapAnnotationStore:
+        return AppMapAnnotationStore(app.map_annotations_path)
+
+    def _require_map_app(self, app: App) -> str:
+        public_map_url = app.public_map_url
+        if public_map_url is None:
+            raise _http_exception(404, f"{app.friendly} does not expose a public map.")
+        return public_map_url
+
+    @staticmethod
+    def _squaremap_response_headers(proxy_response: _SquaremapProxyResponse) -> dict[str, str]:
+        headers = dict(proxy_response.headers)
+        headers[_MAP_SOURCE_HEADER_NAME] = "stale" if proxy_response.is_stale else "live"
+        if proxy_response.cache_updated_at_unix_ms is not None:
+            headers[_MAP_CACHE_UPDATED_AT_HEADER_NAME] = str(proxy_response.cache_updated_at_unix_ms)
+        return headers
+
+    def _squaremap_root_url(self, app: App) -> str:
+        public_map_url = self._require_map_app(app)
+        parsed = urlsplit(public_map_url)
+        root_path = parsed.path.rstrip("/") + "/"
+        return urlunsplit((parsed.scheme, parsed.netloc, root_path, "", ""))
+
+    @staticmethod
+    def _squaremap_initial_world_name(public_map_url: str) -> str | None:
+        parsed = urlsplit(public_map_url)
+        world_values = parse_qs(parsed.query, keep_blank_values=True).get("world", ())
+        for candidate in reversed(world_values):
+            world_name = candidate.strip()
+            if world_name:
+                return world_name
+        return None
+
+    @staticmethod
+    def _squaremap_passthrough_headers(response: requests.Response) -> tuple[tuple[str, str], ...]:
+        allowed_names = ("Cache-Control", "ETag", "Last-Modified", "Expires")
+        headers: list[tuple[str, str]] = []
+        for name in allowed_names:
+            value = response.headers.get(name)
+            if value:
+                headers.append((name, value))
+        return tuple(headers)
+
+    def _squaremap_proxy_response(
+        self,
+        app: App,
+        relative_path: str,
+        raw_query: str = "",
+        *,
+        allow_stale_on_error: bool = False,
+    ) -> _SquaremapProxyResponse:
+        normalized_path = relative_path.lstrip("/")
+        url = f"{self._squaremap_root_url(app)}{normalized_path}"
+        params = parse_qs(raw_query, keep_blank_values=True) if raw_query else None
+        try:
+            response = requests.get(url, params=params, timeout=_SQUAREMAP_REQUEST_TIMEOUT_SECONDS)
+        except requests.Timeout as xcp:
+            cached_response = self._squaremap_cached_response(app, normalized_path) if allow_stale_on_error else None
+            if cached_response is not None:
+                return cached_response
+            raise _http_exception(504, f"Squaremap request timed out: {relative_path}") from xcp
+        except requests.RequestException as xcp:
+            cached_response = self._squaremap_cached_response(app, normalized_path) if allow_stale_on_error else None
+            if cached_response is not None:
+                return cached_response
+            raise _http_exception(502, f"Squaremap request failed: {type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            if response.status_code != 404 and allow_stale_on_error:
+                cached_response = self._squaremap_cached_response(app, normalized_path)
+                if cached_response is not None:
+                    return cached_response
+            status_code = 404 if response.status_code == 404 else 502
+            raise _http_exception(
+                status_code,
+                f"Squaremap returned HTTP {response.status_code} for {relative_path}.",
+            )
+        proxy_response = _SquaremapProxyResponse(
+            content=response.content,
+            media_type=response.headers.get("Content-Type"),
+            headers=self._squaremap_passthrough_headers(response),
+        )
+        self._remember_squaremap_cache_entry(app, normalized_path, proxy_response)
+        return proxy_response
+
+    def _squaremap_cached_response(self, app: App, relative_path: str) -> _SquaremapProxyResponse | None:
+        cache_entry = self._squaremap_cache_entry(app, relative_path)
+        if cache_entry is None:
+            return None
+        return _SquaremapProxyResponse(
+            content=cache_entry.content.encode("utf-8"),
+            media_type=cache_entry.media_type,
+            headers=cache_entry.header_pairs,
+            is_stale=True,
+            cache_updated_at_unix_ms=cache_entry.updated_at_unix_ms,
+        )
+
+    def _squaremap_cache_entry(self, app: App, relative_path: str) -> MapJsonCacheEntry | None:
+        try:
+            return self._map_json_cache_store(app).load_entry(relative_path)
+        except ValueError:
+            log.exception("Map cache for %s is invalid at %s", app.friendly, app.map_cache_path)
+            return None
+
+    def _remember_squaremap_cache_entry(self, app: App, relative_path: str, proxy_response: _SquaremapProxyResponse) -> None:
+        if not self._should_cache_squaremap_path(relative_path):
+            return
+        try:
+            content_text = proxy_response.content.decode("utf-8")
+        except UnicodeDecodeError:
+            log.warning("Skipping map cache write for %s because %s was not UTF-8 JSON.", app.friendly, relative_path)
+            return
+        try:
+            self._map_json_cache_store(app).save_entry(
+                relative_path=relative_path,
+                content=content_text,
+                media_type=proxy_response.media_type,
+                headers=proxy_response.headers,
+            )
+        except ValueError:
+            log.exception("Failed to update map cache for %s at %s", app.friendly, app.map_cache_path)
+
+    @staticmethod
+    def _should_cache_squaremap_path(relative_path: str) -> bool:
+        normalized_path = relative_path.lstrip("/")
+        if normalized_path == "tiles/settings.json":
+            return True
+        if not normalized_path.startswith("tiles/"):
+            return False
+        return normalized_path.endswith("/settings.json") or normalized_path.endswith("/markers.json")
+
+    @staticmethod
+    def _map_json_cache_store(app: App) -> AppMapJsonCacheStore:
+        return AppMapJsonCacheStore(app.map_cache_path)
+
+    def _squaremap_json_object(self, app: App, relative_path: str) -> Mapping[str, object]:
+        proxy_response = self._squaremap_proxy_response(app, relative_path)
+        return self._squaremap_json_object_from_response(proxy_response, relative_path)
+
+    @staticmethod
+    def _squaremap_json_object_from_response(
+        proxy_response: _SquaremapProxyResponse,
+        relative_path: str,
+    ) -> Mapping[str, object]:
+        try:
+            payload = cast(object, json.loads(proxy_response.content.decode("utf-8")))
+        except (UnicodeDecodeError, ValueError) as xcp:
+            raise _http_exception(502, f"Squaremap returned invalid JSON for {relative_path}.") from xcp
+        if not isinstance(payload, Mapping):
+            raise _http_exception(502, f"Squaremap returned an invalid JSON object for {relative_path}.")
+        return cast(Mapping[str, object], payload)
+
+    @staticmethod
+    def _squaremap_world_summaries(payload: Mapping[str, object]) -> tuple[MapWorldSummary, ...]:
+        raw_worlds = payload.get("worlds")
+        if isinstance(raw_worlds, (str, bytes)) or not isinstance(raw_worlds, Sequence):
+            raise _http_exception(502, "Squaremap world list is invalid.")
+        worlds: list[MapWorldSummary] = []
+        for index, raw_world in enumerate(raw_worlds):
+            if not isinstance(raw_world, Mapping):
+                raise _http_exception(502, "Squaremap world entry is invalid.")
+            name = NodeApiService._mapping_text(raw_world, ("name",))
+            worlds.append(
+                MapWorldSummary(
+                    name=name,
+                    display_name=NodeApiService._mapping_text(raw_world, ("display_name", "title", "name")),
+                    world_type=NodeApiService._mapping_text(raw_world, ("type",), default="normal"),
+                    order=NodeApiService._mapping_int(raw_world, "order", default=index),
+                )
+            )
+        return tuple(sorted(worlds, key=lambda world: (world.order, world.display_name.casefold(), world.name.casefold())))
+
+    @staticmethod
+    def _mapping_text(
+        payload: Mapping[str, object],
+        keys: tuple[str, ...],
+        *,
+        default: str | None = None,
+    ) -> str:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    return text
+        if default is not None:
+            return default
+        joined_keys = ", ".join(keys)
+        raise _http_exception(502, f"Squaremap payload is missing required text fields: {joined_keys}.")
+
+    @staticmethod
+    def _mapping_int(payload: Mapping[str, object], key: str, *, default: int) -> int:
+        value = payload.get(key)
+        if value is None:
+            return default
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise _http_exception(502, f"Squaremap field {key!r} is invalid.")
+        return value
 
     def subscribe_local_app_runtime(
         self,
@@ -3967,15 +4587,42 @@ class NodeApiService:
             system_summary=second.system_summary if second.system_summary is not None else first.system_summary,
         )
 
-    async def _app_player_snapshot(self, app: App) -> tuple[int, int] | None:
+    async def _app_player_snapshot(self, app: App) -> _NodeAppPlayerSnapshot | None:
         if not app.check_running():
             return None
         try:
-            return await asyncio.wait_for(app.player_count(), timeout=_APP_PLAYER_COUNT_TIMEOUT_SECONDS)
+            count_snapshot: tuple[int, int] | None = await asyncio.wait_for(
+                app.player_count(), timeout=_APP_PLAYER_COUNT_TIMEOUT_SECONDS
+            )
         except asyncio.TimeoutError:
             log.debug("Node API player count timed out: node=%s app=%s", self.node_name, app.name)
         except Exception as xcp:
             log.warning("Node API player count failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
+        else:
+            if count_snapshot is None:
+                return None
+            player_count, player_capacity = count_snapshot
+            connected_player_names: tuple[str, ...] = ()
+            raw_connected_player_names_reader = getattr(app, "connected_player_names", None)
+            if callable(raw_connected_player_names_reader):
+                connected_player_names_reader: Callable[[], tuple[str, ...]] = cast(
+                    Callable[[], tuple[str, ...]],
+                    raw_connected_player_names_reader,
+                )
+                try:
+                    connected_player_names = connected_player_names_reader()
+                except Exception as xcp:
+                    log.warning(
+                        "Node API connected player names failed: node=%s app=%s error=%s",
+                        self.node_name,
+                        app.name,
+                        xcp,
+                    )
+            return _NodeAppPlayerSnapshot(
+                player_count=player_count,
+                player_capacity=player_capacity,
+                connected_player_names=connected_player_names,
+            )
         return None
 
     async def mutate_app(
@@ -3986,10 +4633,9 @@ class NodeApiService:
         actor_user_id: int,
     ) -> NodeAppMutationResult:
         await self._require_acl().perm_check(actor_user_id, required_app_mutation_level(action))
-        manager = self._require_manager()
-
+        manager: App_Manager = self._require_manager()
         if action is NodeAppMutationAction.START:
-            blocked_by = self._running_blocker_name(app)
+            blocked_by: str | None = self._running_blocker_name(app)
             if blocked_by is not None:
                 raise _http_exception(409, f"Blocked by running app: {blocked_by}")
             self._track_app_mutation_task(
@@ -4020,11 +4666,11 @@ class NodeApiService:
             message = f"Enabled {app.friendly}."
         elif action is NodeAppMutationAction.DISABLE:
             manager.toggle(app.name, False)
-            message = f"Disabled {app.friendly}."
+            message: str = f"Disabled {app.friendly}."
         else:
             raise ValueError(f"Unsupported app mutation action: {action}")
 
-        app_stats = await self.build_app_runtime_summary(app)
+        app_stats: NodeAppRuntimeSummary = await self.build_app_runtime_summary(app)
         traffic_log.info(
             "Node API app mutated: node=%s app=%s action=%s actor=%s",
             self.node_name,
@@ -4045,13 +4691,13 @@ class NodeApiService:
         await app.has_mod_manager.reload_mods()
 
         if request.mod_name is not None:
-            mod = app.has_mod_manager.get(request.mod_name)
+            mod: Mod = app.has_mod_manager.get(request.mod_name)
             try:
                 require_downloadable(mod)
             except NonDownloadableModError as xcp:
                 log.warning("Node API blocked single mod download: app=%s mod=%s reason=%s", app.name, mod.name, xcp)
                 raise _http_exception(403, str(xcp)) from xcp
-            download = await self._single_mod_download_file(app=app, mod=mod)
+            download: NodeDownloadFile = await self._single_mod_download_file(app=app, mod=mod)
             traffic_log.info(
                 "Node API sending single mod: app=%s mod=%s path=%s archive=%s",
                 app.name,
@@ -4061,8 +4707,10 @@ class NodeApiService:
             )
             return FileResponse(path=download.path, filename=download.filename)
 
-        selected_mod_names = request.mod_names if request.selected_only or request.mod_names else None
-        paths = tuple(
+        selected_mod_names: tuple[str, ...] | None = (
+            request.mod_names if request.selected_only or request.mod_names else None
+        )
+        paths: tuple[Path, ...] = tuple(
             build_mod_download_paths(
                 app.has_mod_manager,
                 selected_mod_names,
@@ -4070,7 +4718,7 @@ class NodeApiService:
             )
         )
         if not paths:
-            detail = self._empty_archive_detail(request)
+            detail: str = self._empty_archive_detail(request)
             log.warning(
                 "Node API archive request had no paths: app=%s enabled_only=%s selected=%s",
                 app.name,
@@ -4079,7 +4727,7 @@ class NodeApiService:
             )
             raise _http_exception(404, detail)
 
-        archive_path = await File_Utils.compress(
+        archive_path: Path = await File_Utils.compress(
             paths,
             self._archive_name(app=app, paths=paths, request=request),
             arc_base=self._archive_base_path(paths),
@@ -4095,9 +4743,9 @@ class NodeApiService:
         return FileResponse(path=archive_path, filename=archive_path.name)
 
     def build_config_list(self, app: App, *, actor_user_id: int | None = None) -> NodeConfigList:
-        configs = app.list_config_files()
+        configs: tuple[AppConfigFile, ...] = app.list_config_files()
         if actor_user_id is not None and self._acl is not None:
-            configs = tuple(
+            configs = tuple[AppConfigFile, ...](
                 config_file for config_file in configs if self._acl.can(actor_user_id, config_file.read_power_level)
             )
         traffic_log.info(
@@ -4107,12 +4755,12 @@ class NodeApiService:
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            configs=tuple(self._config_entry(config_file) for config_file in configs),
+            configs=tuple[NodeConfigEntry, ...](self._config_entry(config_file) for config_file in configs),
         )
 
     def read_config_file(self, *, app: App, config_id: str) -> NodeConfigContent:
         try:
-            content = app.read_config_file(config_id)
+            content: AppConfigFileContent = app.read_config_file(config_id)
         except FileNotFoundError as xcp:
             raise _http_exception(404, str(xcp)) from xcp
         except ValueError as xcp:
@@ -4121,7 +4769,7 @@ class NodeApiService:
 
     def write_config_file(self, *, app: App, config_id: str, content: str) -> NodeConfigContent:
         try:
-            updated = app.write_config_file(config_id, content)
+            updated: AppConfigFileContent = app.write_config_file(config_id, content)
         except FileNotFoundError as xcp:
             raise _http_exception(404, str(xcp)) from xcp
         except ValueError as xcp:
@@ -4137,7 +4785,7 @@ class NodeApiService:
         actor_user_id: int | None = None,
     ) -> FileResponse:
         try:
-            root = app.resolve_config_root(root_id)
+            root: AppConfigFileRoot = app.resolve_config_root(root_id)
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
 
@@ -4146,16 +4794,20 @@ class NodeApiService:
         ):
             raise _http_exception(403, f"Insufficient level for config root: {root.label}")
 
-        root_path = root.resolved_path
+        root_path: Path = root.resolved_path
         if not root_path.exists():
             raise _http_exception(404, f"Config root does not exist: {root.label}")
         if not root_path.is_file() and not root_path.is_dir():
             raise _http_exception(404, f"Config root is unsupported: {root.label}")
 
-        visible_configs = tuple(config_file for config_file in app.list_config_files() if config_file.root_id == root_id)
+        visible_configs: tuple[AppConfigFile, ...] = tuple[AppConfigFile, ...](
+            config_file for config_file in app.list_config_files() if config_file.root_id == root_id
+        )
         if actor_user_id is not None and self._acl is not None:
-            visible_configs = tuple(
-                config_file for config_file in visible_configs if self._acl.can(actor_user_id, config_file.read_power_level)
+            visible_configs = tuple[AppConfigFile, ...](
+                config_file
+                for config_file in visible_configs
+                if self._acl.can(actor_user_id, config_file.read_power_level)
             )
         if not visible_configs:
             raise _http_exception(404, f"No downloadable config files found in root: {root.label}")
@@ -4163,8 +4815,12 @@ class NodeApiService:
             traffic_log.info("Node API sending config file root: node=%s app=%s root=%s", self.node_name, app.name, root_id)
             return FileResponse(path=root_path, filename=root_path.name)
 
-        paths: tuple[Path, ...] = tuple(app.resolve_config_file(config_file.id) for config_file in visible_configs)
-        archive_path = await File_Utils.compress(paths, self._config_root_archive_name(app=app, root=root), arc_base=root_path)
+        paths: tuple[Path, ...] = tuple[Path, ...](
+            app.resolve_config_file(config_file.id) for config_file in visible_configs
+        )
+        archive_path: Path = await File_Utils.compress(
+            paths, self._config_root_archive_name(app=app, root=root), arc_base=root_path
+        )
         traffic_log.info(
             "Node API sending config root archive: node=%s app=%s root=%s files=%s archive=%s",
             self.node_name,
@@ -4176,19 +4832,21 @@ class NodeApiService:
         return FileResponse(path=archive_path, filename=archive_path.name)
 
     def build_save_list(self, app: App) -> NodeSaveList:
-        saves = app.list_save_files()
+        saves: tuple[AppSaveEntry, ...] = app.list_save_files()
         traffic_log.info("Node API built save list: node=%s app=%s saves=%s", self.node_name, app.name, len(saves))
         return NodeSaveList(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            roots=tuple(NodeSaveRootEntry(id=root.id, label=root.label) for root in app.save_file_roots),
-            saves=tuple(self._save_entry(save) for save in saves),
+            roots=tuple[NodeSaveRootEntry, ...](
+                NodeSaveRootEntry(id=root.id, label=root.label) for root in app.save_file_roots
+            ),
+            saves=tuple[NodeSaveEntry, ...](self._save_entry(save) for save in saves),
         )
 
     async def build_save_download_response(self, *, app: App, save_id: str) -> FileResponse:
         try:
-            save_path = app.resolve_save_file(save_id)
+            save_path: Path = app.resolve_save_file(save_id)
         except FileNotFoundError as xcp:
             raise _http_exception(404, str(xcp)) from xcp
         except ValueError as xcp:
@@ -4202,7 +4860,7 @@ class NodeApiService:
         if not save_path.is_dir():
             raise _http_exception(404, f"Save path is unsupported: {save_path.name}")
 
-        archive_path = await File_Utils.compress(
+        archive_path: Path = await File_Utils.compress(
             save_path,
             self._save_archive_name(app=app, save_path=save_path),
             arc_base=save_path.parent,
@@ -4227,11 +4885,11 @@ class NodeApiService:
     ) -> NodeSaveMutationResult:
         if not app.supports_save_uploads:
             raise _http_exception(409, f"{app.friendly} does not support save uploads.")
-        resolved_upload_name = (upload_name or upload.filename or "").strip()
+        resolved_upload_name: str = (upload_name or upload.filename or "").strip()
         if not resolved_upload_name:
             raise _http_exception(400, "Save upload filename is required.")
 
-        temp_path = await self._persist_upload_to_temp(upload)
+        temp_path: Path = await self._persist_upload_to_temp(upload)
         try:
             return self.upload_save_path(
                 app=app,
@@ -4255,7 +4913,9 @@ class NodeApiService:
         if not app.supports_save_uploads:
             raise _http_exception(409, f"{app.friendly} does not support save uploads.")
         try:
-            updated = app.upload_save_file(root_id=root_id, upload_name=upload_name, source_path=source_path)
+            updated: AppSaveEntry = app.upload_save_file(
+                root_id=root_id, upload_name=upload_name, source_path=source_path
+            )
         except FileNotFoundError as xcp:
             raise _http_exception(404, str(xcp)) from xcp
         except FileExistsError as xcp:
@@ -4289,7 +4949,7 @@ class NodeApiService:
         upload_name: str | None,
         actor_user_id: int,
     ) -> NodeModUploadResult:
-        resolved_upload_name = self._validated_upload_filename(
+        resolved_upload_name: str = self._validated_upload_filename(
             upload_name or upload.filename or "",
             kind="Mod",
         )
@@ -4317,12 +4977,12 @@ class NodeApiService:
         resolved_upload_name = self._validated_upload_filename(upload_name, kind="Mod")
         try:
             require_app_stopped_for_mod_mutation(app)
-            manager = app.has_mod_manager
+            manager: Mod_Manager = app.has_mod_manager
             await manager.reload_mods()
             with tempfile.TemporaryDirectory(prefix="yukibot-mod-upload-") as temp_dir:
-                staged_path = Path(temp_dir) / resolved_upload_name
+                staged_path: Path = Path(temp_dir) / resolved_upload_name
                 await asyncio.to_thread(File_Utils.copy, source_path, staged_path, True)
-                uploaded = await manager.add(staged_path, atomic=True)
+                uploaded: Mod = await manager.add(staged_path, atomic=True)
         except RunningAppModMutationError as xcp:
             raise _http_exception(409, str(xcp)) from xcp
         except FileNotFoundError as xcp:
@@ -4359,18 +5019,18 @@ class NodeApiService:
     ) -> NodeSaveMutationResult:
         if not app.supports_save_rename:
             raise _http_exception(409, f"{app.friendly} does not support save renaming.")
-        resolved_name = new_name.strip()
+        resolved_name: str = new_name.strip()
         if not resolved_name:
             raise _http_exception(400, "Save name must not be empty.")
 
         try:
-            current_save = next(save for save in app.list_save_files() if save.id == save_id)
+            current_save: AppSaveEntry = next(save for save in app.list_save_files() if save.id == save_id)
         except StopIteration as xcp:
             raise _http_exception(404, f"Unknown save file: {save_id}") from xcp
 
-        destination_relative_path = PurePosixPath(current_save.relative_path).with_name(resolved_name).as_posix()
+        destination_relative_path: str = PurePosixPath(current_save.relative_path).with_name(resolved_name).as_posix()
         try:
-            updated = app.relocate_save_file(
+            updated: AppSaveEntry = app.relocate_save_file(
                 save_id=save_id,
                 destination_root_id=current_save.root_id,
                 destination_relative_path=destination_relative_path,
@@ -4403,7 +5063,7 @@ class NodeApiService:
     def build_blueprint_list(self, app: App, *, actor_user_id: int) -> NodeBlueprintList:
         if not app.supports_blueprints:
             raise _http_exception(409, f"{app.friendly} does not support blueprint files.")
-        blueprints = app.list_blueprint_files()
+        blueprints: tuple[AppBlueprintEntry, ...] = app.list_blueprint_files()
         traffic_log.info(
             "Node API built blueprint list: node=%s app=%s blueprints=%s",
             self.node_name,
@@ -4414,40 +5074,52 @@ class NodeApiService:
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            blueprints=tuple(
+            blueprints=tuple[NodeBlueprintEntry, ...](
                 self._blueprint_entry(blueprint_file, actor_user_id=actor_user_id) for blueprint_file in blueprints
             ),
+            default_session_name=app.default_blueprint_session_name,
         )
 
-    async def upload_blueprint_file(
+    async def upload_blueprint_files(
         self,
         *,
         app: App,
         session_name: str,
-        upload: UploadFile,
-        upload_name: str | None,
+        uploads: list[UploadFile],
         actor_user_id: int,
     ) -> NodeBlueprintMutationResult:
         if not app.supports_blueprints:
             raise _http_exception(409, f"{app.friendly} does not support blueprint uploads.")
-        raw_upload_name = upload_name or upload.filename or ""
-        if raw_upload_name != raw_upload_name.strip():
-            raise _http_exception(400, "Blueprint filenames must not start or end with spaces.")
-        resolved_upload_name = self._validated_upload_filename(
-            raw_upload_name,
-            kind="Blueprint",
-        )
-        temp_path = await self._persist_upload_to_temp(upload)
+        resolved_names: list[str] = []
+        for upload in uploads:
+            raw_upload_name: str = upload.filename or ""
+            if raw_upload_name != raw_upload_name.strip():
+                raise _http_exception(400, "Blueprint filenames must not start or end with spaces.")
+            resolved_names.append(self._validated_upload_filename(raw_upload_name, kind="Blueprint"))
         try:
+            upload_pair: BlueprintUploadPair = classify_blueprint_upload_filenames(resolved_names)
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+
+        temp_paths: dict[str, Path] = {}
+        try:
+            for upload, resolved_name in zip(uploads, resolved_names, strict=True):
+                temp_paths[resolved_name] = await self._persist_upload_to_temp(upload)
+            config_source_path: Path | None = None
+            if upload_pair.config_filename is not None:
+                config_source_path = temp_paths[upload_pair.config_filename]
             return self.upload_blueprint_path(
                 app=app,
                 session_name=session_name,
-                source_path=temp_path,
-                upload_name=resolved_upload_name,
+                source_path=temp_paths[upload_pair.module_filename],
+                upload_name=upload_pair.module_filename,
                 actor_user_id=actor_user_id,
+                config_source_path=config_source_path,
+                config_upload_name=upload_pair.config_filename,
             )
         finally:
-            temp_path.unlink(missing_ok=True)
+            for temp_path in temp_paths.values():
+                temp_path.unlink(missing_ok=True)
 
     def upload_blueprint_path(
         self,
@@ -4457,18 +5129,30 @@ class NodeApiService:
         source_path: Path,
         upload_name: str,
         actor_user_id: int,
+        config_source_path: Path | None = None,
+        config_upload_name: str | None = None,
     ) -> NodeBlueprintMutationResult:
         if not app.supports_blueprints:
             raise _http_exception(409, f"{app.friendly} does not support blueprint uploads.")
         if upload_name != upload_name.strip():
             raise _http_exception(400, "Blueprint filenames must not start or end with spaces.")
-        resolved_upload_name = self._validated_upload_filename(upload_name, kind="Blueprint")
+        if config_upload_name is not None and config_upload_name != config_upload_name.strip():
+            raise _http_exception(400, "Blueprint config filenames must not start or end with spaces.")
+        resolved_upload_names: list[str] = [self._validated_upload_filename(upload_name, kind="Blueprint")]
+        if config_upload_name is not None:
+            resolved_upload_names.append(self._validated_upload_filename(config_upload_name, kind="Blueprint"))
         try:
-            uploaded = app.upload_blueprint_file(
+            upload_pair: BlueprintUploadPair = classify_blueprint_upload_filenames(resolved_upload_names)
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        try:
+            uploaded: AppBlueprintEntry = app.upload_blueprint_file(
                 session_name=session_name,
-                upload_name=resolved_upload_name,
+                upload_name=upload_pair.module_filename,
                 source_path=source_path,
                 actor_user_id=actor_user_id,
+                config_upload_name=upload_pair.config_filename,
+                config_source_path=config_source_path,
             )
         except FileNotFoundError as xcp:
             raise _http_exception(404, str(xcp)) from xcp
@@ -4486,11 +5170,16 @@ class NodeApiService:
             uploaded.id,
             actor_user_id,
         )
+        message: str = f"Uploaded blueprint `{uploaded.label}` for {app.friendly}."
+        if upload_pair.config_filename is not None:
+            message = (
+                f"Uploaded blueprint `{uploaded.label}` with config `{upload_pair.config_filename}` for {app.friendly}."
+            )
         return NodeBlueprintMutationResult(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            message=f"Uploaded blueprint `{uploaded.label}` for {app.friendly}.",
+            message=message,
             blueprint=self._blueprint_entry(uploaded, actor_user_id=actor_user_id),
         )
 
@@ -4505,7 +5194,7 @@ class NodeApiService:
             raise _http_exception(409, f"{app.friendly} does not support blueprint deletion.")
         actor_is_sudo: bool = self._require_acl().can(actor_user_id, Power_Level.sudo)
         try:
-            deleted = app.delete_blueprint_file(
+            deleted: AppBlueprintEntry = app.delete_blueprint_file(
                 file_id=blueprint_id,
                 actor_user_id=actor_user_id,
                 actor_is_sudo=actor_is_sudo,
@@ -4519,6 +5208,16 @@ class NodeApiService:
         except Exception as xcp:
             raise _http_exception(500, f"Blueprint delete failed: {xcp}") from xcp
 
+        delete_message: str = f"Deleted blueprint `{deleted.label}` from {app.friendly}."
+        try:
+            deleted_file_type = blueprint_file_type_from_name(PurePosixPath(blueprint_id).name)
+        except ValueError:
+            deleted_file_type = AppBlueprintFileType.MODULE
+        if deleted_file_type is AppBlueprintFileType.CONFIG:
+            delete_message = f"Deleted blueprint config `{PurePosixPath(blueprint_id).name}` from {app.friendly}."
+        elif deleted.config_file is not None:
+            delete_message = f"Deleted blueprint `{deleted.label}` and its matching config from {app.friendly}."
+
         traffic_log.info(
             "Node API blueprint deleted: node=%s app=%s blueprint=%s actor=%s",
             self.node_name,
@@ -4530,19 +5229,19 @@ class NodeApiService:
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            message=f"Deleted blueprint `{deleted.label}` from {app.friendly}.",
+            message=delete_message,
             blueprint=self._blueprint_entry(deleted, actor_user_id=actor_user_id),
         )
 
     def build_setting_list(self, *, app: App, actor_user_id: int) -> NodeSettingList:
-        settings = self._settings_for_app(app)
-        acl = self._require_acl()
-        settings_manager = self._require_settings_manager(app)
-        entries = tuple(
+        settings: tuple[Setting[object], ...] = self._settings_for_app(app)
+        acl: Access_Control = self._require_acl()
+        settings_manager: Settings_Manager = self._require_settings_manager(app)
+        entries: tuple[NodeSettingEntry, ...] = tuple[NodeSettingEntry, ...](
             self._setting_entry(setting, acl=acl, actor_user_id=actor_user_id, settings_manager=settings_manager)
             for setting in settings
         )
-        editable_count = sum(1 for setting in settings if acl.can(actor_user_id, setting.power_level))
+        editable_count: int = sum(1 for setting in settings if acl.can(actor_user_id, setting.power_level))
         return NodeSettingList(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -4564,11 +5263,11 @@ class NodeApiService:
         value: str,
         actor_user_id: int,
     ) -> NodeSettingMutationResult:
-        setting = self._resolve_setting(app=app, setting_key=setting_key)
+        setting: Setting[object] = self._resolve_setting(app=app, setting_key=setting_key)
         await self._require_acl().perm_check(actor_user_id, setting.power_level)
-        settings_manager = self._require_settings_manager(app)
+        settings_manager: Settings_Manager = self._require_settings_manager(app)
 
-        resolved_value = value.strip()
+        resolved_value: str = value.strip()
         if not resolved_value and not setting.allows_blank_input:
             raise _http_exception(400, "Setting value must not be empty.")
 
@@ -4605,7 +5304,7 @@ class NodeApiService:
         )
 
     async def save_settings(self, *, app: App, actor_user_id: int) -> NodeSettingsActionResult:
-        settings_manager = self._require_settings_manager(app)
+        settings_manager: Settings_Manager = self._require_settings_manager(app)
         await self._require_acl().perm_check(actor_user_id, settings_manager.required_save_level(actor_user_id))
         try:
             settings_manager.save(actor_user_id)
@@ -4620,7 +5319,7 @@ class NodeApiService:
         )
 
     async def reload_settings(self, *, app: App, actor_user_id: int) -> NodeSettingsActionResult:
-        settings_manager = self._require_settings_manager(app)
+        settings_manager: Settings_Manager = self._require_settings_manager(app)
         await self._require_acl().perm_check(actor_user_id, settings_manager.required_reload_level(actor_user_id))
         try:
             settings_manager.load(actor_user_id)
@@ -4635,12 +5334,12 @@ class NodeApiService:
         )
 
     def build_console_action_list(self, *, app: App, actor_user_id: int) -> NodeConsoleActionList:
-        acl = self._require_acl()
+        acl: Access_Control = self._require_acl()
         return NodeConsoleActionList(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            actions=tuple(
+            actions=tuple[NodeConsoleActionEntry, ...](
                 self._console_action_entry(action=action, actor_user_id=actor_user_id, acl=acl)
                 for action in app.console_actions
             ),
@@ -4654,10 +5353,10 @@ class NodeApiService:
         raw_value: str | None,
         actor_user_id: int,
     ) -> NodeConsoleActionExecutionResult:
-        action = self._resolve_console_action(app, action_key)
+        action: ConsoleAction = self._resolve_console_action(app, action_key)
         await self._require_acl().perm_check(actor_user_id, action.power_level)
         try:
-            result = await execute_console_action(
+            result: ConsoleActionResult = await execute_console_action(
                 app=app,
                 is_running=app.check_running,
                 action=action,
@@ -4700,53 +5399,59 @@ class NodeApiService:
         actor_user_id: int,
     ) -> NodeModMutationResult:
         try:
-            manager = app.has_mod_manager
+            manager: Mod_Manager = app.has_mod_manager
             await manager.reload_mods()
-            mod = manager.get(mod_name)
+            mod: Mod = manager.get(mod_name)
+            result_message: str
+            result_mod_entry: NodeModEntry | None
 
             if action is NodeModMutationAction.ENABLE:
                 require_app_stopped_for_mod_mutation(app)
-                updated = await manager.set_enabled(
+                updated_mod: Mod = await manager.set_enabled(
                     mod,
                     True,
                     override_coremod=await self._override_coremod_if_needed(actor_user_id=actor_user_id, mod=mod),
                 )
-                message = f"Enabled {updated.friendly}."
-                result_mod = self._mod_entry(updated)
+                result_message = f"Enabled {updated_mod.friendly}."
+                result_mod_entry = self._mod_entry(updated_mod)
             elif action is NodeModMutationAction.DISABLE:
                 require_app_stopped_for_mod_mutation(app)
-                updated = await manager.set_enabled(
+                updated_mod = await manager.set_enabled(
                     mod,
                     False,
                     override_coremod=await self._override_coremod_if_needed(actor_user_id=actor_user_id, mod=mod),
                 )
-                message = f"Disabled {updated.friendly}."
-                result_mod = self._mod_entry(updated)
+                result_message = f"Disabled {updated_mod.friendly}."
+                result_mod_entry = self._mod_entry(updated_mod)
             elif action is NodeModMutationAction.TOGGLE_COREMOD:
                 await self._require_actor_sudo(actor_user_id)
                 if mod.is_builtin:
                     raise _http_exception(409, "Built-in mods cannot be converted to or from coremods.")
-                updated = await manager.set_coremod(mod, not mod.is_coremod_type)
-                coremod_text = "enabled" if updated.is_coremod_type else "disabled"
-                message = f"Coremod {coremod_text} for {updated.friendly}."
-                result_mod = self._mod_entry(updated)
+                updated_mod = await manager.set_coremod(mod, not mod.is_coremod_type)
+                coremod_text: Literal["enabled", "disabled"] = (
+                    "enabled" if updated_mod.is_coremod_type else "disabled"
+                )
+                result_message = f"Coremod {coremod_text} for {updated_mod.friendly}."
+                result_mod_entry = self._mod_entry(updated_mod)
             elif action is NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
                 await self._require_actor_sudo(actor_user_id)
-                reason = ModDownloadBlockReason.SERVER_ONLY if mod.downloadable else mod.default_download_block_reason()
-                updated = await manager.set_download_block_reason(mod, reason)
-                blocked_text = (
-                    "blocked from download" if updated.download_block_label is not None else "download-enabled"
+                reason: ModDownloadBlockReason | None = (
+                    ModDownloadBlockReason.SERVER_ONLY if mod.downloadable else mod.default_download_block_reason()
                 )
-                message = f"{updated.friendly} is now {blocked_text}."
-                result_mod = self._mod_entry(updated)
+                updated_mod = await manager.set_download_block_reason(mod, reason)
+                blocked_text: Literal["blocked from download", "download-enabled"] = (
+                    "blocked from download" if updated_mod.download_block_label is not None else "download-enabled"
+                )
+                result_message = f"{updated_mod.friendly} is now {blocked_text}."
+                result_mod_entry = self._mod_entry(updated_mod)
             elif action is NodeModMutationAction.DELETE:
                 require_app_stopped_for_mod_mutation(app)
                 await manager.remove(
                     mod,
                     override_coremod=await self._override_coremod_if_needed(actor_user_id=actor_user_id, mod=mod),
                 )
-                message = f"Deleted {mod.friendly}."
-                result_mod = None
+                result_message = f"Deleted {mod.friendly}."
+                result_mod_entry = None
             else:
                 raise ValueError(f"Unsupported mod mutation action: {action}")
         except RunningAppModMutationError as xcp:
@@ -4766,14 +5471,14 @@ class NodeApiService:
             node=self.node_name,
             mod_name=mod.name,
             action=action,
-            message=message,
-            mod=result_mod,
+            message=result_message,
+            mod=result_mod_entry,
         )
 
     def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction:
         if not app.supports_console_actions:
             raise _http_exception(404, f"{app.friendly} does not support console actions.")
-        normalised_key = action_key.strip().casefold()
+        normalised_key: str = action_key.strip().casefold()
         if not normalised_key:
             raise _http_exception(400, "Console action key must not be empty.")
         for action in app.console_actions:
@@ -4788,8 +5493,8 @@ class NodeApiService:
         actor_user_id: int,
         acl: Access_Control,
     ) -> NodeConsoleActionEntry:
-        parameter = action.parameter
-        can_run = acl.can(actor_user_id, action.power_level)
+        parameter: ConsoleActionParameter[object] | None = action.parameter
+        can_run: bool = acl.can(actor_user_id, action.power_level)
         return NodeConsoleActionEntry(
             key=action.key,
             label=action.label,
@@ -4811,7 +5516,7 @@ class NodeApiService:
         *,
         include_recent_inputs: bool,
     ) -> NodeConsoleActionParameter:
-        resolved_parameter = parameter
+        resolved_parameter: ConsoleActionParameter[object] = parameter
         return NodeConsoleActionParameter(
             key=resolved_parameter.key,
             label=resolved_parameter.label,
@@ -4821,7 +5526,7 @@ class NodeApiService:
             multiline=resolved_parameter.multiline,
             strict_choice=resolved_parameter.strict_choice,
             allows_text_input=resolved_parameter.choice_spec is None or not resolved_parameter.strict_choice,
-            choices=tuple(
+            choices=tuple[NodeSettingChoice, ...](
                 NodeSettingChoice(label=label, raw_value=raw_value)
                 for label, raw_value in resolved_parameter.choice_items()
             ),
@@ -4835,8 +5540,8 @@ class NodeApiService:
         if mod.path.is_file():
             return NodeDownloadFile(path=mod.path, filename=mod.name, is_archive=False)
         if mod.path.is_dir():
-            archive_name = self._single_mod_archive_name(app=app, mod=mod)
-            archive_path = await File_Utils.compress(mod.path, archive_name, arc_base=mod.path.parent)
+            archive_name: str = self._single_mod_archive_name(app=app, mod=mod)
+            archive_path: Path = await File_Utils.compress(mod.path, archive_name, arc_base=mod.path.parent)
             traffic_log.info(
                 "Node API zipped directory mod: app=%s mod=%s source=%s archive=%s",
                 app.name,
@@ -4858,15 +5563,26 @@ class NodeApiService:
         return Path(os.path.commonpath([str(path) for path in paths]))
 
     def apps_url(self, *, subject: str = "web", base_url: str | None = None) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=None,
             scopes=(NodeApiScope.APPS_READ,),
         )
         return self._with_access_token(f"{self._base_url(base_url)}/apps", token)
 
+    def ping_url(self, *, base_url: str | None = None) -> str:
+        return f"{self._base_url(base_url)}/ping"
+
+    def map_api_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
+        token: str | None = self.issue_access_token(
+            subject=subject,
+            app_name=app_name,
+            scopes=(NodeApiScope.MAP_READ,),
+        )
+        return self._with_access_token(f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/map", token)
+
     def list_mods_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_READ,),
@@ -4881,12 +5597,12 @@ class NodeApiService:
         subject: str = "web",
         base_url: str | None = None,
     ) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_DOWNLOAD,),
         )
-        query = {"enabled_only": str(enabled_only).lower()}
+        query: dict[str, str] = {"enabled_only": str(enabled_only).lower()}
         return self._with_access_token(
             f"{self._base_url(base_url)}/apps/{quote(app_name, safe='')}/mods/download?{urlencode(query)}",
             token,
@@ -4895,7 +5611,7 @@ class NodeApiService:
     def mod_download_form(
         self, app_name: str, *, subject: str = "web", base_url: str | None = None
     ) -> NodeModDownloadForm:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_DOWNLOAD,),
@@ -4913,7 +5629,7 @@ class NodeApiService:
         subject: str = "web",
         base_url: str | None = None,
     ) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.MODS_DOWNLOAD,),
@@ -4924,7 +5640,7 @@ class NodeApiService:
         )
 
     def list_configs_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
@@ -4940,7 +5656,7 @@ class NodeApiService:
         writable: bool = False,
         base_url: str | None = None,
     ) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_WRITE if writable else NodeApiScope.CONFIGS_READ,),
@@ -4958,7 +5674,7 @@ class NodeApiService:
         subject: str = "web",
         base_url: str | None = None,
     ) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.CONFIGS_READ,),
@@ -4969,7 +5685,7 @@ class NodeApiService:
         )
 
     def list_saves_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.SAVES_READ,),
@@ -4984,7 +5700,7 @@ class NodeApiService:
         subject: str = "web",
         base_url: str | None = None,
     ) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.SAVES_DOWNLOAD,),
@@ -4995,7 +5711,7 @@ class NodeApiService:
         )
 
     def list_settings_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.SETTINGS_READ,),
@@ -5011,7 +5727,7 @@ class NodeApiService:
         writable: bool = False,
         base_url: str | None = None,
     ) -> str:
-        token = self.issue_access_token(
+        token: str | None = self.issue_access_token(
             subject=subject,
             app_name=app_name,
             scopes=(NodeApiScope.SETTINGS_WRITE if writable else NodeApiScope.SETTINGS_READ,),
@@ -5029,7 +5745,7 @@ class NodeApiService:
         scopes: tuple[NodeApiScope, ...],
         ttl_seconds: int = _NODE_TOKEN_TTL_SECONDS,
     ) -> str | None:
-        secret = config.MOD_WEB_SERVER.token_secret
+        secret: str | None = config.MOD_WEB_SERVER.token_secret
         if secret is None:
             return None
         log.debug(
@@ -5059,11 +5775,11 @@ class NodeApiService:
         app_name: str | None,
         scopes: tuple[NodeApiScope, ...],
     ) -> NodeAccessGrant | None:
-        secret = config.MOD_WEB_SERVER.token_secret
+        secret: str | None = config.MOD_WEB_SERVER.token_secret
         token_error: NodeTokenError | None = None
         if secret is not None:
             try:
-                grant = self._verified_token_grant(
+                grant: NodeAccessGrant = self._verified_token_grant(
                     request=request,
                     access_token=access_token,
                     app_name=app_name,
@@ -5082,7 +5798,7 @@ class NodeApiService:
             log.debug("Node API auth disabled: node=%s app=%s scopes=%s", self.node_name, app_name, scopes)
             return None
 
-        reason = token_error or NodeTokenError("Node token is missing.")
+        reason: NodeTokenError = token_error or NodeTokenError("Node token is missing.")
         log.warning(
             "Node API access rejected: node=%s app=%s scopes=%s reason=%s",
             self.node_name,
@@ -5100,10 +5816,10 @@ class NodeApiService:
         app_name: str | None,
         scopes: tuple[NodeApiScope, ...],
     ) -> NodeAccessGrant:
-        secret = config.MOD_WEB_SERVER.token_secret
+        secret: str | None = config.MOD_WEB_SERVER.token_secret
         if secret is None:
             raise NodeTokenError("Node token secret is not configured.")
-        token = self._request_token(request, access_token)
+        token: str = self._request_token(request, access_token)
         return verify_node_token(
             secret=secret,
             token=token,
@@ -5121,7 +5837,7 @@ class NodeApiService:
         scopes: tuple[NodeApiScope, ...],
         verified_grant: NodeAccessGrant | None = None,
     ) -> int:
-        grant = verified_grant
+        grant: NodeAccessGrant | None = verified_grant
         if grant is None and config.MOD_WEB_SERVER.token_secret is not None:
             try:
                 grant = self._verified_token_grant(
@@ -5138,7 +5854,7 @@ class NodeApiService:
 
         if self._web_auth is None:
             raise _http_exception(403, "Mod mutation requires an authenticated Discord user.")
-        user = self._web_auth.current_user(request)
+        user: ModWebUser | None = self._web_auth.current_user(request)
         if user is None:
             raise _http_exception(403, "Mod mutation requires an authenticated Discord user.")
         return user.discord_id
@@ -5508,7 +6224,12 @@ class NodeApiService:
             modified_at=save_file.modified_at.isoformat(sep=" ", timespec="seconds"),
         )
 
-    def _blueprint_entry(self, blueprint_file: AppBlueprintEntry, *, actor_user_id: int) -> NodeBlueprintEntry:
+    def _blueprint_file_entry(
+        self,
+        blueprint_file: AppBlueprintFileEntry,
+        *,
+        actor_user_id: int,
+    ) -> NodeBlueprintFileEntry:
         uploaded_by_user_id: int | None = blueprint_file.uploaded_by_user_id
         uploaded_by_display_name: str | None = None
         if uploaded_by_user_id is not None:
@@ -5519,17 +6240,45 @@ class NodeApiService:
         can_delete: bool = uploaded_by_user_id == actor_user_id
         if not can_delete and self._acl is not None:
             can_delete = self._acl.can(actor_user_id, Power_Level.sudo)
-        return NodeBlueprintEntry(
+        return NodeBlueprintFileEntry(
             id=blueprint_file.id,
             label=blueprint_file.label,
-            session_name=blueprint_file.session_name,
             relative_path=blueprint_file.relative_path,
-            file_type=blueprint_file.file_type.value,
             size_bytes=blueprint_file.size_bytes,
             size_text=Utilities.humanise_bytes(blueprint_file.size_bytes),
             modified_at=blueprint_file.modified_at.isoformat(sep=" ", timespec="seconds"),
             uploaded_by_display_name=uploaded_by_display_name,
             can_delete=can_delete,
+        )
+
+    def _blueprint_entry(self, blueprint_file: AppBlueprintEntry, *, actor_user_id: int) -> NodeBlueprintEntry:
+        main_file = self._blueprint_file_entry(
+            AppBlueprintFileEntry(
+                id=blueprint_file.id,
+                label=blueprint_file.label,
+                relative_path=blueprint_file.relative_path,
+                size_bytes=blueprint_file.size_bytes,
+                modified_at=blueprint_file.modified_at,
+                uploaded_by_user_id=blueprint_file.uploaded_by_user_id,
+            ),
+            actor_user_id=actor_user_id,
+        )
+        config_file = (
+            self._blueprint_file_entry(blueprint_file.config_file, actor_user_id=actor_user_id)
+            if blueprint_file.config_file is not None
+            else None
+        )
+        return NodeBlueprintEntry(
+            id=main_file.id,
+            label=main_file.label,
+            session_name=blueprint_file.session_name,
+            relative_path=main_file.relative_path,
+            size_bytes=main_file.size_bytes,
+            size_text=main_file.size_text,
+            modified_at=main_file.modified_at,
+            uploaded_by_display_name=main_file.uploaded_by_display_name,
+            can_delete=main_file.can_delete and (config_file is None or config_file.can_delete),
+            config_file=config_file,
         )
 
     @staticmethod

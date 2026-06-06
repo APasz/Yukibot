@@ -187,8 +187,12 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         while True:
             try:
                 app_stats, system_summary = await asyncio.gather(
-                    asyncio.to_thread(self._remote_app_runtime_summary, node, app_name, user),
-                    asyncio.to_thread(self._remote_node_system_summary, node, user),
+                    self._remote_app_runtime_summary_async(node, app_name, user),
+                    self._remote_node_system_summary_or_none_async(
+                        node,
+                        user,
+                        error_context="Remote app state polling system summary failed",
+                    ),
                 )
                 event = self._remote_polled_app_state_event(
                     app_name=app_name,
@@ -198,7 +202,8 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     previous_system_summary=previous_system_summary,
                 )
                 previous_app_stats = app_stats
-                previous_system_summary = system_summary
+                if system_summary is not None:
+                    previous_system_summary = system_summary
                 if event is not None:
                     on_update(event)
             except asyncio.CancelledError:
@@ -294,8 +299,12 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         while True:
             try:
                 app_entries, system_summary = await asyncio.gather(
-                    asyncio.to_thread(self._remote_apps, node, user),
-                    asyncio.to_thread(self._remote_node_system_summary, node, user),
+                    self._remote_apps_async(node, user),
+                    self._remote_node_system_summary_or_none_async(
+                        node,
+                        user,
+                        error_context="Remote node state polling system summary failed",
+                    ),
                 )
                 event = self._remote_polled_node_state_event(
                     node_name=node.node_name,
@@ -305,7 +314,8 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     previous_system_summary=previous_system_summary,
                 )
                 previous_app_entries = app_entries
-                previous_system_summary = system_summary
+                if system_summary is not None:
+                    previous_system_summary = system_summary
                 if event is not None:
                     on_update(event)
             except asyncio.CancelledError:
@@ -323,13 +333,13 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         *,
         app_name: str,
         app_stats: NodeAppRuntimeSummary,
-        system_summary: NodeSystemSummary,
+        system_summary: NodeSystemSummary | None,
         previous_app_stats: NodeAppRuntimeSummary | None,
         previous_system_summary: NodeSystemSummary | None,
     ) -> NodeAppStateStreamEvent | None:
         runtime_changed = previous_app_stats != app_stats
-        system_changed = previous_system_summary != system_summary
-        if runtime_changed and system_changed:
+        system_changed = system_summary is not None and previous_system_summary != system_summary
+        if runtime_changed and system_summary is not None and system_changed:
             return NodeAppStateStreamEvent.both(
                 app_name=app_name,
                 app_stats=app_stats,
@@ -337,7 +347,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
             )
         if runtime_changed:
             return NodeAppStateStreamEvent.runtime(app_name=app_name, app_stats=app_stats)
-        if system_changed:
+        if system_summary is not None and system_changed:
             return NodeAppStateStreamEvent.system(app_name=app_name, system_summary=system_summary)
         return None
 
@@ -346,13 +356,13 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         *,
         node_name: str,
         app_entries: tuple[NodeAppEntry, ...],
-        system_summary: NodeSystemSummary,
+        system_summary: NodeSystemSummary | None,
         previous_app_entries: tuple[NodeAppEntry, ...] | None,
         previous_system_summary: NodeSystemSummary | None,
     ) -> NodeStateStreamEvent | None:
         apps_changed = previous_app_entries != app_entries
-        system_changed = previous_system_summary != system_summary
-        if apps_changed and system_changed:
+        system_changed = system_summary is not None and previous_system_summary != system_summary
+        if apps_changed and system_summary is not None and system_changed:
             return NodeStateStreamEvent.both(
                 node_name=node_name,
                 app_entries=app_entries,
@@ -360,7 +370,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
             )
         if apps_changed:
             return NodeStateStreamEvent.apps(node_name=node_name, app_entries=app_entries)
-        if system_changed:
+        if system_summary is not None and system_changed:
             return NodeStateStreamEvent.system(node_name=node_name, system_summary=system_summary)
         return None
 

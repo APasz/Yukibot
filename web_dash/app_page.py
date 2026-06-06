@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .constants import (
@@ -10,8 +12,10 @@ from .constants import (
 )
 from .nicegui_protocols import (
     AsyncRefresh,
+    ModWebEventArgumentsContainer,
     ModWebUi,
     ModWebValueContainer,
+    _event_args_as_text,
     _value_as_object,
     _value_as_text,
 )
@@ -20,10 +24,11 @@ from .runtime_imports import (
     App,
     Awaitable,
     Button,
-    Card,
     Callable,
+    Card,
     Checkbox,
     Html,
+    Input,
     Label,
     Literal,
     LiteralString,
@@ -32,8 +37,8 @@ from .runtime_imports import (
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
-    NodeConsoleActionList,
     NodeAppTransitionState,
+    NodeConsoleActionList,
     NodeModSummary,
     NodeModUploadResult,
     NodeSaveList,
@@ -76,6 +81,15 @@ if TYPE_CHECKING:
     from nicegui.elements.tooltip import Tooltip
     from nicegui.events import UploadEventArguments
 
+
+_LEAFLET_VENDOR_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "vendor" / "leaflet"
+
+
+@lru_cache(maxsize=1)
+def _leaflet_vendor_asset(file_name: str) -> str:
+    return (_LEAFLET_VENDOR_DIRECTORY / file_name).read_text(encoding="utf-8")
+
+
 class ModWebAppPageMixin(ModWebServiceSupport):
     def _apply_live_app_state_update(
         self,
@@ -95,9 +109,9 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             app_start_blocked = self._app_start_blocked_local(local_app)
         else:
             app_start_blocked: bool = self._app_start_blocked_remote(
-                app_friendly=model.app_friendly,
+                app_name=model.app_name,
                 app_stats=next_app_stats,
-                running_names=() if next_system_summary is None else next_system_summary.running_names,
+                running_app_ids=() if next_system_summary is None else next_system_summary.running_app_ids,
             )
         return (
             self._model_with_runtime_state(
@@ -323,8 +337,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     ).classes("p-8 text-lg mod-subtitle")
                 return
 
-    @classmethod
-    def _app_hero_runtime_details(cls, app_stats: NodeAppRuntimeSummary | None) -> _ModWebAppHeroRuntimeDetails:
+    def _app_hero_runtime_details(self, app_stats: NodeAppRuntimeSummary | None) -> _ModWebAppHeroRuntimeDetails:
         if app_stats is None:
             relay_badge = _ModWebBadgeSpec(text="Unknown", tone="grey")
             version_badge = _ModWebBadgeSpec(text="Unknown", tone="black")
@@ -362,25 +375,25 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             _ModWebBadgeSpec(text=f"{app_stats.version or 'Unknown'}", tone="black"),
             _ModWebBadgeSpec(
                 text=(
-                    f"{cls._app_footprint_value(app_stats.footprint_bytes)}"
+                    f"{self._app_footprint_value(app_stats.footprint_bytes)}"
                     if app_stats.footprint_bytes is not None
                     else "Unavailable"
                 ),
                 tone="grey",
             ),
         ]
+        player_count_badge: _ModWebBadgeSpec | None = None
         if app_stats.player_count is not None and app_stats.player_capacity is not None:
             player_tone: Literal["purple"] | Literal["grey"] = "purple" if app_stats.player_count > 0 else "grey"
-            badges.append(
-                _ModWebBadgeSpec(
-                    text=f"{app_stats.player_count} / {app_stats.player_capacity}",
-                    tone=player_tone,
-                )
+            player_count_badge = _ModWebBadgeSpec(
+                text=f"{app_stats.player_count} / {app_stats.player_capacity}",
+                tone=player_tone,
             )
         return _ModWebAppHeroRuntimeDetails(
             status_text=status_text,
             status_tone=status_tone,
             badges=tuple[_ModWebBadgeSpec, ...](badges),
+            player_count_badge=player_count_badge,
         )
 
     def _app_page_hero_badges(self, model: ModWebBasePageModel) -> tuple[_ModWebBadgeSpec, ...]:
@@ -443,30 +456,75 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         initial_app_stats: NodeAppRuntimeSummary | None,
         refresh_async_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]] | None = None,
     ) -> Callable[[NodeAppRuntimeSummary | None], None]:
-        @ui.refreshable
-        def _render_runtime(app_stats: NodeAppRuntimeSummary | None) -> None:
-            runtime_details = self._app_hero_runtime_details(app_stats)
-            with ui.column().classes("w-full gap-3"):
-                with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
-                    with ui.column().classes(self._hero_header_main_classes()):
-                        ui.label(title).classes(self._hero_title_classes())
-                    with ui.column().classes("mod-app-hero-status gap-1"):
-                        ui.label("Status").classes("mod-app-hero-status-label")
-                        ui.label(runtime_details.status_text).classes(
-                            f"mod-app-hero-status-value mod-app-hero-status-value-{runtime_details.status_tone}"
+        initial_runtime_details = self._app_hero_runtime_details(initial_app_stats)
+        with ui.column().classes("w-full gap-3"):
+            with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
+                with ui.column().classes(self._hero_header_main_classes()):
+                    ui.label(title).classes(self._hero_title_classes())
+                with ui.column().classes("mod-app-hero-status gap-1"):
+                    ui.label("Status").classes("mod-app-hero-status-label")
+                    status_value_label = ui.label(initial_runtime_details.status_text).classes(
+                        f"mod-app-hero-status-value mod-app-hero-status-value-{initial_runtime_details.status_tone}"
+                    )
+            with ui.row().classes(f"{self._hero_badge_row_classes(fill=True)} w-full"):
+                runtime_badge_labels: tuple[Label, ...] = tuple(
+                    self._badge(ui=ui, text=badge.text, tone=badge.tone) for badge in initial_runtime_details.badges
+                )
+                player_badge = self._badge(
+                    ui=ui,
+                    text=initial_runtime_details.player_count_badge.text
+                    if initial_runtime_details.player_count_badge is not None
+                    else "",
+                    tone=initial_runtime_details.player_count_badge.tone
+                    if initial_runtime_details.player_count_badge is not None
+                    else "grey",
+                )
+                player_badge_tooltip, player_badge_tooltip_content = self._attach_html_tooltip(
+                    ui=ui,
+                    target=player_badge,
+                    html=(
+                        self._player_count_tooltip_html(
+                            player_count=initial_app_stats.player_count if initial_app_stats is not None else None,
+                            player_capacity=initial_app_stats.player_capacity
+                            if initial_app_stats is not None
+                            else None,
+                            connected_player_names=initial_app_stats.connected_player_names
+                            if initial_app_stats is not None
+                            else (),
                         )
-                with ui.row().classes(f"{self._hero_badge_row_classes(fill=True)} w-full"):
-                    for badge in runtime_details.badges:
-                        self._badge(ui=ui, text=badge.text, tone=badge.tone)
-                    for badge in static_badges:
-                        self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                        or ""
+                    ),
+                )
+                self._set_optional_badge_state(player_badge, initial_runtime_details.player_count_badge)
+                for badge in static_badges:
+                    self._badge(ui=ui, text=badge.text, tone=badge.tone)
 
         def _apply_runtime(app_stats: NodeAppRuntimeSummary | None) -> None:
             hero_card.classes(replace=self._app_hero_card_classes(app_stats))
-            _render_runtime.refresh(app_stats)
+            runtime_details = self._app_hero_runtime_details(app_stats)
+            status_value_label.set_text(runtime_details.status_text)
+            status_value_label.classes(
+                replace=f"mod-app-hero-status-value mod-app-hero-status-value-{runtime_details.status_tone}"
+            )
+            for runtime_badge_label, runtime_badge in zip(
+                runtime_badge_labels,
+                runtime_details.badges,
+                strict=True,
+            ):
+                self._set_badge_state(runtime_badge_label, runtime_badge.text, runtime_badge.tone)
+            self._set_optional_badge_state(player_badge, runtime_details.player_count_badge)
+            self._set_html_tooltip_state(
+                player_badge_tooltip,
+                player_badge_tooltip_content,
+                self._player_count_tooltip_html(
+                    player_count=app_stats.player_count if app_stats is not None else None,
+                    player_capacity=app_stats.player_capacity if app_stats is not None else None,
+                    connected_player_names=app_stats.connected_player_names if app_stats is not None else (),
+                )
+                or "",
+            )
 
         hero_card.classes(replace=self._app_hero_card_classes(initial_app_stats))
-        _render_runtime(initial_app_stats)
         if refresh_async_app_stats is None:
             return _apply_runtime
         refresh_async: AsyncRefresh = self._build_async_refreshable_updater(
@@ -615,19 +673,16 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         blueprints = model.blueprints
         if blueprints is None:
             return ()
-        module_count: int = sum(1 for blueprint in blueprints.blueprints if blueprint.file_type == "module")
-        config_count: int = sum(1 for blueprint in blueprints.blueprints if blueprint.file_type == "config")
+        config_count: int = sum(1 for blueprint in blueprints.blueprints if blueprint.config_file is not None)
         badges: list[_ModWebBadgeSpec] = [
             _ModWebBadgeSpec(
-                text=f"{len(blueprints.blueprints)} files",
+                text=f"{len(blueprints.blueprints)} blueprints",
                 tone="black" if blueprints.blueprints else "grey",
             ),
             _ModWebBadgeSpec(text="User upload", tone="purple"),
         ]
-        if module_count > 0:
-            badges.append(_ModWebBadgeSpec(text=f"{module_count} modules", tone="grey"))
         if config_count > 0:
-            badges.append(_ModWebBadgeSpec(text=f"{config_count} configs", tone="grey"))
+            badges.append(_ModWebBadgeSpec(text=f"{config_count} with config", tone="grey"))
         return tuple(badges)
 
     @staticmethod
@@ -652,6 +707,1298 @@ class ModWebAppPageMixin(ModWebServiceSupport):
     ) -> tuple[_ModWebBadgeSpec, ...]:
         del tab
         return self._blueprint_section_badges(model=model, user=user)
+
+    @staticmethod
+    def _map_tab_badges(
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        tab: ModWebAppTabDefinition,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
+        del user, tab
+        badges = [
+            _ModWebBadgeSpec(text="Shared plan", tone="purple"),
+            _ModWebBadgeSpec(text="Live tiles", tone="black"),
+        ]
+        badges.append(
+            _ModWebBadgeSpec(
+                text="User write" if model.can_write_map_annotations else "Read only",
+                tone="purple" if model.can_write_map_annotations else "grey",
+            )
+        )
+        return tuple(badges)
+
+    @staticmethod
+    def _map_tab_actions(
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        tab: ModWebAppTabDefinition,
+    ) -> tuple[_ModWebTabActionSpec, ...]:
+        del user, tab
+        if model.map_url is None:
+            return ()
+        return (_ModWebTabActionSpec(label="Open Public", url=model.map_url, new_tab=True),)
+
+    def _render_map_section(
+        self,
+        *,
+        ui: ModWebUi,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        tab: ModWebAppTabDefinition,
+    ) -> None:
+        del user, tab
+        if model.map_api_url is None:
+            raise ValueError("The Map tab requires a map_api_url.")
+        self._ensure_map_client_assets(ui)
+        container_id = self._map_container_id(model)
+        canvas_id = f"{container_id}-canvas"
+        world_id = f"{container_id}-world"
+        label_id = f"{container_id}-label"
+        color_id = f"{container_id}-color"
+        snap_id = f"{container_id}-snap"
+        status_id = f"{container_id}-status"
+        notice_id = f"{container_id}-notice"
+        mode_id = f"{container_id}-mode"
+        finish_id = f"{container_id}-finish"
+        cancel_id = f"{container_id}-cancel"
+        refresh_id = f"{container_id}-refresh"
+        marker_id = f"{container_id}-marker"
+        line_id = f"{container_id}-line"
+        pan_id = f"{container_id}-pan"
+        read_only_note = (
+            ""
+            if model.can_write_map_annotations
+            else (
+                '<div class="mod-card mod-card-plain mod-map-note">'
+                '<div class="mod-map-readonly mod-subtitle">Sign in with a `User` level account to add shared annotations.</div>'
+                "</div>"
+            )
+        )
+        write_controls = (
+            ""
+            if not model.can_write_map_annotations
+            else (
+                f'<div class="mod-card mod-card-plain mod-map-toolset">'
+                f'<input id="{label_id}" class="mod-map-input" type="text" maxlength="80" placeholder="Label" value="">'
+                f'<input id="{color_id}" class="mod-map-color" type="color" value="#22C55E" aria-label="Annotation color">'
+                f'<label class="mod-map-toggle" for="{snap_id}"><input id="{snap_id}" type="checkbox" checked>45°</label>'
+                f'<button id="{pan_id}" type="button" class="mod-list-button secondary mod-map-button mod-map-button-active">Pan</button>'
+                f'<button id="{marker_id}" type="button" class="mod-list-button secondary mod-map-button">Point</button>'
+                f'<button id="{line_id}" type="button" class="mod-list-button secondary mod-map-button">Line</button>'
+                f'<button id="{finish_id}" type="button" class="mod-list-button mod-map-button">Finish</button>'
+                f'<button id="{cancel_id}" type="button" class="mod-list-button secondary mod-map-button">Cancel</button>'
+                f"</div>"
+            )
+        )
+        ui.html(
+            f"""
+            <div id="{container_id}" class="mod-map-shell">
+              <div class="mod-card mod-card-plain mod-map-toolbar">
+                <div class="mod-map-toolbar-main">
+                  <select id="{world_id}" class="mod-map-select" aria-label="World"></select>
+                  <div id="{mode_id}" class="mod-map-mode mod-subtitle">Loading map…</div>
+                </div>
+                <div class="mod-map-toolbar-actions">
+                  <button id="{refresh_id}" type="button" class="mod-list-button secondary mod-map-button">Refresh</button>
+                </div>
+              </div>
+              {write_controls}
+              {read_only_note}
+              <div class="mod-card mod-card-plain mod-map-status-panel">
+                <div id="{status_id}" class="mod-map-status mod-subtitle">Loading map data…</div>
+                <div id="{notice_id}" class="mod-map-notice mod-subtitle">Connecting to Squaremap…</div>
+                <div class="mod-map-help mod-subtitle">Plan bases, portals, and 45 degree rail lines without leaving the dashboard.</div>
+              </div>
+              <div class="mod-card mod-card-plain mod-map-stage">
+                <div id="{canvas_id}" class="mod-map-canvas"></div>
+              </div>
+            </div>
+            """
+        )
+        ui.run_javascript(
+            self._map_client_bootstrap_script(
+                config_payload={
+                    "containerId": container_id,
+                    "canvasId": canvas_id,
+                    "worldSelectId": world_id,
+                    "labelInputId": label_id,
+                    "colorInputId": color_id,
+                    "snapToggleId": snap_id,
+                    "statusId": status_id,
+                    "noticeId": notice_id,
+                    "modeId": mode_id,
+                    "finishButtonId": finish_id,
+                    "cancelButtonId": cancel_id,
+                    "refreshButtonId": refresh_id,
+                    "markerButtonId": marker_id,
+                    "lineButtonId": line_id,
+                    "panButtonId": pan_id,
+                    "mapApiUrl": model.map_api_url,
+                    "publicMapUrl": model.map_url,
+                    "canWrite": model.can_write_map_annotations,
+                }
+            ),
+            timeout=1.0,
+        )
+        return None
+
+    @staticmethod
+    def _map_container_id(model: ModWebBasePageModel) -> str:
+        return (
+            f"mod-map-{model.node_name}-{model.app_name}".replace("_", "-")
+            .replace(" ", "-")
+            .replace("/", "-")
+            .casefold()
+        )
+
+    @staticmethod
+    def _ensure_map_client_assets(ui: ModWebUi) -> None:
+        ui.add_head_html(ModWebAppPageMixin._map_client_assets_html())
+
+    @staticmethod
+    def _map_client_assets_html() -> str:
+        return """
+            <style>
+              __LEAFLET_CSS__
+            </style>
+            <script>
+              __LEAFLET_JS__
+            </script>
+            <style>
+              .mod-map-shell {
+                display: flex;
+                flex-direction: column;
+                gap: 0.85rem;
+              }
+              .mod-map-toolbar,
+              .mod-map-toolset,
+              .mod-map-status-panel {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.75rem;
+              }
+              .mod-map-toolbar,
+              .mod-map-toolset,
+              .mod-map-status-panel,
+              .mod-map-note,
+              .mod-map-stage {
+                padding: 1rem 1.1rem;
+              }
+              .mod-map-toolbar-main,
+              .mod-map-toolbar-actions {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 0.75rem;
+              }
+              .mod-map-toolset {
+                padding: 0.85rem 1rem;
+                border: 1px solid var(--mod-border);
+                border-radius: 1rem;
+                background:
+                  linear-gradient(135deg, rgba(22, 163, 74, 0.06), rgba(15, 23, 42, 0.02)),
+                  var(--mod-card-bg, rgba(255, 255, 255, 0.7));
+              }
+              .mod-map-status-panel {
+                align-items: flex-start;
+              }
+              .mod-map-stage {
+                padding: 0.8rem;
+              }
+              .mod-map-select,
+              .mod-map-input,
+              .mod-map-color {
+                border: 1px solid var(--mod-border);
+                border-radius: 999px;
+                background: rgba(255, 255, 255, 0.88);
+                color: var(--mod-text, #111827);
+                min-height: 2.5rem;
+              }
+              .mod-map-select,
+              .mod-map-input {
+                padding: 0 0.9rem;
+              }
+              .mod-map-input {
+                min-width: 14rem;
+              }
+              .mod-map-color {
+                width: 2.75rem;
+                padding: 0.25rem;
+              }
+              .mod-map-button {
+                min-height: 2.5rem;
+              }
+              .mod-map-button-active {
+                border-color: #15803d;
+                box-shadow: inset 0 0 0 1px rgba(21, 128, 61, 0.2);
+                background: rgba(34, 197, 94, 0.12);
+              }
+              .mod-map-toggle {
+                display: inline-flex;
+                align-items: center;
+                gap: 0.4rem;
+                font-size: 0.92rem;
+                color: var(--mod-subtitle, #4b5563);
+              }
+              .mod-map-readonly,
+              .mod-map-status,
+              .mod-map-notice,
+              .mod-map-mode,
+              .mod-map-help {
+                color: var(--mod-subtitle, #4b5563);
+                font-size: 0.92rem;
+              }
+              .mod-map-status {
+                font-weight: 600;
+              }
+              .mod-map-help {
+                width: 100%;
+              }
+              .mod-map-notice {
+                width: 100%;
+              }
+              .mod-map-notice:empty {
+                display: none;
+              }
+              .mod-map-status[data-tone="error"] {
+                color: #b91c1c;
+              }
+              .mod-map-status[data-tone="warning"] {
+                color: #b45309;
+              }
+              .mod-map-status[data-tone="success"] {
+                color: #166534;
+              }
+              .mod-map-notice[data-tone="error"] {
+                color: #991b1b;
+              }
+              .mod-map-notice[data-tone="warning"] {
+                color: #92400e;
+              }
+              .mod-map-notice[data-tone="success"] {
+                color: #166534;
+              }
+              .mod-map-canvas {
+                width: 100%;
+                min-height: 34rem;
+                height: min(68vh, 52rem);
+                border-radius: 1.25rem;
+                border: 1px solid rgba(15, 23, 42, 0.12);
+                overflow: hidden;
+                background:
+                  radial-gradient(circle at top, rgba(56, 189, 248, 0.18), transparent 38%),
+                  linear-gradient(180deg, rgba(226, 232, 240, 0.92), rgba(248, 250, 252, 0.96));
+              }
+              .mod-map-canvas .leaflet-container {
+                width: 100%;
+                height: 100%;
+                background: transparent;
+                font: inherit;
+              }
+              .mod-map-player-label,
+              .mod-map-annotation-label {
+                background: rgba(255, 255, 255, 0.94);
+                border: 1px solid rgba(15, 23, 42, 0.12);
+                border-radius: 999px;
+                box-shadow: 0 8px 22px rgba(15, 23, 42, 0.12);
+                color: #0f172a;
+                font-size: 0.82rem;
+                font-weight: 600;
+                padding: 0.15rem 0.45rem;
+              }
+              .mod-map-annotation-popup button {
+                margin-top: 0.5rem;
+                border: 1px solid rgba(185, 28, 28, 0.28);
+                border-radius: 999px;
+                background: rgba(248, 113, 113, 0.12);
+                color: #991b1b;
+                cursor: pointer;
+                font: inherit;
+                padding: 0.3rem 0.7rem;
+              }
+              @media (max-width: 768px) {
+                .mod-map-input {
+                  min-width: 10rem;
+                  flex: 1 1 100%;
+                }
+                .mod-map-canvas {
+                  min-height: 26rem;
+                  height: 58vh;
+                }
+              }
+            </style>
+            <script>
+              if (window.L && !window.L.ellipse) {
+                window.L.Ellipse = window.L.Path.extend({
+                  initialize(latlng, radii, tilt, options) {
+                    this._latlng = window.L.latLng(latlng);
+                    this._radii = window.L.point(radii[0], radii[1]);
+                    this._tilt = tilt || 0;
+                    window.L.setOptions(this, options);
+                  },
+                  getLatLng() {
+                    return this._latlng;
+                  },
+                  setLatLng(latlng) {
+                    this._latlng = window.L.latLng(latlng);
+                    return this.redraw();
+                  },
+                  _project() {
+                    this._point = this._map.latLngToLayerPoint(this._latlng);
+                    const centerPoint = this._map.latLngToLayerPoint(this._latlng);
+                    const radiusXPoint = this._map.latLngToLayerPoint([this._latlng.lat, this._latlng.lng + this._radii.x]);
+                    const radiusYPoint = this._map.latLngToLayerPoint([this._latlng.lat + this._radii.y, this._latlng.lng]);
+                    this._radiusX = Math.max(Math.abs(radiusXPoint.x - centerPoint.x), 1);
+                    this._radiusY = Math.max(Math.abs(radiusYPoint.y - centerPoint.y), 1);
+                    this._updateBounds();
+                  },
+                  _updateBounds() {
+                    const radius = [this._radiusX, this._radiusY];
+                    this._pxBounds = new window.L.Bounds(
+                      this._point.subtract(radius),
+                      this._point.add(radius),
+                    );
+                  },
+                  _update() {
+                    if (!this._map) {
+                      return;
+                    }
+                    this._updatePath();
+                  },
+                  _updatePath() {
+                    this._renderer._updateEllipse(this);
+                  },
+                  _empty() {
+                    return this._radiusX <= 0 || this._radiusY <= 0;
+                  },
+                  _containsPoint(point) {
+                    if (!this._pxBounds || !this._pxBounds.contains(point)) {
+                      return false;
+                    }
+                    const dx = (point.x - this._point.x) / this._radiusX;
+                    const dy = (point.y - this._point.y) / this._radiusY;
+                    return dx * dx + dy * dy <= 1;
+                  },
+                });
+                window.L.ellipse = (latlng, radii, tilt, options) => new window.L.Ellipse(latlng, radii, tilt, options);
+                if (window.L.SVG) {
+                  window.L.SVG.include({
+                    _updateEllipse(layer) {
+                      const path = [
+                        "M", layer._point.x - layer._radiusX, layer._point.y,
+                        "a", layer._radiusX, layer._radiusY, 0, 1, 0, layer._radiusX * 2, 0,
+                        "a", layer._radiusX, layer._radiusY, 0, 1, 0, -(layer._radiusX * 2), 0,
+                      ].join(" ");
+                      this._setPath(layer, path);
+                    },
+                  });
+                }
+                if (window.L.Canvas) {
+                  window.L.Canvas.include({
+                    _updateEllipse(layer) {
+                      if (layer._empty()) {
+                        return;
+                      }
+                      const ctx = this._ctx;
+                      const point = layer._point;
+                      ctx.beginPath();
+                      ctx.ellipse(point.x, point.y, layer._radiusX, layer._radiusY, 0, 0, Math.PI * 2);
+                      this._fillStroke(ctx, layer);
+                    },
+                  });
+                }
+              }
+              if (!window.modWebMap) {
+                window.modWebMap = (() => {
+                  const transparentTile = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+                  const instances = new Map();
+                  const MAP_SOURCE_LIVE = "live";
+                  const MAP_SOURCE_STALE = "stale";
+
+                  const get = (id) => document.getElementById(id);
+                  const escapeHtml = (value) =>
+                    String(value ?? "")
+                      .replaceAll("&", "&amp;")
+                      .replaceAll("<", "&lt;")
+                      .replaceAll(">", "&gt;")
+                      .replaceAll('"', "&quot;")
+                      .replaceAll("'", "&#39;");
+                  const toLatLng = (world, point) => [(-point.z) * world.scale, point.x * world.scale];
+                  const toPoint = (world, latlng) => ({ x: latlng.lng / world.scale, z: -latlng.lat / world.scale });
+                  const convertNestedPoints = (world, points) =>
+                    Array.isArray(points)
+                      ? points.map((point) => (Array.isArray(point) ? convertNestedPoints(world, point) : toLatLng(world, point)))
+                      : [];
+                  const squaremapRadius = (world, radius) => radius * world.scale;
+                  const annotationPopupHtml = (annotation, canWrite, containerId) => {
+                    const label = escapeHtml(annotation.label);
+                    const createdBy = annotation.created_by_name ? `<div>${escapeHtml(annotation.created_by_name)}</div>` : "";
+                    const deleteButton = canWrite
+                      ? `<button type="button" data-map-delete="${escapeHtml(annotation.annotation_id)}" data-map-container="${escapeHtml(containerId)}">Delete</button>`
+                      : "";
+                    return `<div class="mod-map-annotation-popup"><strong>${label}</strong>${createdBy}${deleteButton}</div>`;
+                  };
+                  const setStatus = (state, message, tone = "info") => {
+                    if (!state.statusEl) {
+                      return;
+                    }
+                    state.statusEl.textContent = message;
+                    state.statusEl.dataset.tone = tone;
+                  };
+                  const setNotice = (state, message = "", tone = "info") => {
+                    if (!state.noticeEl) {
+                      return;
+                    }
+                    state.noticeEl.textContent = message;
+                    state.noticeEl.dataset.tone = tone;
+                  };
+                  const setModeText = (state, message) => {
+                    if (state.modeEl) {
+                      state.modeEl.textContent = message;
+                    }
+                  };
+                  const setToolState = (state, tool) => {
+                    state.tool = tool;
+                    for (const [name, button] of Object.entries(state.toolButtons)) {
+                      if (!button) {
+                        continue;
+                      }
+                      button.classList.toggle("mod-map-button-active", name === tool);
+                    }
+                    if (tool === "line") {
+                      const pointCount = state.pendingLine.length;
+                      setModeText(state, pointCount > 0 ? `Line tool: ${pointCount} point${pointCount === 1 ? "" : "s"}` : "Line tool");
+                      return;
+                    }
+                    setModeText(state, tool === "marker" ? "Point tool" : "Pan tool");
+                  };
+                  const destroyInstance = (containerId) => {
+                    const state = instances.get(containerId);
+                    if (!state) {
+                      return;
+                    }
+                    if (state.pollTimer) {
+                      window.clearInterval(state.pollTimer);
+                    }
+                    if (state.visibilityTimer) {
+                      window.clearInterval(state.visibilityTimer);
+                    }
+                    if (state.map) {
+                      state.map.remove();
+                    }
+                    instances.delete(containerId);
+                  };
+                  const waitForLeaflet = (callback, attempts = 0) => {
+                    if (window.L) {
+                      callback();
+                      return;
+                    }
+                    if (attempts > 100) {
+                      return;
+                    }
+                    window.setTimeout(() => waitForLeaflet(callback, attempts + 1), 100);
+                  };
+                  const parseMapCacheUpdatedAt = (value) => {
+                    const parsed = Number(value);
+                    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+                  };
+                  const describeCacheAge = (updatedAtUnixMs) => {
+                    if (!Number.isFinite(updatedAtUnixMs)) {
+                      return "an earlier session";
+                    }
+                    const ageSeconds = Math.max(0, Math.round((Date.now() - updatedAtUnixMs) / 1000));
+                    if (ageSeconds < 10) {
+                      return "just now";
+                    }
+                    if (ageSeconds < 60) {
+                      return `${ageSeconds}s ago`;
+                    }
+                    if (ageSeconds < 3600) {
+                      return `${Math.round(ageSeconds / 60)}m ago`;
+                    }
+                    if (ageSeconds < 86400) {
+                      return `${Math.round(ageSeconds / 3600)}h ago`;
+                    }
+                    return `${Math.round(ageSeconds / 86400)}d ago`;
+                  };
+                  const normalizeMapError = (message, fallback = "Map data is unavailable.") => {
+                    const text = String(message || "").trim();
+                    if (!text) {
+                      return fallback;
+                    }
+                    if (text.startsWith("Squaremap")) {
+                      return text;
+                    }
+                    if (/^HTTP \\d+$/.test(text)) {
+                      return text;
+                    }
+                    return text;
+                  };
+                  const responseErrorMessage = async (response) => {
+                    try {
+                      const payload = await response.clone().json();
+                      if (payload && typeof payload.detail === "string" && payload.detail.trim()) {
+                        return normalizeMapError(payload.detail, `HTTP ${response.status}`);
+                      }
+                    } catch {
+                    }
+                    return `HTTP ${response.status}`;
+                  };
+                  const fetchJsonDetailed = async (url, options = {}) => {
+                    const response = await fetch(url, {
+                      ...options,
+                      headers: {
+                        Accept: "application/json",
+                        ...(options.headers || {}),
+                      },
+                    });
+                    if (!response.ok) {
+                      throw new Error(await responseErrorMessage(response));
+                    }
+                    return {
+                      data: await response.json(),
+                      source:
+                        response.headers.get("X-Yukibot-Map-Source") === MAP_SOURCE_STALE
+                          ? MAP_SOURCE_STALE
+                          : MAP_SOURCE_LIVE,
+                      cacheUpdatedAtUnixMs: parseMapCacheUpdatedAt(
+                        response.headers.get("X-Yukibot-Map-Cache-Updated-At"),
+                      ),
+                    };
+                  };
+                  const fetchJson = async (url, options = {}) => (await fetchJsonDetailed(url, options)).data;
+                  const apiUrl = (state, suffix, extraParams = {}) => {
+                    const baseUrl = new URL(state.config.mapApiUrl, window.location.origin);
+                    const basePath = baseUrl.pathname.replace(/\\/$/, "");
+                    const searchParams = new URLSearchParams(baseUrl.search);
+                    for (const [key, value] of Object.entries(extraParams)) {
+                      searchParams.set(key, String(value));
+                    }
+                    const query = searchParams.toString();
+                    return `${basePath}${suffix}${query ? `?${query}` : ""}`;
+                  };
+                  const tileUrlTemplate = (state, world) =>
+                    apiUrl(
+                      state,
+                      `/worlds/${encodeURIComponent(world.name)}/tiles/{z}/{x}_{y}.png`,
+                      { tile_rev: state.tileRevision },
+                    );
+                  const createTileLayer = (state, world) =>
+                    window.L.tileLayer(tileUrlTemplate(state, world), {
+                      tileSize: 512,
+                      minNativeZoom: 0,
+                      maxNativeZoom: world.zoom.max,
+                      minZoom: 0,
+                      maxZoom: world.zoom.max + world.zoom.extra,
+                      noWrap: true,
+                      errorTileUrl: transparentTile,
+                    });
+                  const populateWorldOptions = (state) => {
+                    if (!state.worldSelect) {
+                      return;
+                    }
+                    state.worldSelect.textContent = "";
+                    for (const world of state.manifest?.worlds || []) {
+                      state.worldByName.set(world.name, world);
+                      const option = document.createElement("option");
+                      option.value = world.name;
+                      option.textContent = world.display_name;
+                      state.worldSelect.appendChild(option);
+                    }
+                  };
+                  const setSquaremapLiveNotice = (state) => {
+                    state.squaremapSource = MAP_SOURCE_LIVE;
+                    state.lastSquaremapCacheUpdatedAtUnixMs = null;
+                    setNotice(
+                      state,
+                      "Squaremap is live. Shared dashboard annotations stay available independently.",
+                      "success",
+                    );
+                  };
+                  const setSquaremapStaleNotice = (state, cacheUpdatedAtUnixMs = null) => {
+                    state.squaremapSource = MAP_SOURCE_STALE;
+                    state.lastSquaremapCacheUpdatedAtUnixMs = cacheUpdatedAtUnixMs;
+                    const cacheAge = describeCacheAge(cacheUpdatedAtUnixMs);
+                    setNotice(
+                      state,
+                      `Squaremap is offline. Showing cached map metadata from ${cacheAge}. Tile updates and player positions may lag.`,
+                      "warning",
+                    );
+                  };
+                  const setSquaremapOfflineNotice = (state, { cacheUpdatedAtUnixMs = null, noCache = false } = {}) => {
+                    state.squaremapSource = MAP_SOURCE_STALE;
+                    state.lastSquaremapCacheUpdatedAtUnixMs = cacheUpdatedAtUnixMs;
+                    if (noCache) {
+                      setNotice(
+                        state,
+                        "Squaremap is offline and no cached map data is available yet. Start the app once, then use Refresh.",
+                        "error",
+                      );
+                      return;
+                    }
+                    const cacheAge = describeCacheAge(cacheUpdatedAtUnixMs);
+                    setNotice(
+                      state,
+                      `Squaremap is offline. Keeping the last loaded view and shared annotations. Cached data is from ${cacheAge}.`,
+                      "warning",
+                    );
+                  };
+                  const createPopupDeleteHandler = (state, layer, annotation) => {
+                    layer.on("popupopen", (event) => {
+                      const popupRoot = event.popup.getElement();
+                      if (!popupRoot) {
+                        return;
+                      }
+                      const button = popupRoot.querySelector("[data-map-delete]");
+                      if (!button) {
+                        return;
+                      }
+                      button.addEventListener("click", async (clickEvent) => {
+                        clickEvent.preventDefault();
+                        clickEvent.stopPropagation();
+                        await deleteAnnotation(state.config.containerId, annotation.annotation_id);
+                      });
+                    });
+                  };
+                  const bindAnnotationLayer = (state, layer, annotation) => {
+                    layer.bindPopup(annotationPopupHtml(annotation, state.config.canWrite, state.config.containerId));
+                    if (annotation.shape === "marker") {
+                      layer.bindTooltip(annotation.label, {
+                        permanent: true,
+                        direction: "top",
+                        className: "mod-map-annotation-label",
+                        offset: [0, -8],
+                      });
+                    } else {
+                      layer.bindTooltip(annotation.label, {
+                        sticky: true,
+                        direction: "top",
+                        className: "mod-map-annotation-label",
+                      });
+                    }
+                    if (state.config.canWrite) {
+                      createPopupDeleteHandler(state, layer, annotation);
+                    }
+                  };
+                  const refreshAnnotations = async (state) => {
+                    const payload = await fetchJson(apiUrl(state, "/annotations"));
+                    state.annotationLayer.clearLayers();
+                    for (const annotation of payload.annotations || []) {
+                      if (!state.currentWorld || annotation.world_name !== state.currentWorld.name) {
+                        continue;
+                      }
+                      if (annotation.shape === "marker") {
+                        const [point] = annotation.points;
+                        const layer = window.L.circleMarker(toLatLng(state.currentWorld, point), {
+                          radius: 7,
+                          color: annotation.color_hex,
+                          fillColor: annotation.color_hex,
+                          fillOpacity: 0.95,
+                          weight: 2,
+                        }).addTo(state.annotationLayer);
+                        bindAnnotationLayer(state, layer, annotation);
+                        continue;
+                      }
+                      if (annotation.shape === "polyline") {
+                        const layer = window.L.polyline(
+                          annotation.points.map((point) => toLatLng(state.currentWorld, point)),
+                          {
+                            color: annotation.color_hex,
+                            weight: 4,
+                            opacity: 0.92,
+                            dashArray: "12 8",
+                          },
+                        ).addTo(state.annotationLayer);
+                        bindAnnotationLayer(state, layer, annotation);
+                      }
+                    }
+                  };
+                  const refreshPlayers = async (state) => {
+                    if (!state.currentWorld) {
+                      return { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true };
+                    }
+                    if (!state.currentWorld.player_tracker?.enabled) {
+                      state.playerLayer.clearLayers();
+                      return { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true };
+                    }
+                    const result = await fetchJsonDetailed(apiUrl(state, "/players"));
+                    const payload = result.data;
+                    state.playerLayer.clearLayers();
+                    const players = Array.isArray(payload?.players)
+                      ? payload.players
+                      : Array.isArray(payload)
+                        ? payload
+                        : [];
+                    if (players.length === 0) {
+                      return result;
+                    }
+                    for (const player of players) {
+                      if (!player || player.world !== state.currentWorld.name) {
+                        continue;
+                      }
+                      const marker = window.L.circleMarker(toLatLng(state.currentWorld, player), {
+                        radius: 6,
+                        color: "#0f172a",
+                        fillColor: "#22c55e",
+                        fillOpacity: 0.95,
+                        weight: 2,
+                      }).addTo(state.playerLayer);
+                      marker.bindTooltip(player.display_name || player.name, {
+                        direction: "top",
+                        className: "mod-map-player-label",
+                      });
+                    }
+                    return result;
+                  };
+                  const squaremapMarkerLayer = (state, markerData) => {
+                    const world = state.currentWorld;
+                    if (!world || !markerData || typeof markerData !== "object") {
+                      return null;
+                    }
+                    const markerType = markerData.type;
+                    if (markerType === "icon" && markerData.point && markerData.icon) {
+                      const size = markerData.size || { x: 24, z: 24 };
+                      const anchor = markerData.anchor || { x: Math.round(size.x / 2), z: Math.round(size.z / 2) };
+                      const tooltipAnchor = markerData.tooltip_anchor || { x: 0, z: -Math.round(size.z / 2) };
+                      return window.L.marker(toLatLng(world, markerData.point), {
+                        icon: window.L.icon({
+                          iconUrl: `${state.iconBaseUrl}/icon/registered/${encodeURIComponent(markerData.icon)}.png`,
+                          iconSize: [size.x, size.z],
+                          iconAnchor: [anchor.x, anchor.z],
+                          popupAnchor: [tooltipAnchor.x, tooltipAnchor.z],
+                          tooltipAnchor: [tooltipAnchor.x, tooltipAnchor.z],
+                        }),
+                      });
+                    }
+                    if (markerType === "polyline" && Array.isArray(markerData.points)) {
+                      return window.L.polyline(convertNestedPoints(world, markerData.points), markerData);
+                    }
+                    if (markerType === "polygon" && Array.isArray(markerData.points)) {
+                      return window.L.polygon(convertNestedPoints(world, markerData.points), markerData);
+                    }
+                    if (markerType === "rectangle" && Array.isArray(markerData.points) && markerData.points.length >= 2) {
+                      return window.L.rectangle(
+                        [toLatLng(world, markerData.points[0]), toLatLng(world, markerData.points[1])],
+                        markerData,
+                      );
+                    }
+                    if (markerType === "circle" && markerData.center && typeof markerData.radius === "number") {
+                      return window.L.circle(toLatLng(world, markerData.center), {
+                        ...markerData,
+                        radius: squaremapRadius(world, markerData.radius),
+                      });
+                    }
+                    if (
+                      markerType === "ellipse" &&
+                      markerData.center &&
+                      typeof markerData.radiusX === "number" &&
+                      typeof markerData.radiusZ === "number"
+                    ) {
+                      return window.L.ellipse(
+                        toLatLng(world, markerData.center),
+                        [squaremapRadius(world, markerData.radiusX), squaremapRadius(world, markerData.radiusZ)],
+                        0,
+                        markerData,
+                      );
+                    }
+                    return null;
+                  };
+                  const refreshSquaremapMarkers = async (state) => {
+                    if (!state.currentWorld) {
+                      return { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true };
+                    }
+                    const result = await fetchJsonDetailed(
+                      apiUrl(state, `/worlds/${encodeURIComponent(state.currentWorld.name)}/markers`),
+                    );
+                    const payload = result.data;
+                    state.squaremapLayer.clearLayers();
+                    if (!Array.isArray(payload)) {
+                      return result;
+                    }
+                    for (const markerLayer of payload) {
+                      if (!markerLayer || markerLayer.hide === true || !markerLayer.markers) {
+                        continue;
+                      }
+                      for (const markerData of Object.values(markerLayer.markers)) {
+                        const layer = squaremapMarkerLayer(state, markerData);
+                        if (!layer) {
+                          continue;
+                        }
+                        if (markerData.tooltip) {
+                          layer.bindTooltip(markerData.tooltip, { sticky: true, direction: markerData.tooltip_direction || "top" });
+                        }
+                        if (markerData.popup) {
+                          layer.bindPopup(markerData.popup);
+                        }
+                        layer.addTo(state.squaremapLayer);
+                      }
+                    }
+                    return result;
+                  };
+                  const snapLinePoint = (anchor, point) => {
+                    const deltaX = point.x - anchor.x;
+                    const deltaZ = point.z - anchor.z;
+                    const absX = Math.abs(deltaX);
+                    const absZ = Math.abs(deltaZ);
+                    if (absX === 0 && absZ === 0) {
+                      return point;
+                    }
+                    if (absX > absZ * 2) {
+                      return { x: point.x, z: anchor.z };
+                    }
+                    if (absZ > absX * 2) {
+                      return { x: anchor.x, z: point.z };
+                    }
+                    const diagonal = Math.max(absX, absZ);
+                    return {
+                      x: anchor.x + Math.sign(deltaX || 1) * diagonal,
+                      z: anchor.z + Math.sign(deltaZ || 1) * diagonal,
+                    };
+                  };
+                  const refreshTiles = (state, { force = false } = {}) => {
+                    if (!state.currentWorld || !state.tileLayer) {
+                      return;
+                    }
+                    const now = Date.now();
+                    const intervalMs = Math.max(1, state.currentWorld.tiles_update_interval || 15) * 1000;
+                    if (!force && state.lastTileRefreshAt !== null && now - state.lastTileRefreshAt < intervalMs) {
+                      return;
+                    }
+                    state.tileRevision += 1;
+                    state.lastTileRefreshAt = now;
+                    state.tileLayer.setUrl(tileUrlTemplate(state, state.currentWorld));
+                  };
+                  const currentDraftLabel = (state) => {
+                    if (!state.labelInput) {
+                      return "";
+                    }
+                    return state.labelInput.value.trim();
+                  };
+                  const currentDraftColor = (state) => {
+                    if (!state.colorInput || !state.colorInput.value) {
+                      return "#22C55E";
+                    }
+                    return state.colorInput.value.toUpperCase();
+                  };
+                  const cancelLineDraft = (state) => {
+                    state.pendingLine = [];
+                    if (state.previewLayer) {
+                      state.previewLayer.remove();
+                      state.previewLayer = null;
+                    }
+                    if (state.config.canWrite) {
+                      setToolState(state, "pan");
+                    }
+                  };
+                  const updatePreview = (state, previewPoint = null) => {
+                    if (!state.currentWorld || state.pendingLine.length === 0) {
+                      if (state.previewLayer) {
+                        state.previewLayer.remove();
+                        state.previewLayer = null;
+                      }
+                      return;
+                    }
+                    const previewPoints = [...state.pendingLine];
+                    if (previewPoint) {
+                      previewPoints.push(previewPoint);
+                    }
+                    const latLngs = previewPoints.map((point) => toLatLng(state.currentWorld, point));
+                    if (!state.previewLayer) {
+                      state.previewLayer = window.L.polyline(latLngs, {
+                        color: currentDraftColor(state),
+                        weight: 3,
+                        opacity: 0.9,
+                        dashArray: "8 6",
+                      }).addTo(state.previewLayerGroup);
+                    } else {
+                      state.previewLayer.setStyle({ color: currentDraftColor(state) });
+                      state.previewLayer.setLatLngs(latLngs);
+                    }
+                  };
+                  const postAnnotation = async (state, payload) => {
+                    const response = await fetch(apiUrl(state, "/annotations"), {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json", Accept: "application/json" },
+                      body: JSON.stringify(payload),
+                    });
+                    if (!response.ok) {
+                      throw new Error(await responseErrorMessage(response));
+                    }
+                    return await response.json();
+                  };
+                  const createMarkerAnnotation = async (state, point) => {
+                    const label = currentDraftLabel(state);
+                    if (!label) {
+                      setStatus(state, "Add a label before placing a point.", "error");
+                      return;
+                    }
+                    await postAnnotation(state, {
+                      world_name: state.currentWorld.name,
+                      shape: "marker",
+                      label,
+                      color_hex: currentDraftColor(state),
+                      points: [point],
+                    });
+                    setStatus(state, `Added point: ${label}`, "success");
+                    await refreshAnnotations(state);
+                  };
+                  const finishLineAnnotation = async (state) => {
+                    const label = currentDraftLabel(state);
+                    if (!label) {
+                      setStatus(state, "Add a label before saving a line.", "error");
+                      return;
+                    }
+                    if (state.pendingLine.length < 2) {
+                      setStatus(state, "A line needs at least two points.", "error");
+                      return;
+                    }
+                    await postAnnotation(state, {
+                      world_name: state.currentWorld.name,
+                      shape: "polyline",
+                      label,
+                      color_hex: currentDraftColor(state),
+                      points: state.pendingLine,
+                    });
+                    setStatus(state, `Added line: ${label}`, "success");
+                    cancelLineDraft(state);
+                    await refreshAnnotations(state);
+                  };
+                  const refreshAll = async (state, { announce = false, forceTiles = false } = {}) => {
+                    if (!state.currentWorld) {
+                      return { squaremapSource: state.squaremapSource || MAP_SOURCE_LIVE };
+                    }
+                    if (announce) {
+                      setStatus(state, "Refreshing map data…");
+                    }
+                    const previousSquaremapSource = state.squaremapSource;
+                    const [markerResult, playerResult, annotationResult] = await Promise.allSettled([
+                      refreshSquaremapMarkers(state),
+                      refreshPlayers(state),
+                      refreshAnnotations(state),
+                    ]);
+                    if (annotationResult.status !== "fulfilled") {
+                      throw annotationResult.reason;
+                    }
+                    const markersLoaded = markerResult.status === "fulfilled" ? markerResult.value : null;
+                    const playersLoaded = playerResult.status === "fulfilled" ? playerResult.value : null;
+                    const playersFailed = playerResult.status === "rejected";
+                    if (markersLoaded && markersLoaded.source === MAP_SOURCE_LIVE) {
+                      refreshTiles(state, { force: forceTiles });
+                      state.lastSquaremapCacheUpdatedAtUnixMs = null;
+                      if (playersFailed) {
+                        setNotice(
+                          state,
+                          "Squaremap tiles and markers are live, but player positions could not be refreshed.",
+                          "warning",
+                        );
+                        if (announce || previousSquaremapSource !== MAP_SOURCE_LIVE) {
+                          setStatus(state, "Player positions are temporarily unavailable.", "warning");
+                        }
+                        state.squaremapSource = MAP_SOURCE_LIVE;
+                        return { squaremapSource: MAP_SOURCE_LIVE };
+                      }
+                      setSquaremapLiveNotice(state);
+                      if (announce) {
+                        setStatus(state, `Updated ${state.currentWorld.display_name}.`, "success");
+                      }
+                      return { squaremapSource: MAP_SOURCE_LIVE };
+                    }
+                    if (markersLoaded && markersLoaded.source === MAP_SOURCE_STALE) {
+                      const cacheUpdatedAtUnixMs = markersLoaded.cacheUpdatedAtUnixMs ?? state.lastSquaremapCacheUpdatedAtUnixMs;
+                      setSquaremapStaleNotice(state, cacheUpdatedAtUnixMs);
+                      if (announce || previousSquaremapSource !== MAP_SOURCE_STALE) {
+                        setStatus(state, `Loaded cached ${state.currentWorld.display_name} map data.`, "warning");
+                      }
+                      return { squaremapSource: MAP_SOURCE_STALE };
+                    }
+                    const cacheUpdatedAtUnixMs = state.lastSquaremapCacheUpdatedAtUnixMs;
+                    setSquaremapOfflineNotice(state, { cacheUpdatedAtUnixMs, noCache: cacheUpdatedAtUnixMs === null });
+                    if (announce || previousSquaremapSource !== MAP_SOURCE_STALE) {
+                      setStatus(state, "Squaremap is offline. Keeping the last loaded map view.", "warning");
+                    }
+                    return { squaremapSource: MAP_SOURCE_STALE };
+                  };
+                  const loadWorld = async (state, worldName, { preserveView = false } = {}) => {
+                    const worldSummary = state.worldByName.get(worldName) || state.manifest.worlds[0];
+                    const worldSettingsResult = await fetchJsonDetailed(
+                      apiUrl(state, `/worlds/${encodeURIComponent(worldSummary.name)}/settings`),
+                    );
+                    const worldSettings = worldSettingsResult.data;
+                    const nextWorld = {
+                      ...worldSummary,
+                      zoom: worldSettings.zoom,
+                      spawn: worldSettings.spawn,
+                      player_tracker: worldSettings.player_tracker,
+                      marker_update_interval: worldSettings.marker_update_interval || 5,
+                      tiles_update_interval: worldSettings.tiles_update_interval || 15,
+                      scale: 1 / Math.pow(2, worldSettings.zoom.max),
+                    };
+                    state.currentWorld = nextWorld;
+                    state.worldSelect.value = nextWorld.name;
+                    if (state.tileLayer) {
+                      state.tileLayer.remove();
+                    }
+                    state.tileRevision = 0;
+                    state.lastTileRefreshAt = null;
+                    state.tileLayer = createTileLayer(state, nextWorld).addTo(state.map);
+                    if (!preserveView) {
+                      state.map.setView(toLatLng(nextWorld, nextWorld.spawn), nextWorld.zoom.def);
+                    }
+                    cancelLineDraft(state);
+                    if (worldSettingsResult.source === MAP_SOURCE_STALE) {
+                      setSquaremapStaleNotice(state, worldSettingsResult.cacheUpdatedAtUnixMs);
+                    }
+                    const refreshResult = await refreshAll(state, { forceTiles: true });
+                    state.map.setMinZoom(0);
+                    state.map.setMaxZoom(nextWorld.zoom.max + nextWorld.zoom.extra);
+                    window.setTimeout(() => state.map.invalidateSize(), 60);
+                    if (refreshResult.squaremapSource === MAP_SOURCE_LIVE) {
+                      setStatus(state, `Loaded ${nextWorld.display_name}.`, "success");
+                    } else {
+                      setStatus(state, `Loaded cached ${nextWorld.display_name} data.`, "warning");
+                    }
+                  };
+                  const bootstrapMap = async (state, { announce = false, preserveView = true } = {}) => {
+                    if (announce) {
+                      setStatus(state, "Refreshing map data…");
+                    }
+                    const manifestResult = await fetchJsonDetailed(apiUrl(state, "/manifest"));
+                    state.manifest = manifestResult.data;
+                    state.iconBaseUrl = apiUrl(state, "/assets");
+                    state.worldByName.clear();
+                    populateWorldOptions(state);
+                    const requestedWorldName =
+                      state.currentWorld && state.worldByName.has(state.currentWorld.name)
+                        ? state.currentWorld.name
+                        : state.manifest.initial_world_name;
+                    if (manifestResult.source === MAP_SOURCE_STALE) {
+                      setSquaremapStaleNotice(state, manifestResult.cacheUpdatedAtUnixMs);
+                    } else {
+                      setSquaremapLiveNotice(state);
+                    }
+                    await loadWorld(state, requestedWorldName, { preserveView });
+                  };
+                  const runMapSync = async (state, operation) => {
+                    if (state.syncPromise) {
+                      return await state.syncPromise;
+                    }
+                    const pending = Promise.resolve()
+                      .then(operation)
+                      .finally(() => {
+                        if (state.syncPromise === pending) {
+                          state.syncPromise = null;
+                        }
+                      });
+                    state.syncPromise = pending;
+                    return await pending;
+                  };
+                  const handleBootstrapFailure = (state, error) => {
+                    const detail =
+                      error instanceof Error
+                        ? normalizeMapError(error.message, "Map data is unavailable.")
+                        : "Map data is unavailable.";
+                    setModeText(state, "Map unavailable");
+                    setSquaremapOfflineNotice(state, {
+                      cacheUpdatedAtUnixMs: state.lastSquaremapCacheUpdatedAtUnixMs,
+                      noCache: state.lastSquaremapCacheUpdatedAtUnixMs === null,
+                    });
+                    setStatus(
+                      state,
+                      state.lastSquaremapCacheUpdatedAtUnixMs === null
+                        ? "Map unavailable while Squaremap is offline."
+                        : "Squaremap is offline. Waiting to reconnect.",
+                      state.lastSquaremapCacheUpdatedAtUnixMs === null ? "error" : "warning",
+                    );
+                    if (detail && !detail.startsWith("Squaremap")) {
+                      setNotice(state, detail, state.lastSquaremapCacheUpdatedAtUnixMs === null ? "error" : "warning");
+                    }
+                  };
+                  const bindControls = (state) => {
+                    state.worldSelect?.addEventListener("change", () => {
+                      void runMapSync(state, () => loadWorld(state, state.worldSelect.value));
+                    });
+                    state.refreshButton?.addEventListener("click", () => {
+                      void runMapSync(state, () =>
+                        state.manifest && state.currentWorld
+                          ? refreshAll(state, { announce: true, forceTiles: true })
+                          : bootstrapMap(state, { announce: true }),
+                      ).catch((error) => handleBootstrapFailure(state, error));
+                    });
+                    if (!state.config.canWrite) {
+                      return;
+                    }
+                    state.toolButtons.pan?.addEventListener("click", () => {
+                      cancelLineDraft(state);
+                      setToolState(state, "pan");
+                    });
+                    state.toolButtons.marker?.addEventListener("click", () => {
+                      cancelLineDraft(state);
+                      setToolState(state, "marker");
+                    });
+                    state.toolButtons.line?.addEventListener("click", () => {
+                      setToolState(state, "line");
+                      updatePreview(state);
+                    });
+                    state.finishButton?.addEventListener("click", () => {
+                      void finishLineAnnotation(state).catch((error) => setStatus(state, error.message, "error"));
+                    });
+                    state.cancelButton?.addEventListener("click", () => {
+                      cancelLineDraft(state);
+                      setStatus(state, "Cancelled line draft.");
+                    });
+                  };
+                  const deleteAnnotation = async (containerId, annotationId) => {
+                    const state = instances.get(containerId);
+                    if (!state) {
+                      return;
+                    }
+                    const response = await fetch(
+                      apiUrl(state, `/annotations/${encodeURIComponent(annotationId)}/delete`),
+                      {
+                        method: "POST",
+                        headers: { Accept: "application/json" },
+                      },
+                    );
+                    if (!response.ok) {
+                      setStatus(state, `Delete failed: ${await responseErrorMessage(response)}`, "error");
+                      return;
+                    }
+                    setStatus(state, "Annotation deleted.", "success");
+                    await refreshAnnotations(state);
+                  };
+                  const init = async (config) => {
+                    const canvas = get(config.canvasId);
+                    const container = get(config.containerId);
+                    if (!canvas || !container) {
+                      return;
+                    }
+                    destroyInstance(config.containerId);
+                    const state = {
+                      config,
+                      container,
+                      canvas,
+                      map: window.L.map(canvas, {
+                        crs: window.L.CRS.Simple,
+                        center: [0, 0],
+                        zoom: 0,
+                        minZoom: 0,
+                        maxZoom: 8,
+                        attributionControl: false,
+                        preferCanvas: true,
+                        noWrap: true,
+                      }),
+                      manifest: null,
+                      worldByName: new Map(),
+                      currentWorld: null,
+                      tileLayer: null,
+                      squaremapLayer: window.L.layerGroup(),
+                      playerLayer: window.L.layerGroup(),
+                      annotationLayer: window.L.layerGroup(),
+                      previewLayerGroup: window.L.layerGroup(),
+                      previewLayer: null,
+                      pendingLine: [],
+                      tileRevision: 0,
+                      lastTileRefreshAt: null,
+                      tool: "pan",
+                      worldSelect: get(config.worldSelectId),
+                      labelInput: get(config.labelInputId),
+                      colorInput: get(config.colorInputId),
+                      snapToggle: get(config.snapToggleId),
+                      statusEl: get(config.statusId),
+                      noticeEl: get(config.noticeId),
+                      modeEl: get(config.modeId),
+                      finishButton: get(config.finishButtonId),
+                      cancelButton: get(config.cancelButtonId),
+                      refreshButton: get(config.refreshButtonId),
+                      toolButtons: {
+                        pan: get(config.panButtonId),
+                        marker: get(config.markerButtonId),
+                        line: get(config.lineButtonId),
+                      },
+                      pollTimer: null,
+                      syncPromise: null,
+                      visibilityTimer: null,
+                      iconBaseUrl: "",
+                      squaremapSource: MAP_SOURCE_LIVE,
+                      lastSquaremapCacheUpdatedAtUnixMs: null,
+                    };
+                    state.squaremapLayer.addTo(state.map);
+                    state.playerLayer.addTo(state.map);
+                    state.annotationLayer.addTo(state.map);
+                    state.previewLayerGroup.addTo(state.map);
+                    instances.set(config.containerId, state);
+                    bindControls(state);
+                    setToolState(state, state.config.canWrite ? "pan" : "pan");
+                    state.map.on("click", (event) => {
+                      if (!state.config.canWrite || !state.currentWorld) {
+                        return;
+                      }
+                      const rawPoint = toPoint(state.currentWorld, event.latlng);
+                      if (state.tool === "marker") {
+                        void createMarkerAnnotation(state, rawPoint).catch((error) => setStatus(state, error.message, "error"));
+                        return;
+                      }
+                      if (state.tool !== "line") {
+                        return;
+                      }
+                      const anchor = state.pendingLine[state.pendingLine.length - 1];
+                      const snappedPoint =
+                        anchor && state.snapToggle?.checked ? snapLinePoint(anchor, rawPoint) : rawPoint;
+                      state.pendingLine.push(snappedPoint);
+                      updatePreview(state);
+                      setToolState(state, "line");
+                    });
+                    state.map.on("mousemove", (event) => {
+                      if (!state.config.canWrite || !state.currentWorld || state.tool !== "line" || state.pendingLine.length === 0) {
+                        return;
+                      }
+                      const rawPoint = toPoint(state.currentWorld, event.latlng);
+                      const anchor = state.pendingLine[state.pendingLine.length - 1];
+                      const snappedPoint =
+                        anchor && state.snapToggle?.checked ? snapLinePoint(anchor, rawPoint) : rawPoint;
+                      updatePreview(state, snappedPoint);
+                    });
+                    state.visibilityTimer = window.setInterval(() => {
+                      if (state.container.offsetParent !== null) {
+                        state.map.invalidateSize(false);
+                      }
+                    }, 1000);
+                    state.pollTimer = window.setInterval(() => {
+                      void runMapSync(state, () =>
+                        state.manifest && state.currentWorld
+                          ? refreshAll(state)
+                          : bootstrapMap(state, { preserveView: true }),
+                      ).catch((error) => handleBootstrapFailure(state, error));
+                    }, 5000);
+                    try {
+                      await runMapSync(state, () => bootstrapMap(state, { preserveView: false }));
+                    } catch (error) {
+                      handleBootstrapFailure(state, error);
+                    }
+                  };
+                  return { mount: (config) => waitForLeaflet(() => void init(config)), deleteAnnotation };
+                })();
+              }
+            </script>
+            """.replace("__LEAFLET_CSS__", _leaflet_vendor_asset("leaflet.css")).replace(
+            "__LEAFLET_JS__", _leaflet_vendor_asset("leaflet.js")
+        )
+
+    @staticmethod
+    def _map_client_bootstrap_script(*, config_payload: dict[str, object]) -> str:
+        return """
+            (() => {
+              const config = __CONFIG__;
+              if (!window.modWebMap || typeof window.modWebMap.mount !== "function") {
+                return;
+              }
+              window.modWebMap.mount(config);
+            })();
+            """.replace("__CONFIG__", json.dumps(config_payload))
 
     @staticmethod
     def _section_badge_rows(
@@ -928,6 +2275,8 @@ class ModWebAppPageMixin(ModWebServiceSupport):
     ) -> None:
         selected_mod_names: set[str] = set[str]()
         checkboxes: dict[str, Checkbox] = {}
+        mod_options = self._mod_options(model.mods.mods)
+        show_search: bool = len(mod_options) > 1
         downloadable_names: tuple[str, ...] = tuple[str, ...](
             entry.name for entry in model.mods.mods if entry.downloadable
         )
@@ -1047,18 +2396,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     title="Mods",
                     description=self._mods_card_description(model.mods.summary),
                 )
-                toolbar_bindings: _ModWebModToolbarBindings = self._render_mod_toolbar(
-                    ui=ui,
-                    model=model,
-                    user=user,
-                    toggle_selection=toggle_selection,
-                    download_selected=download_selected,
-                    upload_mod=upload_dialog.open,
-                )
-                selection_button: Button | None = toolbar_bindings.selection_button
-                download_button: Button | None = toolbar_bindings.download_button
-                update_count()
-
                 if not model.mods.mods:
                     ui.label("No mods are currently indexed for this app.").classes(
                         "mod-subtitle text-sm mod-tab-empty-detail"
@@ -1067,26 +2404,59 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         ui.label("Upload a mod to seed this app.").classes("mod-subtitle text-sm mod-tab-empty-detail")
                     return
 
-                with ui.column().classes("w-full mod-list"):
+                @ui.refreshable
+                def _mod_download_rows(search_query: str) -> None:
+                    filtered_mods = self._filter_mod_entries(
+                        mods=model.mods.mods,
+                        options=mod_options,
+                        search_query=search_query,
+                    )
+                    checkboxes.clear()
+                    if not filtered_mods:
+                        with ui.card().classes("mod-setting-card locked w-full"):
+                            ui.label("No mods match that search.").classes("mod-subtitle text-sm")
+                        return
 
-                    def _create_mod_selection_handler(mod_name: str) -> Callable[[ModWebValueContainer], None]:
-                        def _handle_mod_selection_change(event: ModWebValueContainer) -> None:
-                            set_selected(mod_name, bool(_value_as_object(event)))
+                    with ui.column().classes("w-full mod-list"):
 
-                        return _handle_mod_selection_change
+                        def _create_mod_selection_handler(mod_name: str) -> Callable[[ModWebValueContainer], None]:
+                            def _handle_mod_selection_change(event: ModWebValueContainer) -> None:
+                                set_selected(mod_name, bool(_value_as_object(event)))
 
-                    for entry in model.mods.mods:
-                        checkbox: Checkbox | None = self._render_mod_download_row(
-                            ui=ui,
-                            entry=entry,
-                            download_url=model.mod_download_urls.get(entry.name),
-                            on_change=_create_mod_selection_handler(entry.name),
-                            app_friendly=model.app_friendly,
-                            model=model,
-                            user=user,
-                        )
-                        if checkbox is not None:
-                            checkboxes[entry.name] = checkbox
+                            return _handle_mod_selection_change
+
+                        for entry in filtered_mods:
+                            checkbox: Checkbox | None = self._render_mod_download_row(
+                                ui=ui,
+                                entry=entry,
+                                download_url=model.mod_download_urls.get(entry.name),
+                                on_change=_create_mod_selection_handler(entry.name),
+                                app_friendly=model.app_friendly,
+                                model=model,
+                                user=user,
+                            )
+                            if checkbox is not None:
+                                checkboxes[entry.name] = checkbox
+                                checkbox.set_value(entry.name in selected_mod_names)
+
+                def _refresh_mod_rows(event: ModWebEventArgumentsContainer) -> None:
+                    _mod_download_rows.refresh(_event_args_as_text(event))
+
+                toolbar_bindings: _ModWebModToolbarBindings = self._render_mod_toolbar(
+                    ui=ui,
+                    model=model,
+                    user=user,
+                    toggle_selection=toggle_selection,
+                    download_selected=download_selected,
+                    upload_mod=upload_dialog.open,
+                    show_search=show_search,
+                    on_search=_refresh_mod_rows if show_search else None,
+                )
+                selection_button: Button | None = toolbar_bindings.selection_button
+                download_button: Button | None = toolbar_bindings.download_button
+                update_count()
+
+                _mod_download_rows("")
         return
 
     def _render_global_app_toolbar(
@@ -1256,16 +2626,27 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         toggle_selection: Callable[[], None],
         download_selected: Callable[[], Awaitable[None]],
         upload_mod: Callable[[], object] | None = None,
+        show_search: bool = False,
+        on_search: Callable[[ModWebEventArgumentsContainer], None] | None = None,
     ) -> _ModWebModToolbarBindings:
         can_upload_mod: bool = upload_mod is not None and self._user_has_level(user, Power_Level.user)
         show_bulk_mod_actions: bool = bool(model.mods.mods)
-        if not can_upload_mod and not show_bulk_mod_actions:
+        if not can_upload_mod and not show_bulk_mod_actions and not show_search:
             return _ModWebModToolbarBindings(selection_button=None, download_button=None)
 
         selection_button: Button | None = None
         download_button: Button | None = None
 
         with ui.row().classes("mod-tab-toolbar mod-mods-toolbar w-full"):
+            if show_search:
+                if on_search is None:
+                    raise ValueError("Mod search handler is not available.")
+                search_input: Input = (
+                    ui.input(placeholder="Search mods")
+                    .props("filled square dense clearable hide-bottom-space color=accent")
+                    .classes("mod-config-search mod-settings-search mod-mods-toolbar-search")
+                )
+                search_input.on("update:model-value", on_search)
             with ui.row().classes("mod-tab-toolbar-actions mod-mods-toolbar-actions"):
                 if can_upload_mod:
                     ui.button("Upload Mod", on_click=upload_mod).classes(

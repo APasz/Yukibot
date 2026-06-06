@@ -3,6 +3,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -180,10 +181,29 @@ class Stats_Disk:
         return round(self.usage.percent)
 
 
+@dataclass(frozen=True, slots=True)
+class StatsDiskSnapshot:
+    mountpoint_text: str
+    display_name: str
+    percent: int
+    free_bytes: int
+    total_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class StatsSystemSnapshot:
+    cpu_percent: int
+    ram_percent: int
+    ram_used_bytes: int
+    ram_total_bytes: int
+    primary_disk: StatsDiskSnapshot | None
+
+
 class Stats_System(metaclass=Singleton):
     _BOT_CONFIGURATION_PATH = Path("configuration.json")
 
     def __init__(self):
+        self._lock = threading.RLock()
         self.cpu = Stats_CPU()
         self.ram = Stats_RAM()
         self._bot_path = Path.cwd().resolve()
@@ -198,7 +218,8 @@ class Stats_System(metaclass=Singleton):
 
     @property
     def disks(self) -> tuple[Stats_Disk, ...]:
-        return tuple(self._disks_by_mountpoint[mountpoint] for mountpoint in sorted(self._disks_by_mountpoint))
+        with self._lock:
+            return tuple(self._disks_by_mountpoint[mountpoint] for mountpoint in sorted(self._disks_by_mountpoint))
 
     @property
     def configured_activity_mounts(self) -> tuple[str, ...] | None:
@@ -214,52 +235,63 @@ class Stats_System(metaclass=Singleton):
 
     @property
     def bot_disk(self) -> Stats_Disk | None:
-        return self.disk_for_path(self._bot_path)
+        with self._lock:
+            return self.disk_for_path(self._bot_path)
 
     @property
     def primary_disk_source(self) -> Literal["override", "bot_path", "fallback"]:
-        if self._configured_primary_mount is not None and self._configured_primary_mount in self._disks_by_mountpoint:
-            return "override"
-        if self.bot_disk is not None:
-            return "bot_path"
-        return "fallback"
+        with self._lock:
+            if self._configured_primary_mount is not None and self._configured_primary_mount in self._disks_by_mountpoint:
+                return "override"
+            if self.bot_disk is not None:
+                return "bot_path"
+            return "fallback"
 
     @property
     def primary_disk(self) -> Stats_Disk | None:
-        if self._configured_primary_mount is not None:
-            disk = self._disks_by_mountpoint.get(self._configured_primary_mount)
-            if disk is not None:
-                return disk
-        bot_disk = self.bot_disk
-        if bot_disk is not None:
-            return bot_disk
-        return self.disks[0] if self.disks else None
+        with self._lock:
+            if self._configured_primary_mount is not None:
+                disk = self._disks_by_mountpoint.get(self._configured_primary_mount)
+                if disk is not None:
+                    return disk
+            bot_disk = self.bot_disk
+            if bot_disk is not None:
+                return bot_disk
+            disks = self.disks
+            return disks[0] if disks else None
 
     @property
     def disk(self) -> Stats_Disk:
-        primary_disk = self.primary_disk
-        if primary_disk is None:
-            raise RuntimeError("No disks discovered.")
-        return primary_disk
+        with self._lock:
+            primary_disk = self.primary_disk
+            if primary_disk is None:
+                raise RuntimeError("No disks discovered.")
+            return primary_disk
 
     @property
     def activity_disks(self) -> tuple[Stats_Disk, ...]:
-        if self._configured_activity_mounts is None:
-            return self.disks
-        return tuple(
-            self._disks_by_mountpoint[mountpoint]
-            for mountpoint in self._configured_activity_mounts
-            if mountpoint in self._disks_by_mountpoint
-        )
+        with self._lock:
+            if self._configured_activity_mounts is None:
+                return self.disks
+            return tuple(
+                self._disks_by_mountpoint[mountpoint]
+                for mountpoint in self._configured_activity_mounts
+                if mountpoint in self._disks_by_mountpoint
+            )
 
     def disk_for_path(self, path: Path) -> Stats_Disk | None:
-        resolved = path.resolve(strict=False)
-        matches = [disk for disk in self.disks if self._path_is_within(resolved, disk.mountpoint)]
-        if not matches:
-            return None
-        return max(matches, key=lambda disk: len(disk.mountpoint.parts))
+        with self._lock:
+            resolved = path.resolve(strict=False)
+            matches = [disk for disk in self.disks if self._path_is_within(resolved, disk.mountpoint)]
+            if not matches:
+                return None
+            return max(matches, key=lambda disk: len(disk.mountpoint.parts))
 
     def reload_disk_preferences(self) -> bool:
+        with self._lock:
+            return self._reload_disk_preferences_unlocked()
+
+    def _reload_disk_preferences_unlocked(self) -> bool:
         try:
             bot_config = config.load_bot_configuration(self._bot_configuration_path)
         except (OSError, ValueError) as xcp:
@@ -280,6 +312,10 @@ class Stats_System(metaclass=Singleton):
         return True
 
     def set_activity_mounts(self, mountpoints: list[str]) -> tuple[Stats_Disk, ...]:
+        with self._lock:
+            return self._set_activity_mounts_unlocked(mountpoints)
+
+    def _set_activity_mounts_unlocked(self, mountpoints: list[str]) -> tuple[Stats_Disk, ...]:
         normalised: list[str] = []
         seen_mountpoints: set[str] = set()
         for mountpoint in mountpoints:
@@ -301,6 +337,10 @@ class Stats_System(metaclass=Singleton):
         return self.activity_disks
 
     def set_primary_mount_override(self, mountpoint: str | None) -> Stats_Disk | None:
+        with self._lock:
+            return self._set_primary_mount_override_unlocked(mountpoint)
+
+    def _set_primary_mount_override_unlocked(self, mountpoint: str | None) -> Stats_Disk | None:
         normalised_mountpoint = None
         if mountpoint is not None:
             normalised_mountpoint = config.normalise_absolute_path_text(
@@ -315,6 +355,10 @@ class Stats_System(metaclass=Singleton):
         return self.primary_disk
 
     def replace_disk_labels(self, labels_by_mountpoint: Mapping[str, str]) -> tuple[Stats_Disk, ...]:
+        with self._lock:
+            return self._replace_disk_labels_unlocked(labels_by_mountpoint)
+
+    def _replace_disk_labels_unlocked(self, labels_by_mountpoint: Mapping[str, str]) -> tuple[Stats_Disk, ...]:
         next_labels = {
             mountpoint: label
             for mountpoint, label in self._configured_labels.items()
@@ -353,7 +397,48 @@ class Stats_System(metaclass=Singleton):
         config.save_bot_configuration(self._bot_configuration_path, bot_config)
 
     def refresh_disk_inventory(self) -> None:
-        self._refresh_disks(force_discovery=True)
+        with self._lock:
+            self._refresh_disks(force_discovery=True)
+
+    @staticmethod
+    def _disk_snapshot(disk: Stats_Disk) -> StatsDiskSnapshot:
+        return StatsDiskSnapshot(
+            mountpoint_text=disk.mountpoint_text,
+            display_name=disk.display_name,
+            percent=disk.percent,
+            free_bytes=int(disk.usage.free),
+            total_bytes=int(disk.usage.total),
+        )
+
+    def system_snapshot(self, *, refresh: bool = False) -> StatsSystemSnapshot:
+        with self._lock:
+            if refresh:
+                self._update_unlocked()
+            primary_disk = self.primary_disk
+            return StatsSystemSnapshot(
+                cpu_percent=self.cpu.r_total,
+                ram_percent=self.ram.percent,
+                ram_used_bytes=int(self.ram.used),
+                ram_total_bytes=int(self.ram.raw.total),
+                primary_disk=None if primary_disk is None else self._disk_snapshot(primary_disk),
+            )
+
+    def disk_snapshot_for_path(
+        self,
+        path: Path,
+        *,
+        refresh: bool = False,
+        fallback_to_primary: bool = True,
+    ) -> StatsDiskSnapshot | None:
+        with self._lock:
+            if refresh:
+                self._update_unlocked()
+            disk = self.disk_for_path(path)
+            if disk is None and fallback_to_primary:
+                disk = self.primary_disk
+            if disk is None:
+                return None
+            return self._disk_snapshot(disk)
 
     def _refresh_disks(self, *, force_discovery: bool = False) -> None:
         if not force_discovery and not self._should_refresh_disk_discovery():
@@ -541,10 +626,14 @@ class Stats_System(metaclass=Singleton):
             return False
         return True
 
-    def update(self):
+    def _update_unlocked(self) -> None:
         self.cpu.update()
         self.ram.update()
         self._refresh_disks()
+
+    def update(self):
+        with self._lock:
+            self._update_unlocked()
 
 
 async def restart(

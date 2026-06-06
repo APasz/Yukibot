@@ -22,6 +22,7 @@ from .runtime_imports import (
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
+    NodeModEntry,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
     NodeChatRoomSnapshot,
@@ -47,6 +48,7 @@ from .runtime_imports import (
 )
 from .types import (
     ModWebAppLink,
+    ModWebAppTabDefinition,
     ModWebBasePageModel,
     ModWebHomeNodeSummary,
     ModWebNodeAppSection,
@@ -54,6 +56,7 @@ from .types import (
     ModWebNodeStatus,
     ModWebOverviewPageModel,
     ModWebPageModel,
+    ModWebSearchOption,
     ModWebTitleStat,
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
@@ -123,6 +126,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_attach_text_tooltip"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_attach_html_tooltip"]) -> Callable[..., tuple[Tooltip, Html]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_authorised_page_user"]) -> Callable[..., ModWebUser | None]: ...
@@ -239,7 +245,7 @@ class ModWebServiceSupport:
     ) -> Callable[..., Awaitable[tuple[ModWebHomeNodeSummary, ...]]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_interactive_badge"]) -> Callable[..., Label]: ...
+    def __getattr__(self, name: Literal["_interactive_badge"]) -> Callable[..., Element]: ...
 
     @overload
     def __getattr__(self, name: Literal["_kill_control_state"]) -> Callable[..., _ModWebKillControlState]: ...
@@ -288,6 +294,12 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_persist_uploaded_file"]) -> Callable[..., Awaitable[Path]]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_page_tabs"]) -> Callable[..., tuple[ModWebAppTabDefinition, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_player_count_tooltip_html"]) -> Callable[..., str | None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_refresh_runtime_model"]) -> Callable[..., Awaitable[ModWebBasePageModel]]: ...
 
     @overload
@@ -300,10 +312,21 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_app_entry"]) -> Callable[..., NodeAppEntry]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_remote_app_entry_async"]) -> Callable[..., Awaitable[NodeAppEntry]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_remote_app_runtime_summary"]) -> Callable[..., NodeAppRuntimeSummary]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_remote_app_runtime_summary_async"]
+    ) -> Callable[..., Awaitable[NodeAppRuntimeSummary]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_remote_apps"]) -> Callable[..., tuple[NodeAppEntry, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_apps_async"]) -> Callable[..., Awaitable[tuple[NodeAppEntry, ...]]]: ...
 
     @overload
     def __getattr__(
@@ -337,6 +360,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_json"]) -> Callable[..., dict[str, object]]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_remote_json_async"]) -> Callable[..., Awaitable[dict[str, object]]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_remote_mod_list"]) -> Callable[..., NodeModList]: ...
 
     @overload
@@ -347,6 +373,16 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_node_system_summary"]) -> Callable[..., NodeSystemSummary]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_node_system_summary_async"]
+    ) -> Callable[..., Awaitable[NodeSystemSummary]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_node_system_summary_or_none_async"]
+    ) -> Callable[..., Awaitable[NodeSystemSummary | None]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_overview_page_model"]) -> Callable[..., ModWebOverviewPageModel]: ...
@@ -443,6 +479,11 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_render_mod_download_row"]) -> Callable[..., Checkbox | None]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_mod_options"]
+    ) -> Callable[[tuple[NodeModEntry, ...]], tuple[ModWebSearchOption, ...]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_render_mods_page"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
@@ -497,7 +538,20 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_selection_toggle_label"]) -> Callable[..., str]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_section_badge_rows"]
+    ) -> Callable[..., tuple[tuple[_ModWebBadgeSpec, ...], ...]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_filter_mod_entries"]
+    ) -> Callable[..., tuple[NodeModEntry, ...]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_set_badge_state"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_set_html_tooltip_state"]) -> Callable[..., None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_set_chat_endpoint_badge_state"]) -> Callable[..., None]: ...

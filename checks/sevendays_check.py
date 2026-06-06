@@ -319,6 +319,22 @@ class SevenDaysRelayFormattingTests(unittest.IsolatedAsyncioTestCase):
         sent_command = app._relay.send.await_args.args[0]
         self.assertEqual(sent_command, 'say "Erin: forwarded; look"')
 
+    async def test_receiver_quotes_embedded_double_quotes(self) -> None:
+        app = SimpleNamespace(_relay=SimpleNamespace(send=AsyncMock()))
+        receiver = Receiver(cast(Any, app))
+        payload = SimpleNamespace(
+            alias='Erin "Admin"',
+            content_demojised='say "hi"',
+            urls=set(),
+            files=set(),
+            reference_kind=RelayMessageReferenceKind.NONE,
+        )
+
+        await receiver.send(cast(Any, payload))
+
+        sent_command = app._relay.send.await_args.args[0]
+        self.assertEqual(sent_command, 'say "Erin \'Admin\': say \'hi\'"')
+
 
 class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
     async def test_match_death_relays_player_death(self) -> None:
@@ -335,7 +351,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         add_mock.assert_called_once()
         relayed_message = add_mock.call_args.args[0]
         self.assertEqual(relayed_message.player, "asdblackmea")
-        self.assertEqual(relayed_message.content, "died")
+        self.assertEqual(relayed_message.content, "asdblackmea died")
 
     async def test_match_ready_sets_server_ready_event(self) -> None:
         app = cast(Any, object.__new__(SevenDays))

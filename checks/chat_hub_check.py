@@ -17,6 +17,7 @@ from chat_hub import (
     ChatMessageReference,
     ChatReferenceKind,
 )
+from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource
 
 
 class ChatHubTests(unittest.TestCase):
@@ -33,7 +34,7 @@ class ChatHubTests(unittest.TestCase):
             room_id=room_id,
             source=discord_endpoint.id,
             author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Erin", id="456", discord_user_id=456),
-            content="hello",
+            content="Erin joined Minecraft Alpha",
         )
 
         targets = hub.publish(event)
@@ -174,8 +175,10 @@ class ChatHubTests(unittest.TestCase):
             ),
             reference_kind=ChatReferenceKind.REPLY,
             reference=ChatMessageReference(author_display_name="Alex", content="hello there", event_id="source-1"),
-            is_template=True,
-            template_values={"player": "Erin"},
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+            ),
             embed=ChatEmbed(title="Relay", description="Forwarded", color=0x336699),
             source_guild_id=789,
             source_channel_id=123,
@@ -187,13 +190,16 @@ class ChatHubTests(unittest.TestCase):
 
         self.assertEqual(restored, event)
 
-    def test_chat_event_render_content_formats_template_values(self) -> None:
+    def test_chat_event_render_content_renders_typed_notice(self) -> None:
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
-            content="{player} joined {app}",
-            is_template=True,
+            content="Alex joined Minecraft Alpha",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+            ),
         )
 
         self.assertEqual(event.render_content(app_name="Minecraft Alpha"), "Alex joined Minecraft Alpha")
@@ -208,19 +214,46 @@ class ChatHubTests(unittest.TestCase):
 
         self.assertEqual(event.render_content(app_name="Minecraft Alpha"), "hello")
 
-    def test_chat_event_to_reference_renders_template_values(self) -> None:
+    def test_chat_event_to_reference_renders_typed_notice(self) -> None:
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
-            content="{player} joined {app}",
-            is_template=True,
+            content="Alex joined Minecraft Alpha",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+            ),
             id="event-1",
         )
 
         reference = event.to_reference(app_name="Minecraft Alpha")
 
         self.assertEqual(reference, ChatMessageReference("Alex", "Alex joined Minecraft Alpha", event_id="event-1"))
+
+    def test_chat_event_from_mapping_rejects_legacy_template_payload(self) -> None:
+        payload = {
+            "room_id": "minecraft_alpha",
+            "source": ChatEndpointId.app("minecraft_alpha").to_mapping(),
+            "author": ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex").to_mapping(),
+            "content": "{player} joined {app}",
+            "id": "event-1",
+            "created_at": 1.0,
+            "attachments": [],
+            "links": [],
+            "reference_kind": ChatReferenceKind.NONE.value,
+            "reference": None,
+            "is_template": True,
+            "notice": None,
+            "embed": None,
+            "source_guild_id": None,
+            "source_channel_id": None,
+            "source_message_id": None,
+            "source_label": None,
+        }
+
+        with self.assertRaisesRegex(ValueError, "Legacy template chat event payloads are no longer supported."):
+            ChatEvent.from_mapping(payload)
 
     def test_chat_event_to_reference_falls_back_to_media_label(self) -> None:
         event = ChatEvent(

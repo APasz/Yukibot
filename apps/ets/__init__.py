@@ -17,6 +17,12 @@ from apps._mod import Mod
 from apps._settings import App_Settings, IntSettingSpec, Setting, Setting_Label, StringSettingSpec
 from apps._tailer import Tailer
 from config import Activity_Manager
+from relay_notices import (
+    PlayerSessionAction,
+    PlayerSessionNotice,
+    RelayNoticeSource,
+    render_notice_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -254,9 +260,19 @@ class Matchers:
         if match:
             player: str = str(match.group(1))
             action: str = str(match.group(2)).lower()
-            txt = DC_Bound.generics.left if "disconnected" in action else DC_Bound.generics.join
-
-            DC_Relay.add(DC_Bound(self.app, txt, player or hikari.UNDEFINED))
+            notice = PlayerSessionNotice(
+                action=PlayerSessionAction.LEFT if "disconnected" in action else PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+            )
+            app_friendly = getattr(self.app, "friendly", self.app.name)
+            DC_Relay.add(
+                DC_Bound(
+                    self.app,
+                    render_notice_text(notice, author_name=player, app_name=app_friendly),
+                    player or hikari.UNDEFINED,
+                    notice=notice,
+                )
+            )
 
 
 # AiviA APasz
