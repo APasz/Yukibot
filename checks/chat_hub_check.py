@@ -70,7 +70,7 @@ class ChatHubTests(unittest.TestCase):
         event = ChatEvent(
             room_id=room_id,
             source=endpoint.id,
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="hello",
         )
         updates: list[str] = []
@@ -109,9 +109,9 @@ class ChatHubTests(unittest.TestCase):
         self.assertEqual(author.color_hex, "#aabbcc")
 
     def test_author_accepts_avatar_uri_for_ui_display(self) -> None:
-        author = ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex", avatar_uri="https://mc-heads.net/avatar/Alex/32")
+        author = ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko", avatar_uri="https://mc-heads.net/avatar/Yoko/32")
 
-        self.assertEqual(author.avatar_uri, "https://mc-heads.net/avatar/Alex/32")
+        self.assertEqual(author.avatar_uri, "https://mc-heads.net/avatar/Yoko/32")
 
     def test_default_author_colour_is_valid_hex(self) -> None:
         author = ChatAuthor(ChatAuthorKind.DISCORD_USER, "Erin", color_hex=DEFAULT_CHAT_AUTHOR_COLOR_HEX)
@@ -174,7 +174,7 @@ class ChatHubTests(unittest.TestCase):
                 ),
             ),
             reference_kind=ChatReferenceKind.REPLY,
-            reference=ChatMessageReference(author_display_name="Alex", content="hello there", event_id="source-1"),
+            reference=ChatMessageReference(author_display_name="Yoko", content="hello there", event_id="source-1"),
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
@@ -194,21 +194,21 @@ class ChatHubTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
-            content="Alex joined Minecraft Alpha",
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="Yoko joined Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
             ),
         )
 
-        self.assertEqual(event.render_content(app_name="Minecraft Alpha"), "Alex joined Minecraft Alpha")
+        self.assertEqual(event.render_content(app_name="Minecraft Alpha"), "Yoko joined Minecraft Alpha")
 
     def test_chat_event_render_content_returns_raw_non_template_content(self) -> None:
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="hello",
         )
 
@@ -218,8 +218,8 @@ class ChatHubTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
-            content="Alex joined Minecraft Alpha",
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="Yoko joined Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
@@ -229,13 +229,13 @@ class ChatHubTests(unittest.TestCase):
 
         reference = event.to_reference(app_name="Minecraft Alpha")
 
-        self.assertEqual(reference, ChatMessageReference("Alex", "Alex joined Minecraft Alpha", event_id="event-1"))
+        self.assertEqual(reference, ChatMessageReference("Yoko", "Yoko joined Minecraft Alpha", event_id="event-1"))
 
     def test_chat_event_from_mapping_rejects_legacy_template_payload(self) -> None:
         payload = {
             "room_id": "minecraft_alpha",
             "source": ChatEndpointId.app("minecraft_alpha").to_mapping(),
-            "author": ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex").to_mapping(),
+            "author": ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko").to_mapping(),
             "content": "{player} joined {app}",
             "id": "event-1",
             "created_at": 1.0,
@@ -275,7 +275,7 @@ class ChatHubTests(unittest.TestCase):
         event = ChatEvent(
             room_id=room_id,
             source=ChatEndpointId.app(room_id),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="hello",
             id="event-lookup",
         )

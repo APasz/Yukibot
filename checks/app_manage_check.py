@@ -2278,6 +2278,45 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Uptime: `1h 2m 3s`")
         self.assertIsNone(app.lifecycle_started_at)
 
+    async def test_handle_inactive_app_emits_lifecycle_stop_embed_for_unmanaged_shutdown(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = "dummy"
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(hours=1, minutes=2, seconds=3)
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager._handle_inactive_app(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.player, "System")
+        self.assertEqual(relayed_message.content, "Stopped")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Ended")
+        self.assertEqual(relayed_message.relay_embed.description, "Uptime: `1h 2m 3s`")
+        app.handle_unexpected_stop.assert_awaited_once()
+        self.assertIsNone(app.lifecycle_started_at)
+        self.assertIsNone(manager.current)
+
+    async def test_handle_inactive_app_skips_duplicate_stop_embed_for_managed_shutdown(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = "dummy"
+        manager._managed_shutdown_names = {"dummy"}
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(hours=1, minutes=2, seconds=3)
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager._handle_inactive_app(app)
+
+        add_mock.assert_not_called()
+        app.handle_unexpected_stop.assert_awaited_once()
+        self.assertIsNone(app.lifecycle_started_at)
+        self.assertIsNone(manager.current)
+
     async def test_notify_running_app_relays_targets_only_running_inbound_apps(self) -> None:
         manager = object.__new__(App_Manager)
         manager.bot = cast(Any, object())

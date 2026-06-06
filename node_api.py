@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import tempfile
 import threading
@@ -73,7 +74,6 @@ from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub
-from mod_web_auth import ModWebAuthService, ModWebUser
 from map_annotations import (
     AppMapAnnotationStore,
     MapAnnotationDraft,
@@ -83,6 +83,7 @@ from map_annotations import (
     MapWorldSummary,
 )
 from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
+from mod_web_auth import ModWebAuthService, ModWebUser
 from node_auth import NodeAccessGrant, NodeApiScope, NodeTokenError, issue_node_token, verify_node_token
 
 if TYPE_CHECKING:
@@ -2531,10 +2532,8 @@ class NodeApiService:
             )
             app = self._resolve_app(app_name)
             draft = MapAnnotationDraft.from_mapping(payload)
-            created_by_name: str | None = None
-            if self._web_auth is not None:
-                user: ModWebUser | None = self._web_auth.current_user(request)
-                created_by_name = None if user is None else user.display_name
+            user: ModWebUser | None = None if self._web_auth is None else self._web_auth.current_user(request)
+            created_by_name = self._map_annotation_creator_name(app, actor_user_id=actor_user_id, user=user)
             result = await asyncio.to_thread(
                 self.create_map_annotation,
                 app,
@@ -3319,7 +3318,8 @@ class NodeApiService:
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/{{missing_path:path}}")
         async def _missing_node_api_route(missing_path: str) -> dict[str, object]:
-            log.warning("Node API route not found: /%s/%s", _NODE_API_PREFIX.strip("/"), missing_path)
+            if self._should_log_missing_route_warning(missing_path):
+                log.warning("Node API route not found: /%s/%s", _NODE_API_PREFIX.strip("/"), missing_path)
             raise _http_exception(404, f"Unknown node API route: /{_NODE_API_PREFIX.strip('/')}/{missing_path}")
 
         self._routes_registered = True
@@ -3904,8 +3904,10 @@ class NodeApiService:
         return headers
 
     def _squaremap_root_url(self, app: App) -> str:
-        public_map_url = self._require_map_app(app)
-        parsed = urlsplit(public_map_url)
+        map_proxy_url = app.map_proxy_url
+        if map_proxy_url is None:
+            map_proxy_url = self._require_map_app(app)
+        parsed = urlsplit(map_proxy_url)
         root_path = parsed.path.rstrip("/") + "/"
         return urlunsplit((parsed.scheme, parsed.netloc, root_path, "", ""))
 
@@ -3938,17 +3940,39 @@ class NodeApiService:
         allow_stale_on_error: bool = False,
     ) -> _SquaremapProxyResponse:
         normalized_path = relative_path.lstrip("/")
+        local_response = self._squaremap_local_proxy_response(app, normalized_path)
+        if local_response is not None:
+            return local_response
         url = f"{self._squaremap_root_url(app)}{normalized_path}"
         params = parse_qs(raw_query, keep_blank_values=True) if raw_query else None
+        should_log_failure = not normalized_path.casefold().endswith(".png")
         try:
             response = requests.get(url, params=params, timeout=_SQUAREMAP_REQUEST_TIMEOUT_SECONDS)
         except requests.Timeout as xcp:
             cached_response = self._squaremap_cached_response(app, normalized_path) if allow_stale_on_error else None
+            if should_log_failure:
+                log.warning(
+                    "Squaremap request timed out: app=%s url=%s query=%s stale_cache=%s",
+                    app.name,
+                    url,
+                    raw_query,
+                    cached_response is not None,
+                )
             if cached_response is not None:
                 return cached_response
             raise _http_exception(504, f"Squaremap request timed out: {relative_path}") from xcp
         except requests.RequestException as xcp:
             cached_response = self._squaremap_cached_response(app, normalized_path) if allow_stale_on_error else None
+            if should_log_failure:
+                log.warning(
+                    "Squaremap request failed: app=%s url=%s query=%s stale_cache=%s error=%s: %s",
+                    app.name,
+                    url,
+                    raw_query,
+                    cached_response is not None,
+                    type(xcp).__name__,
+                    xcp,
+                )
             if cached_response is not None:
                 return cached_response
             raise _http_exception(502, f"Squaremap request failed: {type(xcp).__name__}: {xcp}") from xcp
@@ -3956,7 +3980,25 @@ class NodeApiService:
             if response.status_code != 404 and allow_stale_on_error:
                 cached_response = self._squaremap_cached_response(app, normalized_path)
                 if cached_response is not None:
+                    if should_log_failure:
+                        log.warning(
+                            "Squaremap returned HTTP %s: app=%s url=%s query=%s stale_cache=%s",
+                            response.status_code,
+                            app.name,
+                            url,
+                            raw_query,
+                            True,
+                        )
                     return cached_response
+            if should_log_failure:
+                log.warning(
+                    "Squaremap returned HTTP %s: app=%s url=%s query=%s stale_cache=%s",
+                    response.status_code,
+                    app.name,
+                    url,
+                    raw_query,
+                    False,
+                )
             status_code = 404 if response.status_code == 404 else 502
             raise _http_exception(
                 status_code,
@@ -3969,6 +4011,35 @@ class NodeApiService:
         )
         self._remember_squaremap_cache_entry(app, normalized_path, proxy_response)
         return proxy_response
+
+    def _squaremap_local_proxy_response(self, app: App, relative_path: str) -> _SquaremapProxyResponse | None:
+        root_path: Path | None = app.map_proxy_root_path
+        if root_path is None:
+            return None
+        resolved_root = root_path.resolve()
+        resolved_path = (resolved_root / relative_path).resolve()
+        try:
+            resolved_path.relative_to(resolved_root)
+        except ValueError:
+            raise _http_exception(400, f"Invalid Squaremap path: {relative_path}") from None
+        if not resolved_path.is_file():
+            return None
+        media_type, _ = mimetypes.guess_type(resolved_path.name)
+        return _SquaremapProxyResponse(
+            content=resolved_path.read_bytes(),
+            media_type=media_type,
+            headers=(),
+        )
+
+    @staticmethod
+    def _map_annotation_creator_name(app: App, *, actor_user_id: int, user: ModWebUser | None) -> str | None:
+        fallback_username = None if user is None else user.username
+        return config.Name_Cache().discord_fallback_name(
+            actor_user_id,
+            fallback_username,
+            scope=app.scope,
+            fallback_display_name=fallback_username,
+        )
 
     def _squaremap_cached_response(self, app: App, relative_path: str) -> _SquaremapProxyResponse | None:
         cache_entry = self._squaremap_cache_entry(app, relative_path)
@@ -5964,6 +6035,22 @@ class NodeApiService:
         except Exception as xcp:
             log.warning("Node API app not found: node=%s app=%s", self.node_name, app_name)
             raise _http_exception(404, f"Unknown app: {app_name}") from xcp
+
+    def _should_log_missing_route_warning(self, missing_path: str) -> bool:
+        app_name = self._missing_route_app_name(missing_path)
+        if app_name is None or self._manager is None:
+            return True
+        app = self._manager.apps.get(app_name)
+        if app is None:
+            return True
+        return app.check_running()
+
+    @staticmethod
+    def _missing_route_app_name(missing_path: str) -> str | None:
+        parts = tuple(part for part in missing_path.split("/") if part)
+        if len(parts) < 2 or parts[0] != "apps":
+            return None
+        return parts[1]
 
     def _require_manager(self) -> App_Manager:
         if self._manager is None:

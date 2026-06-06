@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from functools import cache
 from logging import Logger
 from pathlib import Path
-from typing import Literal, Protocol, overload
+from typing import Any, Literal, Protocol, overload
 from urllib.parse import SplitResult, urlencode, urlsplit, urlunsplit
 
 import hikari
@@ -2882,7 +2882,13 @@ class Name_Cache(metaclass=Singleton):
                 if value:
                     self.by_platform_id.setdefault(platform_key, {})[value] = uid
 
-    def parse_mentions(self, text: str, replace: bool = True) -> tuple[str, set[int]]:
+    def parse_mentions(
+        self,
+        text: str,
+        replace: bool = True,
+        *,
+        scope: str | None = None,
+    ) -> tuple[str, set[int]]:
         """
         Parse @name mentions in the input text.
 
@@ -2892,15 +2898,15 @@ class Name_Cache(metaclass=Singleton):
         """
         mentions: set[int] = set[int]()
 
-        def repl(match):
+        def repl(match) -> str | Any:
             name = match.group(1)
-            uid = self.resolve_to_id(name)
+            uid: int | None = self.resolve_to_id(name, scope=scope)
             if uid:
                 mentions.add(uid)
                 return f"<@{uid}>" if replace else match.group(0)
             return match.group(0)
 
-        updated = re.sub(r"@([\w#-]+)", repl, text)
+        updated: str = re.sub(r"@([\w#-]+)", repl, text)
         return updated, mentions
 
 

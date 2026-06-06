@@ -8,6 +8,7 @@ import re
 import shlex
 import tempfile
 from asyncio.locks import Event
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -133,7 +134,7 @@ def _compile_minecraft_death_re() -> re.Pattern[str]:
     phrase_pattern = "|".join(re.escape(opener) for opener in MINECRAFT_DEATH_CAUSE_PHRASE_OPENERS)
     word_pattern = "|".join(re.escape(opener) for opener in MINECRAFT_DEATH_CAUSE_WORD_OPENERS)
     cause_pattern = rf"(?:(?:{phrase_pattern}).*|(?:{word_pattern}).+)"
-    return re.compile(rf"\[.*?\]: (?P<player>\S+)\s+(?P<cause>{cause_pattern})", re.IGNORECASE)
+    return re.compile(rf"\[.*?\]: (?P<player>{_PLAYER_NAME_PATTERN})\s+(?P<cause>{cause_pattern})", re.IGNORECASE)
 
 
 _MINECRAFT_DEATH_PLAYER_REFERENCE_SUFFIX_PATTERN = (
@@ -246,8 +247,26 @@ _MINECRAFT_MOD_VERSION_RE_PATTERNS = (
     re.compile(r"[-_](?P<version>v?\d+(?:\.\d+)+)$", re.IGNORECASE),
 )
 _MINECRAFT_MOD_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
+_KUBEJS_MOD_BASE_NAME = "kubejs"
+_KUBEJS_SERVER_SCRIPTS_RELATIVE_PATH = Path("kubejs/server_scripts")
+_KUBEJS_YUKI_LOG_SCRIPT_NAME = "yuki_log.js"
+_KUBEJS_YUKI_LOG_SOURCE_PATH = (
+    Path(__file__).resolve().parents[2] / "resources" / "minecraft" / "kubejs" / _KUBEJS_YUKI_LOG_SCRIPT_NAME
+)
+_KUBEJS_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
+_KUBEJS_SCRIPT_LOADED_RE = re.compile(
+    r"\[KubeJS Server/\]:\s+Loaded script server_scripts:yuki_log\.js\b",
+    re.IGNORECASE,
+)
+_KUBEJS_EVENT_RE = re.compile(
+    r"\[KubeJS Server/\]:\s+yuki_log\.js#\d+:\s+\[YUKI_MC_EVENT\]\s+(?P<payload>\{.*\})\s*$",
+    re.IGNORECASE,
+)
 _SQUAREMAP_MOD_BASE_NAME = "squaremap"
 _SQUAREMAP_PUBLIC_PATH = "/squaremap/"
+_SQUAREMAP_CONFIG_RELATIVE_PATH = Path("squaremap/config.yml")
+_SQUAREMAP_WEB_ROOT_RELATIVE_PATH = Path("squaremap/web")
+_SQUAREMAP_WEB_ADDRESS_RE: re.Pattern[str] = re.compile(r"^\s*web-address\s*:\s*(?P<url>.+?)\s*$")
 _SQUAREMAP_WORLD_NAME = "minecraft_overworld"
 _MINECRAFT_CRASH_SUMMARY_IGNORED_PREFIXES: tuple[str, ...] = ("Preparing crash report with UUID ",)
 
@@ -990,8 +1009,95 @@ def _detect_minecraft_mod_friendly(name: str) -> str:
     return humanise_mod_identifier(base_name, split_single_camel=True)
 
 
+def _is_kubejs_mod_name(name: str) -> bool:
+    base_name = _detect_minecraft_mod_base_name(name).casefold()
+    if base_name == _KUBEJS_MOD_BASE_NAME:
+        return True
+    tokens = tuple(token for token in base_name.split("-") if token)
+    return len(tokens) >= 2 and tokens[0] == _KUBEJS_MOD_BASE_NAME and tokens[1] in _KUBEJS_LOADER_TOKENS
+
+
 def _is_squaremap_mod_name(name: str) -> bool:
     return _detect_minecraft_mod_base_name(name).casefold() == _SQUAREMAP_MOD_BASE_NAME
+
+
+class KubeJsEventType(enum.StrEnum):
+    PLAYER_JOIN = "player_join"
+    PLAYER_LEAVE = "player_leave"
+    CHAT = "chat"
+    ADVANCEMENT = "advancement"
+    PLAYER_DEATH = "player_death"
+
+
+@dataclass(frozen=True, slots=True)
+class KubeJsEvent:
+    event_type: KubeJsEventType
+    player: str
+    uuid: str | None = None
+    message: str | None = None
+    advancement: str | None = None
+    source: str | None = None
+
+    def __post_init__(self) -> None:
+        if not _PLAYER_NAME_RE.fullmatch(self.player):
+            raise ValueError("KubeJS event player is invalid.")
+        if self.uuid is not None and not self.uuid.strip():
+            raise ValueError("KubeJS event uuid must not be blank.")
+        if self.event_type is KubeJsEventType.CHAT and (self.message is None or not self.message.strip()):
+            raise ValueError("KubeJS chat event message must not be blank.")
+        if self.event_type is KubeJsEventType.ADVANCEMENT and (
+            self.advancement is None or not self.advancement.strip()
+        ):
+            raise ValueError("KubeJS advancement event must not be blank.")
+
+
+def _required_kubejs_player(payload: Mapping[str, object]) -> str:
+    raw_player = payload.get("player")
+    if not isinstance(raw_player, str):
+        raise ValueError("KubeJS event player is invalid.")
+    player = raw_player.strip()
+    if not _PLAYER_NAME_RE.fullmatch(player):
+        raise ValueError("KubeJS event player is invalid.")
+    return player
+
+
+def _optional_kubejs_text(payload: Mapping[str, object], key: str) -> str | None:
+    raw_value = payload.get(key)
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        raise ValueError(f"KubeJS event {key} is invalid.")
+    value = raw_value.strip()
+    if not value:
+        return None
+    return value
+
+
+def _parse_kubejs_event(line: str) -> KubeJsEvent | None:
+    match = _KUBEJS_EVENT_RE.search(line)
+    if match is None:
+        return None
+    try:
+        payload = json.loads(match.group("payload"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_type = payload.get("type")
+    if not isinstance(raw_type, str):
+        return None
+    try:
+        event_type = KubeJsEventType(raw_type)
+        return KubeJsEvent(
+            event_type=event_type,
+            player=_required_kubejs_player(payload),
+            uuid=_optional_kubejs_text(payload, "uuid"),
+            message=_optional_kubejs_text(payload, "message"),
+            advancement=_optional_kubejs_text(payload, "advancement"),
+            source=_optional_kubejs_text(payload, "source"),
+        )
+    except ValueError:
+        return None
 
 
 def _build_squaremap_public_url(*, public_base_url: str, world: str) -> str:
@@ -999,6 +1105,27 @@ def _build_squaremap_public_url(*, public_base_url: str, world: str) -> str:
     if not parsed.scheme or parsed.hostname is None:
         raise ValueError("PUBLIC_BASE_URL must include a scheme and host.")
     return urlunsplit((parsed.scheme, parsed.netloc, _SQUAREMAP_PUBLIC_PATH, urlencode({"world": world}), ""))
+
+
+def _load_squaremap_web_address(pointer: Path) -> str | None:
+    if not pointer.exists():
+        return None
+    try:
+        lines = pointer.read_text(encoding="utf-8").splitlines()
+    except OSError as xcp:
+        log.warning("Failed to read Squaremap config at %s: %s", pointer, xcp)
+        return None
+    for line in lines:
+        match = _SQUAREMAP_WEB_ADDRESS_RE.match(line)
+        if match is None:
+            continue
+        candidate = match.group("url").split("#", 1)[0].strip().strip("\"'")
+        parsed = urlsplit(candidate)
+        if not parsed.scheme or parsed.hostname is None:
+            log.warning("Ignoring invalid Squaremap web-address at %s: %s", pointer, candidate)
+            return None
+        return candidate
+    return None
 
 
 class Mod_MC(Mod):
@@ -1461,6 +1588,7 @@ class Minecraft(App[Minecraft_Config]):
         )
         self._tail: Tailer | None = None
         self._tail_machers = set()
+        self._kubejs_event_stream_ready = False
         self._server_ready: Event = asyncio.Event()
         self._players: Players = Players(self)
         self.am_receiver = Receiver(self)
@@ -1477,6 +1605,10 @@ class Minecraft(App[Minecraft_Config]):
         )
 
         log.debug(f"{__name__}.Created")
+
+    async def post_init(self):
+        await super().post_init()
+        self._sync_kubejs_yuki_log_script()
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
@@ -1588,6 +1720,17 @@ class Minecraft(App[Minecraft_Config]):
     def public_map_url(self) -> str | None:
         return self._squaremap_public_url()
 
+    @property
+    def map_proxy_url(self) -> str | None:
+        return self._squaremap_proxy_url()
+
+    @property
+    def map_proxy_root_path(self) -> Path | None:
+        if not self._has_squaremap_mod():
+            return None
+        root_path = self.directory / _SQUAREMAP_WEB_ROOT_RELATIVE_PATH
+        return root_path if root_path.is_dir() else None
+
     def apply_relay_advancements_enabled(self, enabled: bool) -> None:
         self.cfg.relay_advancements = enabled
 
@@ -1603,10 +1746,54 @@ class Minecraft(App[Minecraft_Config]):
             log.warning("Failed to build squaremap public URL for %s: %s", self.name, xcp)
             return None
 
-    def _has_squaremap_mod(self) -> bool:
+    def _squaremap_proxy_url(self) -> str | None:
+        if not self._has_squaremap_mod():
+            return None
+        local_web_address = _load_squaremap_web_address(self.directory / _SQUAREMAP_CONFIG_RELATIVE_PATH)
+        if local_web_address is not None:
+            return local_web_address
+        return self._squaremap_public_url()
+
+    def _has_enabled_matching_mod(self, matcher: Callable[[str], bool]) -> bool:
         if self.mods is None:
             return False
-        return any(_is_squaremap_mod_name(mod.name) for mod in self.mods.list_mods())
+        return any(matcher(mod.name) for mod in self.mods.list_mods(True))
+
+    def _has_squaremap_mod(self) -> bool:
+        return self._has_enabled_matching_mod(_is_squaremap_mod_name)
+
+    def _has_enabled_kubejs_mod(self) -> bool:
+        return self._has_enabled_matching_mod(_is_kubejs_mod_name)
+
+    def _kubejs_yuki_log_path(self) -> Path:
+        return self.directory / _KUBEJS_SERVER_SCRIPTS_RELATIVE_PATH / _KUBEJS_YUKI_LOG_SCRIPT_NAME
+
+    def _uses_kubejs_event_stream(self) -> bool:
+        return (
+            self._has_enabled_kubejs_mod()
+            and self._kubejs_yuki_log_path().is_file()
+            and getattr(self, "_kubejs_event_stream_ready", False)
+        )
+
+    def _sync_kubejs_yuki_log_script(self) -> bool:
+        if not self._has_enabled_kubejs_mod():
+            return False
+        try:
+            script_content = _KUBEJS_YUKI_LOG_SOURCE_PATH.read_text(config.STR_ENCODE)
+        except OSError as xcp:
+            log.warning("Failed to read bundled KubeJS relay script for %s: %s", self.name, xcp)
+            return False
+        script_path = self._kubejs_yuki_log_path()
+        try:
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            if script_path.exists() and script_path.read_text(config.STR_ENCODE) == script_content:
+                return False
+            script_path.write_text(script_content, config.STR_ENCODE)
+        except OSError as xcp:
+            log.warning("Failed to sync KubeJS relay script for %s at %s: %s", self.name, script_path, xcp)
+            return False
+        log.info("%s synced KubeJS relay script: %s", self.name, script_path)
+        return True
 
     def _apply_runtime_snapshot(self, runtime: MinecraftRuntimeInfo | None, *, persist: bool) -> bool:
         current_runtime = getattr(self, "_runtime", None)
@@ -1639,6 +1826,8 @@ class Minecraft(App[Minecraft_Config]):
         log.info(f"{__name__}.start")
         self.clear_runtime_fault()
         self._server_ready.clear()
+        self._kubejs_event_stream_ready = False
+        self._sync_kubejs_yuki_log_script()
         log.info(
             "Minecraft config for %s: server_properties=%s exists=%s rcon_host=%s rcon_port=%s file_enable_rcon=%s file_rcon_port=%s file_max_players=%s file_password_state=%s password_match=%s",
             self.name,
@@ -1774,6 +1963,8 @@ class Matchers:
         self.app = app
         app._tail_machers.add(self.match_runtime)
         app._tail_machers.add(self.match_crash)
+        app._tail_machers.add(self.match_kubejs_script_loaded)
+        app._tail_machers.add(self.match_kubejs_event)
         app._tail_machers.add(self.match_ready)
         app._tail_machers.add(self.match_uuid)
         app._tail_machers.add(self.match_chat)
@@ -1813,7 +2004,81 @@ class Matchers:
         if self.app.record_runtime_fault(kind=AppRuntimeFaultKind.CRASH, summary=summary):
             log.warning("%s detected Minecraft crash signal: %s", self.app.name, summary)
 
+    async def match_kubejs_script_loaded(self, line: str) -> None:
+        if _KUBEJS_SCRIPT_LOADED_RE.search(line) is None:
+            return
+        if not self.app._has_enabled_kubejs_mod():
+            return
+        self.app._kubejs_event_stream_ready = True
+
+    async def match_kubejs_event(self, line: str) -> None:
+        if not self.app._uses_kubejs_event_stream():
+            return
+        event = _parse_kubejs_event(line)
+        if event is None:
+            return
+        self.app._players.note_uuid(event.player, event.uuid or "")
+        if event.event_type is KubeJsEventType.PLAYER_JOIN:
+            self.app._players.note_join(event.player, source=RelayNoticeSource.APP_LOG)
+            return
+        if event.event_type is KubeJsEventType.PLAYER_LEAVE:
+            self.app._players.note_leave(event.player, source=RelayNoticeSource.APP_LOG)
+            return
+        if event.event_type is KubeJsEventType.CHAT:
+            assert event.message is not None
+            content = event.message
+            if "CICode" in content:
+                content = CICODE_RE.sub(self._deCICodeify, content).strip()
+            if not content or content.startswith(self.app.cfg.chat_ignore_symbol):
+                return
+            DC_Relay.add(
+                DC_Bound(
+                    self.app,
+                    content,
+                    event.player,
+                    player_avatar_uri=self._player_avatar_uri(event.player),
+                )
+            )
+            return
+        if event.event_type is KubeJsEventType.ADVANCEMENT:
+            if not self.app.cfg.relay_advancements:
+                return
+            assert event.advancement is not None
+            advancement_type = self.app.relay_advancement_term
+            advancement_title = event.advancement
+            app_friendly = getattr(self.app, "friendly", self.app.name)
+            notice = GameProgressNotice(
+                progress_kind=GameProgressKind.ADVANCEMENT,
+                label=advancement_type,
+                title=advancement_title,
+                source=RelayNoticeSource.APP_LOG,
+            )
+            embed_spec = notice_embed_spec(notice, app_name=app_friendly, author_name=event.player)
+            relay_embed = (
+                None
+                if embed_spec is None
+                else RelayEmbedPayload(
+                    title=embed_spec.title,
+                    description=embed_spec.description,
+                    color=self.app.manage_embed_color,
+                )
+            )
+            DC_Relay.add(
+                DC_Bound(
+                    self.app,
+                    f"{advancement_type}: {advancement_title}",
+                    event.player,
+                    relay_embed=relay_embed,
+                    notice=notice,
+                    player_avatar_uri=self._player_avatar_uri(event.player),
+                )
+            )
+            return
+        return
+
     async def match_chat(self, line: str):
+        if self.app._uses_kubejs_event_stream():
+            return
         if match := CHAT_RE.match(line):
             player, content = match.groups()
             if content and "CICode" in content:
@@ -1829,6 +2094,8 @@ class Matchers:
                 )
 
     async def match_advancement(self, line: str):
+        if self.app._uses_kubejs_event_stream():
+            return
         if not self.app.cfg.relay_advancements:
             return
         if match := ADVANCEMENT_RE.match(line):
@@ -1892,11 +2159,15 @@ class Matchers:
                 note_uuid(match.group("name"), match.group("uuid"))
 
     async def match_join(self, line: str):
+        if self.app._uses_kubejs_event_stream():
+            return
         if match := JOIN_RE.match(line):
             player = match.group(1)
             self.app._players.note_join(player, source=RelayNoticeSource.APP_LOG)
 
     async def match_left(self, line: str):
+        if self.app._uses_kubejs_event_stream():
+            return
         if match := LEAVE_RE.match(line):
             player = match.group(1)
             self.app._players.note_leave(player, source=RelayNoticeSource.APP_LOG)
@@ -1947,13 +2218,9 @@ class Players:
         self._logged_empty_response = False
         self._logged_unrecognised_response = False
         self._running = False
-        if self._players_task:
-            self._players_task.cancel()
-            try:
-                await self._players_task
-            except asyncio.CancelledError:
-                pass
-            self._players_task = None
+        task = self._players_task
+        self._players_task = None
+        await self.app._cancel_background_task(task, label="player poll task")
 
     async def _listplayers(self):
         while self._running:
@@ -2150,16 +2417,14 @@ class Activities:
         self._running = True
         for prov in self.providers:
             self.app.activity_manager.register(prov)
-            self.tasks.union([asyncio.create_task(func()) for func in prov.task_funcs])
+            self.tasks.update(asyncio.create_task(func()) for func in prov.task_funcs)
 
     async def stop(self):
         self._running = False
-        for task in self.tasks:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        tasks = tuple(self.tasks)
+        self.tasks.clear()
+        for task in tasks:
+            await self.app._cancel_background_task(task, label="activity task")
 
 
 class Provider_Day(config.Activity_Provider):

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pydantic import BaseModel, ConfigDict
+
+from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
+from .nicegui_protocols import ModWebFastApiApp, ModWebRouteUi
 from .runtime_imports import (
     Access_Control,
     Awaitable,
@@ -18,11 +22,21 @@ from .runtime_imports import (
     quote,
     requests,
 )
-from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
-from .nicegui_protocols import ModWebFastApiApp, ModWebRouteUi
+from .service_base import ModWebServiceSupport
 from .utils import _http_exception
 
-from .service_base import ModWebServiceSupport
+
+class _ModWebClientMapErrorReport(BaseModel):
+    context: str
+    message: str
+    stack: str | None = None
+    page_path: str | None = None
+    app_name: str | None = None
+    node_name: str | None = None
+    map_api_url: str | None = None
+    public_map_url: str | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=False)
 
 class ModWebRoutesMixin(ModWebServiceSupport):
     def _register_routes(self, *, nicegui_app: ModWebFastApiApp, ui: ModWebRouteUi) -> None:
@@ -125,6 +139,28 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             self._auth.logout_request(request)
             return self._auth.logout_response()
 
+        @nicegui_app.post("/mod-web/client-errors/map")
+        async def _client_map_error_report(
+            payload: _ModWebClientMapErrorReport,
+            request: Request,
+        ) -> dict[str, bool]:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            log.warning(
+                ("Map client error: user=%s(%s) node=%s app=%s context=%s page=%s map_api=%s public_map=%s message=%s"),
+                self._web_display_name(user),
+                user.discord_id,
+                payload.node_name,
+                payload.app_name,
+                payload.context,
+                payload.page_path,
+                payload.map_api_url,
+                payload.public_map_url,
+                payload.message,
+            )
+            if payload.stack:
+                log.warning("Map client error stack:\n%s", payload.stack)
+            return {"ok": True}
+
         def _require_dev_preview_enabled() -> None:
             if not config.INDEV:
                 raise _http_exception(404, "Dev error previews are not available.")
@@ -154,7 +190,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                             for label, message, tone in actions:
                                 ui.button(
                                     label,
-                                    on_click=lambda _=None, preview_message=message, preview_tone=tone: ui.notify(
+                                    on_click=lambda preview_message=message, preview_tone=tone: ui.notify(
                                         preview_message,
                                         type=preview_tone,
                                     ),

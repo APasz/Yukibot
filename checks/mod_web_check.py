@@ -1879,7 +1879,7 @@ class ModWebTests(unittest.TestCase):
                 storage_free_bytes=None,
                 storage_total_bytes=None,
                 transition_state=NodeAppTransitionState.STARTING,
-                connected_player_names=("Alex", "Bea"),
+                connected_player_names=("Yoko", "Bea"),
             ),
         )
 
@@ -1887,7 +1887,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(updated.transition_state, NodeAppTransitionState.STARTING)
         self.assertEqual(updated.player_count, 5)
         self.assertEqual(updated.player_capacity, 20)
-        self.assertEqual(updated.connected_player_names, ("Alex", "Bea"))
+        self.assertEqual(updated.connected_player_names, ("Yoko", "Bea"))
         self.assertEqual(updated.url, app.url)
 
     def test_app_card_link_classes_uses_starting_state_class(self) -> None:
@@ -2353,7 +2353,7 @@ class ModWebTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
             content="hello",
             created_at=123.0,
         )
@@ -2369,7 +2369,7 @@ class ModWebTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
             content="hello",
         )
 
@@ -2379,7 +2379,7 @@ class ModWebTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.discord_channel("123"),
-            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Alex", color_hex="#336699"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Yoko", color_hex="#336699"),
             content="hello",
         )
 
@@ -2391,13 +2391,13 @@ class ModWebTests(unittest.TestCase):
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(
                 kind=ChatAuthorKind.GAME_PLAYER,
-                display_name="Alex",
-                avatar_uri="https://mc-heads.net/avatar/Alex/32",
+                display_name="Yoko",
+                avatar_uri="https://mc-heads.net/avatar/Yoko/32",
             ),
             content="hello",
         )
 
-        self.assertEqual(ModWebService._chat_author_avatar_uri(event), "https://mc-heads.net/avatar/Alex/32")
+        self.assertEqual(ModWebService._chat_author_avatar_uri(event), "https://mc-heads.net/avatar/Yoko/32")
 
     def test_chat_author_avatar_uri_accepts_safe_data_image_uri(self) -> None:
         avatar_uri = minecraft_dev_bypass_head_data_uri(Access_Control.dev_bypass_user_id(Power_Level.user))
@@ -2421,7 +2421,7 @@ class ModWebTests(unittest.TestCase):
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(
                 kind=ChatAuthorKind.GAME_PLAYER,
-                display_name="Alex",
+                display_name="Yoko",
                 avatar_uri="javascript:alert(1)",
             ),
             content="hello",
@@ -2455,22 +2455,22 @@ class ModWebTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
-            content="Alex joined Minecraft Alpha",
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="Yoko joined Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
             ),
         )
 
-        self.assertEqual(service._chat_event_content(event), "Alex joined Minecraft Alpha")
+        self.assertEqual(service._chat_event_content(event), "Yoko joined Minecraft Alpha")
 
     def test_chat_event_content_prefers_embed_description_for_web_chat(self) -> None:
         service = ModWebService()
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
             content="Advancement: Stone Age",
             embed=ChatEmbed(title="Advancement", description="Stone Age", color=0x336699),
         )
@@ -2518,7 +2518,7 @@ class ModWebTests(unittest.TestCase):
             app_name="minecraft_alpha",
             source_kind=ChatEndpointKind.APP,
             author_kind=ChatAuthorKind.GAME_PLAYER,
-            author_name="Alex",
+            author_name="Yoko",
             message_mode=_ModWebFakeChatMessageMode.JOIN,
         )
 
@@ -2527,8 +2527,8 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(event.room_id, "minecraft_alpha")
         self.assertEqual(event.source, ChatEndpointId.app("minecraft_alpha"))
         self.assertEqual(event.author.kind, ChatAuthorKind.GAME_PLAYER)
-        self.assertEqual(event.author.display_name, "Alex")
-        self.assertEqual(event.content, "Alex joined minecraft_alpha")
+        self.assertEqual(event.author.display_name, "Yoko")
+        self.assertEqual(event.content, "Yoko joined minecraft_alpha")
         self.assertIsNone(event.embed)
         self.assertIsInstance(event.notice, PlayerSessionNotice)
         assert isinstance(event.notice, PlayerSessionNotice)
@@ -2579,7 +2579,7 @@ class ModWebTests(unittest.TestCase):
             app_name="minecraft_alpha",
             source_kind=ChatEndpointKind.APP,
             author_kind=ChatAuthorKind.GAME_PLAYER,
-            author_name="Alex",
+            author_name="Yoko",
             message_mode=_ModWebFakeChatMessageMode.JOIN,
         )
 
@@ -2587,7 +2587,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(event.room_id, "factorio_lab")
         self.assertEqual(event.source, ChatEndpointId.app("factorio_lab"))
-        self.assertEqual(event.content, "Alex joined factorio_lab")
+        self.assertEqual(event.content, "Yoko joined factorio_lab")
 
     def test_build_fake_chat_preview_event_creates_advancement_notice_event(self) -> None:
         service = ModWebService()
@@ -2595,7 +2595,7 @@ class ModWebTests(unittest.TestCase):
             app_name="minecraft_alpha",
             source_kind=ChatEndpointKind.APP,
             author_kind=ChatAuthorKind.GAME_PLAYER,
-            author_name="Alex",
+            author_name="Yoko",
             message_mode=_ModWebFakeChatMessageMode.ADVANCEMENT,
             embed_title="Advancement",
             embed_description="Stone Age",
@@ -2603,7 +2603,7 @@ class ModWebTests(unittest.TestCase):
 
         event = service._build_fake_chat_preview_event(state)
 
-        self.assertEqual(event.content, "Alex: Advancement: Stone Age")
+        self.assertEqual(event.content, "Yoko: Advancement: Stone Age")
         self.assertIsInstance(event.notice, GameProgressNotice)
         assert isinstance(event.notice, GameProgressNotice)
         self.assertIs(event.notice.progress_kind, GameProgressKind.ADVANCEMENT)
@@ -2817,8 +2817,8 @@ class ModWebTests(unittest.TestCase):
         join_event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
-            content="Alex joined Minecraft Alpha",
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="Yoko joined Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
@@ -2827,8 +2827,8 @@ class ModWebTests(unittest.TestCase):
         leave_event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
-            content="Alex left Minecraft Alpha",
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="Yoko left Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.LEFT,
                 source=RelayNoticeSource.APP_LOG,
@@ -2843,8 +2843,8 @@ class ModWebTests(unittest.TestCase):
         death_event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
-            content="Alex died to Skeleton",
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="Yoko died to Skeleton",
             notice=GameDeathNotice(
                 death_kind=GameDeathKind.PVE,
                 detail_text="died to Skeleton",
@@ -2852,7 +2852,7 @@ class ModWebTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(service._chat_event_display_content(death_event), "Alex died to Skeleton")
+        self.assertEqual(service._chat_event_display_content(death_event), "Yoko died to Skeleton")
 
     def test_chat_markup_html_supports_discord_style_formatting(self) -> None:
         markup = ModWebService._chat_markup_html("**bold** _italic_ __underline__ ~~strike~~ ||spoiler||\n> quoted")
@@ -3107,14 +3107,14 @@ class ModWebTests(unittest.TestCase):
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="<@42>", discord_user_id=42),
-            content="Alex joined Minecraft Alpha",
+            content="Yoko joined Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
             ),
             source_guild_id=99,
         )
-        relay_display_name = Mock(return_value="Alex")
+        relay_display_name = Mock(return_value="Yoko")
 
         with patch(
             "web_dash.chat.config.Name_Cache",
@@ -3122,7 +3122,7 @@ class ModWebTests(unittest.TestCase):
         ):
             resolved = service._chat_event_author_display_name(event)
 
-        self.assertEqual(resolved, "Alex")
+        self.assertEqual(resolved, "Yoko")
         relay_display_name.assert_called_once_with(42, "42", scope="minecraft", preferred_guild_id=99)
 
     def test_chat_reference_label_resolves_raw_discord_mentions(self) -> None:
@@ -3134,7 +3134,7 @@ class ModWebTests(unittest.TestCase):
                 }
             )
         )
-        relay_mention_name = Mock(return_value="Alex")
+        relay_mention_name = Mock(return_value="Yoko")
 
         with patch(
             "web_dash.chat.config.Name_Cache",
@@ -3147,15 +3147,15 @@ class ModWebTests(unittest.TestCase):
                 preferred_guild_id=99,
             )
 
-        self.assertEqual(label, "Replying to Alex")
+        self.assertEqual(label, "Replying to Yoko")
         relay_mention_name.assert_called_once_with(42, scope="minecraft", preferred_guild_id=99, default="42")
 
     def test_chat_event_badges_include_join_notice_badge(self) -> None:
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
-            content="Alex joined Minecraft Alpha",
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="Yoko joined Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
@@ -3186,7 +3186,7 @@ class ModWebTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Alex"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
             content="Research: Electronics 1",
             embed=ChatEmbed(title="Research", description="Electronics 1", color=0x336699),
         )
@@ -3229,7 +3229,7 @@ class ModWebTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.discord_channel("123"),
-            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Alex"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Yoko"),
             content="hello",
             source_guild_id=1,
             source_channel_id=123,
@@ -3255,7 +3255,7 @@ class ModWebTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.discord_channel("123"),
-            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Alex"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Yoko"),
             content="hello",
             source_guild_id=1,
             source_channel_id=123,
@@ -3284,7 +3284,7 @@ class ModWebTests(unittest.TestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.discord_channel("123"),
-            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Alex"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Yoko"),
             content="hello",
             source_channel_id=123,
             source_label="relay-main",
@@ -3428,9 +3428,9 @@ class ModWebTests(unittest.TestCase):
             service._player_count_tooltip_html(
                 player_count=3,
                 player_capacity=20,
-                connected_player_names=("Alex", "Bea", "Casey"),
+                connected_player_names=("Yoko", "Bea", "Casey"),
             ),
-            "Alex<br>Bea<br>Casey",
+            "Yoko<br>Bea<br>Casey",
         )
         self.assertIsNone(
             service._player_count_tooltip_html(
@@ -3443,7 +3443,7 @@ class ModWebTests(unittest.TestCase):
             service._player_count_tooltip_html(
                 player_count=3,
                 player_capacity=None,
-                connected_player_names=("Alex",),
+                connected_player_names=("Yoko",),
             )
         )
 
@@ -4997,7 +4997,7 @@ class ModWebTests(unittest.TestCase):
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(kind=ChatAuthorKind.SYSTEM, display_name="System"),
-            content="Alex joined Minecraft Alpha",
+            content="Yoko joined Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
@@ -5008,7 +5008,7 @@ class ModWebTests(unittest.TestCase):
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
             author=ChatAuthor(kind=ChatAuthorKind.SYSTEM, display_name="System"),
-            content="Alex left Minecraft Alpha",
+            content="Yoko left Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.LEFT,
                 source=RelayNoticeSource.APP_LOG,
@@ -5039,7 +5039,7 @@ class ModWebTests(unittest.TestCase):
 
     def test_chat_reference_label_reflects_reference_kind(self) -> None:
         service = ModWebService()
-        reference = ChatMessageReference(author_display_name="Alex", content="hello")
+        reference = ChatMessageReference(author_display_name="Yoko", content="hello")
 
         self.assertEqual(
             service._chat_reference_label(
@@ -5048,7 +5048,7 @@ class ModWebTests(unittest.TestCase):
                 room_id="minecraft_alpha",
                 preferred_guild_id=None,
             ),
-            "Replying to Alex",
+            "Replying to Yoko",
         )
         self.assertEqual(
             service._chat_reference_label(
@@ -5057,7 +5057,7 @@ class ModWebTests(unittest.TestCase):
                 room_id="minecraft_alpha",
                 preferred_guild_id=None,
             ),
-            "Forwarded from Alex",
+            "Forwarded from Yoko",
         )
 
     def test_remote_download_url_points_at_owning_node_with_scoped_token(self) -> None:
@@ -6659,6 +6659,151 @@ class ModWebTests(unittest.TestCase):
 
         self.assertNotIn("https://unpkg.com", assets_html)
         self.assertIn("Leaflet", assets_html)
+
+    def test_render_map_section_places_controls_inside_shared_tab_toolbar(self) -> None:
+        class FakeHtmlElement:
+            def __init__(self) -> None:
+                self.class_names: list[str] = []
+
+            def classes(self, value: str) -> "FakeHtmlElement":
+                self.class_names.append(value)
+                return self
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.head_html: list[str] = []
+                self.html_fragments: list[str] = []
+                self.javascript_calls: list[tuple[str, float | None]] = []
+                self.html_elements: list[FakeHtmlElement] = []
+
+            def add_head_html(self, content: str) -> None:
+                self.head_html.append(content)
+
+            def html(self, content: str) -> FakeHtmlElement:
+                self.html_fragments.append(content)
+                element = FakeHtmlElement()
+                self.html_elements.append(element)
+                return element
+
+            def run_javascript(self, script: str, *, timeout: float | None = None) -> None:
+                self.javascript_calls.append((script, timeout))
+
+        service = ModWebService()
+        model = ModWebOverviewPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            map_url="https://example.invalid/squaremap/?world=minecraft_overworld",
+            map_api_url="/api/node/apps/minecraft_alpha/map",
+            can_write_map_annotations=True,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        tab = ModWebAppTabDefinition.custom(
+            tab_id="map",
+            label="Map",
+            page_order=350,
+            app_card_order=150,
+            app_card_tone="purple",
+            render_handler_name="_render_map_section",
+        )
+        ui = FakeUi()
+
+        service._render_map_section(ui=cast(ModWebUi, cast(object, ui)), model=model, user=user, tab=tab)
+
+        self.assertEqual(len(ui.html_fragments), 1)
+        self.assertEqual(len(ui.html_elements), 1)
+        self.assertEqual(ui.html_elements[0].class_names, ["w-full"])
+        markup = ui.html_fragments[0]
+        self.assertIn("mod-tab-toolbar mod-tab-toolbar-surface mod-map-toolbar", markup)
+        self.assertIn('class="mod-map-toolbar-main"', markup)
+        self.assertIn('class="mod-map-mode mod-subtitle">Loading map…</div>', markup)
+        self.assertIn('class="mod-map-status mod-subtitle">Loading map data…</div>', markup)
+        self.assertIn("mod-tab-toolbar-actions mod-map-toolbar-actions", markup)
+        self.assertNotIn("mod-map-toolset", markup)
+        self.assertIn('class="mod-map-toolbar-group mod-map-toolbar-group-dimension"', markup)
+        self.assertIn('class="mod-map-toolbar-group mod-map-toolbar-group-tools"', markup)
+        self.assertIn('class="mod-map-toolbar-pair mod-map-toolbar-pair-dimension"', markup)
+        self.assertIn('class="mod-map-toolbar-pair mod-map-toolbar-pair-tools"', markup)
+        self.assertIn("mod-toolbar-button mod-map-button", markup)
+        self.assertIn('class="mod-map-label-prompt"', markup)
+        self.assertIn('class="mod-map-canvas-frame"', markup)
+        self.assertIn('aria-label="Annotation label"', markup)
+        self.assertNotIn(">Cancel</button>", markup)
+        self.assertNotIn(">Pan</button>", markup)
+        self.assertNotIn(">Finish</button>", markup)
+        self.assertNotIn('id="mod-map-yuki-minecraft-alpha-finish"', markup)
+        self.assertNotIn('id="mod-map-yuki-minecraft-alpha-cancel"', markup)
+        self.assertIn('aria-label="Dimension"', markup)
+
+    def test_map_client_refresh_keeps_existing_layers_visible_until_replacements_are_ready(self) -> None:
+        assets_html = ModWebService._map_client_assets_html()
+
+        self.assertIn('replaceLayerGroup(state, "annotationLayer", annotationResult.value);', assets_html)
+        self.assertIn("nextTileLayer.setOpacity(state.tileLayer ? 0 : 1);", assets_html)
+        self.assertIn('nextTileLayer.once("load", finish);', assets_html)
+        self.assertIn("const requestAnnotationLabel = async (state, labelKind, anchorPoint = null) => {", assets_html)
+        self.assertNotIn("window.prompt(", assets_html)
+        self.assertIn("state.labelPrompt.hidden = false;", assets_html)
+        self.assertIn("background: rgba(0, 0, 0, 0.96);", assets_html)
+        self.assertIn("placeLabelPrompt(state, anchorPoint);", assets_html)
+        self.assertIn("const placeLabelPrompt = (state, anchorPoint = null) => {", assets_html)
+        self.assertIn("transform: translate(-50%, calc(-100% - 0.85rem));", assets_html)
+        self.assertIn("width: 100%;", assets_html)
+        self.assertIn("const resolveLabelPrompt = (state, value, { focusMap = true } = {}) => {", assets_html)
+        self.assertIn("const cancelPendingAnnotation = (state, { focusMap = true } = {}) => {", assets_html)
+        self.assertIn('document.addEventListener("pointerdown", state.documentPointerDownListener, true);', assets_html)
+        self.assertIn('document.addEventListener("contextmenu", state.documentContextMenuListener, true);', assets_html)
+        self.assertIn('cancelPendingAnnotation(state, { focusMap: false });', assets_html)
+        self.assertIn('state.labelPromptInput.placeholder = `Enter a label for this ${labelKind}`;', assets_html)
+        self.assertIn('void createMarkerAnnotation(state, rawPoint, event.containerPoint).catch((error) =>', assets_html)
+        self.assertIn('void finishLineAnnotation(state, event.containerPoint).catch((error) =>', assets_html)
+        self.assertNotIn("state.labelPromptCancel?.addEventListener(", assets_html)
+        self.assertIn('if (state.tool === "marker") {', assets_html)
+        self.assertIn("doubleClickZoom: false,", assets_html)
+        self.assertIn("if (event.originalEvent?.detail && event.originalEvent.detail > 1) {", assets_html)
+        self.assertIn('state.map.on("dblclick", (event) => {', assets_html)
+        self.assertIn('state.map.on("contextmenu", (event) => {', assets_html)
+        self.assertIn('setToolState(state, "pan");', assets_html)
+        self.assertIn('toggle.disabled = !enabled;', assets_html)
+        self.assertIn('toggleLabel.dataset.disabled = enabled ? "false" : "true";', assets_html)
+        self.assertIn(".mod-map-toggle[data-disabled=\"true\"]", assets_html)
+        self.assertIn("width: 100%;", assets_html)
+        self.assertIn("gap: 0.55rem;", assets_html)
+        self.assertIn("justify-content: space-between;", assets_html)
+        self.assertIn("text-align: right;", assets_html)
+        self.assertIn("justify-content: center;", assets_html)
+        self.assertIn("aspect-ratio: 1 / 1;", assets_html)
+        self.assertIn("border-radius: 0;", assets_html)
+        self.assertIn('const defaultWorldName = state.worldByName.has("minecraft_overworld")', assets_html)
+        self.assertIn('typeof layer.bringToFront === "function"', assets_html)
+        self.assertIn('void fetch(state.config.clientErrorUrl, {', assets_html)
+        self.assertIn('console.error("[mod-map]", context, error);', assets_html)
+        self.assertIn("const apiSubpathUrl = (state, baseSuffix, relativePath) => {", assets_html)
+        self.assertIn('iconUrl: apiSubpathUrl(', assets_html)
+        self.assertIn('if (markersLoaded && markersLoaded.source === MAP_SOURCE_STALE) {', assets_html)
+        self.assertIn("if (forceTiles) {", assets_html)
+        self.assertIn("await refreshTiles(state, { force: true });", assets_html)
+        self.assertNotIn("await refreshTiles(state, { force: forceTiles });", assets_html)
+        self.assertIn("const isOfflineError = isSquaremapOfflineError(detail);", assets_html)
+        self.assertIn('setStatus(state, "Map data is unavailable.", "error");', assets_html)
 
     def test_app_link_tabs_include_map_when_public_map_exists(self) -> None:
         service = ModWebService()

@@ -540,6 +540,22 @@ def _format_duration_seconds(total_seconds: int) -> str:
     return " ".join(components)
 
 
+def _sentence_case_fragment(text: str) -> str:
+    stripped_text = text.strip()
+    if not stripped_text:
+        raise ValueError("Notice fragment must not be blank.")
+    first_character = stripped_text[0]
+    return f"{first_character.upper()}{stripped_text[1:]}"
+
+
+def _render_game_death_embed_description(notice: GameDeathNotice) -> str:
+    if notice.detail_text is not None:
+        return _sentence_case_fragment(notice.detail_text)
+    if notice.death_kind is GameDeathKind.PVP:
+        return "Killed by another player"
+    return "Died"
+
+
 def render_notice_body(notice: RelayNotice, *, app_name: str) -> str:
     if isinstance(notice, PlayerSessionNotice):
         if notice.action is PlayerSessionAction.JOINED:
@@ -676,14 +692,7 @@ def notice_embed_spec(notice: RelayNotice, *, app_name: str, author_name: str) -
             return RelayNoticeEmbedSpec(title=app_name, description=f"Joined {author_name}")
         return RelayNoticeEmbedSpec(title=app_name, description=f"Left {author_name}")
     if isinstance(notice, GameDeathNotice):
-        label = "PVP Kill" if notice.death_kind is GameDeathKind.PVP else "Death"
-        if notice.death_kind is GameDeathKind.PVP:
-            if notice.detail_text is not None:
-                return RelayNoticeEmbedSpec(title=app_name, description=f"{label} {author_name}: {notice.detail_text}")
-            return RelayNoticeEmbedSpec(title=app_name, description=f"{label} {author_name}")
-        if notice.detail_text is not None:
-            return RelayNoticeEmbedSpec(title=app_name, description=f"{label} {author_name}: {notice.detail_text}")
-        return RelayNoticeEmbedSpec(title=app_name, description=f"{label} {author_name}")
+        return RelayNoticeEmbedSpec(title=app_name, description=_render_game_death_embed_description(notice))
     if isinstance(notice, GameProgressNotice):
         return RelayNoticeEmbedSpec(title=notice.label, description=notice.title)
     if isinstance(notice, GameEventNotice):

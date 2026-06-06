@@ -54,8 +54,8 @@ from chat_hub import (
 from config import Name_Cache, NameResolutionResult, NameResolutionStatus, Singleton
 from relay_notices import (
     RelayNotice,
-    notice_hides_body_content,
     notice_embed_spec,
+    notice_hides_body_content,
     render_notice_body,
     render_notice_text,
 )
@@ -2552,7 +2552,9 @@ class DC_Relay(metaclass=Singleton):
                 return notice_body, set()
             return f"{player_plate} {notice_body}".strip(), set()
 
-        parsed_content, mentions = self.names.parse_mentions(event.content)
+        app_scope = getattr(app, "scope", None) if app is not None else None
+        scope = app_scope if isinstance(app_scope, str) else None
+        parsed_content, mentions = self.names.parse_mentions(event.content, scope=scope)
         body = parsed_content
         if reference_prefix is not None:
             body = f"{reference_prefix} {body}".strip() if body else reference_prefix

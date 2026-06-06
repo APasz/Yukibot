@@ -369,6 +369,14 @@ class App(Generic[ConfigT], ABC):
         return None
 
     @property
+    def map_proxy_url(self) -> str | None:
+        return self.public_map_url
+
+    @property
+    def map_proxy_root_path(self) -> Path | None:
+        return None
+
+    @property
     def supports_map(self) -> bool:
         return self.public_map_url is not None
 
@@ -686,6 +694,37 @@ class App(Generic[ConfigT], ABC):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    async def _cancel_background_task(
+        self,
+        task: asyncio.Task[object] | None,
+        *,
+        label: str,
+        timeout_seconds: float = 1.0,
+    ) -> None:
+        if task is None or task.done():
+            return
+
+        current_loop = asyncio.get_running_loop()
+        task_loop = task.get_loop()
+        if task_loop is not current_loop:
+            deadline = current_loop.time() + timeout_seconds
+            if not task_loop.is_closed():
+                task_loop.call_soon_threadsafe(task.cancel)
+            while not task.done():
+                if current_loop.time() >= deadline:
+                    log.warning("%s %s did not finish in time after cross-loop cancellation.", self.name, label)
+                    return
+                await asyncio.sleep(0.05)
+            return
+
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout_seconds)
+        except asyncio.TimeoutError:
+            log.warning("%s %s did not finish in time after cancellation.", self.name, label)
+        except asyncio.CancelledError:
+            pass
 
     async def _terminate(self):
         if self.process is None and not self.proc_name:

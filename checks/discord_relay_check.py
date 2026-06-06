@@ -45,7 +45,7 @@ from chat_hub import (
     ChatMessageReference,
     ChatReferenceKind,
 )
-from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource
+from relay_notices import GameDeathKind, GameDeathNotice, PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource
 
 
 def _make_attachment(*, title: str, filename: str, media_type: str | None) -> hikari.Attachment:
@@ -331,8 +331,8 @@ class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
-            content="Alex joined minecraft_alpha",
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="Yoko joined minecraft_alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
@@ -466,7 +466,7 @@ class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
         original = ChatEvent(
             room_id=room_id,
             source=ChatEndpointId.app(room_id),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="hello there",
             id="event-1",
         )
@@ -492,7 +492,7 @@ class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.reference_kind, ChatReferenceKind.REPLY)
         self.assertIsNotNone(event.reference)
         assert event.reference is not None
-        self.assertEqual(event.reference.author_display_name, "Alex")
+        self.assertEqual(event.reference.author_display_name, "Yoko")
         self.assertEqual(event.reference.content, "hello there")
         delivered.assert_awaited_once_with(event)
 
@@ -641,12 +641,14 @@ class _NamesStub:
         discord_fallback_name: str | None = None,
     ) -> None:
         self.names: list[object] = []
+        self.parse_mention_calls: list[tuple[str, str | None]] = []
         self._parsed_text = parsed_text
         self._parsed_mentions = set() if parsed_mentions is None else set(parsed_mentions)
         self._relay_display_name = relay_display_name
         self._discord_fallback_name = discord_fallback_name
 
-    def parse_mentions(self, text: str) -> tuple[str, set[int]]:
+    def parse_mentions(self, text: str, *, scope: str | None = None) -> tuple[str, set[int]]:
+        self.parse_mention_calls.append((text, scope))
         return self._parsed_text or text, set(self._parsed_mentions)
 
     def set_names(self, user: object) -> None:
@@ -902,6 +904,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(text, "<<@42>> hello <@77>")
         self.assertEqual(mentions, {77})
+        self.assertEqual(cast(Any, relay).names.parse_mention_calls, [("hello @bob", "minecraft")])
 
     async def test_discord_text_uses_system_plate_for_system_author(self) -> None:
         relay = object.__new__(DC_Relay)
@@ -942,12 +945,12 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             author=ChatAuthor(ChatAuthorKind.WEB_USER, "Web Alice", discord_user_id=42),
             content="hello",
             reference_kind=ChatReferenceKind.REPLY,
-            reference=ChatMessageReference(author_display_name="Alex", content="earlier"),
+            reference=ChatMessageReference(author_display_name="Yoko", content="earlier"),
         )
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=hikari.Snowflake(123))
 
-        self.assertEqual(text, "<AliceGame> reply to <Alex>; hello")
+        self.assertEqual(text, "<AliceGame> reply to <Yoko>; hello")
         self.assertEqual(mentions, set())
 
     async def test_discord_text_skips_reply_prefix_when_native_reply_is_used(self) -> None:
@@ -967,7 +970,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             author=ChatAuthor(ChatAuthorKind.WEB_USER, "Web Alice", discord_user_id=42),
             content="hello",
             reference_kind=ChatReferenceKind.REPLY,
-            reference=ChatMessageReference(author_display_name="Alex", content="earlier"),
+            reference=ChatMessageReference(author_display_name="Yoko", content="earlier"),
         )
 
         text, mentions = await relay._discord_text_for_event(
@@ -983,7 +986,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="look",
             embed=ChatEmbed(title="Relay", description="Forwarded", color=0x336699),
             links=(ChatLink(url="https://example.invalid/cat.gif", is_media=True, extension=".gif"),),
@@ -1000,7 +1003,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="Advancement: Stone Age",
             embed=ChatEmbed(title="Advancement", description="Stone Age", color=0x336699),
         )
@@ -1024,14 +1027,14 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="Advancement: Stone Age",
             embed=ChatEmbed(title="Advancement", description="Stone Age", color=0x336699),
         )
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=None)
 
-        self.assertEqual(text, "<Alex>")
+        self.assertEqual(text, "<Yoko>")
         self.assertEqual(mentions, set())
 
     async def test_discord_text_and_embeds_synthesise_join_embed_for_typed_notice(self) -> None:
@@ -1043,8 +1046,8 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
-            content="Alex joined Minecraft Alpha",
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="Yoko joined Minecraft Alpha",
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
@@ -1058,7 +1061,57 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mentions, set())
         self.assertEqual(len(embeds), 1)
         self.assertEqual(embeds[0].title, "Minecraft Alpha")
-        self.assertEqual(embeds[0].description, "Joined Alex")
+        self.assertEqual(embeds[0].description, "Joined Yoko")
+        self.assertEqual(embeds[0].color, 0x22C55E)
+
+    async def test_discord_text_and_embeds_synthesise_death_embed_without_duplicate_player_name(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay)._chat_apps = {
+            "minecraft_alpha": SimpleNamespace(friendly="Minecraft Alpha", manage_embed_color=0x22C55E),
+        }
+
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="Yoko died to Skeleton",
+            notice=GameDeathNotice(
+                death_kind=GameDeathKind.PVE,
+                detail_text="died to Skeleton",
+                source=RelayNoticeSource.APP_LOG,
+            ),
+        )
+
+        text, mentions = await relay._discord_text_for_event(event, guild_id=None)
+        embeds = DC_Relay._embedify_event(event, app=cast(Any, relay)._chat_apps["minecraft_alpha"])
+
+        self.assertEqual(text, "<Yoko>")
+        self.assertEqual(mentions, set())
+        self.assertEqual(len(embeds), 1)
+        self.assertEqual(embeds[0].title, "Minecraft Alpha")
+        self.assertEqual(embeds[0].description, "Died to Skeleton")
+        self.assertEqual(embeds[0].color, 0x22C55E)
+
+    def test_embedify_event_synthesises_pvp_death_embed_without_player_name(self) -> None:
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="Yoko killed by another player",
+            notice=GameDeathNotice(
+                death_kind=GameDeathKind.PVP,
+                source=RelayNoticeSource.APP_LOG,
+            ),
+        )
+
+        embeds = DC_Relay._embedify_event(
+            event,
+            app=cast(Any, SimpleNamespace(friendly="Minecraft Alpha", manage_embed_color=0x22C55E)),
+        )
+
+        self.assertEqual(len(embeds), 1)
+        self.assertEqual(embeds[0].title, "Minecraft Alpha")
+        self.assertEqual(embeds[0].description, "Killed by another player")
         self.assertEqual(embeds[0].color, 0x22C55E)
 
     async def test_chat_author_membership_skips_local_dev_users(self) -> None:
@@ -1182,7 +1235,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         target_event = ChatEvent(
             room_id=room_id,
             source=ChatEndpointId.discord_channel(channel_id),
-            author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Alex", discord_user_id=42),
+            author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Yoko", discord_user_id=42),
             content="earlier",
             id="target-event",
             source_channel_id=int(channel_id),
@@ -1194,7 +1247,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             author=ChatAuthor(ChatAuthorKind.WEB_USER, "Tester"),
             content="replying",
             reference_kind=ChatReferenceKind.REPLY,
-            reference=ChatMessageReference(author_display_name="Alex", content="earlier", event_id="target-event"),
+            reference=ChatMessageReference(author_display_name="Yoko", content="earlier", event_id="target-event"),
         )
 
         relay.chat_hub.clear_room(room_id)
@@ -1231,7 +1284,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         target_event = ChatEvent(
             room_id=room_id,
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="from game",
             id="target-event",
         )
@@ -1241,7 +1294,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             author=ChatAuthor(ChatAuthorKind.WEB_USER, "Tester"),
             content="replying",
             reference_kind=ChatReferenceKind.REPLY,
-            reference=ChatMessageReference(author_display_name="Alex", content="from game", event_id="target-event"),
+            reference=ChatMessageReference(author_display_name="Yoko", content="from game", event_id="target-event"),
         )
 
         relay._record_discord_relay_message(channel_id=channel_id, message_id=hikari.Snowflake(777), event=target_event)
@@ -1260,7 +1313,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         source_event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="from game",
             id="target-event",
         )
@@ -1273,7 +1326,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
                 referenced_message=SimpleNamespace(
                     id=hikari.Snowflake(777),
                     author=SimpleNamespace(id=hikari.Snowflake(999), username="Yuki", global_name="Yuki"),
-                    content="<Alex> from game",
+                    content="<Yoko> from game",
                     attachments=(),
                 ),
             ),
@@ -1281,7 +1334,9 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         reference = relay._chat_reference_from_discord_message(message, guild_id=hikari.Snowflake(10))
 
-        self.assertEqual(reference, ChatMessageReference(author_display_name="Alex", content="from game", event_id="target-event"))
+        self.assertEqual(
+            reference, ChatMessageReference(author_display_name="Yoko", content="from game", event_id="target-event")
+        )
 
     def test_forwarded_snapshot_content_uses_snapshot_body_and_extras(self) -> None:
         message = cast(
@@ -1405,7 +1460,7 @@ class DiscordRelayQueueTests(unittest.IsolatedAsyncioTestCase):
         relay = object.__new__(DC_Relay)
         first_message = cast(
             Any,
-            SimpleNamespace(app=SimpleNamespace(name="minecraft_alpha"), player="Alex", content="bad"),
+            SimpleNamespace(app=SimpleNamespace(name="minecraft_alpha"), player="Yoko", content="bad"),
         )
         second_message = cast(
             Any,
@@ -1425,7 +1480,7 @@ class DiscordRelayQueueTests(unittest.IsolatedAsyncioTestCase):
         exception_mock.assert_called_once_with(
             "App -> Discord relay worker dropped message: app=%s player=%r content=%r",
             "minecraft_alpha",
-            "Alex",
+            "Yoko",
             "bad",
         )
 

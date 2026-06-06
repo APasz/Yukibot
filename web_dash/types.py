@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from mod_web_theme import BadgeTone
+
 from .runtime_imports import (
     AppRuntimeFault,
     Awaitable,
@@ -27,7 +29,6 @@ from .runtime_imports import (
     dataclass,
     field,
 )
-from mod_web_theme import BadgeTone
 
 ChatMediaPreviewKind: TypeAlias = Literal["image", "video", "audio"]
 
@@ -228,7 +229,7 @@ class _ModWebFakeChatPreviewState:
     app_name: str | None = None
     source_kind: ChatEndpointKind = ChatEndpointKind.APP
     author_kind: ChatAuthorKind = ChatAuthorKind.GAME_PLAYER
-    author_name: str = "Alex"
+    author_name: str = "Yoko"
     author_color_hex: str = ""
     author_avatar_uri: str = ""
     message_mode: _ModWebFakeChatMessageMode = _ModWebFakeChatMessageMode.TEXT

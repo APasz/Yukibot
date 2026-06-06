@@ -497,6 +497,173 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
         add_mock.assert_not_called()
 
+    async def test_match_kubejs_chat_relays_structured_message(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            script_path = directory / "kubejs" / "server_scripts" / "yuki_log.js"
+            script_path.parent.mkdir(parents=True)
+            script_path.write_text("// managed", encoding="utf-8")
+
+            app = cast(Any, object.__new__(Minecraft))
+            app.cfg = _make_minecraft_cfg()
+            app.name = "minecraft_demo"
+            app.scope = "minecraft"
+            app.directory = directory
+            app.mods = SimpleNamespace(
+                list_mods=lambda state=None: [SimpleNamespace(name="kubejs-forge-2001.6.5-build.26.jar")]
+                if state is not False
+                else []
+            )
+            app._kubejs_event_stream_ready = False
+            app._tail_machers = set()
+            app._players = Players(app)
+            matcher = Matchers(app)
+
+            await matcher.match_kubejs_script_loaded(
+                "[07Jun2026 03:51:57.975] [Server thread/INFO] [KubeJS Server/]: "
+                "Loaded script server_scripts:yuki_log.js in 0.011 s"
+            )
+
+            with patch("apps.minecraft.DC_Relay.add") as add_mock:
+                await matcher.match_kubejs_event(
+                    '[07Jun2026 03:52:34.516] [Worker-Main-25/INFO] [KubeJS Server/]: '
+                    'yuki_log.js#15: [YUKI_MC_EVENT] {"type":"chat","time":1.780768354516E12,'
+                    '"player":"APasz","uuid":"3ae72093-e174-439a-a155-7cf6c8651184","message":"woa"}'
+                )
+
+            add_mock.assert_called_once()
+            relayed_message = add_mock.call_args.args[0]
+            self.assertEqual(relayed_message.player, "APasz")
+            self.assertEqual(relayed_message.content, "woa")
+            self.assertEqual(app._players._player_uuids["apasz"], "3ae72093-e174-439a-a155-7cf6c8651184")
+
+    async def test_match_kubejs_event_ignores_non_script_prefixed_line(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            script_path = directory / "kubejs" / "server_scripts" / "yuki_log.js"
+            script_path.parent.mkdir(parents=True)
+            script_path.write_text("// managed", encoding="utf-8")
+
+            app = cast(Any, object.__new__(Minecraft))
+            app.cfg = _make_minecraft_cfg()
+            app.name = "minecraft_demo"
+            app.scope = "minecraft"
+            app.directory = directory
+            app.mods = SimpleNamespace(
+                list_mods=lambda state=None: [SimpleNamespace(name="kubejs-forge-2001.6.5-build.26.jar")]
+                if state is not False
+                else []
+            )
+            app._kubejs_event_stream_ready = True
+            app._tail_machers = set()
+            app._players = Players(app)
+            matcher = Matchers(app)
+
+            with patch("apps.minecraft.DC_Relay.add") as add_mock:
+                await matcher.match_kubejs_event(
+                    '[07Jun2026 03:52:34.516] [Worker-Main-25/INFO] [KubeJS Server/]: '
+                    '[YUKI_MC_EVENT] {"type":"chat","time":1.780768354516E12,'
+                    '"player":"APasz","uuid":"3ae72093-e174-439a-a155-7cf6c8651184","message":"woa"}'
+                )
+
+            add_mock.assert_not_called()
+
+    async def test_match_chat_keeps_vanilla_line_before_kubejs_script_loads(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            script_path = directory / "kubejs" / "server_scripts" / "yuki_log.js"
+            script_path.parent.mkdir(parents=True)
+            script_path.write_text("// managed", encoding="utf-8")
+
+            app = cast(Any, object.__new__(Minecraft))
+            app.cfg = _make_minecraft_cfg()
+            app.name = "minecraft_demo"
+            app.scope = "minecraft"
+            app.directory = directory
+            app.mods = SimpleNamespace(
+                list_mods=lambda state=None: [SimpleNamespace(name="kubejs-forge-2001.6.5-build.26.jar")]
+                if state is not False
+                else []
+            )
+            app._kubejs_event_stream_ready = False
+            app._tail_machers = set()
+            app._players = Players(app)
+            matcher = Matchers(app)
+
+            with patch("apps.minecraft.DC_Relay.add") as add_mock:
+                await matcher.match_chat("[12:00:00] [Server thread/INFO]: <APasz> woa")
+
+            add_mock.assert_called_once()
+
+    async def test_match_chat_ignores_vanilla_line_when_kubejs_script_is_available(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            script_path = directory / "kubejs" / "server_scripts" / "yuki_log.js"
+            script_path.parent.mkdir(parents=True)
+            script_path.write_text("// managed", encoding="utf-8")
+
+            app = cast(Any, object.__new__(Minecraft))
+            app.cfg = _make_minecraft_cfg()
+            app.name = "minecraft_demo"
+            app.scope = "minecraft"
+            app.directory = directory
+            app.mods = SimpleNamespace(
+                list_mods=lambda state=None: [SimpleNamespace(name="kubejs-forge-2001.6.5-build.26.jar")]
+                if state is not False
+                else []
+            )
+            app._kubejs_event_stream_ready = False
+            app._tail_machers = set()
+            app._players = Players(app)
+            matcher = Matchers(app)
+
+            await matcher.match_kubejs_script_loaded(
+                "[07Jun2026 03:51:57.975] [Server thread/INFO] [KubeJS Server/]: "
+                "Loaded script server_scripts:yuki_log.js in 0.011 s"
+            )
+
+            with patch("apps.minecraft.DC_Relay.add") as add_mock:
+                await matcher.match_chat("[12:00:00] [Server thread/INFO]: <APasz> woa")
+
+            add_mock.assert_not_called()
+
+    async def test_match_kubejs_player_death_is_ignored_until_native_death_relay_is_replaced(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            script_path = directory / "kubejs" / "server_scripts" / "yuki_log.js"
+            script_path.parent.mkdir(parents=True)
+            script_path.write_text("// managed", encoding="utf-8")
+
+            app = cast(Any, object.__new__(Minecraft))
+            app.cfg = _make_minecraft_cfg()
+            app.name = "minecraft_demo"
+            app.scope = "minecraft"
+            app.directory = directory
+            app.mods = SimpleNamespace(
+                list_mods=lambda state=None: [SimpleNamespace(name="kubejs-forge-2001.6.5-build.26.jar")]
+                if state is not False
+                else []
+            )
+            app._kubejs_event_stream_ready = False
+            app._tail_machers = set()
+            app._players = Players(app)
+            matcher = Matchers(app)
+
+            await matcher.match_kubejs_script_loaded(
+                "[07Jun2026 03:51:57.975] [Server thread/INFO] [KubeJS Server/]: "
+                "Loaded script server_scripts:yuki_log.js in 0.011 s"
+            )
+
+            with patch("apps.minecraft.DC_Relay.add") as add_mock:
+                await matcher.match_kubejs_event(
+                    '[07Jun2026 03:52:47.128] [Server thread/INFO] [KubeJS Server/]: '
+                    'yuki_log.js#15: [YUKI_MC_EVENT] {"type":"player_death","time":1.780768367128E12,'
+                    '"player":"APasz","uuid":"3ae72093-e174-439a-a155-7cf6c8651184","source":"DamageSource (fall)"}'
+                )
+
+            add_mock.assert_not_called()
+            self.assertEqual(app._players._player_uuids["apasz"], "3ae72093-e174-439a-a155-7cf6c8651184")
+
     async def test_match_death_preserves_multiword_create_vehicle_names(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
         app.cfg = _make_minecraft_cfg()
@@ -586,6 +753,40 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
                 relayed_message = add_mock.call_args.args[0]
                 self.assertEqual(relayed_message.player, expected_player)
                 self.assertEqual(relayed_message.content, expected_content)
+
+    async def test_match_death_ignores_non_death_mod_warning_lines(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.cfg = _make_minecraft_cfg()
+        app.name = "minecraft_demo"
+        app.scope = "minecraft"
+        app._tail_machers = set()
+        app._players = Players(app)
+        matcher = Matchers(app)
+
+        with patch("apps.minecraft.DC_Relay.add") as add_mock:
+            await matcher.match_death(
+                "[06Jun2026 07:27:28.067] [Server thread/WARN] [cgm/]: literal{asdmea}(2adf8e74-111d-4867-95c9-ae6e6a454afe) "
+                "tried to fire before cooldown finished or server is lagging? Remaining milliseconds: 89"
+            )
+
+        add_mock.assert_not_called()
+
+    async def test_match_death_ignores_chat_lines(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.cfg = _make_minecraft_cfg()
+        app.name = "minecraft_demo"
+        app.scope = "minecraft"
+        app._tail_machers = set()
+        app._players = Players(app)
+        matcher = Matchers(app)
+
+        with patch("apps.minecraft.DC_Relay.add") as add_mock:
+            await matcher.match_death(
+                "[06Jun2026 07:06:39.352] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: "
+                "<Nishant321> gotta be seiso when collecting"
+            )
+
+        add_mock.assert_not_called()
 
     async def test_match_runtime_updates_version_fields(self) -> None:
         app = cast(Any, object.__new__(Minecraft))

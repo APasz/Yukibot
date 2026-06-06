@@ -754,19 +754,21 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         self._ensure_map_client_assets(ui)
         container_id = self._map_container_id(model)
         canvas_id = f"{container_id}-canvas"
+        canvas_frame_id = f"{container_id}-canvas-frame"
         world_id = f"{container_id}-world"
-        label_id = f"{container_id}-label"
         color_id = f"{container_id}-color"
         snap_id = f"{container_id}-snap"
         status_id = f"{container_id}-status"
         notice_id = f"{container_id}-notice"
         mode_id = f"{container_id}-mode"
-        finish_id = f"{container_id}-finish"
-        cancel_id = f"{container_id}-cancel"
+        prompt_id = f"{container_id}-prompt"
+        prompt_title_id = f"{container_id}-prompt-title"
+        prompt_form_id = f"{container_id}-prompt-form"
+        prompt_input_id = f"{container_id}-prompt-input"
+        prompt_submit_id = f"{container_id}-prompt-submit"
         refresh_id = f"{container_id}-refresh"
         marker_id = f"{container_id}-marker"
         line_id = f"{container_id}-line"
-        pan_id = f"{container_id}-pan"
         read_only_note = (
             ""
             if model.can_write_map_annotations
@@ -776,66 +778,92 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 "</div>"
             )
         )
-        write_controls = (
+        write_toolbar_controls = (
             ""
             if not model.can_write_map_annotations
             else (
-                f'<div class="mod-card mod-card-plain mod-map-toolset">'
-                f'<input id="{label_id}" class="mod-map-input" type="text" maxlength="80" placeholder="Label" value="">'
+                f'<div class="mod-map-toolbar-group mod-map-toolbar-group-dimension">'
+                f'<select id="{world_id}" class="mod-map-select" aria-label="Dimension"></select>'
+                f'<div class="mod-map-toolbar-pair mod-map-toolbar-pair-dimension">'
                 f'<input id="{color_id}" class="mod-map-color" type="color" value="#22C55E" aria-label="Annotation color">'
                 f'<label class="mod-map-toggle" for="{snap_id}"><input id="{snap_id}" type="checkbox" checked>45°</label>'
-                f'<button id="{pan_id}" type="button" class="mod-list-button secondary mod-map-button mod-map-button-active">Pan</button>'
-                f'<button id="{marker_id}" type="button" class="mod-list-button secondary mod-map-button">Point</button>'
-                f'<button id="{line_id}" type="button" class="mod-list-button secondary mod-map-button">Line</button>'
-                f'<button id="{finish_id}" type="button" class="mod-list-button mod-map-button">Finish</button>'
-                f'<button id="{cancel_id}" type="button" class="mod-list-button secondary mod-map-button">Cancel</button>'
+                f"</div>"
+                f"</div>"
+                f'<div class="mod-map-toolbar-group mod-map-toolbar-group-tools">'
+                f'<div class="mod-map-toolbar-pair mod-map-toolbar-pair-tools">'
+                f'<button id="{marker_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Point</button>'
+                f'<button id="{line_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Line</button>'
+                f"</div>"
+                f'<button id="{refresh_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Refresh</button>'
                 f"</div>"
             )
         )
-        ui.html(
+        map_html = ui.html(
             f"""
             <div id="{container_id}" class="mod-map-shell">
-              <div class="mod-card mod-card-plain mod-map-toolbar">
+              <div class="mod-card mod-card-plain mod-tab-toolbar mod-tab-toolbar-surface mod-map-toolbar">
                 <div class="mod-map-toolbar-main">
-                  <select id="{world_id}" class="mod-map-select" aria-label="World"></select>
                   <div id="{mode_id}" class="mod-map-mode mod-subtitle">Loading map…</div>
+                  <div id="{status_id}" class="mod-map-status mod-subtitle">Loading map data…</div>
                 </div>
-                <div class="mod-map-toolbar-actions">
-                  <button id="{refresh_id}" type="button" class="mod-list-button secondary mod-map-button">Refresh</button>
+                <div class="mod-tab-toolbar-actions mod-map-toolbar-actions">
+                  {write_toolbar_controls}
+                  {"" if model.can_write_map_annotations else f'<select id="{world_id}" class="mod-map-select" aria-label="Dimension"></select><button id="{refresh_id}" type="button" class="mod-list-button secondary mod-toolbar-button mod-map-button">Refresh</button>'}
                 </div>
               </div>
-              {write_controls}
               {read_only_note}
               <div class="mod-card mod-card-plain mod-map-status-panel">
-                <div id="{status_id}" class="mod-map-status mod-subtitle">Loading map data…</div>
                 <div id="{notice_id}" class="mod-map-notice mod-subtitle">Connecting to Squaremap…</div>
-                <div class="mod-map-help mod-subtitle">Plan bases, portals, and 45 degree rail lines without leaving the dashboard.</div>
               </div>
               <div class="mod-card mod-card-plain mod-map-stage">
-                <div id="{canvas_id}" class="mod-map-canvas"></div>
+                <div id="{canvas_frame_id}" class="mod-map-canvas-frame">
+                  <div id="{canvas_id}" class="mod-map-canvas"></div>
+                  <div id="{prompt_id}" class="mod-map-label-prompt" hidden>
+                    <div id="{prompt_title_id}" class="mod-map-label-prompt-title">Label annotation</div>
+                    <form id="{prompt_form_id}" class="mod-map-label-prompt-form">
+                      <input
+                        id="{prompt_input_id}"
+                        class="mod-map-label-input"
+                        type="text"
+                        maxlength="80"
+                        autocomplete="off"
+                      spellcheck="false"
+                      aria-label="Annotation label">
+                      <div class="mod-map-label-prompt-actions">
+                        <button id="{prompt_submit_id}" type="submit" class="mod-list-button mod-toolbar-button mod-map-button">Save</button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
               </div>
             </div>
             """
         )
+        map_html.classes("w-full")
         ui.run_javascript(
             self._map_client_bootstrap_script(
                 config_payload={
                     "containerId": container_id,
                     "canvasId": canvas_id,
+                    "canvasFrameId": canvas_frame_id,
                     "worldSelectId": world_id,
-                    "labelInputId": label_id,
                     "colorInputId": color_id,
                     "snapToggleId": snap_id,
                     "statusId": status_id,
                     "noticeId": notice_id,
                     "modeId": mode_id,
-                    "finishButtonId": finish_id,
-                    "cancelButtonId": cancel_id,
+                    "promptId": prompt_id,
+                    "promptTitleId": prompt_title_id,
+                    "promptFormId": prompt_form_id,
+                    "promptInputId": prompt_input_id,
+                    "promptSubmitId": prompt_submit_id,
                     "refreshButtonId": refresh_id,
                     "markerButtonId": marker_id,
                     "lineButtonId": line_id,
-                    "panButtonId": pan_id,
+                    "appName": model.app_name,
+                    "nodeName": model.node_name,
                     "mapApiUrl": model.map_api_url,
+                    "clientErrorUrl": "/mod-web/client-errors/map",
                     "publicMapUrl": model.map_url,
                     "canWrite": model.can_write_map_annotations,
                 }
@@ -870,10 +898,9 @@ class ModWebAppPageMixin(ModWebServiceSupport):
               .mod-map-shell {
                 display: flex;
                 flex-direction: column;
-                gap: 0.85rem;
+                width: 100%;
+                gap: 0.55rem;
               }
-              .mod-map-toolbar,
-              .mod-map-toolset,
               .mod-map-status-panel {
                 display: flex;
                 flex-wrap: wrap;
@@ -881,79 +908,250 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 justify-content: space-between;
                 gap: 0.75rem;
               }
-              .mod-map-toolbar,
-              .mod-map-toolset,
               .mod-map-status-panel,
               .mod-map-note,
               .mod-map-stage {
+                width: 100%;
+                box-sizing: border-box;
                 padding: 1rem 1.1rem;
               }
+              .mod-map-toolbar {
+                display: flex;
+                flex-direction: column;
+                align-items: stretch;
+                width: 100%;
+                box-sizing: border-box;
+                gap: 0.65rem;
+              }
               .mod-map-toolbar-main,
+              .mod-map-toolbar-group,
+              .mod-map-toolbar-pair,
               .mod-map-toolbar-actions {
                 display: flex;
+                align-items: center;
+                gap: 0.55rem;
+              }
+              .mod-map-toolbar-main {
+                width: 100%;
+                min-width: 0;
+                flex-wrap: nowrap;
+                justify-content: space-between;
+              }
+              .mod-map-toolbar-actions {
+                width: 100%;
                 flex-wrap: wrap;
                 align-items: center;
-                gap: 0.75rem;
+                gap: 0.65rem;
               }
-              .mod-map-toolset {
-                padding: 0.85rem 1rem;
-                border: 1px solid var(--mod-border);
-                border-radius: 1rem;
-                background:
-                  linear-gradient(135deg, rgba(22, 163, 74, 0.06), rgba(15, 23, 42, 0.02)),
-                  var(--mod-card-bg, rgba(255, 255, 255, 0.7));
+              .mod-map-toolbar-group {
+                min-width: 0;
+              }
+              .mod-map-toolbar-group-dimension {
+                flex: 1 1 18rem;
+                flex-wrap: nowrap;
+              }
+              .mod-map-toolbar-group-tools {
+                flex: 1 1 16rem;
+                flex-wrap: nowrap;
+                justify-content: flex-end;
+              }
+              .mod-map-toolbar-pair-dimension {
+                flex: 0 0 auto;
+                flex-wrap: nowrap;
+              }
+              .mod-map-toolbar-pair-tools {
+                flex: 1 1 auto;
+                min-width: 0;
+                flex-wrap: nowrap;
               }
               .mod-map-status-panel {
                 align-items: flex-start;
               }
+              .mod-map-label-prompt[hidden] {
+                display: none;
+              }
+              .mod-map-canvas-frame {
+                position: relative;
+                width: 100%;
+                max-width: min(100%, 72rem);
+              }
+              .mod-map-label-prompt {
+                position: absolute;
+                z-index: 700;
+                display: flex;
+                flex-direction: column;
+                gap: 0.55rem;
+                width: min(19rem, calc(100% - 1rem));
+                padding: 0.8rem 0.85rem;
+                border: 1px solid rgba(139, 92, 246, 0.42);
+                border-radius: 0;
+                background: rgba(0, 0, 0, 0.96);
+                box-shadow:
+                  0 18px 42px rgba(3, 7, 18, 0.34),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.05),
+                  inset 0 -1px 0 rgba(139, 92, 246, 0.16);
+                transform: translate(-50%, calc(-100% - 0.85rem));
+              }
+              .mod-map-label-prompt-title {
+                color: #ddd6fe;
+                font-size: 0.85rem;
+                font-weight: 700;
+                letter-spacing: 0.02em;
+                text-transform: uppercase;
+              }
+              .mod-map-label-prompt-form {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 0.55rem;
+              }
+              .mod-map-label-input {
+                width: 100%;
+                min-height: 2.5rem;
+                padding: 0 0.9rem;
+                border: 1px solid rgba(139, 92, 246, 0.42);
+                border-radius: 0;
+                background:
+                  linear-gradient(180deg, rgba(196, 181, 253, 0.08), rgba(196, 181, 253, 0)),
+                  rgba(36, 17, 58, 0.72);
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.04),
+                  inset 0 -1px 0 rgba(139, 92, 246, 0.24);
+                color: #f5f3ff;
+              }
+              .mod-map-label-input::placeholder {
+                color: rgba(237, 233, 254, 0.62);
+              }
+              .mod-map-label-input:focus {
+                outline: none;
+                border-color: rgba(196, 181, 253, 0.9);
+                box-shadow:
+                  0 0 0 1px rgba(196, 181, 253, 0.35),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.04),
+                  inset 0 -1px 0 rgba(139, 92, 246, 0.24);
+              }
+              .mod-map-label-prompt-actions {
+                display: flex;
+                width: 100%;
+                align-items: center;
+                gap: 0.55rem;
+              }
+              .mod-map-label-prompt-actions .mod-map-button {
+                flex: 1 1 100%;
+                width: 100%;
+              }
               .mod-map-stage {
-                padding: 0.8rem;
+                display: flex;
+                justify-content: center;
+                padding: 0.7rem;
+                border: 1px solid rgba(139, 92, 246, 0.24);
+                background:
+                  linear-gradient(180deg, rgba(76, 29, 149, 0.14), rgba(24, 24, 27, 0)),
+                  rgba(12, 10, 18, 0.62);
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.03),
+                  inset 0 -1px 0 rgba(139, 92, 246, 0.1);
               }
               .mod-map-select,
-              .mod-map-input,
-              .mod-map-color {
-                border: 1px solid var(--mod-border);
-                border-radius: 999px;
-                background: rgba(255, 255, 255, 0.88);
-                color: var(--mod-text, #111827);
+              .mod-map-color,
+              .mod-map-toggle {
+                border: 1px solid rgba(139, 92, 246, 0.42);
+                border-radius: 0;
+                background:
+                  linear-gradient(180deg, rgba(196, 181, 253, 0.08), rgba(196, 181, 253, 0)),
+                  rgba(36, 17, 58, 0.72);
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.04),
+                  inset 0 -1px 0 rgba(139, 92, 246, 0.24);
+                color: #f5f3ff;
                 min-height: 2.5rem;
               }
-              .mod-map-select,
-              .mod-map-input {
-                padding: 0 0.9rem;
+              .mod-map-select {
+                flex: 1 1 12rem;
+                min-width: 10rem;
+                padding: 0 0.75rem;
+                appearance: none;
               }
-              .mod-map-input {
-                min-width: 14rem;
+              .mod-map-select option {
+                background: #1f1630;
+                color: #f5f3ff;
               }
               .mod-map-color {
-                width: 2.75rem;
-                padding: 0.25rem;
+                width: 2.5rem;
+                min-width: 2.5rem;
+                padding: 0.2rem;
+              }
+              .mod-map-color::-webkit-color-swatch-wrapper {
+                padding: 0;
+              }
+              .mod-map-color::-webkit-color-swatch,
+              .mod-map-color::-moz-color-swatch {
+                border: none;
+                border-radius: 0;
               }
               .mod-map-button {
                 min-height: 2.5rem;
+                padding: 0 0.85rem;
               }
-              .mod-map-button-active {
-                border-color: #15803d;
-                box-shadow: inset 0 0 0 1px rgba(21, 128, 61, 0.2);
-                background: rgba(34, 197, 94, 0.12);
+              .mod-map-toolbar-group-tools .mod-map-button {
+                flex: 1 1 0;
+                min-width: 0;
+              }
+              .mod-map-toolbar .mod-list-button.mod-toolbar-button.mod-map-button.mod-map-button-active {
+                border-color: rgba(168, 85, 247, 0.9) !important;
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.06),
+                  inset 0 -1px 0 rgba(216, 180, 254, 0.28),
+                  0 0 0 1px rgba(168, 85, 247, 0.18) !important;
+                background:
+                  linear-gradient(180deg, rgba(168, 85, 247, 0.28), rgba(126, 34, 206, 0.18)),
+                  rgba(67, 26, 95, 0.92) !important;
+                color: #faf5ff !important;
               }
               .mod-map-toggle {
                 display: inline-flex;
                 align-items: center;
                 gap: 0.4rem;
                 font-size: 0.92rem;
-                color: var(--mod-subtitle, #4b5563);
+                min-width: 2.5rem;
+                padding: 0 0.75rem;
+                color: #ede9fe;
+              }
+              .mod-map-toggle[data-disabled="true"] {
+                border-color: rgba(115, 115, 125, 0.36);
+                background:
+                  linear-gradient(180deg, rgba(82, 82, 91, 0.08), rgba(82, 82, 91, 0)),
+                  rgba(24, 24, 27, 0.72);
+                box-shadow:
+                  inset 0 1px 0 rgba(255, 255, 255, 0.02),
+                  inset 0 -1px 0 rgba(82, 82, 91, 0.18);
+                color: #a1a1aa;
+                opacity: 0.8;
+              }
+              .mod-map-toggle input {
+                accent-color: #a855f7;
+              }
+              .mod-map-toggle input:disabled {
+                cursor: not-allowed;
               }
               .mod-map-readonly,
-              .mod-map-status,
               .mod-map-notice,
               .mod-map-mode,
               .mod-map-help {
                 color: var(--mod-subtitle, #4b5563);
                 font-size: 0.92rem;
               }
+              .mod-map-mode {
+                min-width: 0;
+                white-space: nowrap;
+              }
               .mod-map-status {
+                color: var(--mod-subtitle, #4b5563);
+                font-size: 0.92rem;
                 font-weight: 600;
+                margin-left: auto;
+                text-align: right;
+                white-space: nowrap;
               }
               .mod-map-help {
                 width: 100%;
@@ -984,20 +1182,41 @@ class ModWebAppPageMixin(ModWebServiceSupport):
               }
               .mod-map-canvas {
                 width: 100%;
-                min-height: 34rem;
-                height: min(68vh, 52rem);
-                border-radius: 1.25rem;
-                border: 1px solid rgba(15, 23, 42, 0.12);
+                aspect-ratio: 1 / 1;
+                min-height: 0;
+                height: auto;
+                border-radius: 0;
+                border: 1px solid rgba(196, 181, 253, 0.2);
                 overflow: hidden;
                 background:
-                  radial-gradient(circle at top, rgba(56, 189, 248, 0.18), transparent 38%),
-                  linear-gradient(180deg, rgba(226, 232, 240, 0.92), rgba(248, 250, 252, 0.96));
+                  radial-gradient(circle at top, rgba(56, 189, 248, 0.22), transparent 34%),
+                  linear-gradient(180deg, rgba(226, 232, 240, 0.94), rgba(248, 250, 252, 0.98));
+                box-shadow:
+                  0 20px 48px rgba(3, 7, 18, 0.26),
+                  0 0 0 1px rgba(139, 92, 246, 0.08);
               }
               .mod-map-canvas .leaflet-container {
                 width: 100%;
                 height: 100%;
                 background: transparent;
                 font: inherit;
+              }
+              .mod-map-canvas .leaflet-control-zoom {
+                border: 1px solid rgba(139, 92, 246, 0.28);
+                border-radius: 0;
+                overflow: hidden;
+                box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+              }
+              .mod-map-canvas .leaflet-control-zoom a {
+                border-radius: 0;
+                background:
+                  linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(226, 232, 240, 0.96));
+                color: #111827;
+              }
+              .mod-map-canvas .leaflet-control-zoom a:hover {
+                background:
+                  linear-gradient(180deg, rgba(237, 233, 254, 0.96), rgba(221, 214, 254, 0.92));
+                color: #4c1d95;
               }
               .mod-map-player-label,
               .mod-map-annotation-label {
@@ -1020,14 +1239,40 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 font: inherit;
                 padding: 0.3rem 0.7rem;
               }
+              .mod-map-annotation-meta {
+                margin-top: 0.3rem;
+                color: #6b7280;
+                font-size: 0.8rem;
+              }
               @media (max-width: 768px) {
-                .mod-map-input {
-                  min-width: 10rem;
+                .mod-map-toolbar-main,
+                .mod-map-toolbar-actions,
+                .mod-map-toolbar-group {
+                  width: 100%;
+                }
+                .mod-map-toolbar-group-dimension {
+                  flex-wrap: wrap;
+                }
+                .mod-map-toolbar-group-tools {
+                  flex-wrap: wrap;
+                  justify-content: stretch;
+                }
+                .mod-map-toolbar-pair-tools {
                   flex: 1 1 100%;
                 }
+                .mod-map-select {
+                  min-width: 10rem;
+                  flex: 1 1 11rem;
+                }
+                .mod-map-status {
+                  max-width: 55%;
+                }
+                .mod-map-label-prompt {
+                  width: calc(100% - 0.6rem);
+                  transform: translate(-50%, calc(-100% - 0.6rem));
+                }
                 .mod-map-canvas {
-                  min-height: 26rem;
-                  height: 58vh;
+                  max-width: 100%;
                 }
               }
             </style>
@@ -1136,7 +1381,9 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                   const squaremapRadius = (world, radius) => radius * world.scale;
                   const annotationPopupHtml = (annotation, canWrite, containerId) => {
                     const label = escapeHtml(annotation.label);
-                    const createdBy = annotation.created_by_name ? `<div>${escapeHtml(annotation.created_by_name)}</div>` : "";
+                    const createdBy = annotation.created_by_name
+                      ? `<div class="mod-map-annotation-meta">By ${escapeHtml(annotation.created_by_name)}</div>`
+                      : "";
                     const deleteButton = canWrite
                       ? `<button type="button" data-map-delete="${escapeHtml(annotation.annotation_id)}" data-map-container="${escapeHtml(containerId)}">Delete</button>`
                       : "";
@@ -1161,6 +1408,70 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       state.modeEl.textContent = message;
                     }
                   };
+                  const isLabelPromptOpen = (state) => state.labelPrompt && state.labelPrompt.hidden === false;
+                  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+                  const placeLabelPrompt = (state, anchorPoint = null) => {
+                    if (!state.labelPrompt || !state.canvasFrame) {
+                      return;
+                    }
+                    const fallbackPoint = {
+                      x: state.canvasFrame.clientWidth / 2,
+                      y: state.canvasFrame.clientHeight / 2,
+                    };
+                    const requestedPoint = anchorPoint || state.lastPromptAnchorPoint || fallbackPoint;
+                    const promptWidth = state.labelPrompt.offsetWidth || 304;
+                    const promptHeight = state.labelPrompt.offsetHeight || 148;
+                    const frameWidth = state.canvasFrame.clientWidth;
+                    const frameHeight = state.canvasFrame.clientHeight;
+                    const nextLeft = clamp(requestedPoint.x, promptWidth / 2 + 8, frameWidth - promptWidth / 2 - 8);
+                    const nextTop = clamp(requestedPoint.y, promptHeight + 16, frameHeight - 12);
+                    state.lastPromptAnchorPoint = { x: nextLeft, y: nextTop };
+                    state.labelPrompt.style.left = `${nextLeft}px`;
+                    state.labelPrompt.style.top = `${nextTop}px`;
+                  };
+                  const resolveLabelPrompt = (state, value, { focusMap = true } = {}) => {
+                    const pendingLabelPrompt = state.pendingLabelPrompt;
+                    state.pendingLabelPrompt = null;
+                    state.pendingLabelKind = null;
+                    closeLabelPrompt(state, { focusMap });
+                    pendingLabelPrompt?.(value);
+                  };
+                  const closeLabelPrompt = (state, { focusMap = true } = {}) => {
+                    if (state.labelPrompt) {
+                      state.labelPrompt.hidden = true;
+                    }
+                    if (state.labelPromptInput) {
+                      state.labelPromptInput.value = "";
+                    }
+                    state.lastPromptAnchorPoint = null;
+                    if (focusMap) {
+                      state.map?.getContainer?.().focus?.();
+                    }
+                  };
+                  const cancelPendingAnnotation = (state, { focusMap = true } = {}) => {
+                    const pendingKind = state.pendingLabelKind;
+                    resolveLabelPrompt(state, null, { focusMap });
+                    if (pendingKind === "line" || state.pendingLine.length > 0) {
+                      cancelLineDraft(state);
+                      setStatus(state, "Cancelled line draft.");
+                      return;
+                    }
+                    if (pendingKind === "point" && state.config.canWrite) {
+                      setToolState(state, "pan");
+                      setStatus(state, "Cancelled point placement.");
+                    }
+                  };
+                  const setSnapToggleState = (state, enabled) => {
+                    const toggle = state.snapToggle;
+                    const toggleLabel = toggle?.closest(".mod-map-toggle");
+                    if (!toggle) {
+                      return;
+                    }
+                    toggle.disabled = !enabled;
+                    if (toggleLabel) {
+                      toggleLabel.dataset.disabled = enabled ? "false" : "true";
+                    }
+                  };
                   const setToolState = (state, tool) => {
                     state.tool = tool;
                     for (const [name, button] of Object.entries(state.toolButtons)) {
@@ -1169,12 +1480,13 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       }
                       button.classList.toggle("mod-map-button-active", name === tool);
                     }
+                    setSnapToggleState(state, tool === "line");
                     if (tool === "line") {
                       const pointCount = state.pendingLine.length;
                       setModeText(state, pointCount > 0 ? `Line tool: ${pointCount} point${pointCount === 1 ? "" : "s"}` : "Line tool");
                       return;
                     }
-                    setModeText(state, tool === "marker" ? "Point tool" : "Pan tool");
+                    setModeText(state, tool === "marker" ? "Point tool" : "Pan mode");
                   };
                   const destroyInstance = (containerId) => {
                     const state = instances.get(containerId);
@@ -1186,6 +1498,12 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     }
                     if (state.visibilityTimer) {
                       window.clearInterval(state.visibilityTimer);
+                    }
+                    if (state.documentPointerDownListener) {
+                      document.removeEventListener("pointerdown", state.documentPointerDownListener, true);
+                    }
+                    if (state.documentContextMenuListener) {
+                      document.removeEventListener("contextmenu", state.documentContextMenuListener, true);
                     }
                     if (state.map) {
                       state.map.remove();
@@ -1238,6 +1556,9 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     }
                     return text;
                   };
+                  const isSquaremapOfflineError = (detail) =>
+                    detail.startsWith("Squaremap request timed out:")
+                    || detail.startsWith("Squaremap request failed:");
                   const responseErrorMessage = async (response) => {
                     try {
                       const payload = await response.clone().json();
@@ -1281,6 +1602,12 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     const query = searchParams.toString();
                     return `${basePath}${suffix}${query ? `?${query}` : ""}`;
                   };
+                  const apiSubpathUrl = (state, baseSuffix, relativePath) => {
+                    const baseUrl = new URL(apiUrl(state, baseSuffix), window.location.origin);
+                    const joinedPath =
+                      `${baseUrl.pathname.replace(/\\/$/, "")}/${String(relativePath || "").replace(/^\\/+/, "")}`;
+                    return `${joinedPath}${baseUrl.search}`;
+                  };
                   const tileUrlTemplate = (state, world) =>
                     apiUrl(
                       state,
@@ -1297,6 +1624,90 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       noWrap: true,
                       errorTileUrl: transparentTile,
                     });
+                  const bringLayerToFront = (layer) => {
+                    if (!layer) {
+                      return;
+                    }
+                    if (typeof layer.bringToFront === "function") {
+                      layer.bringToFront();
+                      return;
+                    }
+                    if (typeof layer.eachLayer === "function") {
+                      layer.eachLayer((childLayer) => bringLayerToFront(childLayer));
+                    }
+                  };
+                  const reportClientError = (state, error, context) => {
+                    if (!state?.config?.clientErrorUrl) {
+                      return;
+                    }
+                    const message =
+                      error instanceof Error
+                        ? normalizeMapError(error.message, "Map data is unavailable.")
+                        : normalizeMapError(String(error), "Map data is unavailable.");
+                    const stack = error instanceof Error && typeof error.stack === "string" ? error.stack : null;
+                    const signature = JSON.stringify([context, message, stack]);
+                    const now = Date.now();
+                    if (
+                      state.lastClientErrorSignature === signature
+                      && state.lastClientErrorReportedAt !== null
+                      && now - state.lastClientErrorReportedAt < 30000
+                    ) {
+                      return;
+                    }
+                    state.lastClientErrorSignature = signature;
+                    state.lastClientErrorReportedAt = now;
+                    const payload = {
+                      context,
+                      message,
+                      stack,
+                      page_path: window.location.pathname,
+                      app_name: state.config.appName || null,
+                      node_name: state.config.nodeName || null,
+                      map_api_url: state.config.mapApiUrl || null,
+                      public_map_url: state.config.publicMapUrl || null,
+                    };
+                    console.error("[mod-map]", context, error);
+                    void fetch(state.config.clientErrorUrl, {
+                      method: "POST",
+                      headers: {
+                        "Content-Type": "application/json",
+                        Accept: "application/json",
+                      },
+                      body: JSON.stringify(payload),
+                      keepalive: true,
+                    }).catch(() => {});
+                  };
+                  const handleClientActionFailure = (state, error, context) => {
+                    const message =
+                      error instanceof Error
+                        ? normalizeMapError(error.message, "Map action failed.")
+                        : "Map action failed.";
+                    reportClientError(state, error, context);
+                    setStatus(state, message, "error");
+                  };
+                  const syncOverlayOrder = (state) => {
+                    bringLayerToFront(state.squaremapLayer);
+                    bringLayerToFront(state.playerLayer);
+                    bringLayerToFront(state.annotationLayer);
+                    bringLayerToFront(state.previewLayerGroup);
+                  };
+                  const replaceLayerGroup = (state, layerKey, nextLayer) => {
+                    const currentLayer = state[layerKey];
+                    if (currentLayer === nextLayer) {
+                      syncOverlayOrder(state);
+                      return;
+                    }
+                    nextLayer.addTo(state.map);
+                    state[layerKey] = nextLayer;
+                    currentLayer?.remove();
+                    syncOverlayOrder(state);
+                  };
+                  const resetTileLayers = (state) => {
+                    state.pendingTileLayer?.remove();
+                    state.pendingTileLayer = null;
+                    state.tileLayer?.remove();
+                    state.tileLayer = null;
+                  };
                   const populateWorldOptions = (state) => {
                     if (!state.worldSelect) {
                       return;
@@ -1384,9 +1795,9 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       createPopupDeleteHandler(state, layer, annotation);
                     }
                   };
-                  const refreshAnnotations = async (state) => {
+                  const loadAnnotationLayer = async (state) => {
                     const payload = await fetchJson(apiUrl(state, "/annotations"));
-                    state.annotationLayer.clearLayers();
+                    const nextLayer = window.L.layerGroup();
                     for (const annotation of payload.annotations || []) {
                       if (!state.currentWorld || annotation.world_name !== state.currentWorld.name) {
                         continue;
@@ -1399,7 +1810,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                           fillColor: annotation.color_hex,
                           fillOpacity: 0.95,
                           weight: 2,
-                        }).addTo(state.annotationLayer);
+                        }).addTo(nextLayer);
                         bindAnnotationLayer(state, layer, annotation);
                         continue;
                       }
@@ -1412,29 +1823,32 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                             opacity: 0.92,
                             dashArray: "12 8",
                           },
-                        ).addTo(state.annotationLayer);
+                        ).addTo(nextLayer);
                         bindAnnotationLayer(state, layer, annotation);
                       }
                     }
+                    return nextLayer;
                   };
-                  const refreshPlayers = async (state) => {
+                  const refreshAnnotations = async (state) => {
+                    replaceLayerGroup(state, "annotationLayer", await loadAnnotationLayer(state));
+                  };
+                  const loadPlayerLayer = async (state) => {
+                    const nextLayer = window.L.layerGroup();
                     if (!state.currentWorld) {
-                      return { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true };
+                      return { result: { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true }, layer: nextLayer };
                     }
                     if (!state.currentWorld.player_tracker?.enabled) {
-                      state.playerLayer.clearLayers();
-                      return { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true };
+                      return { result: { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true }, layer: nextLayer };
                     }
                     const result = await fetchJsonDetailed(apiUrl(state, "/players"));
                     const payload = result.data;
-                    state.playerLayer.clearLayers();
                     const players = Array.isArray(payload?.players)
                       ? payload.players
                       : Array.isArray(payload)
                         ? payload
                         : [];
                     if (players.length === 0) {
-                      return result;
+                      return { result, layer: nextLayer };
                     }
                     for (const player of players) {
                       if (!player || player.world !== state.currentWorld.name) {
@@ -1446,13 +1860,13 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         fillColor: "#22c55e",
                         fillOpacity: 0.95,
                         weight: 2,
-                      }).addTo(state.playerLayer);
+                      }).addTo(nextLayer);
                       marker.bindTooltip(player.display_name || player.name, {
                         direction: "top",
                         className: "mod-map-player-label",
                       });
                     }
-                    return result;
+                    return { result, layer: nextLayer };
                   };
                   const squaremapMarkerLayer = (state, markerData) => {
                     const world = state.currentWorld;
@@ -1466,7 +1880,11 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       const tooltipAnchor = markerData.tooltip_anchor || { x: 0, z: -Math.round(size.z / 2) };
                       return window.L.marker(toLatLng(world, markerData.point), {
                         icon: window.L.icon({
-                          iconUrl: `${state.iconBaseUrl}/icon/registered/${encodeURIComponent(markerData.icon)}.png`,
+                          iconUrl: apiSubpathUrl(
+                            state,
+                            "/assets",
+                            `icon/registered/${encodeURIComponent(markerData.icon)}.png`,
+                          ),
                           iconSize: [size.x, size.z],
                           iconAnchor: [anchor.x, anchor.z],
                           popupAnchor: [tooltipAnchor.x, tooltipAnchor.z],
@@ -1507,17 +1925,17 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     }
                     return null;
                   };
-                  const refreshSquaremapMarkers = async (state) => {
+                  const loadSquaremapMarkerLayer = async (state) => {
+                    const nextLayer = window.L.layerGroup();
                     if (!state.currentWorld) {
-                      return { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true };
+                      return { result: { source: MAP_SOURCE_LIVE, cacheUpdatedAtUnixMs: null, skipped: true }, layer: nextLayer };
                     }
                     const result = await fetchJsonDetailed(
                       apiUrl(state, `/worlds/${encodeURIComponent(state.currentWorld.name)}/markers`),
                     );
                     const payload = result.data;
-                    state.squaremapLayer.clearLayers();
                     if (!Array.isArray(payload)) {
-                      return result;
+                      return { result, layer: nextLayer };
                     }
                     for (const markerLayer of payload) {
                       if (!markerLayer || markerLayer.hide === true || !markerLayer.markers) {
@@ -1534,10 +1952,10 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         if (markerData.popup) {
                           layer.bindPopup(markerData.popup);
                         }
-                        layer.addTo(state.squaremapLayer);
+                        layer.addTo(nextLayer);
                       }
                     }
-                    return result;
+                    return { result, layer: nextLayer };
                   };
                   const snapLinePoint = (anchor, point) => {
                     const deltaX = point.x - anchor.x;
@@ -1559,8 +1977,8 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       z: anchor.z + Math.sign(deltaZ || 1) * diagonal,
                     };
                   };
-                  const refreshTiles = (state, { force = false } = {}) => {
-                    if (!state.currentWorld || !state.tileLayer) {
+                  const refreshTiles = async (state, { force = false } = {}) => {
+                    if (!state.currentWorld) {
                       return;
                     }
                     const now = Date.now();
@@ -1570,19 +1988,83 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     }
                     state.tileRevision += 1;
                     state.lastTileRefreshAt = now;
-                    state.tileLayer.setUrl(tileUrlTemplate(state, state.currentWorld));
-                  };
-                  const currentDraftLabel = (state) => {
-                    if (!state.labelInput) {
-                      return "";
+                    state.pendingTileLayer?.remove();
+                    state.pendingTileLayer = null;
+                    const nextTileLayer = createTileLayer(state, state.currentWorld);
+                    nextTileLayer.setOpacity(state.tileLayer ? 0 : 1);
+                    nextTileLayer.addTo(state.map);
+                    if (!state.tileLayer) {
+                      state.tileLayer = nextTileLayer;
+                      syncOverlayOrder(state);
+                      return;
                     }
-                    return state.labelInput.value.trim();
+                    state.pendingTileLayer = nextTileLayer;
+                    syncOverlayOrder(state);
+                    await new Promise((resolve) => {
+                      let settled = false;
+                      const finish = () => {
+                        if (settled) {
+                          return;
+                        }
+                        settled = true;
+                        timeoutId && window.clearTimeout(timeoutId);
+                        if (state.pendingTileLayer !== nextTileLayer) {
+                          resolve(null);
+                          return;
+                        }
+                        const previousTileLayer = state.tileLayer;
+                        state.pendingTileLayer = null;
+                        state.tileLayer = nextTileLayer;
+                        nextTileLayer.setOpacity(1);
+                        if (previousTileLayer && previousTileLayer !== nextTileLayer) {
+                          previousTileLayer.remove();
+                        }
+                        syncOverlayOrder(state);
+                        resolve(null);
+                      };
+                      const timeoutId = window.setTimeout(finish, 1500);
+                      nextTileLayer.once("load", finish);
+                    });
                   };
                   const currentDraftColor = (state) => {
                     if (!state.colorInput || !state.colorInput.value) {
                       return "#22C55E";
                     }
                     return state.colorInput.value.toUpperCase();
+                  };
+                  const requestAnnotationLabel = async (state, labelKind, anchorPoint = null) => {
+                    if (!state.labelPrompt || !state.labelPromptTitle || !state.labelPromptInput) {
+                      throw new Error("Map label prompt is unavailable.");
+                    }
+                    if (state.pendingLabelPrompt) {
+                      return null;
+                    }
+                    state.pendingLabelKind = labelKind;
+                    state.labelPrompt.hidden = false;
+                    state.labelPromptTitle.textContent = `Label ${labelKind}`;
+                    state.labelPromptInput.placeholder = `Enter a label for this ${labelKind}`;
+                    state.labelPromptInput.value = "";
+                    window.setTimeout(() => {
+                      placeLabelPrompt(state, anchorPoint);
+                      state.labelPromptInput?.focus();
+                      state.labelPromptInput?.select();
+                    }, 0);
+                    const label = await new Promise((resolve) => {
+                      state.pendingLabelPrompt = resolve;
+                    });
+                    if (typeof label !== "string") {
+                      return null;
+                    }
+                    const trimmedLabel = label.trim();
+                    if (!trimmedLabel) {
+                      setStatus(state, "A label is required.", "error");
+                      return null;
+                    }
+                    if (trimmedLabel.length > 80) {
+                      setStatus(state, "Labels must be 80 characters or fewer.", "error");
+                      return null;
+                    }
+                    return trimmedLabel;
                   };
                   const cancelLineDraft = (state) => {
                     state.pendingLine = [];
@@ -1630,10 +2112,9 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     }
                     return await response.json();
                   };
-                  const createMarkerAnnotation = async (state, point) => {
-                    const label = currentDraftLabel(state);
+                  const createMarkerAnnotation = async (state, point, anchorPoint = null) => {
+                    const label = await requestAnnotationLabel(state, "point", anchorPoint);
                     if (!label) {
-                      setStatus(state, "Add a label before placing a point.", "error");
                       return;
                     }
                     await postAnnotation(state, {
@@ -1646,14 +2127,26 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     setStatus(state, `Added point: ${label}`, "success");
                     await refreshAnnotations(state);
                   };
-                  const finishLineAnnotation = async (state) => {
-                    const label = currentDraftLabel(state);
-                    if (!label) {
-                      setStatus(state, "Add a label before saving a line.", "error");
+                  const dedupeTrailingLinePoint = (state) => {
+                    if (state.pendingLine.length < 2) {
                       return;
                     }
+                    const lastPoint = state.pendingLine[state.pendingLine.length - 1];
+                    const previousPoint = state.pendingLine[state.pendingLine.length - 2];
+                    if (lastPoint.x !== previousPoint.x || lastPoint.z !== previousPoint.z) {
+                      return;
+                    }
+                    state.pendingLine.pop();
+                    updatePreview(state);
+                  };
+                  const finishLineAnnotation = async (state, anchorPoint = null) => {
+                    dedupeTrailingLinePoint(state);
                     if (state.pendingLine.length < 2) {
                       setStatus(state, "A line needs at least two points.", "error");
+                      return;
+                    }
+                    const label = await requestAnnotationLabel(state, "line", anchorPoint);
+                    if (!label) {
                       return;
                     }
                     await postAnnotation(state, {
@@ -1676,18 +2169,27 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     }
                     const previousSquaremapSource = state.squaremapSource;
                     const [markerResult, playerResult, annotationResult] = await Promise.allSettled([
-                      refreshSquaremapMarkers(state),
-                      refreshPlayers(state),
-                      refreshAnnotations(state),
+                      loadSquaremapMarkerLayer(state),
+                      loadPlayerLayer(state),
+                      loadAnnotationLayer(state),
                     ]);
                     if (annotationResult.status !== "fulfilled") {
                       throw annotationResult.reason;
                     }
-                    const markersLoaded = markerResult.status === "fulfilled" ? markerResult.value : null;
-                    const playersLoaded = playerResult.status === "fulfilled" ? playerResult.value : null;
+                    replaceLayerGroup(state, "annotationLayer", annotationResult.value);
+                    if (markerResult.status === "fulfilled") {
+                      replaceLayerGroup(state, "squaremapLayer", markerResult.value.layer);
+                    }
+                    if (playerResult.status === "fulfilled") {
+                      replaceLayerGroup(state, "playerLayer", playerResult.value.layer);
+                    }
+                    const markersLoaded = markerResult.status === "fulfilled" ? markerResult.value.result : null;
+                    const playersLoaded = playerResult.status === "fulfilled" ? playerResult.value.result : null;
                     const playersFailed = playerResult.status === "rejected";
                     if (markersLoaded && markersLoaded.source === MAP_SOURCE_LIVE) {
-                      refreshTiles(state, { force: forceTiles });
+                      if (forceTiles) {
+                        await refreshTiles(state, { force: true });
+                      }
                       state.lastSquaremapCacheUpdatedAtUnixMs = null;
                       if (playersFailed) {
                         setNotice(
@@ -1708,6 +2210,9 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       return { squaremapSource: MAP_SOURCE_LIVE };
                     }
                     if (markersLoaded && markersLoaded.source === MAP_SOURCE_STALE) {
+                      if (forceTiles) {
+                        await refreshTiles(state, { force: true });
+                      }
                       const cacheUpdatedAtUnixMs = markersLoaded.cacheUpdatedAtUnixMs ?? state.lastSquaremapCacheUpdatedAtUnixMs;
                       setSquaremapStaleNotice(state, cacheUpdatedAtUnixMs);
                       if (announce || previousSquaremapSource !== MAP_SOURCE_STALE) {
@@ -1739,12 +2244,9 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     };
                     state.currentWorld = nextWorld;
                     state.worldSelect.value = nextWorld.name;
-                    if (state.tileLayer) {
-                      state.tileLayer.remove();
-                    }
+                    resetTileLayers(state);
                     state.tileRevision = 0;
                     state.lastTileRefreshAt = null;
-                    state.tileLayer = createTileLayer(state, nextWorld).addTo(state.map);
                     if (!preserveView) {
                       state.map.setView(toLatLng(nextWorld, nextWorld.spawn), nextWorld.zoom.def);
                     }
@@ -1771,10 +2273,13 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     state.iconBaseUrl = apiUrl(state, "/assets");
                     state.worldByName.clear();
                     populateWorldOptions(state);
+                    const defaultWorldName = state.worldByName.has("minecraft_overworld")
+                      ? "minecraft_overworld"
+                      : state.manifest.initial_world_name;
                     const requestedWorldName =
                       state.currentWorld && state.worldByName.has(state.currentWorld.name)
                         ? state.currentWorld.name
-                        : state.manifest.initial_world_name;
+                        : defaultWorldName;
                     if (manifestResult.source === MAP_SOURCE_STALE) {
                       setSquaremapStaleNotice(state, manifestResult.cacheUpdatedAtUnixMs);
                     } else {
@@ -1801,21 +2306,25 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       error instanceof Error
                         ? normalizeMapError(error.message, "Map data is unavailable.")
                         : "Map data is unavailable.";
+                    reportClientError(state, error, "map-bootstrap");
                     setModeText(state, "Map unavailable");
-                    setSquaremapOfflineNotice(state, {
-                      cacheUpdatedAtUnixMs: state.lastSquaremapCacheUpdatedAtUnixMs,
-                      noCache: state.lastSquaremapCacheUpdatedAtUnixMs === null,
-                    });
-                    setStatus(
-                      state,
-                      state.lastSquaremapCacheUpdatedAtUnixMs === null
-                        ? "Map unavailable while Squaremap is offline."
-                        : "Squaremap is offline. Waiting to reconnect.",
-                      state.lastSquaremapCacheUpdatedAtUnixMs === null ? "error" : "warning",
-                    );
-                    if (detail && !detail.startsWith("Squaremap")) {
-                      setNotice(state, detail, state.lastSquaremapCacheUpdatedAtUnixMs === null ? "error" : "warning");
+                    const isOfflineError = isSquaremapOfflineError(detail);
+                    if (isOfflineError) {
+                      setSquaremapOfflineNotice(state, {
+                        cacheUpdatedAtUnixMs: state.lastSquaremapCacheUpdatedAtUnixMs,
+                        noCache: state.lastSquaremapCacheUpdatedAtUnixMs === null,
+                      });
+                      setStatus(
+                        state,
+                        state.lastSquaremapCacheUpdatedAtUnixMs === null
+                          ? "Map unavailable while Squaremap is offline."
+                          : "Squaremap is offline. Waiting to reconnect.",
+                        state.lastSquaremapCacheUpdatedAtUnixMs === null ? "error" : "warning",
+                      );
+                      return;
                     }
+                    setNotice(state, detail, "error");
+                    setStatus(state, "Map data is unavailable.", "error");
                   };
                   const bindControls = (state) => {
                     state.worldSelect?.addEventListener("change", () => {
@@ -1831,24 +2340,36 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     if (!state.config.canWrite) {
                       return;
                     }
-                    state.toolButtons.pan?.addEventListener("click", () => {
-                      cancelLineDraft(state);
-                      setToolState(state, "pan");
-                    });
                     state.toolButtons.marker?.addEventListener("click", () => {
+                      if (state.tool === "marker") {
+                        setToolState(state, "pan");
+                        return;
+                      }
                       cancelLineDraft(state);
                       setToolState(state, "marker");
                     });
                     state.toolButtons.line?.addEventListener("click", () => {
+                      if (state.tool === "line") {
+                        cancelLineDraft(state);
+                        setStatus(state, "Cancelled line draft.");
+                        return;
+                      }
+                      cancelLineDraft(state);
                       setToolState(state, "line");
                       updatePreview(state);
+                      setStatus(state, "Line tool active. Double-click to save, right-click to cancel.");
                     });
-                    state.finishButton?.addEventListener("click", () => {
-                      void finishLineAnnotation(state).catch((error) => setStatus(state, error.message, "error"));
+                    state.labelPromptForm?.addEventListener("submit", (event) => {
+                      event.preventDefault();
+                      const value = state.labelPromptInput?.value ?? "";
+                      resolveLabelPrompt(state, value);
                     });
-                    state.cancelButton?.addEventListener("click", () => {
-                      cancelLineDraft(state);
-                      setStatus(state, "Cancelled line draft.");
+                    state.labelPromptInput?.addEventListener("keydown", (event) => {
+                      if (event.key !== "Escape") {
+                        return;
+                      }
+                      event.preventDefault();
+                      cancelPendingAnnotation(state);
                     });
                   };
                   const deleteAnnotation = async (containerId, annotationId) => {
@@ -1856,19 +2377,23 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     if (!state) {
                       return;
                     }
-                    const response = await fetch(
-                      apiUrl(state, `/annotations/${encodeURIComponent(annotationId)}/delete`),
-                      {
-                        method: "POST",
-                        headers: { Accept: "application/json" },
-                      },
-                    );
-                    if (!response.ok) {
-                      setStatus(state, `Delete failed: ${await responseErrorMessage(response)}`, "error");
-                      return;
+                    try {
+                      const response = await fetch(
+                        apiUrl(state, `/annotations/${encodeURIComponent(annotationId)}/delete`),
+                        {
+                          method: "POST",
+                          headers: { Accept: "application/json" },
+                        },
+                      );
+                      if (!response.ok) {
+                        setStatus(state, `Delete failed: ${await responseErrorMessage(response)}`, "error");
+                        return;
+                      }
+                      setStatus(state, "Annotation deleted.", "success");
+                      await refreshAnnotations(state);
+                    } catch (error) {
+                      handleClientActionFailure(state, error, "delete-annotation");
                     }
-                    setStatus(state, "Annotation deleted.", "success");
-                    await refreshAnnotations(state);
                   };
                   const init = async (config) => {
                     const canvas = get(config.canvasId);
@@ -1881,6 +2406,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       config,
                       container,
                       canvas,
+                      canvasFrame: get(config.canvasFrameId),
                       map: window.L.map(canvas, {
                         crs: window.L.CRS.Simple,
                         center: [0, 0],
@@ -1888,6 +2414,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         minZoom: 0,
                         maxZoom: 8,
                         attributionControl: false,
+                        doubleClickZoom: false,
                         preferCanvas: true,
                         noWrap: true,
                       }),
@@ -1903,19 +2430,21 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       pendingLine: [],
                       tileRevision: 0,
                       lastTileRefreshAt: null,
+                      pendingTileLayer: null,
                       tool: "pan",
                       worldSelect: get(config.worldSelectId),
-                      labelInput: get(config.labelInputId),
                       colorInput: get(config.colorInputId),
                       snapToggle: get(config.snapToggleId),
                       statusEl: get(config.statusId),
                       noticeEl: get(config.noticeId),
                       modeEl: get(config.modeId),
-                      finishButton: get(config.finishButtonId),
-                      cancelButton: get(config.cancelButtonId),
                       refreshButton: get(config.refreshButtonId),
+                      labelPrompt: get(config.promptId),
+                      labelPromptTitle: get(config.promptTitleId),
+                      labelPromptForm: get(config.promptFormId),
+                      labelPromptInput: get(config.promptInputId),
+                      labelPromptSubmit: get(config.promptSubmitId),
                       toolButtons: {
-                        pan: get(config.panButtonId),
                         marker: get(config.markerButtonId),
                         line: get(config.lineButtonId),
                       },
@@ -1925,21 +2454,60 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       iconBaseUrl: "",
                       squaremapSource: MAP_SOURCE_LIVE,
                       lastSquaremapCacheUpdatedAtUnixMs: null,
+                      lastClientErrorSignature: null,
+                      lastClientErrorReportedAt: null,
+                      pendingLabelPrompt: null,
+                      pendingLabelKind: null,
+                      lastPromptAnchorPoint: null,
+                      documentPointerDownListener: null,
+                      documentContextMenuListener: null,
                     };
+                    state.documentPointerDownListener = (event) => {
+                      if (!isLabelPromptOpen(state)) {
+                        return;
+                      }
+                      if (event.button !== 0) {
+                        return;
+                      }
+                      if (state.labelPrompt && event.target instanceof Node && state.labelPrompt.contains(event.target)) {
+                        return;
+                      }
+                      event.preventDefault();
+                      event.stopPropagation();
+                      cancelPendingAnnotation(state, { focusMap: false });
+                    };
+                    state.documentContextMenuListener = (event) => {
+                      if (!isLabelPromptOpen(state)) {
+                        return;
+                      }
+                      event.preventDefault();
+                      event.stopPropagation();
+                      cancelPendingAnnotation(state, { focusMap: false });
+                    };
+                    document.addEventListener("pointerdown", state.documentPointerDownListener, true);
+                    document.addEventListener("contextmenu", state.documentContextMenuListener, true);
                     state.squaremapLayer.addTo(state.map);
                     state.playerLayer.addTo(state.map);
                     state.annotationLayer.addTo(state.map);
                     state.previewLayerGroup.addTo(state.map);
                     instances.set(config.containerId, state);
                     bindControls(state);
-                    setToolState(state, state.config.canWrite ? "pan" : "pan");
+                    setToolState(state, "pan");
                     state.map.on("click", (event) => {
                       if (!state.config.canWrite || !state.currentWorld) {
                         return;
                       }
+                      if (isLabelPromptOpen(state)) {
+                        return;
+                      }
+                      if (event.originalEvent?.detail && event.originalEvent.detail > 1) {
+                        return;
+                      }
                       const rawPoint = toPoint(state.currentWorld, event.latlng);
                       if (state.tool === "marker") {
-                        void createMarkerAnnotation(state, rawPoint).catch((error) => setStatus(state, error.message, "error"));
+                        void createMarkerAnnotation(state, rawPoint, event.containerPoint).catch((error) =>
+                          handleClientActionFailure(state, error, "create-marker-annotation")
+                        );
                         return;
                       }
                       if (state.tool !== "line") {
@@ -1961,6 +2529,30 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                       const snappedPoint =
                         anchor && state.snapToggle?.checked ? snapLinePoint(anchor, rawPoint) : rawPoint;
                       updatePreview(state, snappedPoint);
+                    });
+                    state.map.on("dblclick", (event) => {
+                      if (!state.config.canWrite || !state.currentWorld || isLabelPromptOpen(state) || state.tool !== "line") {
+                        return;
+                      }
+                      event.originalEvent?.preventDefault?.();
+                      void finishLineAnnotation(state, event.containerPoint).catch((error) =>
+                        handleClientActionFailure(state, error, "finish-line-annotation")
+                      );
+                    });
+                    state.map.on("contextmenu", (event) => {
+                      if (!state.config.canWrite) {
+                        return;
+                      }
+                      if (isLabelPromptOpen(state)) {
+                        cancelPendingAnnotation(state, { focusMap: false });
+                        return;
+                      }
+                      if (state.tool !== "line") {
+                        return;
+                      }
+                      event.originalEvent?.preventDefault?.();
+                      cancelLineDraft(state);
+                      setStatus(state, "Cancelled line draft.");
                     });
                     state.visibilityTimer = window.setInterval(() => {
                       if (state.container.offsetParent !== null) {

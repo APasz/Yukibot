@@ -38,3 +38,4 @@ voice_target_labels.json
 resources/icon/*
 resources/minecraft_default_skins/*
 .cache/*
+.yukibot/map_cache.json

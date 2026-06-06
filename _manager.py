@@ -122,12 +122,20 @@ class App_Manager(metaclass=config.Singleton):
         self.current: str | None = None
         self.apps: dict[str, ManagedApp] = {}
         self._lookup: dict[str, str] = {}
+        self._managed_shutdown_names: set[str] = set()
         self.default_chat_channels: tuple[hikari.Snowflake, ...] = ()
         self.default_chat_channel: hikari.Snowflake | None = None
         self.default_chat_channel_source = RelayChannelSource.NONE
         self.startup_disabled_instances: list[StartupDisabledAppNotice] = []
         self._update_task: asyncio.Task[None] | None = None
         self._bot_configuration_path = self._BOT_CONFIGURATION_PATH
+
+    def _managed_shutdown_name_keys(self) -> set[str]:
+        managed_shutdown_names = getattr(self, "_managed_shutdown_names", None)
+        if managed_shutdown_names is None:
+            managed_shutdown_names = set()
+            self._managed_shutdown_names = managed_shutdown_names
+        return managed_shutdown_names
 
     async def post_init(self, bot: hikari.GatewayBot, activity_manager: "Activity_Manager"):
         self.bot = bot
@@ -145,6 +153,7 @@ class App_Manager(metaclass=config.Singleton):
     async def _handle_inactive_app(self, app: ManagedApp) -> None:
         started_at = app.lifecycle_started_at
         uptime = datetime.now(timezone.utc) - started_at if started_at is not None else None
+        was_manager_initiated_shutdown = app.name.casefold() in self._managed_shutdown_name_keys()
         try:
             await app.handle_unexpected_stop()
         except Exception:
@@ -152,6 +161,8 @@ class App_Manager(metaclass=config.Singleton):
         runtime_fault = getattr(app, "runtime_fault", None)
         if runtime_fault is not None and runtime_fault.kind is AppRuntimeFaultKind.CRASH:
             self._notify_app_crash(app, summary=runtime_fault.summary, uptime=uptime)
+        elif started_at is not None and not was_manager_initiated_shutdown:
+            self._notify_app_lifecycle(app, started=False, uptime=uptime)
         app.lifecycle_started_at = None
         if self.current == app.name:
             self.current = None
@@ -286,6 +297,8 @@ class App_Manager(metaclass=config.Singleton):
                     return (app.name, 0.0, "Skipped", "Not running", None)
             t0 = time.perf_counter()
             started_at = app.lifecycle_started_at
+            managed_shutdown_names = self._managed_shutdown_name_keys()
+            managed_shutdown_names.add(app.name.casefold())
             try:
                 result = await shutdown(app) or None
                 elapsed = time.perf_counter() - t0
@@ -298,6 +311,8 @@ class App_Manager(metaclass=config.Singleton):
                 elapsed = time.perf_counter() - t0
                 log.exception(f"Failed to {action_label} {app.name}: {xcp}")
                 return (app.name, elapsed, "Error", str(xcp), None)
+            finally:
+                managed_shutdown_names.discard(app.name.casefold())
 
         if name:
             try:

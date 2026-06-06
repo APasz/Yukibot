@@ -1,56 +1,5 @@
 from __future__ import annotations
 
-from .runtime_imports import (
-    Awaitable,
-    Button,
-    ChatAttachment,
-    ChatAuthor,
-    ChatAuthorKind,
-    ChatEmbed,
-    ChatEndpointId,
-    ChatEndpointKind,
-    ChatEvent,
-    ChatLink,
-    ChatMediaProvider,
-    ChatMessageReference,
-    ChatReferenceKind,
-    Label,
-    LiteralString,
-    MOD_WEB_ACTION_BASE_CLASSES,
-    ModWebUser,
-    Power_Level,
-    Request,
-    Path,
-    Timer,
-    asyncio,
-    cast,
-    config,
-    inspect,
-    lru_cache,
-    requests,
-    urlencode,
-)
-from .constants import (
-    _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
-    log,
-)
-from .nicegui_protocols import (
-    AsyncRefresh,
-    ModWebUi,
-    ModWebValueContainer,
-    WebChatRelayPublisher,
-    _value_as_object,
-)
-from .types import (
-    ModWebNodeStatus,
-    _ModWebChatEventGroup,
-    _ModWebFakeChatMessageMode,
-    _ModWebFakeChatPreviewState,
-    _ModWebLinkSpec,
-    _ModWebStatusPageConfig,
-)
-
-from .service_base import ModWebServiceSupport
 from relay_notices import (
     AppLifecycleNotice,
     AppLifecycleState,
@@ -70,6 +19,58 @@ from relay_notices import (
     render_notice_text,
 )
 from restart_targets import RestartTarget
+
+from .constants import (
+    _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
+    log,
+)
+from .nicegui_protocols import (
+    AsyncRefresh,
+    ModWebUi,
+    ModWebValueContainer,
+    WebChatRelayPublisher,
+    _value_as_object,
+)
+from .runtime_imports import (
+    MOD_WEB_ACTION_BASE_CLASSES,
+    Awaitable,
+    Button,
+    ChatAttachment,
+    ChatAuthor,
+    ChatAuthorKind,
+    ChatEmbed,
+    ChatEndpointId,
+    ChatEndpointKind,
+    ChatEvent,
+    ChatLink,
+    ChatMediaProvider,
+    ChatMessageReference,
+    ChatReferenceKind,
+    Label,
+    LiteralString,
+    ModWebUser,
+    Path,
+    Power_Level,
+    Request,
+    Timer,
+    asyncio,
+    cast,
+    config,
+    inspect,
+    lru_cache,
+    requests,
+    urlencode,
+)
+from .service_base import ModWebServiceSupport
+from .types import (
+    ModWebNodeStatus,
+    _ModWebChatEventGroup,
+    _ModWebFakeChatMessageMode,
+    _ModWebFakeChatPreviewState,
+    _ModWebLinkSpec,
+    _ModWebStatusPageConfig,
+)
+
 _STATUS_SVG_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "svg" / "web_dash"
 
 class ModWebStatusMixin(ModWebServiceSupport):
@@ -1049,7 +1050,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                 source=notice_source,
             )
         if state.message_mode is _ModWebFakeChatMessageMode.PVP_KILL:
-            cause = state.detail_text.strip() or "Alex"
+            cause = state.detail_text.strip() or "Yoko"
             return GameDeathNotice(
                 death_kind=GameDeathKind.PVP,
                 detail_text=f"killed by {cause}",

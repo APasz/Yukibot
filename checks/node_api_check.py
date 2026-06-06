@@ -15,16 +15,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import hikari
 import requests
-from fastapi import Request
-from fastapi import HTTPException
-from fastapi import WebSocketDisconnect
+from fastapi import HTTPException, Request, WebSocketDisconnect
 
 import config
 from _security import Access_Control, Power_Level
 from apps._app import App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
-from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._config import App_Config, Mod_Config, ModDownloadBlockReason, ModType
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
+from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod
 from apps._save_files import AppSaveEntry, AppSaveEntryKind, AppSaveRoot, AppSaveRootMode
 from apps._settings import (
@@ -44,19 +42,19 @@ from map_annotations import MapAnnotationDraft
 from node_api import (
     NodeApiService,
     NodeAppEntry,
-    NodeAppStateStreamEvent,
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
-    NodeChatStreamEvent,
-    NodeChatStreamEventKind,
+    NodeAppStateStreamEvent,
     NodeAppTransitionState,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
+    NodeChatRoomSnapshot,
+    NodeChatStreamEvent,
+    NodeChatStreamEventKind,
+    NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
-    NodeChatRoomSnapshot,
-    NodeConfigList,
     NodeDownloadRequest,
     NodeModMutationAction,
     NodeModMutationResult,
@@ -771,7 +769,7 @@ class NodeApiTests(unittest.TestCase):
             storage_total_bytes=None,
             footprint_bytes=None,
             transition_state=NodeAppTransitionState.NONE,
-            connected_player_names=("Alex", "Bea"),
+            connected_player_names=("Yoko", "Bea"),
         )
         event = NodeChatStreamEvent(
             kind=NodeChatStreamEventKind.RUNTIME_CHANGED,
@@ -797,9 +795,11 @@ class NodeApiTests(unittest.TestCase):
             storage_free_bytes=None,
             storage_total_bytes=None,
             footprint_bytes=None,
-            runtime_fault=AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"),
+            runtime_fault=AppRuntimeFault(
+                kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"
+            ),
             transition_state=NodeAppTransitionState.NONE,
-            connected_player_names=("Alex", "Bea"),
+            connected_player_names=("Yoko", "Bea"),
         )
         system_summary = NodeSystemSummary(
             cpu_percent=20,
@@ -835,13 +835,15 @@ class NodeApiTests(unittest.TestCase):
             transition_state=NodeAppTransitionState.NONE,
             player_count=2,
             player_capacity=8,
-            connected_player_names=("Alex", "Bea"),
+            connected_player_names=("Yoko", "Bea"),
             supports_saves=True,
             supports_save_uploads=True,
             supports_save_rename=True,
             supports_settings=True,
             supports_chat=True,
-            runtime_fault=AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"),
+            runtime_fault=AppRuntimeFault(
+                kind=AppRuntimeFaultKind.CRASH, summary="Failed to start the minecraft server"
+            ),
             color_hex="#336699",
         )
         system_summary = NodeSystemSummary(
@@ -1710,6 +1712,28 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.map_url, map_url)
         self.assertEqual(entry.to_mapping()["map_url"], map_url)
 
+    def test_missing_route_app_name_parses_app_paths(self) -> None:
+        self.assertEqual(
+            NodeApiService._missing_route_app_name("apps/minecraft_alpha/map/assets/icon/registered/spawn.png"),
+            "minecraft_alpha",
+        )
+        self.assertIsNone(NodeApiService._missing_route_app_name("ping"))
+
+    def test_missing_route_warning_is_suppressed_for_stopped_apps(self) -> None:
+        app = _build_app(Mock())
+        service = NodeApiService()
+        service.set_manager(cast(Any, SimpleNamespace(apps={app.name: app})))
+
+        self.assertFalse(service._should_log_missing_route_warning("apps/minecraft_alpha/map/assets/spawn.png"))
+
+    def test_missing_route_warning_is_kept_for_running_apps(self) -> None:
+        app = _build_app(Mock())
+        app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        service = NodeApiService()
+        service.set_manager(cast(Any, SimpleNamespace(apps={app.name: app})))
+
+        self.assertTrue(service._should_log_missing_route_warning("apps/minecraft_alpha/map/assets/spawn.png"))
+
     def test_list_apps_includes_chat_support_flag(self) -> None:
         class _MappedApp(_DummyApp):
             @property
@@ -1737,6 +1761,10 @@ class NodeApiTests(unittest.TestCase):
             def public_map_url(self) -> str | None:
                 return "https://example.invalid/squaremap/?world=minecraft_nether"
 
+            @property
+            def map_proxy_url(self) -> str | None:
+                return "http://localhost:8080"
+
         app = _build_app(Mock())
         app.__class__ = _MappedApp
         response = Mock(status_code=200)
@@ -1752,7 +1780,108 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(manifest.initial_world_name, "minecraft_nether")
         self.assertEqual([world.name for world in manifest.worlds], ["minecraft_nether", "minecraft_overworld"])
         self.assertEqual(manifest.icon_base_url, "./assets")
-        self.assertEqual(get_mock.call_args.args[0], "https://example.invalid/squaremap/tiles/settings.json")
+        self.assertEqual(get_mock.call_args.args[0], "http://localhost:8080/tiles/settings.json")
+
+    def test_map_annotation_creator_name_prefers_minecraft_alias(self) -> None:
+        app = _build_app(Mock())
+        user = SimpleNamespace(username="discord_user")
+        relay_display_name = Mock(return_value="Yoko")
+
+        with patch(
+            "node_api.config.Name_Cache",
+            return_value=SimpleNamespace(discord_fallback_name=relay_display_name),
+        ):
+            created_by_name = NodeApiService._map_annotation_creator_name(app, actor_user_id=42, user=cast(Any, user))
+
+        self.assertEqual(created_by_name, "Yoko")
+        relay_display_name.assert_called_once_with(
+            42,
+            "discord_user",
+            scope=app.scope,
+            fallback_display_name="discord_user",
+        )
+
+    def test_map_annotation_creator_name_falls_back_to_discord_username(self) -> None:
+        app = _build_app(Mock())
+        user = SimpleNamespace(username="discord_user")
+
+        with patch(
+            "node_api.config.Name_Cache",
+            return_value=SimpleNamespace(discord_fallback_name=Mock(return_value="discord_user")),
+        ):
+            created_by_name = NodeApiService._map_annotation_creator_name(app, actor_user_id=42, user=cast(Any, user))
+
+        self.assertEqual(created_by_name, "discord_user")
+
+    def test_build_map_manifest_reads_local_squaremap_root_when_available(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def public_map_url(self) -> str | None:
+                return "https://example.invalid/squaremap/?world=minecraft_nether"
+
+            @property
+            def map_proxy_root_path(self) -> Path | None:
+                return self.directory
+
+        with TemporaryDirectory() as temp_dir:
+            root_path = Path(temp_dir)
+            tiles_path = root_path / "tiles"
+            tiles_path.mkdir(parents=True, exist_ok=True)
+            (tiles_path / "settings.json").write_text(
+                json.dumps(
+                    {
+                        "worlds": [
+                            {
+                                "name": "minecraft_overworld",
+                                "display_name": "Overworld",
+                                "type": "normal",
+                                "order": 2,
+                            },
+                            {
+                                "name": "minecraft_nether",
+                                "display_name": "Nether",
+                                "type": "nether",
+                                "order": 1,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app = _build_app(Mock())
+            app.__class__ = _MappedApp
+            app.directory = root_path
+            with patch("node_api.requests.get") as get_mock:
+                manifest = NodeApiService().build_map_manifest(app)
+
+        self.assertEqual(manifest.initial_world_name, "minecraft_nether")
+        self.assertEqual([world.name for world in manifest.worlds], ["minecraft_nether", "minecraft_overworld"])
+        get_mock.assert_not_called()
+
+    def test_squaremap_proxy_response_reads_local_asset_when_available(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def map_proxy_root_path(self) -> Path | None:
+                return self.directory
+
+        with TemporaryDirectory() as temp_dir:
+            root_path = Path(temp_dir)
+            asset_path = root_path / "images" / "icon" / "registered"
+            asset_path.mkdir(parents=True, exist_ok=True)
+            expected_content = b"png-bits"
+            (asset_path / "squaremap-spawn_icon.png").write_bytes(expected_content)
+            app = _build_app(Mock())
+            app.__class__ = _MappedApp
+            app.directory = root_path
+            with patch("node_api.requests.get") as get_mock:
+                response = NodeApiService()._squaremap_proxy_response(
+                    app,
+                    "images/icon/registered/squaremap-spawn_icon.png",
+                )
+
+        self.assertEqual(response.content, expected_content)
+        self.assertEqual(response.media_type, "image/png")
+        get_mock.assert_not_called()
 
     def test_build_map_manifest_uses_cached_squaremap_settings_when_upstream_is_unavailable(self) -> None:
         class _MappedApp(_DummyApp):
@@ -1883,13 +2012,13 @@ class NodeApiTests(unittest.TestCase):
         first_event = ChatEvent(
             room_id=app.name,
             source=ChatEndpointId.app(app.name),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="one",
         )
         second_event = ChatEvent(
             room_id=app.name,
             source=ChatEndpointId.app(app.name),
-            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Alex"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
             content="two",
         )
         hub.publish(first_event)

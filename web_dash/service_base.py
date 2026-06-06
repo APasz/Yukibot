@@ -61,6 +61,7 @@ from .types import (
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
     _ModWebKillControlState,
+    _ModWebStatusPageConfig,
     _ModWebStartStopControlState,
 )
 from .utils import _http_exception
@@ -363,6 +364,11 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_json_async"]) -> Callable[..., Awaitable[dict[str, object]]]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_remote_bytes_async"]
+    ) -> Callable[..., Awaitable[tuple[bytes, str | None, tuple[tuple[str, str], ...]]]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_remote_mod_list"]) -> Callable[..., NodeModList]: ...
 
     @overload
@@ -457,6 +463,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_render_error_page"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_render_forbidden_page"]) -> Callable[..., None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_render_flat_tab_empty_state"]) -> Callable[..., None]: ...
 
     @overload
@@ -509,6 +518,12 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_render_remote_node_unavailable_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_auth_setup_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_status_page_panel"]) -> Callable[..., None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_render_blueprints_editor"]) -> Callable[..., None]: ...
@@ -564,6 +579,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_should_render_framework_error_page"]) -> Callable[..., bool]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_framework_http_error_config"]) -> Callable[..., _ModWebStatusPageConfig]: ...
 
     @overload
     def __getattr__(self, name: Literal["_simulated_down_node_names"]) -> Callable[..., tuple[str, ...]]: ...

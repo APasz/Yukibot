@@ -509,6 +509,20 @@ class NameCacheTests(unittest.TestCase):
             self.assertEqual(cache.resolve_game_alias_to_id("Alice", "minecraft"), 7)
             self.assertIsNone(cache.resolve_game_alias_to_id("123", "minecraft"))
 
+    def test_parse_mentions_resolves_scoped_game_aliases_to_discord_mentions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(nicknames={"Alice"})
+            cache.by_id[7] = config.UserNames(
+                games={"minecraft": ("Alice", "123e4567-e89b-12d3-a456-426614174000")}
+            )
+            cache._rebuild_aliases()
+
+            parsed_text, mentions = cache.parse_mentions("hello @Alice", scope="minecraft")
+
+            self.assertEqual(parsed_text, "hello <@7>")
+            self.assertEqual(mentions, {7})
+
     def test_set_game_profile_normalises_minecraft_uuid(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = _make_cache(Path(tmp) / "discord_names.json")
