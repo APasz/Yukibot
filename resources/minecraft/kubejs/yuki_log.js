@@ -21,7 +21,7 @@ function playerName(player) {
     return String(player)
 }
 
-function playerUuid(player) {
+function playerUUID(player) {
     if (player.uuid) return String(player.uuid)
     return ''
 }
@@ -29,21 +29,21 @@ function playerUuid(player) {
 PlayerEvents.loggedIn(function (event) {
     emit('player_join', {
         player: playerName(event.player),
-        uuid: playerUuid(event.player)
+        uuid: playerUUID(event.player)
     })
 })
 
 PlayerEvents.loggedOut(function (event) {
     emit('player_leave', {
         player: playerName(event.player),
-        uuid: playerUuid(event.player)
+        uuid: playerUUID(event.player)
     })
 })
 
 PlayerEvents.chat(function (event) {
     emit('chat', {
         player: playerName(event.player),
-        uuid: playerUuid(event.player),
+        uuid: playerUUID(event.player),
         message: String(event.message)
     })
 })
@@ -51,7 +51,7 @@ PlayerEvents.chat(function (event) {
 PlayerEvents.advancement(function (event) {
     emit('advancement', {
         player: playerName(event.player),
-        uuid: playerUuid(event.player),
+        uuid: playerUUID(event.player),
         advancement: String(event.advancement)
     })
 })
@@ -64,7 +64,7 @@ EntityEvents.death(function (event) {
 
     emit('player_death', {
         player: playerName(entity),
-        uuid: playerUuid(entity),
+        uuid: playerUUID(entity),
         source: String(event.source)
     })
 })

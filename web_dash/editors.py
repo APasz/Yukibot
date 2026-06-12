@@ -1,9 +1,28 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from typing import TYPE_CHECKING
 
 from apps._blueprint_files import BlueprintUploadPair, classify_blueprint_upload_filenames
 
+from .constants import (
+    _CONFIG_EDITOR_DOCKERFILE_LANGUAGE,
+    _CONFIG_EDITOR_LANGUAGE_BY_SUFFIX,
+    _CONFIG_EDITOR_THEME,
+    _HIDDEN_SETTING_CYCLE_VARIANT_COUNT,
+    _HIDDEN_SETTING_GLYPHS,
+    _SAME_ORIGIN_NODE_API_BASE,
+    _SAME_ORIGIN_NODE_PROXY_BASE,
+    log,
+)
+from .nicegui_protocols import (
+    ModWebEventArgumentsContainer,
+    ModWebUi,
+    ModWebValueContainer,
+    _event_args_as_text,
+    _value_as_object,
+    _value_as_text,
+)
 from .runtime_imports import (
     Access_Control,
     App_Manager,
@@ -60,24 +79,7 @@ from .runtime_imports import (
     hikari,
     quote,
 )
-from .constants import (
-    _CONFIG_EDITOR_DOCKERFILE_LANGUAGE,
-    _CONFIG_EDITOR_LANGUAGE_BY_SUFFIX,
-    _CONFIG_EDITOR_THEME,
-    _HIDDEN_SETTING_CYCLE_VARIANT_COUNT,
-    _HIDDEN_SETTING_GLYPHS,
-    _SAME_ORIGIN_NODE_API_BASE,
-    _SAME_ORIGIN_NODE_PROXY_BASE,
-    log,
-)
-from .nicegui_protocols import (
-    ModWebEventArgumentsContainer,
-    ModWebUi,
-    ModWebValueContainer,
-    _event_args_as_text,
-    _value_as_object,
-    _value_as_text,
-)
+from .service_base import ModWebServiceSupport
 from .types import (
     ModWebBasePageModel,
     ModWebConfigEditorLayout,
@@ -90,17 +92,12 @@ from .types import (
     _SettingSecretConfig,
 )
 
-from .service_base import ModWebServiceSupport
-
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from nicegui.elements.codemirror.codemirror import SUPPORTED_LANGUAGES
     from nicegui.elements.dialog import Dialog
     from nicegui.elements.switch import Switch
     from nicegui.elements.upload_files import FileUpload
-    from nicegui.events import MultiUploadEventArguments
-    from nicegui.events import UploadEventArguments
+    from nicegui.events import MultiUploadEventArguments, UploadEventArguments
 
 
 class _ModWebSelectOptionsControl(Protocol):
@@ -1152,7 +1149,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                     "update:model-value",
                                     _sync_hidden_input,
                                 )
-                            if setting.can_edit:
+                            if self._should_initialise_text_setting_draft(setting):
                                 sync_input_value()
 
                             if setting.choices:
@@ -2387,6 +2384,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         return "filled square dense clearable hide-bottom-space color=accent"
 
     @staticmethod
+    def _should_initialise_text_setting_draft(setting: NodeSettingEntry) -> bool:
+        return setting.can_edit and not setting.value_is_hidden
+
+    @staticmethod
     def _setting_select_props() -> str:
         return "filled square dense clearable hide-bottom-space color=accent options-dense popup-content-class=mod-setting-menu"
 
@@ -2652,7 +2653,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     def _hidden_setting_reveal_markup(setting: NodeSettingEntry) -> str:
         if not setting.can_reveal_hidden_text:
             return ""
-        return f'<span class="mod-setting-meta-secret-reveal">{escape(setting.revealed_value_text)}</span>'
+        reveal_classes: str = "mod-setting-meta-secret-reveal"
+        if setting.is_sensitive:
+            reveal_classes += " mod-setting-meta-secret-reveal-token"
+        return f'<span class="{reveal_classes}">{escape(setting.revealed_value_text)}</span>'
 
     @classmethod
     def _render_hidden_sensitive_meta_value(

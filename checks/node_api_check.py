@@ -83,6 +83,8 @@ class _DummyApp(App[Any]):
 
 
 class _ConsoleActionApp(_DummyApp):
+    _console_actions: tuple[ConsoleAction, ...] = ()
+
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
         return self._console_actions
@@ -180,8 +182,8 @@ def _build_blueprint_app(temp_path: Path) -> Satisfactory:
     app.friendly = "Satisfactory Alpha"
     app.dir_log = temp_path / "app-log"
     app.dir_log.mkdir(parents=True, exist_ok=True)
-    app._blueprint_root_override = temp_path / "blueprints"
-    app._blueprint_ownership_store = SatisfactoryBlueprintOwnershipStore(
+    cast(Any, app)._blueprint_root_override = temp_path / "blueprints"
+    cast(Any, app)._blueprint_ownership_store = SatisfactoryBlueprintOwnershipStore(
         app.dir_log / "satisfactory-blueprints.json"
     )
     return app
@@ -316,6 +318,14 @@ class NodeApiTests(unittest.TestCase):
     def test_app_mutation_kill_requires_manage_scope_and_sudo_level(self) -> None:
         self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.KILL), NodeApiScope.APP_MANAGE)
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.KILL), Power_Level.sudo)
+
+    def test_app_mutation_rename_requires_manage_scope_and_sudo_level(self) -> None:
+        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.RENAME), NodeApiScope.APP_MANAGE)
+        self.assertEqual(required_app_mutation_level(NodeAppMutationAction.RENAME), Power_Level.sudo)
+
+    def test_app_mutation_update_details_requires_manage_scope_and_sudo_level(self) -> None:
+        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.UPDATE_DETAILS), NodeApiScope.APP_MANAGE)
+        self.assertEqual(required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS), Power_Level.sudo)
 
     def test_mod_download_and_config_read_web_scopes_allow_visitors(self) -> None:
         service = NodeApiService()
@@ -1297,13 +1307,15 @@ class NodeApiTests(unittest.TestCase):
         self.assertFalse(other_list.blueprints[0].can_delete)
         self.assertEqual(owner_list.blueprints[0].uploaded_by_display_name, "User 101")
         self.assertIsNotNone(owner_list.blueprints[0].config_file)
-        self.assertEqual(owner_list.blueprints[0].config_file.uploaded_by_display_name, "User 101")
+        config_file = owner_list.blueprints[0].config_file
+        assert config_file is not None
+        self.assertEqual(config_file.uploaded_by_display_name, "User 101")
 
     def test_build_blueprint_list_includes_default_session_name(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app = _build_blueprint_app(root)
-            app._players = SimpleNamespace(  # type: ignore[attr-defined]
+            cast(Any, app)._players = SimpleNamespace(
                 state=SatisfactoryServerState(active_session_name="Session Current")
             )
 
@@ -1335,7 +1347,9 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertFalse(owner_list.blueprints[0].can_delete)
         self.assertIsNotNone(owner_list.blueprints[0].config_file)
-        self.assertFalse(owner_list.blueprints[0].config_file.can_delete)
+        config_file = owner_list.blueprints[0].config_file
+        assert config_file is not None
+        self.assertFalse(config_file.can_delete)
         self.assertTrue(sudo_list.blueprints[0].can_delete)
 
     def test_build_blueprint_list_tolerates_legacy_blueprint_filenames(self) -> None:
@@ -1969,13 +1983,15 @@ class NodeApiTests(unittest.TestCase):
 
             created = service.create_map_annotation(app, draft, 42, "Taylor")
             listed = service.build_map_annotation_list(app)
-            deleted = service.delete_map_annotation(app, created.annotation.annotation_id)  # type: ignore[union-attr]
+            self.assertIsNotNone(created.annotation)
+            assert created.annotation is not None
+            deleted = service.delete_map_annotation(app, created.annotation.annotation_id)
             after_delete = service.build_map_annotation_list(app)
 
-        self.assertEqual(created.annotation.label, "Home Base")  # type: ignore[union-attr]
-        self.assertEqual(created.annotation.created_by_name, "Taylor")  # type: ignore[union-attr]
+        self.assertEqual(created.annotation.label, "Home Base")
+        self.assertEqual(created.annotation.created_by_name, "Taylor")
         self.assertEqual(len(listed.annotations), 1)
-        self.assertEqual(deleted.deleted_annotation_id, created.annotation.annotation_id)  # type: ignore[union-attr]
+        self.assertEqual(deleted.deleted_annotation_id, created.annotation.annotation_id)
         self.assertEqual(after_delete.annotations, ())
 
     def test_list_apps_includes_player_counts_for_running_apps(self) -> None:
@@ -2080,7 +2096,7 @@ class NodeApiTests(unittest.TestCase):
         service.subscribe_local_app_runtime = Mock(return_value=Mock())  # type: ignore[method-assign]
         app = _build_app(Mock())
 
-        asyncio.run(service._serve_chat_stream(websocket=_DisconnectingWebSocket(), app=app))
+        asyncio.run(service._serve_chat_stream(websocket=cast(Any, _DisconnectingWebSocket()), app=app))
 
     def test_build_chat_room_snapshot_counts_discord_guilds_as_separate_endpoints(self) -> None:
         app = _build_app(Mock())
@@ -2350,6 +2366,107 @@ class NodeApiTests(unittest.TestCase):
 
         manager.toggle.assert_called_once_with(app.name, False)
         self.assertEqual(result.action, NodeAppMutationAction.DISABLE)
+
+    def test_mutate_app_rename_updates_friendly_name(self) -> None:
+        app = _build_app(Mock())
+        manager = Mock()
+        manager.get_current = None
+        manager.set_app_friendly_name = Mock(
+            side_effect=lambda current_app, friendly_name: (
+                setattr(current_app, "friendly", friendly_name) or friendly_name
+            )
+        )
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch.object(
+            service,
+            "build_app_runtime_summary",
+            new=AsyncMock(
+                return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=app.chat_relay_support,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )
+            ),
+        ):
+            result = asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.RENAME,
+                    actor_user_id=42,
+                    friendly_name="Demo Alpha",
+                )
+            )
+
+        manager.set_app_friendly_name.assert_called_once_with(app, "Demo Alpha")
+        self.assertEqual(result.action, NodeAppMutationAction.RENAME)
+        self.assertEqual(result.app_friendly, "Demo Alpha")
+        self.assertEqual(result.message, "Renamed Minecraft Alpha to Demo Alpha.")
+
+    def test_mutate_app_update_details_persists_notes_and_notice_flags(self) -> None:
+        app = _build_app(Mock())
+        manager = Mock()
+        manager.get_current = None
+
+        def _update_details(current_app: _DummyApp, details: object) -> str:
+            setattr(current_app, "friendly", "Demo Alpha")
+            current_app.cfg.notes = "Main shard"
+            current_app.cfg.lifecycle_notice_started = False
+            current_app.cfg.lifecycle_notice_stopped = True
+            current_app.cfg.lifecycle_notice_crashed = False
+            return "Demo Alpha"
+
+        manager.update_app_details = Mock(side_effect=_update_details)
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch.object(
+            service,
+            "build_app_runtime_summary",
+            new=AsyncMock(
+                return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=app.chat_relay_support,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )
+            ),
+        ):
+            result = asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.UPDATE_DETAILS,
+                    actor_user_id=42,
+                    friendly_name="Demo Alpha",
+                    notes="Main shard",
+                    lifecycle_notice_started=False,
+                    lifecycle_notice_stopped=True,
+                    lifecycle_notice_crashed=False,
+                )
+            )
+
+        manager.update_app_details.assert_called_once()
+        self.assertEqual(result.action, NodeAppMutationAction.UPDATE_DETAILS)
+        self.assertEqual(result.app_friendly, "Demo Alpha")
+        self.assertEqual(result.message, "Updated details for Demo Alpha.")
 
     def test_mutate_app_start_returns_before_launch_finishes(self) -> None:
         app = _build_app(Mock())

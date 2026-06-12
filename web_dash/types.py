@@ -336,6 +336,10 @@ class ModWebBasePageModel:
     can_write_map_annotations: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
+    app_notes: str | None = field(default=None, kw_only=True)
+    lifecycle_notice_started: bool = field(default=True, kw_only=True)
+    lifecycle_notice_stopped: bool = field(default=True, kw_only=True)
+    lifecycle_notice_crashed: bool = field(default=True, kw_only=True)
     tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
 
 
@@ -678,6 +682,7 @@ __all__: tuple[str, ...] = (
     "ModWebTitleStatLine",
     "_ChatMediaPreview",
     "_ModWebAppCardBadgeSpec",
+    "_ModWebAppHeroRuntimeDetails",
     "_ModWebAppRuntimeState",
     "_ModWebBadgeSpec",
     "_ModWebChatComposeRequest",

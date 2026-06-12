@@ -1,22 +1,31 @@
 from __future__ import annotations
 
-from .runtime_imports import (
-    Callable,
-    ModWebUser,
-    NodeAppRuntimeSummary,
-    NodeAppStateStreamEvent,
-    NodeStateStreamEvent,
-    Power_Level,
-    Request,
-    asyncio,
-    config,
-    requests,
-)
 from .constants import (
     _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
     log,
 )
 from .nicegui_protocols import ModWebUi
+from .runtime_imports import (
+    Callable,
+    ModWebUser,
+    NodeBlueprintList,
+    NodeConfigList,
+    NodeConsoleActionList,
+    NodeModList,
+    NodeAppRuntimeSummary,
+    NodeAppStateStreamEvent,
+    NodeSaveList,
+    NodeSettingList,
+    NodeSystemSummary,
+    NodeStateStreamEvent,
+    Power_Level,
+    Request,
+    asyncio,
+    cast,
+    config,
+    requests,
+)
+from .service_base import ModWebServiceSupport
 from .types import (
     ModWebAppLink,
     ModWebBasePageModel,
@@ -26,7 +35,6 @@ from .types import (
     ModWebTitleStat,
 )
 
-from .service_base import ModWebServiceSupport
 
 class ModWebPageHandlersMixin(ModWebServiceSupport):
     def _on_startup(self) -> None:
@@ -299,7 +307,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     if app_entry.supports_console_actions and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
-                mods, configs, saves, blueprints, settings, console_actions, system_summary = await asyncio.gather(
+                remote_results = await asyncio.gather(
                     asyncio.to_thread(self._remote_mod_list, node, app_name, user),
                     configs_job,
                     saves_job,
@@ -312,6 +320,13 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         error_context="Remote mod web app system summary failed",
                     ),
                 )
+                mods = cast(NodeModList, remote_results[0])
+                configs = cast(NodeConfigList, remote_results[1])
+                saves = cast(NodeSaveList | None, remote_results[2])
+                blueprints = cast(NodeBlueprintList | None, remote_results[3])
+                settings = cast(NodeSettingList | None, remote_results[4])
+                console_actions = cast(NodeConsoleActionList | None, remote_results[5])
+                system_summary = cast(NodeSystemSummary | None, remote_results[6])
                 model = self._remote_page_model(
                     node=node,
                     mods=mods,
@@ -333,6 +348,10 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),
                     app_color_hex=app_entry.color_hex,
+                    app_notes=app_entry.notes,
+                    lifecycle_notice_started=app_entry.lifecycle_notice_started,
+                    lifecycle_notice_stopped=app_entry.lifecycle_notice_stopped,
+                    lifecycle_notice_crashed=app_entry.lifecycle_notice_crashed,
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=mods.app_name,
                         app_stats=mods.app_stats,
@@ -401,7 +420,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     if app_entry.supports_console_actions and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
-                configs, saves, blueprints, settings, console_actions, app_stats, system_summary = await asyncio.gather(
+                remote_results = await asyncio.gather(
                     configs_job,
                     saves_job,
                     blueprints_job,
@@ -414,6 +433,13 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         error_context="Remote mod web overview system summary failed",
                     ),
                 )
+                configs = cast(NodeConfigList, remote_results[0])
+                saves = cast(NodeSaveList | None, remote_results[1])
+                blueprints = cast(NodeBlueprintList | None, remote_results[2])
+                settings = cast(NodeSettingList | None, remote_results[3])
+                console_actions = cast(NodeConsoleActionList | None, remote_results[4])
+                app_stats = cast(NodeAppRuntimeSummary | None, remote_results[5])
+                system_summary = cast(NodeSystemSummary | None, remote_results[6])
                 model = self._remote_overview_page_model(
                     node=node,
                     app_name=app_entry.name,
@@ -437,6 +463,10 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),
                     app_stats=app_stats,
+                    app_notes=app_entry.notes,
+                    lifecycle_notice_started=app_entry.lifecycle_notice_started,
+                    lifecycle_notice_stopped=app_entry.lifecycle_notice_stopped,
+                    lifecycle_notice_crashed=app_entry.lifecycle_notice_crashed,
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=app_entry.name,
                         app_stats=app_stats,

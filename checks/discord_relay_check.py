@@ -373,6 +373,50 @@ class DiscordRelayWebChatTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(delivered_loops, [relay_loop])
 
+    async def test_send_dc_accepts_message_created_on_foreign_event_loop(self) -> None:
+        relay = object.__new__(DC_Relay)
+        delivered = AsyncMock()
+        event = SimpleNamespace(id="event-1")
+        cast(Any, relay)._notify_resolution_failure = AsyncMock()
+        cast(Any, relay)._chat_author_color_for_room = AsyncMock(return_value=(None, None))
+        cast(Any, relay)._deliver_chat_event = delivered
+        cast(Any, relay)._event_from_dc_bound = Mock(return_value=event)
+
+        app = SimpleNamespace(name="minecraft_erm", scope="minecraft", chat_channel=1376260773348638821)
+        foreign_loop = asyncio.new_event_loop()
+        created_messages: list[DC_Bound] = []
+
+        def build_message_on_foreign_loop() -> None:
+            asyncio.set_event_loop(foreign_loop)
+
+            async def create_message() -> None:
+                created_messages.append(
+                    DC_Bound(
+                        cast(Any, app),
+                        "asdmea joined MC_Ermingham",
+                        "asdmea",
+                        player_id=42,
+                    )
+                )
+
+            try:
+                foreign_loop.run_until_complete(create_message())
+            finally:
+                foreign_loop.close()
+
+        thread = threading.Thread(target=build_message_on_foreign_loop, daemon=True)
+        thread.start()
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(created_messages), 1)
+        message = created_messages[0]
+
+        with patch.object(Message, "_enrich_links", new=AsyncMock(return_value=set())) as enrich_mock:
+            await relay._send_dc(message)
+
+        enrich_mock.assert_awaited_once_with({})
+        delivered.assert_awaited_once_with(event, source_message=message)
+
     async def test_publish_web_chat_preserves_detected_links(self) -> None:
         relay = object.__new__(DC_Relay)
         delivered = AsyncMock()
@@ -627,8 +671,8 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
         payload = receiver.payload
         self.assertIsNotNone(payload)
         assert payload is not None
-        self.assertEqual(payload.content, "Tester joined Minecraft Alpha")
-        self.assertIs(payload.notice, notice)
+        self.assertEqual(getattr(payload, "content"), "Tester joined Minecraft Alpha")
+        self.assertIs(getattr(payload, "notice"), notice)
 
 
 class _NamesStub:
@@ -1306,6 +1350,200 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             include_reference_prefix=False,
         )
         self.assertEqual(channel.send.await_args.kwargs["reply"], hikari.Snowflake(777))
+
+    async def test_on_dc_message_ignores_tracked_relay_echo_before_shared_room_mirroring(self) -> None:
+        class _RelayApp:
+            def __init__(self, *, name: str, friendly: str, scope: str, am_receiver: object) -> None:
+                self.name = name
+                self.friendly = friendly
+                self.scope = scope
+                self._running = True
+                self.am_receiver = am_receiver
+
+            def __hash__(self) -> int:
+                return id(self)
+
+        relay = object.__new__(DC_Relay)
+        relay._channel_objects = {}
+        relay.chat_hub = ChatHub()
+        relay.names = cast(Any, SimpleNamespace(set_names=Mock(), relay_display_name=Mock(return_value="Alice")))
+        relay.resolve_channel = AsyncMock(return_value=None)
+        relay._author_color_cache = {}
+        relay._chat_apps = {}
+        relay._discord_relay_message_order = deque()
+        relay._discord_relay_reference_by_message = {}
+        relay._discord_relay_message_id_by_event_channel = {}
+        first_app = _RelayApp(
+            name="minecraft_alpha",
+            friendly="Minecraft Alpha",
+            scope="minecraft",
+            am_receiver=object(),
+        )
+        second_app = _RelayApp(
+            name="sevendays_alpha",
+            friendly="7D2D Alpha",
+            scope="sevendays",
+            am_receiver=object(),
+        )
+        channel_id = hikari.Snowflake(111)
+        cast(Any, DC_Relay)._chat_channels = {channel_id: {first_app, second_app}}
+
+        source_event = ChatEvent(
+            room_id=first_app.name,
+            source=ChatEndpointId.app(first_app.name),
+            author=ChatAuthor(ChatAuthorKind.SYSTEM, "System"),
+            content="Started",
+        )
+        relay._record_discord_relay_message(channel_id=channel_id, message_id=hikari.Snowflake(777), event=source_event)
+
+        ctx = SimpleNamespace(
+            is_human=True,
+            channel_id=channel_id,
+            message_id=hikari.Snowflake(777),
+            guild_id=hikari.Snowflake(1),
+            author=SimpleNamespace(id=hikari.Snowflake(456), is_bot=False),
+            content="Started",
+            member=None,
+            message=SimpleNamespace(
+                author=SimpleNamespace(is_bot=False),
+                type=hikari.MessageType.DEFAULT,
+                attachments=(),
+                get_member_mentions=Mock(return_value=hikari.UNDEFINED),
+                user_mentions=hikari.UNDEFINED,
+                message_reference=None,
+            ),
+        )
+
+        try:
+            await relay.on_dc_message(cast(Any, ctx))
+            self.assertEqual(relay.chat_hub.history(first_app.name), ())
+            self.assertEqual(relay.chat_hub.history(second_app.name), ())
+        finally:
+            DC_Relay._chat_channels.clear()
+            relay.chat_hub.clear_room(first_app.name)
+            relay.chat_hub.clear_room(second_app.name)
+
+    async def test_send_chat_event_to_discord_falls_back_to_forward_for_oversized_media(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay._channel_objects = {}
+        relay.chat_hub = ChatHub()
+        cast(Any, relay)._chat_apps = {}
+        cast(Any, relay)._discord_text_for_event = AsyncMock(return_value=("hello", set()))
+        cast(Any, relay).resolve_channel = AsyncMock()
+        rest = SimpleNamespace(
+            _request=AsyncMock(
+                return_value={
+                    "id": "903",
+                    "channel_id": "222",
+                    "guild_id": "10",
+                    "author": {
+                        "id": "999",
+                        "username": "Yuki",
+                        "discriminator": "0",
+                        "avatar": None,
+                    },
+                    "content": "",
+                    "timestamp": "2024-01-01T00:00:00.000000+00:00",
+                    "edited_timestamp": None,
+                    "tts": False,
+                    "mention_everyone": False,
+                    "mentions": [],
+                    "mention_roles": [],
+                    "attachments": [],
+                    "embeds": [],
+                    "pinned": False,
+                    "type": 0,
+                }
+            ),
+            _entity_factory=SimpleNamespace(
+                deserialize_message=Mock(return_value=SimpleNamespace(id=hikari.Snowflake(903)))
+            ),
+        )
+        relay.bot = cast(Any, SimpleNamespace(rest=rest))
+        channel_id = hikari.Snowflake(222)
+        channel = SimpleNamespace(
+            id=channel_id,
+            guild_id=hikari.Snowflake(10),
+            send=AsyncMock(
+                side_effect=hikari.BadRequestError(
+                    url="https://discord.invalid/channels/222/messages",
+                    headers={},
+                    raw_body="",
+                    message="Request entity too large",
+                    code=40005,
+                )
+            ),
+        )
+        relay._channel_objects[channel_id] = cast(Any, channel)
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.discord_channel(111),
+            author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Yoko", discord_user_id=42),
+            content="hello",
+            attachments=(ChatAttachment(uri="https://cdn.example.invalid/big.mp4", name="big.mp4"),),
+            source_guild_id=10,
+            source_channel_id=111,
+            source_message_id=555,
+            id="oversized-event",
+        )
+
+        await relay._send_chat_event_to_discord(event, channel_id)
+
+        channel.send.assert_awaited_once()
+        rest._request.assert_awaited_once()
+        self.assertEqual(
+            rest._request.await_args.kwargs["json"],
+            {
+                "message_reference": {
+                    "type": hikari_messages.MessageReferenceType.FORWARD.value,
+                    "message_id": "555",
+                    "channel_id": "111",
+                }
+            },
+        )
+        self.assertEqual(
+            relay._discord_message_id_for_event_in_channel(event_id=event.id, channel_id=channel_id),
+            903,
+        )
+
+    async def test_send_chat_event_to_discord_does_not_forward_oversized_media_without_discord_source(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay._channel_objects = {}
+        relay.chat_hub = ChatHub()
+        cast(Any, relay)._chat_apps = {}
+        cast(Any, relay)._discord_text_for_event = AsyncMock(return_value=("hello", set()))
+        cast(Any, relay).resolve_channel = AsyncMock()
+        rest = SimpleNamespace(_request=AsyncMock(), _entity_factory=SimpleNamespace(deserialize_message=Mock()))
+        relay.bot = cast(Any, SimpleNamespace(rest=rest))
+        channel_id = hikari.Snowflake(333)
+        channel = SimpleNamespace(
+            id=channel_id,
+            guild_id=hikari.Snowflake(10),
+            send=AsyncMock(
+                side_effect=hikari.BadRequestError(
+                    url="https://discord.invalid/channels/333/messages",
+                    headers={},
+                    raw_body="",
+                    message="Request entity too large",
+                    code=40005,
+                )
+            ),
+        )
+        relay._channel_objects[channel_id] = cast(Any, channel)
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.web_session("session-1"),
+            author=ChatAuthor(ChatAuthorKind.WEB_USER, "Tester"),
+            content="hello",
+            attachments=(ChatAttachment(uri="https://cdn.example.invalid/big.mp4", name="big.mp4"),),
+            id="oversized-no-forward",
+        )
+
+        with patch("_discord.log.exception") as exception_mock:
+            await relay._send_chat_event_to_discord(event, channel_id)
+
+        rest._request.assert_not_awaited()
+        exception_mock.assert_called_once()
 
     def test_chat_reference_from_discord_message_uses_tracked_relay_reference_for_relay_bot_message(self) -> None:
         relay = object.__new__(DC_Relay)

@@ -52,7 +52,23 @@ class ModWebActionsMixin(ModWebServiceSupport):
         app_name: str,
         action: NodeAppMutationAction,
         user: ModWebUser,
+        friendly_name: str | None = None,
+        notes: str | None = None,
+        lifecycle_notice_started: bool | None = None,
+        lifecycle_notice_stopped: bool | None = None,
+        lifecycle_notice_crashed: bool | None = None,
     ) -> NodeAppMutationResult:
+        json_payload: dict[str, object] = {"action": action.value}
+        if friendly_name is not None:
+            json_payload["friendly_name"] = friendly_name
+        if notes is not None:
+            json_payload["notes"] = notes
+        if lifecycle_notice_started is not None:
+            json_payload["lifecycle_notice_started"] = lifecycle_notice_started
+        if lifecycle_notice_stopped is not None:
+            json_payload["lifecycle_notice_stopped"] = lifecycle_notice_stopped
+        if lifecycle_notice_crashed is not None:
+            json_payload["lifecycle_notice_crashed"] = lifecycle_notice_crashed
         payload: dict[str, object] = self._remote_json(
             node=node,
             app_name=app_name,
@@ -60,7 +76,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             scopes=(required_app_mutation_scope(action),),
             user=user,
             method="POST",
-            json_payload={"action": action.value},
+            json_payload=json_payload,
         )
         return NodeAppMutationResult.from_mapping(payload)
 
@@ -160,13 +176,27 @@ class ModWebActionsMixin(ModWebServiceSupport):
         model: ModWebBasePageModel,
         action: NodeAppMutationAction,
         user: ModWebUser,
+        friendly_name: str | None = None,
+        notes: str | None = None,
+        lifecycle_notice_started: bool | None = None,
+        lifecycle_notice_stopped: bool | None = None,
+        lifecycle_notice_crashed: bool | None = None,
     ) -> NodeAppMutationResult:
         required_level: Power_Level = required_app_mutation_level(action)
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required for this app action.")
         if model.node_name == config.MOD_WEB_SERVER.node_name:
             app: ManagedApp = self._resolve_app(model.app_name)
-            return await self._node_api.mutate_app(app=app, action=action, actor_user_id=user.discord_id)
+            return await self._node_api.mutate_app(
+                app=app,
+                action=action,
+                actor_user_id=user.discord_id,
+                friendly_name=friendly_name,
+                notes=notes,
+                lifecycle_notice_started=lifecycle_notice_started,
+                lifecycle_notice_stopped=lifecycle_notice_stopped,
+                lifecycle_notice_crashed=lifecycle_notice_crashed,
+            )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(
             self._remote_app_mutation,
@@ -174,6 +204,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
             model.app_name,
             action,
             user,
+            friendly_name,
+            notes,
+            lifecycle_notice_started,
+            lifecycle_notice_stopped,
+            lifecycle_notice_crashed,
         )
 
     @staticmethod

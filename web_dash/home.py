@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+from .constants import (
+    _APP_SECTION_QUERY_PARAM,
+    _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
+    _HOME_NODE_LATENCY_TIMEOUT_SECONDS,
+    _SAME_ORIGIN_NODE_API_BASE,
+    _SAME_ORIGIN_NODE_PROXY_BASE,
+    _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
+)
+from .nicegui_protocols import ModWebUi
 from .runtime_imports import (
     AbstractEventLoop,
     Awaitable,
@@ -7,7 +18,6 @@ from .runtime_imports import (
     Callable,
     Card,
     Label,
-    LiteralString,
     ManagedApp,
     ModWebUser,
     NodeAppEntry,
@@ -24,17 +34,10 @@ from .runtime_imports import (
     quote,
     replace,
 )
-from .constants import (
-    _APP_SECTION_QUERY_PARAM,
-    _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
-    _HOME_NODE_LATENCY_TIMEOUT_SECONDS,
-    _SAME_ORIGIN_NODE_API_BASE,
-    _SAME_ORIGIN_NODE_PROXY_BASE,
-    _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
-)
-from .nicegui_protocols import ModWebUi
+from .service_base import ModWebServiceSupport
 from .types import (
     ModWebAppLink,
+    ModWebAppTabDefinition,
     ModWebBasePageModel,
     ModWebHomeNodeSummary,
     ModWebNodeAppSection,
@@ -46,9 +49,6 @@ from .types import (
     _ModWebBadgeSpec,
     _ModWebLinkSpec,
 )
-
-from .service_base import ModWebServiceSupport
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nicegui.element import Element
@@ -325,18 +325,17 @@ class ModWebHomeMixin(ModWebServiceSupport):
             return "purple"
         return "black"
 
-    @classmethod
     def _build_home_node_stat_specs(
-        cls,
+        self,
         node_summaries: tuple[ModWebHomeNodeSummary, ...],
     ) -> tuple[_ModWebHomeNodeStatSpec, ...]:
         node_stats: list[_ModWebHomeNodeStatSpec] = []
         for node_summary in node_summaries:
             system_summary: NodeSystemSummary | None = node_summary.system_summary
-            cpu_value, cpu_tone = cls._system_cpu_entry(system_summary)
-            ram_value, ram_tone = cls._system_ram_entry(system_summary)
-            storage_value, storage_tone = cls._system_storage_entry(system_summary)
-            uptime_value, uptime_tone = cls._system_uptime_entry(system_summary)
+            cpu_value, cpu_tone = self._system_cpu_entry(system_summary)
+            ram_value, ram_tone = self._system_ram_entry(system_summary)
+            storage_value, storage_tone = self._system_storage_entry(system_summary)
+            uptime_value, uptime_tone = self._system_uptime_entry(system_summary)
             running_tooltip: str | None = None
             if system_summary is None:
                 running_text = "Unavailable"
@@ -345,11 +344,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 running_text = "Nothin Running"
                 running_tone = "grey"
             else:
-                running_text = cls._running_value(system_summary.running_names)
+                running_text = self._running_value(system_summary.running_names)
                 running_tone = "purple"
             if system_summary is not None and len(system_summary.running_names) > 2:
                 running_tooltip = ", ".join(system_summary.running_names)
-            status_text, status_tone = cls._home_node_status_entry(
+            status_text, status_tone = self._home_node_status_entry(
                 system_summary=system_summary,
                 app_count=node_summary.app_count,
             )
@@ -357,13 +356,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 _ModWebHomeNodeStatSpec(
                     node_name=node_summary.node.node_name,
                     node_label=node_summary.node.label,
-                    node_subtitle=cls._node_display_subtitle(
+                    node_subtitle=self._node_display_subtitle(
                         label=node_summary.node.label,
                         node_name=node_summary.node.node_name,
                     ),
                     status_text=status_text,
                     status_tone=status_tone,
-                    card_tone=cls._home_node_card_tone(
+                    card_tone=self._home_node_card_tone(
                         system_summary=system_summary,
                         app_count=node_summary.app_count,
                     ),
@@ -723,12 +722,15 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 const specs = {specs_json};
                 const refreshIntervalMs = {refresh_interval_ms};
                 const timeoutMs = {timeout_ms};
+                const bootstrapProbeCount = 4;
+                const bootstrapProbeDelayMs = 850;
                 const findBadge = (badgeId) => getElement(badgeId) || getHtmlElement(badgeId);
                 const existing = window[controllerKey];
                 const controllerState = existing && typeof existing === 'object'
                     ? existing
-                    : {{intervalId: null, inFlight: false, sampleId: 0, lastTextByBadgeId: {{}}}};
+                    : {{intervalId: null, inFlight: false, sampleId: 0, lastTextByBadgeId: {{}}, hasBootstrapped: false}};
                 controllerState.lastTextByBadgeId = controllerState.lastTextByBadgeId || {{}};
+                controllerState.hasBootstrapped = Boolean(controllerState.hasBootstrapped);
                 const renderText = (spec, text) => {{
                     const badge = findBadge(spec.badge_id);
                     if (!badge) {{
@@ -737,7 +739,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     badge.textContent = text;
                     return true;
                 }};
-                const probeLatency = async (spec) => {{
+                const probeLatencyMeasurement = async (spec) => {{
                     if (!spec.probe_url) {{
                         return null;
                     }}
@@ -754,12 +756,43 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             credentials: 'omit',
                             signal: controller.signal,
                         }});
-                        return `${{Math.max(1, Math.round(performance.now() - startedAt))}} ms`;
+                        return Math.max(1, Math.round(performance.now() - startedAt));
                     }} catch (_error) {{
-                        return 'n/a';
+                        return null;
                     }} finally {{
                         window.clearTimeout(timeoutHandle);
                     }}
+                }};
+                const sleep = async (delayMs) => new Promise((resolve) => window.setTimeout(resolve, delayMs));
+                const summariseLatencyMeasurements = (measurements) => {{
+                    if (!measurements.length) {{
+                        return null;
+                    }}
+                    const sorted = [...measurements].sort((left, right) => left - right);
+                    const middle = Math.floor(sorted.length / 2);
+                    if (sorted.length % 2 === 1) {{
+                        return sorted[middle];
+                    }}
+                    return Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+                }};
+                const probeLatencySeries = async (spec, attemptCount, delayMs) => {{
+                    const measurements = [];
+                    for (let attemptIndex = 0; attemptIndex < attemptCount; attemptIndex += 1) {{
+                        const measurement = await probeLatencyMeasurement(spec);
+                        if (typeof measurement === 'number' && Number.isFinite(measurement)) {{
+                            measurements.push(measurement);
+                        }}
+                        if (attemptIndex + 1 < attemptCount) {{
+                            await sleep(delayMs);
+                        }}
+                    }}
+                    return summariseLatencyMeasurements(measurements);
+                }};
+                const formatLatency = (latencyMs) => {{
+                    if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs)) {{
+                        return 'n/a';
+                    }}
+                    return `${{latencyMs}} ms`;
                 }};
                 const latencyText = (spec, latency) => `${{spec.node_label}}: ${{latency}}`;
                 const cachedText = (spec) => {{
@@ -796,13 +829,16 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             if (!(String(spec.badge_id) in controllerState.lastTextByBadgeId)) {{
                                 renderText(spec, latencyText(spec, '...'));
                             }}
-                            const latency = await probeLatency(spec);
-                            const nextText = latencyText(spec, latency ?? 'n/a');
+                            const latency = controllerState.hasBootstrapped
+                                ? await probeLatencyMeasurement(spec)
+                                : await probeLatencySeries(spec, bootstrapProbeCount, bootstrapProbeDelayMs);
+                            const nextText = latencyText(spec, formatLatency(latency));
                             controllerState.lastTextByBadgeId[String(spec.badge_id)] = nextText;
                             if (controllerState.sampleId === sampleId) {{
                                 renderText(spec, nextText);
                             }}
                         }}));
+                        controllerState.hasBootstrapped = true;
                     }} finally {{
                         controllerState.inFlight = false;
                     }}
@@ -854,7 +890,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if runtime_badge is not None:
                     runtime_badge_classes = "mod-app-runtime-chip"
                     if app.runtime_changed:
-                        runtime_badge_classes: LiteralString = f"{runtime_badge_classes} mod-app-runtime-chip-live"
+                        runtime_badge_classes = f"{runtime_badge_classes} mod-app-runtime-chip-live"
                     runtime_badge_label = self._badge(
                         ui=ui,
                         text=runtime_badge.text,
@@ -1051,10 +1087,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
         with target:
             ui.tooltip(text)
 
-    @classmethod
-    def _app_card_link_classes(cls, app: ModWebAppLink) -> str:
+    def _app_card_link_classes(self, app: ModWebAppLink) -> str:
         classes = "mod-card mod-app-card mod-app-card-link w-full"
-        runtime_state_class: str | None = cls._app_runtime_state_class(
+        runtime_state_class: str | None = self._app_runtime_state_class(
             running=app.running,
             transition_state=app.transition_state,
             class_prefix="mod-app-card",
@@ -1062,7 +1097,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         if runtime_state_class is not None:
             classes = f"{classes} {runtime_state_class}"
         if app.runtime_changed:
-            classes: LiteralString = f"{classes} mod-app-card-live"
+            classes = f"{classes} mod-app-card-live"
         if not app.enabled:
             return f"{classes} mod-app-card-disabled"
         return classes

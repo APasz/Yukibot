@@ -28,8 +28,8 @@ from _discord import (
     OutboundRelayFormatter,
     RelayEmbedPayload,
     RelayOutboundFormatOptions,
-    URLVariant,
     URLish,
+    URLVariant,
     render_plain_reference_prefix,
 )
 from _file import File_Utils
@@ -2412,7 +2412,8 @@ class Activities:
         self.tasks: set[asyncio.Task[None]] = set()
 
     async def start(self):
-        if self._time_task and not self._time_task.done():
+        self.tasks = {task for task in self.tasks if not task.done()}
+        if self.tasks:
             return
         self._running = True
         for prov in self.providers:
@@ -2421,6 +2422,8 @@ class Activities:
 
     async def stop(self):
         self._running = False
+        for prov in self.providers:
+            self.app.activity_manager.deregister(prov)
         tasks = tuple(self.tasks)
         self.tasks.clear()
         for task in tasks:

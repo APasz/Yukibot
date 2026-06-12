@@ -30,8 +30,8 @@ from apps._config_files import (
     effective_config_root_read_level,
     list_app_config_files,
     read_app_config_file,
-    resolve_app_config_root,
     resolve_app_config_path,
+    resolve_app_config_root,
     write_app_config_file,
 )
 from apps._console import ConsoleAction
@@ -285,6 +285,16 @@ class App(Generic[ConfigT], ABC):
     @property
     def instance_config_overrides(self) -> Mapping[str, object]:
         overrides: dict[str, object] = {}
+        if self.cfg.friendly_name is not None:
+            overrides["friendly_name"] = self.cfg.friendly_name
+        if self.cfg.notes is not None:
+            overrides["notes"] = self.cfg.notes
+        if not self.cfg.lifecycle_notice_started:
+            overrides["lifecycle_notice_started"] = self.cfg.lifecycle_notice_started
+        if not self.cfg.lifecycle_notice_stopped:
+            overrides["lifecycle_notice_stopped"] = self.cfg.lifecycle_notice_stopped
+        if not self.cfg.lifecycle_notice_crashed:
+            overrides["lifecycle_notice_crashed"] = self.cfg.lifecycle_notice_crashed
         if self.cfg.version is not None:
             overrides["version"] = self.cfg.version.model_dump(mode="json", exclude_none=True)
         if self.config_file_read_level_override is not None:

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Never, cast
 from unittest.mock import AsyncMock, patch
 
 import config
@@ -12,6 +12,9 @@ from _security import Power_Level
 from _utils import Utilities
 from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType
 from apps._mod import Mod_Manager
+from apps.sevendays import (
+    Activities as SevenDaysActivities,
+)
 from apps.sevendays import (
     Matchers,
     Mod_7D2D,
@@ -22,6 +25,18 @@ from apps.sevendays import (
     parse_admin_add_value,
     parse_gamestat_value,
 )
+
+
+class _RecordingActivityManager:
+    def __init__(self) -> None:
+        self.registered: list[object] = []
+        self.deregistered: list[object] = []
+
+    def register(self, provider: object) -> None:
+        self.registered.append(provider)
+
+    def deregister(self, provider: object) -> None:
+        self.deregistered.append(provider)
 
 
 class SevenDaysGameStatParsingTests(unittest.TestCase):
@@ -134,7 +149,7 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             directory=Path("/srv/7d2d"),
             apps_dir=Path("/srv/apps"),
             scope="sevendays",
-            save_file_write_level_override="admin",
+            save_file_write_level_override=Power_Level.admin,
         )
 
         self.assertEqual(cfg.save_file_write_level_override, Power_Level.admin)
@@ -231,6 +246,30 @@ class SevenDaysRelayFormattingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(formatted, "look https://public.example/uploads/cat.png")
+
+
+class SevenDaysActivityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sevendays_activities_track_started_tasks_and_deregister_provider(self) -> None:
+        activity_manager = _RecordingActivityManager()
+
+        async def background_worker() -> Never:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        app = SimpleNamespace(activity_manager=activity_manager, _tail_matchers=set())
+        activities = SevenDaysActivities(cast(Any, app))
+        provider = activities.providers[0]
+        provider.task_funcs = [background_worker]
+
+        await activities.start()
+
+        self.assertEqual(activity_manager.registered, [provider])
+        self.assertEqual(len(activities.tasks), 1)
+
+        await activities.stop()
+
+        self.assertEqual(activity_manager.deregistered, [provider])
+        self.assertEqual(activities.tasks, set())
 
     def test_outbound_formatter_uses_percent_encoded_public_urls_for_attachments(self) -> None:
         payload = SimpleNamespace(

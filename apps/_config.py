@@ -10,8 +10,8 @@ import hikari
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import config
-from _security import Access_Control, Power_Level
 from _resolator import Resolutator
+from _security import Access_Control, Power_Level
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +62,18 @@ def normalise_optional_text(raw: object) -> str | None:
         return None
     text = str(raw).strip()
     return text or None
+
+
+APP_FRIENDLY_NAME_MAX_LENGTH = 80
+
+
+def normalise_optional_friendly_name(raw: object) -> str | None:
+    text = normalise_optional_text(raw)
+    if text is None:
+        return None
+    if len(text) > APP_FRIENDLY_NAME_MAX_LENGTH:
+        raise ValueError(f"Friendly name must be {APP_FRIENDLY_NAME_MAX_LENGTH} characters or fewer.")
+    return text
 
 
 def normalise_optional_power_level(raw: object) -> Power_Level | None:
@@ -186,6 +198,7 @@ class App_Config(BaseModel):
     name: str
     instance_key: str
     friendly_name: str | None = None
+    notes: str | None = None
     directory: Path
     apps_dir: Path
     mods_dir: Path | None = None
@@ -203,12 +216,25 @@ class App_Config(BaseModel):
     chat_channel_source: RelayChannelSource = RelayChannelSource.NONE
     chat_ignore_symbol: str = config.CHAT_IGNORE
     enabled: bool = True
+    lifecycle_notice_started: bool = True
+    lifecycle_notice_stopped: bool = True
+    lifecycle_notice_crashed: bool = True
     cmd_start: list[str] = Field(default_factory=list)
     provider_alt_text: str | None = None
     version: AppVersion | None = None
     config_file_read_level_override: Power_Level | None = None
     config_file_write_level_override: Power_Level | None = None
     save_file_write_level_override: Power_Level | None = None
+
+    @field_validator("friendly_name", mode="before")
+    @classmethod
+    def validate_friendly_name(cls, raw: object) -> str | None:
+        return normalise_optional_friendly_name(raw)
+
+    @field_validator("notes", mode="before")
+    @classmethod
+    def validate_optional_text_fields(cls, raw: object) -> str | None:
+        return normalise_optional_text(raw)
 
     @property
     def enabled_txt(self) -> str:

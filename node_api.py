@@ -33,13 +33,13 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 import config
 from _audit import audit_log
 from _authority import AuthorityResource, read_json_object
 from _file import File_Utils
-from _manager import App_Manager
+from _manager import App_Manager, AppDetailsUpdate
 from _mod_ops import (
     NonDownloadableModError,
     RunningAppModMutationError,
@@ -292,11 +292,16 @@ class NodeAppEntry:
     save_write_level: Power_Level = Power_Level.sudo
     color_hex: str | None = None
     map_url: str | None = None
+    notes: str | None = field(default=None, kw_only=True)
+    lifecycle_notice_started: bool = True
+    lifecycle_notice_stopped: bool = True
+    lifecycle_notice_crashed: bool = True
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeAppEntry:
         name = payload.get("name")
         friendly = payload.get("friendly")
+        notes = payload.get("notes")
         node = payload.get("node")
         running = payload.get("running", False)
         enabled = payload.get("enabled", True)
@@ -320,10 +325,15 @@ class NodeAppEntry:
         save_write_level = _power_level(payload, "save_write_level", default=Power_Level.sudo)
         color_hex = payload.get("color_hex")
         map_url = payload.get("map_url")
+        lifecycle_notice_started = payload.get("lifecycle_notice_started", True)
+        lifecycle_notice_stopped = payload.get("lifecycle_notice_stopped", True)
+        lifecycle_notice_crashed = payload.get("lifecycle_notice_crashed", True)
         if not isinstance(name, str) or not name:
             raise ValueError("Node app entry name is invalid.")
         if not isinstance(friendly, str) or not friendly:
             raise ValueError("Node app entry friendly name is invalid.")
+        if notes is not None and not isinstance(notes, str):
+            raise ValueError("Node app entry notes are invalid.")
         if not isinstance(node, str) or not node:
             raise ValueError("Node app entry node is invalid.")
         if not isinstance(running, bool):
@@ -356,9 +366,16 @@ class NodeAppEntry:
             raise ValueError("Node app entry color_hex is invalid.")
         if map_url is not None and not isinstance(map_url, str):
             raise ValueError("Node app entry map_url is invalid.")
+        if not isinstance(lifecycle_notice_started, bool):
+            raise ValueError("Node app entry lifecycle_notice_started is invalid.")
+        if not isinstance(lifecycle_notice_stopped, bool):
+            raise ValueError("Node app entry lifecycle_notice_stopped is invalid.")
+        if not isinstance(lifecycle_notice_crashed, bool):
+            raise ValueError("Node app entry lifecycle_notice_crashed is invalid.")
         return cls(
             name=name,
             friendly=friendly,
+            notes=notes,
             node=node,
             running=running,
             enabled=enabled,
@@ -384,12 +401,16 @@ class NodeAppEntry:
             save_write_level=save_write_level,
             color_hex=color_hex,
             map_url=map_url,
+            lifecycle_notice_started=lifecycle_notice_started,
+            lifecycle_notice_stopped=lifecycle_notice_stopped,
+            lifecycle_notice_crashed=lifecycle_notice_crashed,
         )
 
     def to_mapping(self) -> dict[str, object]:
         return {
             "name": self.name,
             "friendly": self.friendly,
+            "notes": self.notes,
             "node": self.node,
             "running": self.running,
             "enabled": self.enabled,
@@ -413,6 +434,9 @@ class NodeAppEntry:
             "save_write_level": self.save_write_level.name,
             "color_hex": self.color_hex,
             "map_url": self.map_url,
+            "lifecycle_notice_started": self.lifecycle_notice_started,
+            "lifecycle_notice_stopped": self.lifecycle_notice_stopped,
+            "lifecycle_notice_crashed": self.lifecycle_notice_crashed,
         }
 
 
@@ -621,12 +645,20 @@ class NodeAppMutationAction(StrEnum):
     KILL = "kill"
     ENABLE = "enable"
     DISABLE = "disable"
+    RENAME = "rename"
+    UPDATE_DETAILS = "update_details"
 
 
 def required_app_mutation_level(action: NodeAppMutationAction) -> Power_Level:
     if action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP}:
         return Power_Level.user
-    if action in {NodeAppMutationAction.KILL, NodeAppMutationAction.ENABLE, NodeAppMutationAction.DISABLE}:
+    if action in {
+        NodeAppMutationAction.KILL,
+        NodeAppMutationAction.ENABLE,
+        NodeAppMutationAction.DISABLE,
+        NodeAppMutationAction.RENAME,
+        NodeAppMutationAction.UPDATE_DETAILS,
+    }:
         return Power_Level.sudo
     raise ValueError(f"Unsupported app mutation action: {action}")
 
@@ -634,13 +666,44 @@ def required_app_mutation_level(action: NodeAppMutationAction) -> Power_Level:
 def required_app_mutation_scope(action: NodeAppMutationAction) -> NodeApiScope:
     if action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP}:
         return NodeApiScope.APP_CONTROL
-    if action in {NodeAppMutationAction.KILL, NodeAppMutationAction.ENABLE, NodeAppMutationAction.DISABLE}:
+    if action in {
+        NodeAppMutationAction.KILL,
+        NodeAppMutationAction.ENABLE,
+        NodeAppMutationAction.DISABLE,
+        NodeAppMutationAction.RENAME,
+        NodeAppMutationAction.UPDATE_DETAILS,
+    }:
         return NodeApiScope.APP_MANAGE
     raise ValueError(f"Unsupported app mutation action: {action}")
 
 
 class NodeAppMutationRequest(BaseModel):
     action: NodeAppMutationAction
+    friendly_name: str | None = None
+    notes: str | None = None
+    lifecycle_notice_started: bool | None = None
+    lifecycle_notice_stopped: bool | None = None
+    lifecycle_notice_crashed: bool | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> "NodeAppMutationRequest":
+        if self.action is not NodeAppMutationAction.RENAME:
+            if self.action is not NodeAppMutationAction.UPDATE_DETAILS:
+                return self
+            if self.friendly_name is None or not self.friendly_name:
+                raise ValueError("Friendly name is required for update-details requests.")
+            if self.lifecycle_notice_started is None:
+                raise ValueError("Started lifecycle notice flag is required for update-details requests.")
+            if self.lifecycle_notice_stopped is None:
+                raise ValueError("Stopped lifecycle notice flag is required for update-details requests.")
+            if self.lifecycle_notice_crashed is None:
+                raise ValueError("Crash lifecycle notice flag is required for update-details requests.")
+            return self
+        if self.friendly_name is None or not self.friendly_name:
+            raise ValueError("Friendly name is required for rename requests.")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -2734,7 +2797,16 @@ class NodeApiService:
                 verified_grant=grant,
             )
             app = self._resolve_app(app_name)
-            result = await self.mutate_app(app=app, action=mutation_request.action, actor_user_id=actor_user_id)
+            result = await self.mutate_app(
+                app=app,
+                action=mutation_request.action,
+                actor_user_id=actor_user_id,
+                friendly_name=mutation_request.friendly_name,
+                notes=mutation_request.notes,
+                lifecycle_notice_started=mutation_request.lifecycle_notice_started,
+                lifecycle_notice_stopped=mutation_request.lifecycle_notice_stopped,
+                lifecycle_notice_crashed=mutation_request.lifecycle_notice_crashed,
+            )
             return result.to_mapping()
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/download")
@@ -3365,6 +3437,10 @@ class NodeApiService:
                     save_write_level=app.save_file_write_level,
                     color_hex=self.app_color_hex(app.manage_embed_color),
                     map_url=app.public_map_url,
+                    notes=app.cfg.notes,
+                    lifecycle_notice_started=app.cfg.lifecycle_notice_started,
+                    lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
+                    lifecycle_notice_crashed=app.cfg.lifecycle_notice_crashed,
                 )
             )
         return tuple(entries)
@@ -4702,6 +4778,11 @@ class NodeApiService:
         app: App,
         action: NodeAppMutationAction,
         actor_user_id: int,
+        friendly_name: str | None = None,
+        notes: str | None = None,
+        lifecycle_notice_started: bool | None = None,
+        lifecycle_notice_stopped: bool | None = None,
+        lifecycle_notice_crashed: bool | None = None,
     ) -> NodeAppMutationResult:
         await self._require_acl().perm_check(actor_user_id, required_app_mutation_level(action))
         manager: App_Manager = self._require_manager()
@@ -4738,6 +4819,35 @@ class NodeApiService:
         elif action is NodeAppMutationAction.DISABLE:
             manager.toggle(app.name, False)
             message: str = f"Disabled {app.friendly}."
+        elif action is NodeAppMutationAction.RENAME:
+            previous_friendly_name: str = app.friendly
+            if friendly_name is None or not friendly_name.strip():
+                raise ValueError("Friendly name must not be empty.")
+            next_friendly_name = manager.set_app_friendly_name(app, friendly_name)
+            if previous_friendly_name == next_friendly_name:
+                message = f"Friendly name already set to {next_friendly_name}."
+            else:
+                message = f"Renamed {previous_friendly_name} to {next_friendly_name}."
+        elif action is NodeAppMutationAction.UPDATE_DETAILS:
+            if friendly_name is None or not friendly_name.strip():
+                raise ValueError("Friendly name must not be empty.")
+            if lifecycle_notice_started is None:
+                raise ValueError("Started lifecycle notice flag must not be empty.")
+            if lifecycle_notice_stopped is None:
+                raise ValueError("Stopped lifecycle notice flag must not be empty.")
+            if lifecycle_notice_crashed is None:
+                raise ValueError("Crash lifecycle notice flag must not be empty.")
+            manager.update_app_details(
+                app,
+                AppDetailsUpdate(
+                    friendly_name=friendly_name,
+                    notes=notes,
+                    lifecycle_notice_started=lifecycle_notice_started,
+                    lifecycle_notice_stopped=lifecycle_notice_stopped,
+                    lifecycle_notice_crashed=lifecycle_notice_crashed,
+                ),
+            )
+            message = f"Updated details for {app.friendly}."
         else:
             raise ValueError(f"Unsupported app mutation action: {action}")
 

@@ -15,7 +15,15 @@ import lightbulb
 import config
 from _discord import App_Bound, DC_Bound, DC_Relay, RelayEmbedPayload
 from apps._app import App, AppRuntimeFaultKind
-from apps._config import App_Config, RelayChannelSource, normalise_optional_channel_id, normalise_optional_channel_ids
+from apps._config import (
+    App_Config,
+    RelayChannelSource,
+    normalise_optional_channel_id,
+    normalise_optional_channel_ids,
+    normalise_optional_friendly_name,
+    normalise_optional_text,
+)
+from chat_hub import ChatEndpoint, ChatEndpointId, ChatHub
 from config import Activity_Manager, Activity_Provider
 from relay_notices import (
     AppLifecycleNotice,
@@ -43,6 +51,15 @@ class AppInstanceCreateRequest:
     port: int | None = None
     server_log_file: str | None = None
     admin_password: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AppDetailsUpdate:
+    friendly_name: str
+    notes: str | None
+    lifecycle_notice_started: bool
+    lifecycle_notice_stopped: bool
+    lifecycle_notice_crashed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +123,13 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
         join_port=26900,
     ),
 }
+
+
+def _validate_required_friendly_name(raw: object) -> str:
+    friendly_name = normalise_optional_friendly_name(raw)
+    if friendly_name is None:
+        raise ValueError("Friendly name must not be empty.")
+    return friendly_name
 
 
 def format_enabled_app_dump(apps: Sequence[ManagedApp]) -> str:
@@ -388,7 +412,11 @@ class App_Manager(metaclass=config.Singleton):
         started: bool,
         uptime: timedelta | None = None,
     ) -> None:
-        if app.chat_channel is None and not app.supports_chat_relay:
+        if not self._app_can_emit_lifecycle_notice(app):
+            return
+        if started and not app.cfg.lifecycle_notice_started:
+            return
+        if not started and not app.cfg.lifecycle_notice_stopped:
             return
         uptime_seconds = None if uptime is None else max(0, round(uptime.total_seconds()))
         notice = AppLifecycleNotice(
@@ -425,7 +453,9 @@ class App_Manager(metaclass=config.Singleton):
         summary: str | None,
         uptime: timedelta | None = None,
     ) -> None:
-        if app.chat_channel is None and not app.supports_chat_relay:
+        if not self._app_can_emit_lifecycle_notice(app):
+            return
+        if not app.cfg.lifecycle_notice_crashed:
             return
         uptime_seconds = None if uptime is None else max(0, round(uptime.total_seconds()))
         notice = AppLifecycleNotice(
@@ -454,6 +484,10 @@ class App_Manager(metaclass=config.Singleton):
                 notice=notice,
             )
         )
+
+    @staticmethod
+    def _app_can_emit_lifecycle_notice(app: ManagedApp) -> bool:
+        return bool(app.chat_channel or app.chat_channels or app.supports_chat_relay)
 
     async def notify_running_app_relays(
         self,
@@ -491,6 +525,60 @@ class App_Manager(metaclass=config.Singleton):
             enabled=state,
         )
         self.dump_enabled()
+
+    def update_app_details(self, name: str | ManagedApp, details: AppDetailsUpdate) -> str:
+        app = name if isinstance(name, App) else self.get(name)
+        previous_friendly_name: str = app.friendly
+        next_friendly_name = _validate_required_friendly_name(details.friendly_name)
+        next_notes: str | None = normalise_optional_text(details.notes)
+        if previous_friendly_name == next_friendly_name and app.cfg.notes == next_notes:
+            if (
+                app.cfg.lifecycle_notice_started is details.lifecycle_notice_started
+                and app.cfg.lifecycle_notice_stopped is details.lifecycle_notice_stopped
+                and app.cfg.lifecycle_notice_crashed is details.lifecycle_notice_crashed
+            ):
+                return app.friendly
+        lookup_conflict = self._friendly_lookup_conflict(app=app, friendly_name=next_friendly_name)
+        if lookup_conflict is not None:
+            raise ValueError(f"Friendly name conflicts with existing app alias: {lookup_conflict}.")
+        instances_path = app.file_instances
+        raw = self._read_json_object(instances_path)
+        instance_payload = self._require_instance_payload(
+            raw.get(app.cfg.instance_key),
+            instances_path=instances_path,
+            instance_key=app.cfg.instance_key,
+        )
+        next_payload = dict(instance_payload)
+        next_payload["friendly_name"] = next_friendly_name
+        next_payload["notes"] = next_notes
+        next_payload["lifecycle_notice_started"] = details.lifecycle_notice_started
+        next_payload["lifecycle_notice_stopped"] = details.lifecycle_notice_stopped
+        next_payload["lifecycle_notice_crashed"] = details.lifecycle_notice_crashed
+        raw[app.cfg.instance_key] = next_payload
+        self._write_json_object(instances_path, raw)
+        app.cfg.friendly_name = next_friendly_name
+        app.cfg.notes = next_notes
+        app.cfg.lifecycle_notice_started = details.lifecycle_notice_started
+        app.cfg.lifecycle_notice_stopped = details.lifecycle_notice_stopped
+        app.cfg.lifecycle_notice_crashed = details.lifecycle_notice_crashed
+        app.friendly = next_friendly_name
+        self._replace_friendly_lookup_aliases(app=app, previous_friendly_name=previous_friendly_name)
+        ChatHub().bind(app.name, ChatEndpoint(ChatEndpointId.app(app.name), next_friendly_name))
+        log.info("Updated app details: app=%s friendly_name=%s", app.name, next_friendly_name)
+        return next_friendly_name
+
+    def set_app_friendly_name(self, name: str | ManagedApp, friendly_name: str) -> str:
+        app = name if isinstance(name, App) else self.get(name)
+        return self.update_app_details(
+            app,
+            AppDetailsUpdate(
+                friendly_name=friendly_name,
+                notes=app.cfg.notes,
+                lifecycle_notice_started=app.cfg.lifecycle_notice_started,
+                lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
+                lifecycle_notice_crashed=app.cfg.lifecycle_notice_crashed,
+            ),
+        )
 
     def clear_app_chat_channel(self, name: str | ManagedApp) -> None:
         self.set_app_chat_channel(name, None)
@@ -579,9 +667,7 @@ class App_Manager(metaclass=config.Singleton):
     def create_instance(self, request: AppInstanceCreateRequest) -> str:
         scope = self._validate_scope_name(request.scope)
         instance_key = self._validate_instance_key(request.instance_key)
-        friendly_name = request.friendly_name.strip()
-        if not friendly_name:
-            raise ValueError("Friendly name must not be empty.")
+        friendly_name = _validate_required_friendly_name(request.friendly_name)
         subfolder = self._validate_subfolder(request.subfolder)
         server_log_file = self._validate_optional_config_path(
             request.server_log_file,
@@ -972,21 +1058,66 @@ class App_Manager(metaclass=config.Singleton):
         log.warning(f"Disabled missing app instance `{cfg.name}`: {reason}")
 
     def _register_lookup_aliases(self, name: str, app: ManagedApp) -> None:
-        def permitate(trans: str, base: str, /):
-            if trans:
-                self._lookup[trans] = base
-                self._lookup[trans.lower()] = base
-                self._lookup[trans.upper()] = base
-                self._lookup[trans.title()] = base
-                self._lookup[trans.capitalize()] = base
-                self._lookup[trans.casefold()] = base
-                self._lookup[trans.swapcase()] = base
+        self._register_lookup_alias_text(app.name, name)
+        self._register_lookup_alias_text(getattr(app, "proc_name", ""), name)
+        self._register_lookup_alias_text(app.directory.name, name)
+        friendly_name = getattr(app, "friendly", "")
+        if friendly_name:
+            self._register_lookup_alias_text(friendly_name, name)
 
-        permitate(app.name, name)
-        permitate(app.proc_name, name)
-        permitate(app.directory.name, name)
-        if app.friendly:
-            permitate(app.friendly, name)
+    @staticmethod
+    def _lookup_alias_variants(text: str) -> tuple[str, ...]:
+        stripped_text = text.strip()
+        if not stripped_text:
+            return ()
+        ordered_variants = (
+            stripped_text,
+            stripped_text.lower(),
+            stripped_text.upper(),
+            stripped_text.title(),
+            stripped_text.capitalize(),
+            stripped_text.casefold(),
+            stripped_text.swapcase(),
+        )
+        unique_variants: list[str] = []
+        seen_variants: set[str] = set()
+        for variant in ordered_variants:
+            if variant in seen_variants:
+                continue
+            seen_variants.add(variant)
+            unique_variants.append(variant)
+        return tuple(unique_variants)
+
+    def _register_lookup_alias_text(self, text: str, base_name: str) -> None:
+        lookup = self._lookup_mapping()
+        for alias in self._lookup_alias_variants(text):
+            lookup[alias] = base_name
+
+    def _remove_lookup_alias_text(self, text: str, base_name: str) -> None:
+        lookup = self._lookup_mapping()
+        for alias in self._lookup_alias_variants(text):
+            if lookup.get(alias) == base_name:
+                lookup.pop(alias, None)
+
+    def _replace_friendly_lookup_aliases(self, *, app: ManagedApp, previous_friendly_name: str) -> None:
+        self._remove_lookup_alias_text(previous_friendly_name, app.name)
+        self._register_lookup_alias_text(app.friendly, app.name)
+
+    def _friendly_lookup_conflict(self, *, app: ManagedApp, friendly_name: str) -> str | None:
+        lookup = self._lookup_mapping()
+        for alias in self._lookup_alias_variants(friendly_name):
+            resolved_name = lookup.get(alias)
+            if resolved_name is None or resolved_name == app.name:
+                continue
+            return resolved_name
+        return None
+
+    def _lookup_mapping(self) -> dict[str, str]:
+        lookup = getattr(self, "_lookup", None)
+        if lookup is None:
+            lookup = {}
+            self._lookup = lookup
+        return lookup
 
     @staticmethod
     def _find_instance_template(

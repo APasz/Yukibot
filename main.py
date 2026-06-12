@@ -34,6 +34,7 @@ from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, Voice
 from config import Activity_Provider, Name_Cache
 from maintenance import MaintenanceService
 from node_api import RemoteRelayTTSForwarder
+from online import Online_Tracker
 from relay_notices import (
     BotLifecycleNotice,
     BotLifecycleStage,
@@ -42,7 +43,6 @@ from relay_notices import (
     RelayNoticeSource,
     render_system_notice_text,
 )
-from online import Online_Tracker
 from remote_node import RemoteNodeSupervisor
 from restart_targets import RestartTarget
 
@@ -578,6 +578,7 @@ def main():
             restart_type=effective_target.value,
             reason=render_system_notice_text(restart_notice),
             message_channel_id=config.STARTED_CHANNEL,
+            suppress_notifications=True,
         )
 
     @bot.listen(hikari.StartedEvent)

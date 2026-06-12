@@ -1248,18 +1248,21 @@ class Activities:
         self.tasks: set[asyncio.Task[None]] = set()
 
     async def start(self):
-        if self._time_task and not self._time_task.done():
+        self.tasks = {task for task in self.tasks if not task.done()}
+        if self.tasks:
             return
         self._running = True
         for prov in self.providers:
             self.app.activity_manager.register(prov)
-            self.tasks.union([asyncio.create_task(func()) for func in prov.task_funcs])
+            self.tasks.update(asyncio.create_task(func()) for func in prov.task_funcs)
 
     async def stop(self):
         self._running = False
         for prov in self.providers:
             self.app.activity_manager.deregister(prov)
-        for task in self.tasks:
+        tasks = tuple(self.tasks)
+        self.tasks.clear()
+        for task in tasks:
             task.cancel()
             try:
                 await task

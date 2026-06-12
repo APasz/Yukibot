@@ -418,7 +418,7 @@ class ModWebTests(unittest.TestCase):
         )
 
     def test_build_home_node_stat_specs_groups_metrics_per_node(self) -> None:
-        node_stats = ModWebService._build_home_node_stat_specs(
+        node_stats = ModWebService()._build_home_node_stat_specs(
             (
                 ModWebHomeNodeSummary(
                     node=ModWebNodeLink(
@@ -614,6 +614,11 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("_mod_web_latency_probe", script)
         self.assertIn("${spec.node_label}: ${latency}", script)
         self.assertIn("lastTextByBadgeId", script)
+        self.assertIn("bootstrapProbeCount = 4", script)
+        self.assertIn("bootstrapProbeDelayMs = 850", script)
+        self.assertIn("probeLatencySeries", script)
+        self.assertIn("summariseLatencyMeasurements", script)
+        self.assertIn("hasBootstrapped", script)
         self.assertIn("if (controllerState.inFlight)", script)
 
     def test_node_capability_badges_use_updated_wording(self) -> None:
@@ -1910,7 +1915,7 @@ class ModWebTests(unittest.TestCase):
             chat_url=None,
         )
 
-        classes = ModWebService._app_card_link_classes(app)
+        classes = ModWebService()._app_card_link_classes(app)
 
         self.assertIn("mod-app-card-starting", classes)
         self.assertNotIn("mod-app-card-running", classes)
@@ -1936,7 +1941,7 @@ class ModWebTests(unittest.TestCase):
             chat_url=None,
         )
 
-        classes = ModWebService._app_card_link_classes(app)
+        classes = ModWebService()._app_card_link_classes(app)
 
         self.assertIn("mod-app-card-running", classes)
         self.assertNotIn("mod-app-card-starting", classes)
@@ -1962,7 +1967,7 @@ class ModWebTests(unittest.TestCase):
             chat_url=None,
         )
 
-        classes = ModWebService._app_card_link_classes(app)
+        classes = ModWebService()._app_card_link_classes(app)
 
         self.assertIn("mod-app-card-stopping", classes)
         self.assertNotIn("mod-app-card-starting", classes)
@@ -2853,6 +2858,32 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(service._chat_event_display_content(death_event), "Yoko died to Skeleton")
+
+    def test_chat_event_copy_text_prefers_event_body_content(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="Hello from chat",
+            reference_kind=ChatReferenceKind.REPLY,
+            reference=ChatMessageReference(author_display_name="Ken", content="Referenced text"),
+        )
+
+        self.assertEqual(service._chat_event_copy_text(event), "Hello from chat")
+
+    def test_chat_event_copy_text_falls_back_to_reference_content(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(kind=ChatAuthorKind.SYSTEM, display_name="System"),
+            content="   ",
+            reference_kind=ChatReferenceKind.REPLY,
+            reference=ChatMessageReference(author_display_name="Ken", content="Referenced text"),
+        )
+
+        self.assertEqual(service._chat_event_copy_text(event), "Referenced text")
 
     def test_chat_markup_html_supports_discord_style_formatting(self) -> None:
         markup = ModWebService._chat_markup_html("**bold** _italic_ __underline__ ~~strike~~ ||spoiler||\n> quoted")
@@ -5030,12 +5061,16 @@ class ModWebTests(unittest.TestCase):
 
         self.assertIn("beforeRefresh", script)
         self.assertIn("attachMediaListeners", script)
+        self.assertIn("jumpStateByTimeline", script)
+        self.assertIn("clearScheduledJump", script)
         self.assertIn("hiddenMessageCount", script)
         self.assertIn("modChatWasPinned", script)
         self.assertIn("modChatHiddenCount", script)
         self.assertIn("autoScrollHiddenMessageLimit = 3", script)
         self.assertIn("shouldAutoScrollAfterRefresh", script)
         self.assertIn("loadedmetadata", script)
+        self.assertIn("ResizeObserver", script)
+        self.assertIn("setTimeout(settle, 320)", script)
 
     def test_chat_reference_label_reflects_reference_kind(self) -> None:
         service = ModWebService()
@@ -6180,6 +6215,7 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("mod-setting-meta-secret-revealable", markup)
         self.assertIn('tabindex="0"', markup)
         self.assertIn("mod-setting-meta-secret-reveal", markup)
+        self.assertIn("mod-setting-meta-secret-reveal-token", markup)
         self.assertIn(">secret</span>", markup)
         self.assertIn(">REDACTED</span>", markup)
 
@@ -6205,6 +6241,25 @@ class ModWebTests(unittest.TestCase):
             ModWebService._setting_text_input_props(hidden_setting),
             "filled square dense clearable hide-bottom-space color=accent type=password autocomplete=off",
         )
+
+    def test_hidden_text_settings_do_not_initialise_blank_drafts(self) -> None:
+        hidden_setting = self._setting_entry(
+            key="admin_password",
+            label="Admin Password",
+            type_name="str",
+            can_edit=True,
+            value_is_hidden=True,
+        )
+        visible_setting = self._setting_entry(
+            key="motd",
+            label="MOTD",
+            type_name="str",
+            can_edit=True,
+            value_is_hidden=False,
+        )
+
+        self.assertFalse(ModWebService._should_initialise_text_setting_draft(hidden_setting))
+        self.assertTrue(ModWebService._should_initialise_text_setting_draft(visible_setting))
 
     def test_setting_select_props_use_compact_popup_theme(self) -> None:
         self.assertEqual(
@@ -7805,6 +7860,192 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             ModWebService._app_action_pending_message(NodeAppMutationAction.KILL, "Minecraft Alpha"),
             "Kill requested for Minecraft Alpha.",
+        )
+
+    def test_render_global_app_toolbar_exposes_details_dialog_for_sudo_users(self) -> None:
+        class FakeContainer:
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeContainer":
+                del value, replace
+                return self
+
+            def style(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeDialog(FakeContainer):
+            def open(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FakeButton:
+            def __init__(self, text: str) -> None:
+                self.text = text
+                self.class_value: str | None = None
+
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeButton":
+                self.class_value = replace if replace is not None else value
+                return self
+
+            def set_text(self, text: str) -> None:
+                self.text = text
+
+            def disable(self) -> None:
+                return None
+
+            def enable(self) -> None:
+                return None
+
+        class FakeInput:
+            def __init__(self, value: object) -> None:
+                self.value = value
+                self.class_value: str | None = None
+                self.props_value: str | None = None
+
+            def props(self, value: str) -> "FakeInput":
+                self.props_value = value
+                return self
+
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeInput":
+                self.class_value = replace if replace is not None else value
+                return self
+
+        class FakeCheckbox:
+            def __init__(self, label: str, value: object) -> None:
+                self.label = label
+                self.value = value
+                self.class_value: str | None = None
+
+            def props(self, value: str) -> "FakeCheckbox":
+                del value
+                return self
+
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeCheckbox":
+                self.class_value = replace if replace is not None else value
+                return self
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.buttons: list[FakeButton] = []
+                self.inputs: list[FakeInput] = []
+                self.checkboxes: list[FakeCheckbox] = []
+                self.navigate = SimpleNamespace(reload=lambda: None)
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def dialog(self) -> FakeDialog:
+                return FakeDialog()
+
+            def button(self, text: str = "", **kwargs: object) -> FakeButton:
+                del kwargs
+                button = FakeButton(text)
+                self.buttons.append(button)
+                return button
+
+            def input(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                control = FakeInput(kwargs.get("value"))
+                self.inputs.append(control)
+                return control
+
+            def checkbox(self, label: str, *, value: object = False, **kwargs: object) -> FakeCheckbox:
+                del kwargs
+                control = FakeCheckbox(label, value)
+                self.checkboxes.append(control)
+                return control
+
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def notify(self, message: str, *, type: str | None = None) -> None:
+                del message, type
+                return None
+
+        service = ModWebService()
+        ui = FakeUi()
+        model = ModWebBasePageModel(
+            node_name="erin",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="erin",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=NodeAppRuntimeSummary(
+                running=False,
+                enabled=True,
+                version=None,
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+            ),
+            app_start_blocked=False,
+            settings=None,
+            app_notes="Main shard",
+            lifecycle_notice_started=False,
+            lifecycle_notice_stopped=True,
+            lifecycle_notice_crashed=False,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with patch.object(service, "_user_has_level", return_value=True):
+            service._render_global_app_toolbar(
+                ui=cast(ModWebUi, cast(object, ui)),
+                model=model,
+                user=user,
+                refresh_async_runtime_model=None,
+            )
+
+        self.assertIn("Details", [button.text for button in ui.buttons])
+        self.assertIn("Disable", [button.text for button in ui.buttons])
+        self.assertEqual([control.value for control in ui.inputs], ["Minecraft Alpha", "Main shard"])
+        self.assertEqual(ui.inputs[0].class_value, "mod-app-details-field")
+        self.assertIsNotNone(ui.inputs[0].props_value)
+        props_value = ui.inputs[0].props_value
+        assert props_value is not None
+        self.assertIn("maxlength=80", props_value)
+        self.assertEqual(ui.inputs[1].class_value, "mod-app-details-field mod-app-details-notes")
+        self.assertEqual(
+            [(control.label, control.value) for control in ui.checkboxes],
+            [("Started notices", False), ("Stopped notices", True), ("Crash notices", False)],
+        )
+        self.assertEqual(
+            [control.class_value for control in ui.checkboxes],
+            ["mod-app-details-toggle", "mod-app-details-toggle", "mod-app-details-toggle"],
         )
 
     def test_app_enable_disable_label_reflects_enabled_state(self) -> None:

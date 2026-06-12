@@ -190,6 +190,42 @@ class ChatHubTests(unittest.TestCase):
 
         self.assertEqual(restored, event)
 
+    def test_chat_event_from_mapping_treats_blank_link_media_type_as_missing(self) -> None:
+        payload = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.discord_channel("123"),
+            author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Erin"),
+            content="hello",
+            links=(
+                ChatLink(
+                    url="https://example.com/cat.png",
+                    media_type="image/png",
+                    is_media=True,
+                    variants=(
+                        ChatLinkVariant(
+                            key="tiny",
+                            label="tiny",
+                            url="https://example.com/cat-tiny.png",
+                            media_type="image/png",
+                        ),
+                    ),
+                ),
+            ),
+        ).to_mapping()
+        raw_links = payload["links"]
+        assert isinstance(raw_links, list)
+        raw_link = raw_links[0]
+        assert isinstance(raw_link, dict)
+        raw_link["media_type"] = "   "
+        raw_variant = raw_link["variants"][0]
+        assert isinstance(raw_variant, dict)
+        raw_variant["media_type"] = ""
+
+        restored = ChatEvent.from_mapping(payload)
+
+        self.assertIsNone(restored.links[0].media_type)
+        self.assertIsNone(restored.links[0].variants[0].media_type)
+
     def test_chat_event_render_content_renders_typed_notice(self) -> None:
         event = ChatEvent(
             room_id="minecraft_alpha",

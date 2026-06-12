@@ -4,7 +4,7 @@
         "directory": "{APPS}/mc_survival",
         "mods_dir": "{WD}/mods",
         "port": 25565,
-        "enabled": false,
+        "enabled": true,
         "version": {
             "main": "1.20.1",
             "framework": "47.4.0",

@@ -46,6 +46,15 @@ def _optional_string(payload: Mapping[str, object], key: str) -> str | None:
     return value
 
 
+def _optional_text(value: object, key: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} is invalid.")
+    text = value.strip()
+    return text or None
+
+
 class ChatEndpointKind(StrEnum):
     APP = "app"
     DISCORD_CHANNEL = "discord_channel"
@@ -251,6 +260,7 @@ class ChatLinkVariant:
             raise ValueError("Chat link variant label must not be empty.")
         if not self.url.strip():
             raise ValueError("Chat link variant URL must not be empty.")
+        object.__setattr__(self, "media_type", _optional_text(self.media_type, "media_type"))
         for field_name, value in (
             ("width", self.width),
             ("height", self.height),
@@ -286,7 +296,7 @@ class ChatLinkVariant:
             key=_required_string(payload, "key"),
             label=_required_string(payload, "label"),
             url=_required_string(payload, "url"),
-            media_type=_optional_string(payload, "media_type"),
+            media_type=_optional_text(payload.get("media_type"), "media_type"),
             extension=_optional_string(payload, "extension"),
             width=_optional_non_negative_int("width"),
             height=_optional_non_negative_int("height"),
@@ -322,6 +332,7 @@ class ChatLink:
     def __post_init__(self) -> None:
         if not self.url.strip():
             raise ValueError("Chat link URL must not be empty.")
+        object.__setattr__(self, "media_type", _optional_text(self.media_type, "media_type"))
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "ChatLink":
@@ -346,7 +357,7 @@ class ChatLink:
         return cls(
             url=_required_string(payload, "url"),
             label=_optional_string(payload, "label"),
-            media_type=_optional_string(payload, "media_type"),
+            media_type=_optional_text(payload.get("media_type"), "media_type"),
             is_media=raw_is_media,
             extension=_optional_string(payload, "extension"),
             original_url=_optional_string(payload, "original_url"),

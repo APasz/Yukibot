@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import BinaryIO
+
 from typing import TYPE_CHECKING
 
 from .constants import (
@@ -133,7 +135,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
             len(blueprints.blueprints) if blueprints is not None else 0,
             len(settings.settings) if settings is not None else 0,
         )
-        return self._page_model_with_tabs(
+        return cast(
+            ModWebPageModel,
+            self._page_model_with_tabs(
             ModWebPageModel(
                 node_name=config.MOD_WEB_SERVER.node_name,
                 app_name=app.name,
@@ -155,11 +159,17 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 blueprints=blueprints,
                 map_url=app.public_map_url,
                 map_api_url=(
-                    self._node_api.map_api_url(app.name, base_url=_SAME_ORIGIN_NODE_API_BASE) if app.supports_map else None
+                    self._node_api.map_api_url(app.name, base_url=_SAME_ORIGIN_NODE_API_BASE)
+                    if app.supports_map
+                    else None
                 ),
                 can_write_map_annotations=app.supports_map and can_manage_app,
                 supports_chat=app.supports_chat_relay,
                 chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
+                app_notes=app.cfg.notes,
+                lifecycle_notice_started=app.cfg.lifecycle_notice_started,
+                lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
+                lifecycle_notice_crashed=app.cfg.lifecycle_notice_crashed,
                 download_all_url=self._node_api.mod_download_url(
                     app.name,
                     enabled_only=False,
@@ -179,7 +189,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     for mod in mods.mods
                     if mod.downloadable
                 },
-            )
+            ),
+        )
         )
 
     async def _build_overview_page_model(self, app: App, *, user: ModWebUser) -> ModWebOverviewPageModel:
@@ -227,7 +238,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
             len(blueprints.blueprints) if blueprints is not None else 0,
             len(settings.settings) if settings is not None else 0,
         )
-        return self._page_model_with_tabs(
+        return cast(
+            ModWebOverviewPageModel,
+            self._page_model_with_tabs(
             ModWebOverviewPageModel(
                 node_name=config.MOD_WEB_SERVER.node_name,
                 app_name=app.name,
@@ -248,12 +261,19 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 blueprints=blueprints,
                 map_url=app.public_map_url,
                 map_api_url=(
-                    self._node_api.map_api_url(app.name, base_url=_SAME_ORIGIN_NODE_API_BASE) if app.supports_map else None
+                    self._node_api.map_api_url(app.name, base_url=_SAME_ORIGIN_NODE_API_BASE)
+                    if app.supports_map
+                    else None
                 ),
                 can_write_map_annotations=app.supports_map and can_manage_app,
                 supports_chat=app.supports_chat_relay,
                 chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
-            )
+                app_notes=app.cfg.notes,
+                lifecycle_notice_started=app.cfg.lifecycle_notice_started,
+                lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
+                lifecycle_notice_crashed=app.cfg.lifecycle_notice_crashed,
+            ),
+        )
         )
 
     def _remote_page_model(
@@ -278,10 +298,16 @@ class ModWebModelsMixin(ModWebServiceSupport):
         chat_url: str | None,
         app_start_blocked: bool,
         app_color_hex: str | None,
+        app_notes: str | None,
+        lifecycle_notice_started: bool,
+        lifecycle_notice_stopped: bool,
+        lifecycle_notice_crashed: bool,
     ) -> ModWebPageModel:
         node_path: str = f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node.node_name, safe='')}"
         app_path: str = f"{node_path}/apps/{quote(mods.app_name, safe='')}"
-        return self._page_model_with_tabs(
+        return cast(
+            ModWebPageModel,
+            self._page_model_with_tabs(
             ModWebPageModel(
                 node_name=node.node_name,
                 app_name=mods.app_name,
@@ -306,6 +332,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 can_write_map_annotations=map_url is not None and can_write_map_annotations,
                 supports_chat=supports_chat,
                 chat_url=chat_url,
+                app_notes=app_notes,
+                lifecycle_notice_started=lifecycle_notice_started,
+                lifecycle_notice_stopped=lifecycle_notice_stopped,
+                lifecycle_notice_crashed=lifecycle_notice_crashed,
                 download_all_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'false'})}",
                 download_enabled_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'true'})}",
                 mod_download_urls={
@@ -313,7 +343,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     for mod in mods.mods
                     if mod.downloadable
                 },
-            )
+            ),
+        )
         )
 
     def _remote_overview_page_model(
@@ -340,9 +371,15 @@ class ModWebModelsMixin(ModWebServiceSupport):
         chat_url: str | None,
         app_stats: NodeAppRuntimeSummary | None,
         app_start_blocked: bool,
+        app_notes: str | None,
+        lifecycle_notice_started: bool,
+        lifecycle_notice_stopped: bool,
+        lifecycle_notice_crashed: bool,
     ) -> ModWebOverviewPageModel:
         app_path: str = f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node.node_name, safe='')}/apps/{quote(app_name, safe='')}"
-        return self._page_model_with_tabs(
+        return cast(
+            ModWebOverviewPageModel,
+            self._page_model_with_tabs(
             ModWebOverviewPageModel(
                 node_name=node.node_name,
                 app_name=app_name,
@@ -366,7 +403,12 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 can_write_map_annotations=map_url is not None and can_write_map_annotations,
                 supports_chat=supports_chat,
                 chat_url=chat_url,
-            )
+                app_notes=app_notes,
+                lifecycle_notice_started=lifecycle_notice_started,
+                lifecycle_notice_stopped=lifecycle_notice_stopped,
+                lifecycle_notice_crashed=lifecycle_notice_crashed,
+            ),
+        )
         )
 
     def _node_links(self) -> tuple[ModWebNodeLink, ...]:
@@ -599,9 +641,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
             user=user,
         )
         url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/blueprints/upload"
-        opened_handles: list[object] = []
+        opened_handles: list[BinaryIO] = []
         try:
-            request_files: list[tuple[str, tuple[str, object, str]]] = []
+            request_files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
             for upload_name, upload_path in upload_files:
                 handle = upload_path.open("rb")
                 opened_handles.append(handle)
@@ -924,18 +966,18 @@ class ModWebModelsMixin(ModWebServiceSupport):
     ) -> dict[str, object]:
         token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
         url: str = f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}"
-        request_kwargs: dict[str, object] = {
-            "headers": {"Authorization": f"Bearer {token}"},
-        }
-        if method != "GET":
-            request_kwargs["json"] = _json_request_object(json_payload)
         try:
             async with aiohttp.ClientSession(timeout=self._aiohttp_client_timeout(timeout)) as session:
-                async with session.request(
-                    method,
-                    url,
-                    **request_kwargs,
-                ) as response:
+                if method == "GET":
+                    response_context = session.get(url, headers={"Authorization": f"Bearer {token}"})
+                else:
+                    response_context = session.request(
+                        method,
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=_json_request_object(json_payload),
+                    )
+                async with response_context as response:
                     if response.status >= 400:
                         raise RuntimeError(
                             f"Remote node rejected the request: url={url} status={response.status} "
@@ -1003,12 +1045,12 @@ class ModWebModelsMixin(ModWebServiceSupport):
         try:
             payload: object = cast(object, json.loads(response_text))
         except ValueError:
-            return response_text or response.reason
+            return response_text or response.reason or ""
         if isinstance(payload, Mapping):
             detail: object | None = cast(Mapping[object, object], payload).get("detail")
             if isinstance(detail, str) and detail:
                 return detail
-        return response_text or response.reason
+        return response_text or response.reason or ""
 
     @staticmethod
     async def _persist_uploaded_file(upload_file: "FileUpload") -> Path:

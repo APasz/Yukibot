@@ -1563,6 +1563,15 @@ class ModWebTheme:
                     user-select: none;
                     -webkit-user-select: none;
                 }}
+                .mod-setting-meta-secret-reveal-token {{
+                    display: block;
+                    -webkit-line-clamp: unset;
+                    overflow: visible;
+                    white-space: nowrap;
+                    word-break: normal;
+                    overflow-wrap: normal;
+                    hyphens: manual;
+                }}
                 .mod-setting-meta-secret-cycle-token {{
                     position: absolute;
                     inset: 0;
@@ -2454,6 +2463,121 @@ class ModWebTheme:
                     width: min(30rem, calc(100vw - 2rem)) !important;
                     max-width: none !important;
                 }}
+                .mod-app-details-dialog-card {{
+                    width: min(44rem, calc(100vw - 1.5rem)) !important;
+                }}
+                .mod-app-details-layout {{
+                    gap: 1rem;
+                }}
+                .mod-app-details-section {{
+                    width: 100%;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.8rem;
+                    padding: 0.95rem 1rem;
+                    border: 1px solid rgba(82, 82, 91, 0.62);
+                    background:
+                        linear-gradient(180deg, rgba(196, 181, 253, 0.04), rgba(196, 181, 253, 0)),
+                        rgba(10, 10, 14, 0.78) !important;
+                    box-shadow:
+                        inset 0 1px 0 rgba(255, 255, 255, 0.03),
+                        inset 0 -1px 0 rgba(139, 92, 246, 0.08);
+                }}
+                .mod-app-details-subsection {{
+                    width: 100%;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.45rem;
+                }}
+                .mod-app-details-field {{
+                    width: 100%;
+                }}
+                .mod-app-details-field .q-field__control {{
+                    min-height: 2.9rem;
+                    padding: 0 0.55rem !important;
+                    border: 1px solid rgba(82, 82, 91, 0.82) !important;
+                    border-radius: 0 !important;
+                    background:
+                        linear-gradient(180deg, rgba(139, 92, 246, 0.06), rgba(139, 92, 246, 0)),
+                        rgba(8, 8, 12, 0.94) !important;
+                    box-shadow:
+                        inset 0 1px 0 rgba(255, 255, 255, 0.04),
+                        inset 0 -1px 0 rgba(139, 92, 246, 0.12);
+                }}
+                .mod-app-details-field .q-field--filled .q-field__control::before {{
+                    border-bottom: 0 !important;
+                    opacity: 0 !important;
+                }}
+                .mod-app-details-field .q-field--filled .q-field__control::after {{
+                    border-bottom: 0 !important;
+                }}
+                .mod-app-details-field.q-field--focused .q-field__control,
+                .mod-app-details-field .q-field--focused .q-field__control {{
+                    border-color: rgba(139, 92, 246, 0.62) !important;
+                    box-shadow:
+                        inset 0 1px 0 rgba(255, 255, 255, 0.05),
+                        inset 0 -1px 0 rgba(139, 92, 246, 0.2),
+                        0 0 0 1px rgba(139, 92, 246, 0.16);
+                }}
+                .mod-app-details-field .q-field__native,
+                .mod-app-details-field .q-field__input,
+                .mod-app-details-field .q-field__append,
+                .mod-app-details-field .q-field__prepend,
+                .mod-app-details-field .q-field__marginal,
+                .mod-app-details-field .q-icon {{
+                    color: var(--mod-text) !important;
+                }}
+                .mod-app-details-field .q-field__label {{
+                    color: var(--mod-muted) !important;
+                    font-size: 0.74rem !important;
+                    font-weight: 800 !important;
+                    letter-spacing: 0.04em;
+                }}
+                .mod-app-details-field .q-field__native,
+                .mod-app-details-field .q-field__input {{
+                    font-size: 0.9rem !important;
+                    font-weight: 850 !important;
+                }}
+                .mod-app-details-notes .q-field__control {{
+                    min-height: 11.5rem !important;
+                    align-items: stretch;
+                    padding-top: 0.65rem !important;
+                    padding-bottom: 0.65rem !important;
+                }}
+                .mod-app-details-notes textarea,
+                .mod-app-details-notes .q-field__native {{
+                    min-height: 9.5rem !important;
+                    line-height: 1.45 !important;
+                    resize: vertical;
+                }}
+                .mod-app-details-toggle {{
+                    color: var(--mod-text) !important;
+                }}
+                .mod-app-details-toggle .q-checkbox__label {{
+                    font-weight: 800 !important;
+                }}
+                .mod-app-details-toggle .q-checkbox__inner {{
+                    color: rgba(228, 228, 231, 0.78) !important;
+                }}
+                .mod-app-details-toggle .q-checkbox__inner--truthy {{
+                    color: var(--mod-purple) !important;
+                }}
+                .mod-app-details-toggle .q-checkbox__bg {{
+                    border-radius: 0 !important;
+                }}
+                .mod-app-details-state-button {{
+                    flex: 0 1 auto !important;
+                    width: auto !important;
+                    min-width: 11rem !important;
+                    max-width: 15rem !important;
+                    min-height: 2.7rem !important;
+                    height: 2.7rem !important;
+                    justify-content: center;
+                    align-self: flex-start;
+                }}
+                .mod-app-details-actions {{
+                    margin-top: 0.15rem;
+                }}
                 .mod-fake-chat-dialog-card {{
                     width: min(52rem, calc(100vw - 1.5rem)) !important;
                     max-width: none !important;
@@ -3242,6 +3366,12 @@ class ModWebTheme:
                     }}
                     .mod-config-select,
                     .mod-config-search {{ flex-basis: 100%; min-width: 0; }}
+                    .mod-app-details-dialog-card {{ width: calc(100vw - 1rem) !important; }}
+                    .mod-app-details-section {{ padding: 0.85rem 0.85rem; }}
+                    .mod-app-details-state-button {{
+                        width: 100% !important;
+                        max-width: none !important;
+                    }}
                     .mod-tab-toolbar-actions {{ width: 100%; margin-left: 0; }}
                     .mod-save-card-button {{ flex-basis: 100%; min-width: 0; }}
                     .mod-chat-entry {{

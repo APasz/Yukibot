@@ -1,53 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
-from .runtime_imports import (
-    App,
-    App_Manager,
-    Awaitable,
-    BadgeTone,
-    Callable,
-    ChatAttachment,
-    ChatAuthorKind,
-    ChatEmbed,
-    ChatEndpointKind,
-    ChatEvent,
-    ChatHub,
-    ChatLink,
-    ChatMessageReference,
-    ChatReferenceKind,
-    Column,
-    DEFAULT_CHAT_AUTHOR_COLOR_HEX,
-    Html,
-    Input,
-    Label,
-    Mapping,
-    ModWebUser,
-    NodeAppEntry,
-    NodeApiScope,
-    NodeAppRuntimeSummary,
-    NodeAppTransitionState,
-    NodeChatRoomSnapshot,
-    NodeChatStreamEvent,
-    NodeChatStreamEventKind,
-    Power_Level,
-    PurePosixPath,
-    Request,
-    Tooltip,
-    aiohttp,
-    asyncio,
-    cast,
-    config,
-    escape,
-    hashlib,
-    mimetypes,
-    quote,
-    re,
-    time,
-    urlencode,
-    urlsplit,
-)
+from relay_notices import notice_badge_spec, notice_hides_body_content, relay_notice_badge_spec_from_label
+
 from .constants import (
     _CHAT_GROUP_WINDOW_SECONDS,
     _CHAT_HISTORY_LIMIT,
@@ -61,11 +18,11 @@ from .constants import (
     _CHAT_MARKUP_ESCAPE_RE,
     _CHAT_MARKUP_HEADER_RE,
     _CHAT_MARKUP_INLINE_CODE_RE,
+    _CHAT_MARKUP_ITALIC_STAR_RE,
+    _CHAT_MARKUP_ITALIC_UNDERSCORE_RE,
     _CHAT_MARKUP_LINK_RE,
     _CHAT_MARKUP_ORDERED_LIST_RE,
     _CHAT_MARKUP_RAW_URL_RE,
-    _CHAT_MARKUP_ITALIC_STAR_RE,
-    _CHAT_MARKUP_ITALIC_UNDERSCORE_RE,
     _CHAT_MARKUP_SPOILER_RE,
     _CHAT_MARKUP_STRIKETHROUGH_RE,
     _CHAT_MARKUP_SUBTEXT_RE,
@@ -84,6 +41,55 @@ from .constants import (
 )
 from .json_helpers import _json_object_from_text
 from .nicegui_protocols import ModWebUi, _value_as_text
+from .runtime_imports import (
+    DEFAULT_CHAT_AUTHOR_COLOR_HEX,
+    App,
+    App_Manager,
+    Awaitable,
+    BadgeTone,
+    Callable,
+    ChatAttachment,
+    ChatAuthorKind,
+    ChatEmbed,
+    ChatEndpointKind,
+    ChatEvent,
+    ChatHub,
+    ChatLink,
+    ChatMessageReference,
+    ChatReferenceKind,
+    Column,
+    Html,
+    Input,
+    Label,
+    Mapping,
+    ModWebUser,
+    NodeApiScope,
+    NodeAppEntry,
+    NodeAppRuntimeSummary,
+    NodeAppTransitionState,
+    NodeChatRoomSnapshot,
+    NodeChatStreamEvent,
+    NodeChatStreamEventKind,
+    Power_Level,
+    PurePosixPath,
+    Request,
+    Tooltip,
+    aiohttp,
+    asyncio,
+    cast,
+    config,
+    escape,
+    hashlib,
+    json,
+    mimetypes,
+    quote,
+    re,
+    time,
+    urlencode,
+    urlsplit,
+)
+from .service_base import ModWebServiceSupport
+from .streams import ModWebStreamsMixin
 from .types import (
     ChatMediaPreviewKind,
     ModWebBasePageModel,
@@ -96,13 +102,7 @@ from .types import (
     _ModWebChatPanelSignal,
     _ModWebChatSurfaceConfig,
 )
-
-from .service_base import ModWebServiceSupport
-from .streams import ModWebStreamsMixin
 from .ui_helpers import ModWebUiHelpersMixin
-from relay_notices import notice_badge_spec, notice_hides_body_content, relay_notice_badge_spec_from_label
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nicegui.element import Element
@@ -1122,6 +1122,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                 const bottomThresholdPx = {_CHAT_TIMELINE_BOTTOM_THRESHOLD_PX};
                 const autoScrollHiddenMessageLimit = {_CHAT_TIMELINE_AUTO_SCROLL_HIDDEN_MESSAGE_LIMIT};
                 const get = (elementId) => getElement(elementId);
+                const jumpStateByTimeline = new WeakMap();
                 const pinned = (timeline) => timeline.dataset.modChatPinned !== '0';
                 const hiddenMessageCount = (timeline) => {{
                   const viewportBottom = timeline.scrollTop + timeline.clientHeight + bottomThresholdPx;
@@ -1304,6 +1305,11 @@ class ModWebChatMixin(ModWebServiceSupport):
                     media.addEventListener('load', onMediaReady, {{passive: true}});
                     media.addEventListener('loadeddata', onMediaReady, {{passive: true}});
                     media.addEventListener('loadedmetadata', onMediaReady, {{passive: true}});
+                    if (window.ResizeObserver && !media._modChatResizeObserver) {{
+                      const resizeObserver = new ResizeObserver(() => onMediaReady());
+                      resizeObserver.observe(media);
+                      media._modChatResizeObserver = resizeObserver;
+                    }}
                   }}
                 }};
                 const bind = (timelineId, unreadBarId, unreadCountId) => {{
@@ -1338,18 +1344,44 @@ class ModWebChatMixin(ModWebServiceSupport):
                   timeline.dataset.modChatWasPinned = pinned(timeline) ? '1' : '0';
                   timeline.dataset.modChatHiddenCount = String(hiddenMessageCount(timeline));
                 }};
+                const clearScheduledJump = (timeline) => {{
+                  const state = jumpStateByTimeline.get(timeline);
+                  if (!state) {{
+                    return;
+                  }}
+                  for (const frameId of state.frameIds) {{
+                    cancelAnimationFrame(frameId);
+                  }}
+                  for (const timeoutId of state.timeoutIds) {{
+                    clearTimeout(timeoutId);
+                  }}
+                  jumpStateByTimeline.delete(timeline);
+                }};
+                const settleBottom = (timelineId, unreadBarId, unreadCountId) => {{
+                  const timeline = get(timelineId);
+                  if (!timeline) {{
+                    return;
+                  }}
+                  timeline.scrollTop = timeline.scrollHeight;
+                  timeline.dataset.modChatPinned = '1';
+                  sync(timelineId, unreadBarId, unreadCountId);
+                }};
                 const jump = (timelineId, unreadBarId, unreadCountId) => {{
                   const timeline = get(timelineId);
                   if (!timeline) {{
                     return;
                   }}
-                  const settle = () => {{
-                    timeline.scrollTop = timeline.scrollHeight;
-                    timeline.dataset.modChatPinned = '1';
-                    sync(timelineId, unreadBarId, unreadCountId);
-                  }};
+                  clearScheduledJump(timeline);
+                  const frameIds = [];
+                  const timeoutIds = [];
+                  const settle = () => settleBottom(timelineId, unreadBarId, unreadCountId);
                   settle();
-                  requestAnimationFrame(settle);
+                  frameIds.push(requestAnimationFrame(settle));
+                  frameIds.push(requestAnimationFrame(() => requestAnimationFrame(settle)));
+                  timeoutIds.push(setTimeout(settle, 0));
+                  timeoutIds.push(setTimeout(settle, 120));
+                  timeoutIds.push(setTimeout(settle, 320));
+                  jumpStateByTimeline.set(timeline, {{frameIds, timeoutIds}});
                 }};
                 const shouldAutoScrollAfterRefresh = (timeline, appendedCount) => {{
                   if (appendedCount <= 0) {{
@@ -1567,17 +1599,24 @@ class ModWebChatMixin(ModWebServiceSupport):
         can_reply: bool,
         on_reply: Callable[[ChatEvent], None],
     ) -> None:
+        copy_text: str = self._chat_event_copy_text(event)
         with ui.row().classes("mod-chat-entry w-full items-start gap-2"):
             with ui.column().classes("mod-chat-entry-main min-w-0 grow"):
                 self._render_chat_event_body(ui=ui, event=event)
             with ui.row().classes("mod-chat-entry-meta items-start justify-end gap-1"):
                 if show_time:
                     ui.html(self._chat_event_time_markup(event)).classes("mod-chat-entry-time")
-            if can_reply:
+            if can_reply or copy_text:
                 with ui.context_menu().classes("mod-chat-entry-menu"):
-                    ui.menu_item("Reply", on_click=lambda event=event: on_reply(event)).classes(
-                        "mod-chat-entry-menu-item"
-                    )
+                    if copy_text:
+                        ui.menu_item(
+                            "Copy",
+                            on_click=lambda ui=ui, copy_text=copy_text: self._copy_chat_text(ui=ui, text=copy_text),
+                        ).classes("mod-chat-entry-menu-item")
+                    if can_reply:
+                        ui.menu_item("Reply", on_click=lambda event=event: on_reply(event)).classes(
+                            "mod-chat-entry-menu-item"
+                        )
 
     def _render_chat_event_body(self, *, ui: ModWebUi, event: ChatEvent) -> None:
         reference = event.reference
@@ -2330,6 +2369,48 @@ class ModWebChatMixin(ModWebServiceSupport):
         if self._chat_event_hides_body_content(event):
             return ""
         return self._chat_event_content(event)
+
+    def _chat_event_copy_text(self, event: ChatEvent) -> str:
+        content: str = self._chat_event_content(event).strip()
+        if content:
+            return content
+        reference = event.reference
+        if reference is None:
+            return ""
+        return reference.content.strip()
+
+    @staticmethod
+    def _copy_chat_text(*, ui: ModWebUi, text: str) -> None:
+        normalised_text: str = text.strip()
+        if not normalised_text:
+            ui.notify("This message has no text to copy.", type="warning")
+            return
+        encoded_text: str = json.dumps(normalised_text)
+        ui.run_javascript(
+            (
+                "(async () => {"
+                f"const text = {encoded_text};"
+                "try {"
+                "if (navigator.clipboard && navigator.clipboard.writeText) {"
+                "await navigator.clipboard.writeText(text);"
+                "} else {"
+                "const textarea = document.createElement('textarea');"
+                "textarea.value = text;"
+                "textarea.setAttribute('readonly', 'true');"
+                "textarea.style.position = 'fixed';"
+                "textarea.style.opacity = '0';"
+                "document.body.appendChild(textarea);"
+                "textarea.focus();"
+                "textarea.select();"
+                "document.execCommand('copy');"
+                "document.body.removeChild(textarea);"
+                "}"
+                "} catch (_error) {}"
+                "})()"
+            ),
+            timeout=1.0,
+        )
+        ui.notify("Copied message text.", type="positive")
 
     @staticmethod
     def _chat_event_hides_body_content(event: ChatEvent) -> bool:

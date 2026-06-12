@@ -6,13 +6,34 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Never, cast
 from unittest.mock import patch
 
 import config
 from _relay_embeds import build_app_lifecycle_embed
 from apps._config import Mod_Config, ModDownloadBlockReason, ModType
-from apps.minecraft import Minecraft, Minecraft_Config, Mod_MC, _detect_minecraft_mod_version, _load_squaremap_web_address
+from apps.minecraft import (
+    Activities as MinecraftActivities,
+)
+from apps.minecraft import (
+    Minecraft,
+    Minecraft_Config,
+    Mod_MC,
+    _detect_minecraft_mod_version,
+    _load_squaremap_web_address,
+)
+
+
+class _RecordingActivityManager:
+    def __init__(self) -> None:
+        self.registered: list[object] = []
+        self.deregistered: list[object] = []
+
+    def register(self, provider: object) -> None:
+        self.registered.append(provider)
+
+    def deregister(self, provider: object) -> None:
+        self.deregistered.append(provider)
 
 
 class MinecraftModVersionDetectionTests(unittest.TestCase):
@@ -234,6 +255,43 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
         thread.join(timeout=1.0)
         self.assertFalse(thread.is_alive())
         self.assertTrue(task.done())
+
+
+class MinecraftActivityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_minecraft_activities_stop_deregisters_registered_provider(self) -> None:
+        activity_manager = _RecordingActivityManager()
+
+        async def background_worker() -> Never:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def cancel_background_task(
+            task: asyncio.Task[None],
+            *,
+            label: str,
+            timeout_seconds: float = 5.0,
+        ) -> None:
+            del label, timeout_seconds
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        app = SimpleNamespace(
+            activity_manager=activity_manager,
+            _cancel_background_task=cancel_background_task,
+        )
+        activities = MinecraftActivities(cast(Any, app))
+        provider = activities.providers[0]
+        provider.task_funcs = [background_worker]
+
+        await activities.start()
+        await activities.stop()
+
+        self.assertEqual(activity_manager.registered, [provider])
+        self.assertEqual(activity_manager.deregistered, [provider])
+        self.assertEqual(activities.tasks, set())
 
 
 if __name__ == "__main__":

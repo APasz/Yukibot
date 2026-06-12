@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Protocol, SupportsInt, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, SupportsInt, cast, runtime_checkable
 from urllib.parse import urlparse
 
 import aiohttp
@@ -23,6 +23,7 @@ import hikari
 import lightbulb
 from hikari import messages as hikari_messages
 from hikari.guilds import Member, Role
+from hikari.internal import routes
 from hikari.users import OwnUser
 from pathvalidate import sanitize_filename
 from TenorGrabber import tenorgrabber
@@ -483,6 +484,12 @@ class MediaProvider(Enum):
     UNKNOWN = "unknown"
 
 
+class MessageEnrichmentState(Enum):
+    DISABLED = "disabled"
+    PENDING = "pending"
+    COMPLETE = "complete"
+
+
 @dataclass(slots=True, frozen=True)
 class RelayEmbedPayload:
     title: str
@@ -557,7 +564,7 @@ class Message:
     player: str | int | hikari.UndefinedType
     urls: set["URLish"]
     files: set["Fileish"]
-    enrich_task: asyncio.Task[set["URLish"]] | None
+    _enrichment_state: MessageEnrichmentState
     relay_embed: RelayEmbedPayload | None
     notice: RelayNotice | None
 
@@ -582,7 +589,7 @@ class Message:
         }
     )
 
-    __slots__ = ("app", "_string", "player", "urls", "files", "enrich_task", "relay_embed", "notice")
+    __slots__ = ("app", "_string", "player", "urls", "files", "_enrichment_state", "relay_embed", "notice")
 
     def __init__(
         self,
@@ -598,11 +605,7 @@ class Message:
         self.player = player
         self.urls = set()
         self.files = set(files or ())
-
-        if enrich:
-            self.enrich_task = asyncio.create_task(self.find_urls())
-        else:
-            self.enrich_task = None
+        self._enrichment_state = MessageEnrichmentState.PENDING if enrich else MessageEnrichmentState.DISABLED
 
         self.relay_embed = relay_embed
         self.notice = notice
@@ -619,9 +622,15 @@ class Message:
     def content_demojised(self) -> str:
         return emoji.demojize(self.content)
 
-    async def find_urls(self):
+    async def find_urls(self) -> set["URLish"]:
         self.urls = await self._enrich_links(self._match_urls(self._string))
+        self._enrichment_state = MessageEnrichmentState.COMPLETE
         return self.urls
+
+    async def ensure_enriched(self) -> set["URLish"]:
+        if self._enrichment_state is not MessageEnrichmentState.PENDING:
+            return self.urls
+        return await self.find_urls()
 
     def _match_urls(self, text: str) -> dict[str, str | None]:
         urls: dict[str, str | None] = {}
@@ -962,7 +971,7 @@ class DC_Bound(Message):
         "player_resolution",
         "urls",
         "files",
-        "enrich_task",
+        "_enrichment_state",
         "relay_embed",
         "notice",
     )
@@ -1012,7 +1021,7 @@ class App_Bound(Message):
         "player",
         "urls",
         "files",
-        "enrich_task",
+        "_enrichment_state",
         "relay_embed",
         "notice",
         "reference_kind",
@@ -2102,6 +2111,18 @@ class DC_Relay(metaclass=Singleton):
         self._discord_relay_reference_by_message = reference_map
         return reference_map
 
+    def _is_tracked_discord_relay_message(
+        self,
+        *,
+        channel_id: hikari.Snowflakeish,
+        message_id: hikari.Snowflakeish,
+    ) -> bool:
+        reference_map = self._discord_relay_reference_by_message_map()
+        return (
+            int(hikari.Snowflake(channel_id)),
+            int(hikari.Snowflake(message_id)),
+        ) in reference_map
+
     def _discord_relay_message_id_by_event_channel_map(self) -> dict[tuple[str, int], int]:
         raw_map = getattr(self, "_discord_relay_message_id_by_event_channel", None)
         if isinstance(raw_map, dict):
@@ -2391,8 +2412,7 @@ class DC_Relay(metaclass=Singleton):
             raise ValueError("Web chat content must not be empty.")
         display_name = author_display_name.strip() or "Web User"
         parsed_message = Message(message, display_name, None)
-        if parsed_message.enrich_task is not None:
-            await parsed_message.enrich_task
+        await parsed_message.ensure_enriched()
         author_color_hex, source_guild_id = await self._chat_author_color_for_room(
             room_id=room,
             discord_user_id=discord_user_id,
@@ -2592,6 +2612,45 @@ class DC_Relay(metaclass=Singleton):
             return player_plate
         return f"{reference_prefix} {player_plate}".strip()
 
+    @staticmethod
+    def _is_discord_attachment_too_large_error(error: hikari.HTTPResponseError) -> bool:
+        if isinstance(error, hikari.BadRequestError) and error.code == 40005:
+            return True
+        return int(error.status) == 413
+
+    @staticmethod
+    def _can_forward_source_discord_message(event: ChatEvent) -> bool:
+        return (
+            event.source.kind is ChatEndpointKind.DISCORD_CHANNEL
+            and event.source_channel_id is not None
+            and event.source_message_id is not None
+        )
+
+    async def _forward_chat_event_to_discord(
+        self,
+        event: ChatEvent,
+        *,
+        channel_id: hikari.Snowflakeish,
+    ) -> hikari.Message:
+        if not self._can_forward_source_discord_message(event):
+            raise ValueError("Chat event cannot be forwarded without a source Discord message.")
+
+        channel_snowflake = hikari.Snowflake(channel_id)
+        rest = cast(Any, self.bot.rest)
+        response_payload = await rest._request(
+            routes.POST_CHANNEL_MESSAGES.compile(channel=channel_snowflake),
+            json={
+                "message_reference": {
+                    "type": hikari_messages.MessageReferenceType.FORWARD.value,
+                    "message_id": str(event.source_message_id),
+                    "channel_id": str(event.source_channel_id),
+                }
+            },
+        )
+        if not isinstance(response_payload, Mapping):
+            raise TypeError("Discord forward response payload is invalid.")
+        return cast(hikari.Message, rest._entity_factory.deserialize_message(response_payload))
+
     @classmethod
     def _relay_embed_payload_for_event(
         cls,
@@ -2686,6 +2745,32 @@ class DC_Relay(metaclass=Singleton):
                 int(channel.id),
                 sent_message,
             )
+        except hikari.HTTPResponseError as xcp:
+            if self._is_discord_attachment_too_large_error(xcp) and self._can_forward_source_discord_message(event):
+                try:
+                    sent_message = await self._forward_chat_event_to_discord(event, channel_id=channel_snowflake)
+                except Exception:
+                    log.exception(
+                        "DC.Send forward fallback failed: room=%s channel=%s event=%s",
+                        event.room_id,
+                        int(channel_snowflake),
+                        event.id,
+                    )
+                else:
+                    self._record_discord_relay_message(
+                        channel_id=channel_snowflake,
+                        message_id=sent_message.id,
+                        event=event,
+                    )
+                    log.info(
+                        "Chat event forwarded to Discord after attachment upload exceeded size limit: room=%s source_channel=%s source_message=%s channel=%s",
+                        event.room_id,
+                        event.source_channel_id,
+                        event.source_message_id,
+                        int(channel_snowflake),
+                    )
+                    return
+            log.exception("DC.Send: -/> room=%s channel=%s event=%s", event.room_id, int(channel_snowflake), event.id)
         except Exception:
             log.exception("DC.Send: -/> room=%s channel=%s event=%s", event.room_id, int(channel_snowflake), event.id)
 
@@ -2735,8 +2820,8 @@ class DC_Relay(metaclass=Singleton):
         )
         if event.links:
             payload.urls = {_urlish(link) for link in event.links}
-        elif payload.enrich_task:
-            await payload.enrich_task
+        else:
+            await payload.ensure_enriched()
         payload.app = app
         log.info(
             "Chat -> App: app=%s event=%s source=%s author=%r chars=%s attachments=%s links=%s",
@@ -2914,8 +2999,7 @@ class DC_Relay(metaclass=Singleton):
             raise ValueError(f"Invalid DC_Message: {message}")
         log.info(f"App -> DC: {message} | {message.content}")
 
-        if message.enrich_task:
-            await message.enrich_task
+        await message.ensure_enriched()
         await self._notify_resolution_failure(message)
         author_color_hex, _ = await self._chat_author_color_for_room(
             room_id=message.app.name,
@@ -2951,6 +3035,14 @@ class DC_Relay(metaclass=Singleton):
             return
 
         if self._message_author_is_bot(ctx):
+            return
+
+        if self._is_tracked_discord_relay_message(channel_id=ctx.channel_id, message_id=ctx.message_id):
+            log.debug(
+                "Ignoring tracked relay echo: channel=%s message=%s",
+                int(ctx.channel_id),
+                int(ctx.message_id),
+            )
             return
 
         if ctx.channel_id not in self._chat_channels:
@@ -3035,8 +3127,7 @@ class DC_Relay(metaclass=Singleton):
             if message.urls:
                 message._string = "<URL>"
 
-        if message.enrich_task:
-            await message.enrich_task
+        await message.ensure_enriched()
         owns_shared_relay_channel = self._owns_shared_relay_channel(ctx.channel_id)
         relay_apps = tuple(sorted(self._chat_channels[ctx.channel_id], key=self._app_relay_name))
         default_pickup_app = self._default_relay_pickup_app(relay_apps)

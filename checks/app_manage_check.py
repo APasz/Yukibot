@@ -16,14 +16,14 @@ from hikari_ui import EditorCustomIdCodec, InteractionDeferral
 from hikari_ui.action import PagedActionCodec
 
 import config
-from chat_hub import ChatEndpointKind, ChatHub
 from _discord import App_Bound, DC_Relay
 from _editor_session import EditorSessionNamespace
-from _manager import App_Manager, AppInstanceCreateRequest, AppInstanceTemplate, Provider_Player
+from _manager import App_Manager, AppDetailsUpdate, AppInstanceCreateRequest, AppInstanceTemplate, Provider_Player
 from _relay_embeds import build_app_lifecycle_embed
 from _security import Power_Level
 from apps._app import AM_Receiver, App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport, RelayAdvancementTerms
 from apps._config import (
+    APP_FRIENDLY_NAME_MAX_LENGTH,
     App_Config,
     AppVersion,
     Mod_Config,
@@ -31,31 +31,38 @@ from apps._config import (
     RelayChannelSource,
     normalise_app_version,
 )
-from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource, execute_console_action
+from apps._console import (
+    ConsoleAction,
+    ConsoleActionParameter,
+    ConsoleActionResult,
+    ConsoleResponseSource,
+    execute_console_action,
+)
 from apps._mod import Mod
 from apps._settings import ChoiceOption, ChoiceSpec
 from apps.minecraft import Minecraft, Minecraft_Config, MinecraftLoader, MinecraftRuntimeInfo
 from apps.sevendays import SevenDays
+from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatHub
 from cmd_app import (
     AppConsoleActionKind,
     AppConsoleService,
     AppConsoleState,
-    EditorStatus,
     AppManageActionKind,
     AppManageCapability,
     AppManageMode,
     AppManageService,
     AppManageState,
+    EditorStatus,
     _app_capabilities,
     _app_extra_capability_labels,
     _app_relay_lines,
-    _default_relay_lines,
     _app_started_response_text,
     _app_status_lines,
     _console_action_result_status_text,
     _console_action_status_lines_for_view,
     _console_state_from_value,
     _console_state_value,
+    _default_relay_lines,
     _state_value,
 )
 from cmd_dashboard import DashboardEditorService
@@ -1398,10 +1405,11 @@ class AppManageTests(unittest.TestCase):
                 relay_advancements=True,
             )
             app.file_instances = app.cfg.apps_dir / "instances.json"
-            manager.apps = {app.name: app}
+            managed_app = cast(App[App_Config], app)
+            manager.apps = {app.name: managed_app}
             manager._lookup = {app.name: app.name, app.name.lower(): app.name}
 
-            manager.set_app_relay_advancements_enabled(app, False)
+            manager.set_app_relay_advancements_enabled(managed_app, False)
 
             payload = json.loads(instances_path.read_text(encoding="utf-8"))
             self.assertEqual(app.relay_advancements_enabled, False)
@@ -1429,7 +1437,7 @@ class AppManageTests(unittest.TestCase):
             )
             app.file_instances = app.cfg.apps_dir / "instances.json"
 
-            manager._sync_app_instance_config(app)
+            manager._sync_app_instance_config(cast(App[App_Config], app))
 
             payload = json.loads(instances_path.read_text(encoding="utf-8"))
 
@@ -1462,7 +1470,7 @@ class AppManageTests(unittest.TestCase):
             app.file_instances = app.cfg.apps_dir / "instances.json"
             app._runtime = MinecraftRuntimeInfo("1.20.1", MinecraftLoader.FORGE, "47.4.0")
 
-            manager._sync_app_instance_config(app)
+            manager._sync_app_instance_config(cast(App[App_Config], app))
 
             payload = json.loads(instances_path.read_text(encoding="utf-8"))
 
@@ -1525,6 +1533,8 @@ class AppManageTests(unittest.TestCase):
             status=EditorStatus(text="Could not load apps.", is_error=True),
         )
 
+        self.assertIsNotNone(embed)
+        assert embed is not None
         self.assertEqual(embed.title, "Error | App Manager")
 
     def test_relay_view_uses_app_specific_advancement_term_labels(self) -> None:
@@ -2190,6 +2200,38 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Join: `play.example.com:25565`")
         self.assertIsNotNone(app.lifecycle_started_at)
 
+    async def test_launch_emits_lifecycle_start_embed_for_default_chat_channels_without_chat_relay(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = None
+        manager.end = AsyncMock(return_value=set())
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channels = (hikari.Snowflake(123),)
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager.launch(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.player, "System")
+        self.assertEqual(relayed_message.content, "Started")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Started")
+        self.assertEqual(relayed_message.relay_embed.description, "Join: `play.example.com:25565`")
+
+    async def test_launch_skips_lifecycle_start_embed_when_started_notice_disabled(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = None
+        manager.end = AsyncMock(return_value=set())
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.cfg.lifecycle_notice_started = False
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager.launch(app)
+
+        add_mock.assert_not_called()
+        self.assertIsNotNone(app.lifecycle_started_at)
+
     async def test_launch_emits_crash_embed_when_startup_records_runtime_fault(self) -> None:
         manager = object.__new__(App_Manager)
         manager.current = None
@@ -2637,6 +2679,116 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["alpha"]["mods_dir"], "{WD}/mods")
             self.assertEqual(payload["alpha"]["server_log_file"], "{WD}/Server.log")
             self.assertEqual(payload["alpha"]["join_port"], 25565)
+
+    def test_set_app_friendly_name_persists_instance_metadata(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps({"alpha": {"friendly_name": "Dummy", "directory": "{APPS}/dummy"}}),
+                encoding="utf-8",
+            )
+            app = _build_dummy_app()
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+            hub = ChatHub()
+            hub.clear_room(app.name)
+            hub.bind(app.name, ChatEndpoint(ChatEndpointId.app(app.name), app.friendly))
+
+            os.chdir(temp_path)
+            try:
+                updated_friendly_name = manager.set_app_friendly_name(app, "Demo Alpha")
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated_friendly_name, "Demo Alpha")
+            self.assertEqual(app.friendly, "Demo Alpha")
+            self.assertEqual(app.cfg.friendly_name, "Demo Alpha")
+            self.assertEqual(payload["alpha"]["friendly_name"], "Demo Alpha")
+            self.assertEqual(manager._lookup.get("Demo Alpha"), app.name)
+            self.assertEqual(manager._lookup.get("demo alpha"), app.name)
+            self.assertIsNone(manager._lookup.get("Dummy"))
+            endpoints = hub.endpoints_for_room(app.name)
+            self.assertEqual(len(endpoints), 1)
+            self.assertEqual(endpoints[0].label, "Demo Alpha")
+
+    def test_set_app_friendly_name_rejects_lookup_collision(self) -> None:
+        manager = object.__new__(App_Manager)
+        primary_app = _build_dummy_app()
+        primary_app.name = "dummy_alpha"
+        primary_app.cfg.name = primary_app.name
+        primary_app.cfg.instance_key = "alpha"
+        primary_app.friendly = "Dummy Alpha"
+        primary_app.cfg.friendly_name = primary_app.friendly
+        conflicting_app = _build_dummy_app()
+        conflicting_app.name = "dummy_beta"
+        conflicting_app.cfg.name = conflicting_app.name
+        conflicting_app.cfg.instance_key = "beta"
+        conflicting_app.friendly = "Dummy Beta"
+        conflicting_app.cfg.friendly_name = conflicting_app.friendly
+        manager.apps = {primary_app.name: primary_app, conflicting_app.name: conflicting_app}
+        manager._lookup = {}
+        manager._register_lookup_aliases(primary_app.name, primary_app)
+        manager._register_lookup_aliases(conflicting_app.name, conflicting_app)
+
+        with self.assertRaisesRegex(ValueError, "Friendly name conflicts with existing app alias"):
+            manager.set_app_friendly_name(primary_app, "Dummy Beta")
+
+    def test_set_app_friendly_name_rejects_overlong_value(self) -> None:
+        manager = object.__new__(App_Manager)
+        app = _build_dummy_app()
+
+        with self.assertRaisesRegex(
+            ValueError, f"Friendly name must be {APP_FRIENDLY_NAME_MAX_LENGTH} characters or fewer."
+        ):
+            manager.set_app_friendly_name(app, "A" * (APP_FRIENDLY_NAME_MAX_LENGTH + 1))
+
+    def test_update_app_details_persists_notes_and_lifecycle_notice_flags(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps({"alpha": {"friendly_name": "Dummy", "directory": "{APPS}/dummy"}}),
+                encoding="utf-8",
+            )
+            app = _build_dummy_app()
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+
+            os.chdir(temp_path)
+            try:
+                updated_friendly_name = manager.update_app_details(
+                    app,
+                    AppDetailsUpdate(
+                        friendly_name="Dummy Prime",
+                        notes="Main survival shard",
+                        lifecycle_notice_started=False,
+                        lifecycle_notice_stopped=True,
+                        lifecycle_notice_crashed=False,
+                    ),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated_friendly_name, "Dummy Prime")
+            self.assertEqual(app.cfg.notes, "Main survival shard")
+            self.assertFalse(app.cfg.lifecycle_notice_started)
+            self.assertTrue(app.cfg.lifecycle_notice_stopped)
+            self.assertFalse(app.cfg.lifecycle_notice_crashed)
+            self.assertEqual(payload["alpha"]["notes"], "Main survival shard")
+            self.assertFalse(payload["alpha"]["lifecycle_notice_started"])
+            self.assertTrue(payload["alpha"]["lifecycle_notice_stopped"])
+            self.assertFalse(payload["alpha"]["lifecycle_notice_crashed"])
 
     def test_create_instance_requires_admin_password_for_satisfactory(self) -> None:
         manager = object.__new__(App_Manager)

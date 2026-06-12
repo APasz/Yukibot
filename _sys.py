@@ -678,6 +678,7 @@ async def scheduled_restart(
     restart_type: str,
     reason: str,
     message_channel_id: hikari.Snowflakeish | None,
+    suppress_notifications: bool = False,
 ) -> None:
     restart_kind = restart_type.strip().lower()
     restart_sys = restart_kind == "system"
@@ -687,10 +688,13 @@ async def scheduled_restart(
         status=hikari.Status.DO_NOT_DISTURB,
     )
     if message_channel_id is not None:
+        flags: hikari.MessageFlag | hikari.UndefinedType = (
+            hikari.MessageFlag.SUPPRESS_NOTIFICATIONS if suppress_notifications else hikari.UNDEFINED
+        )
         message = await bot.rest.create_message(
             message_channel_id,
             reason,
-            flags=hikari.MessageFlag.SUPPRESS_NOTIFICATIONS,
+            flags=flags,
         )
         Path("restart_message_id").write_text(f"{int(message_channel_id)}:{message.id}")
         await asyncio.sleep(0.1)

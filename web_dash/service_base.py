@@ -25,7 +25,6 @@ from .runtime_imports import (
     NodeModEntry,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
-    NodeChatRoomSnapshot,
     NodeConfigContent,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
@@ -100,6 +99,12 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_app_link_from_entry"]) -> Callable[..., ModWebAppLink]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_link_tabs"]) -> Callable[..., tuple[ModWebAppTabDefinition, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_link_with_tabs"]) -> Callable[..., ModWebAppLink]: ...
 
     @overload
     def __getattr__(self, name: Literal["_app_list_api_actions_enabled"]) -> Callable[..., bool]: ...
@@ -296,6 +301,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_page_tabs"]) -> Callable[..., tuple[ModWebAppTabDefinition, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_page_model_with_tabs"]) -> Callable[..., ModWebBasePageModel]: ...
 
     @overload
     def __getattr__(self, name: Literal["_player_count_tooltip_html"]) -> Callable[..., str | None]: ...
@@ -544,6 +552,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_request_url_with_query_values"]) -> Callable[..., str]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_running_value"]) -> Callable[..., str]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_require_http_user"]) -> Callable[..., ModWebUser]: ...
 
     @overload
@@ -594,6 +605,18 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_subscribe_local_app_state"]) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_system_cpu_entry"]) -> Callable[..., tuple[str, BadgeTone]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_system_ram_entry"]) -> Callable[..., tuple[str, BadgeTone]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_system_storage_entry"]) -> Callable[..., tuple[str, BadgeTone]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_system_uptime_entry"]) -> Callable[..., tuple[str, BadgeTone]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_tab_section_body_classes"]) -> Callable[..., str]: ...

@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, Mock, patch
 import hikari
 
 import config
-from chat_hub import ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
 from _discord import (
     App_Bound,
     DC_Bound,
@@ -22,11 +21,10 @@ from _discord import (
     Message,
     RelayEmbedPayload,
     RelayMessageReferenceKind,
-    URLVariant,
     URLish,
+    URLVariant,
 )
-from apps._app import AppRuntimeFaultKind
-from apps._app import AM_Receiver
+from apps._app import AM_Receiver, AppRuntimeFaultKind
 from apps._config import AppVersion
 from apps.minecraft import (
     Matchers,
@@ -41,6 +39,7 @@ from apps.minecraft import (
     _minecraft_crash_summary_from_log_line,
     _runtime_info_from_log_line,
 )
+from chat_hub import ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
 from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource
 
 
@@ -783,7 +782,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         with patch("apps.minecraft.DC_Relay.add") as add_mock:
             await matcher.match_death(
                 "[06Jun2026 07:06:39.352] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: "
-                "<Nishant321> gotta be seiso when collecting"
+                "<Rando> gotta be seiso when collecting"
             )
 
         add_mock.assert_not_called()

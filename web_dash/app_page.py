@@ -4,6 +4,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from apps._config import APP_FRIENDLY_NAME_MAX_LENGTH
+
 from .constants import (
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _APP_SECTION_QUERY_PARAM,
@@ -12,6 +14,7 @@ from .constants import (
 )
 from .nicegui_protocols import (
     AsyncRefresh,
+    Dialog,
     ModWebEventArgumentsContainer,
     ModWebUi,
     ModWebValueContainer,
@@ -30,7 +33,6 @@ from .runtime_imports import (
     Html,
     Input,
     Label,
-    Literal,
     LiteralString,
     ModWebUser,
     NodeAppMutationAction,
@@ -350,7 +352,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
 
         if app_stats.transition_state is NodeAppTransitionState.STOPPING:
             status_text = "Stopping"
-            status_tone: Literal["warn"] | Literal["purple"] | Literal["grey"] | Literal["red"] = "warn"
+            status_tone = "warn"
         elif app_stats.transition_state is NodeAppTransitionState.STARTING:
             status_text = "Starting"
             status_tone = "purple"
@@ -384,7 +386,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         ]
         player_count_badge: _ModWebBadgeSpec | None = None
         if app_stats.player_count is not None and app_stats.player_capacity is not None:
-            player_tone: Literal["purple"] | Literal["grey"] = "purple" if app_stats.player_count > 0 else "grey"
+            player_tone = "purple" if app_stats.player_count > 0 else "grey"
             player_count_badge = _ModWebBadgeSpec(
                 text=f"{app_stats.player_count} / {app_stats.player_capacity}",
                 tone=player_tone,
@@ -3066,11 +3068,22 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         can_manage_app_state: bool = self._user_has_level(
             user, required_app_mutation_level(NodeAppMutationAction.ENABLE)
         )
-        if not can_control_app_runtime and not can_kill_app_runtime and not can_manage_app_state:
+        can_edit_app_details: bool = self._user_has_level(
+            user, required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS)
+        )
+        can_open_details_dialog: bool = can_manage_app_state or can_edit_app_details
+        if not can_control_app_runtime and not can_kill_app_runtime and not can_open_details_dialog:
             return _ModWebRuntimeToolbarBindings()
 
         start_stop_button: Button | None = None
         kill_button: Button | None = None
+        details_dialog: Dialog | None = None
+        details_enable_disable_button: Button | None = None
+        friendly_name_input: Input | None = None
+        notes_input: Input | None = None
+        lifecycle_started_checkbox: Checkbox | None = None
+        lifecycle_stopped_checkbox: Checkbox | None = None
+        lifecycle_crashed_checkbox: Checkbox | None = None
         current_runtime_model: ModWebBasePageModel = model
         start_stop_control_state: _ModWebStartStopControlState | None = None
         kill_control_state: _ModWebKillControlState | None = None
@@ -3098,6 +3111,11 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     kill_button.classes(replace="mod-list-button danger mod-toolbar-button")
                     _set_button_disabled(button=kill_button, disabled=next_kill_state.disabled)
                     kill_control_state = next_kill_state
+            if can_manage_app_state and details_enable_disable_button is not None:
+                details_enable_disable_button.set_text(self._app_enable_disable_label(runtime_model))
+                details_enable_disable_button.classes(
+                    replace=f"{self._app_enable_disable_button_classes(runtime_model)} mod-app-details-state-button"
+                )
 
         async def run_app_action(action: NodeAppMutationAction) -> None:
             pending_label: str | None = self._app_action_pending_label(action)
@@ -3157,6 +3175,116 @@ class ModWebAppPageMixin(ModWebServiceSupport):
 
             return _handle_app_action
 
+        async def _handle_details_enable_disable(_: object | None = None) -> None:
+            await run_app_action(self._app_enable_disable_action(current_runtime_model))
+
+        async def _handle_details_submit(_: object | None = None) -> None:
+            if (
+                friendly_name_input is None
+                or notes_input is None
+                or lifecycle_started_checkbox is None
+                or lifecycle_stopped_checkbox is None
+                or lifecycle_crashed_checkbox is None
+            ):
+                return
+            next_friendly_name: str = _value_as_text(friendly_name_input.value).strip()
+            if not next_friendly_name:
+                ui.notify("Friendly name must not be empty.", type="negative")
+                return
+            if len(next_friendly_name) > APP_FRIENDLY_NAME_MAX_LENGTH:
+                ui.notify(
+                    f"Friendly name must be {APP_FRIENDLY_NAME_MAX_LENGTH} characters or fewer.",
+                    type="negative",
+                )
+                return
+            next_notes: str = _value_as_text(notes_input.value)
+            try:
+                result = await self._mutate_app(
+                    model=current_runtime_model,
+                    action=NodeAppMutationAction.UPDATE_DETAILS,
+                    user=user,
+                    friendly_name=next_friendly_name,
+                    notes=next_notes,
+                    lifecycle_notice_started=bool(_value_as_object(lifecycle_started_checkbox.value)),
+                    lifecycle_notice_stopped=bool(_value_as_object(lifecycle_stopped_checkbox.value)),
+                    lifecycle_notice_crashed=bool(_value_as_object(lifecycle_crashed_checkbox.value)),
+                )
+            except Exception as xcp:
+                log.warning(
+                    "App details update failed: node=%s app=%s error=%s",
+                    current_runtime_model.node_name,
+                    current_runtime_model.app_name,
+                    xcp,
+                )
+                ui.notify(f"App details update failed: {xcp}", type="negative")
+                return
+            ui.notify(result.message, type="positive")
+            ui.navigate.reload()
+
+        if can_open_details_dialog:
+            with ui.dialog() as details_dialog:
+                with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
+                    with ui.column().classes("w-full gap-4 mod-app-details-layout"):
+                        with ui.column().classes("gap-1"):
+                            ui.label("App Details").classes("text-xl font-black mod-title-small")
+                            ui.label("Update instance-level details shown across web and relay surfaces.").classes(
+                                "mod-subtitle text-sm"
+                            )
+                        if can_edit_app_details:
+                            with ui.column().classes("mod-app-details-section"):
+                                friendly_name_input = (
+                                    ui.input("Friendly name", value=model.app_friendly)
+                                    .props(
+                                        "filled square dense clearable hide-bottom-space "
+                                        f"color=accent autofocus maxlength={APP_FRIENDLY_NAME_MAX_LENGTH}"
+                                    )
+                                    .classes("mod-app-details-field")
+                                )
+                                notes_input = (
+                                    ui.input("Shared instance notes", value=model.app_notes or "")
+                                    .props("filled square type=textarea autogrow hide-bottom-space color=accent")
+                                    .classes("mod-app-details-field mod-app-details-notes")
+                                )
+                                with ui.column().classes("mod-app-details-subsection"):
+                                    ui.label("Lifecycle Notices").classes("mod-stat-label")
+                                    lifecycle_started_checkbox = (
+                                        ui.checkbox(
+                                            "Started notices",
+                                            value=model.lifecycle_notice_started,
+                                        )
+                                        .props("dense")
+                                        .classes("mod-app-details-toggle")
+                                    )
+                                    lifecycle_stopped_checkbox = (
+                                        ui.checkbox(
+                                            "Stopped notices",
+                                            value=model.lifecycle_notice_stopped,
+                                        )
+                                        .props("dense")
+                                        .classes("mod-app-details-toggle")
+                                    )
+                                    lifecycle_crashed_checkbox = (
+                                        ui.checkbox(
+                                            "Crash notices",
+                                            value=model.lifecycle_notice_crashed,
+                                        )
+                                        .props("dense")
+                                        .classes("mod-app-details-toggle")
+                                    )
+                        if can_manage_app_state:
+                            with ui.column().classes("mod-app-details-section"):
+                                ui.label("Instance State").classes("mod-stat-label")
+                                details_enable_disable_button = ui.button(
+                                    self._app_enable_disable_label(model),
+                                    on_click=_handle_details_enable_disable,
+                                ).classes(
+                                    f"{self._app_enable_disable_button_classes(model)} mod-app-details-state-button"
+                                )
+                        with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
+                            ui.button("Cancel", on_click=details_dialog.close).classes("mod-list-button secondary")
+                            if can_edit_app_details:
+                                ui.button("Save", on_click=_handle_details_submit).classes("mod-list-button")
+
         with ui.column().classes("mod-hero-toolbar w-full mod-select-form"):
             with ui.row().classes("mod-list-toolbar mod-hero-toolbar-surface w-full"):
                 with ui.row().classes("mod-list-actions"):
@@ -3181,12 +3309,11 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                             on_click=_create_app_action_handler(NodeAppMutationAction.KILL),
                         ).classes("mod-list-button danger mod-toolbar-button")
                         _apply_runtime_control_model(model, force=True)
-                    if can_manage_app_state:
-                        enable_disable_action: NodeAppMutationAction = self._app_enable_disable_action(model)
+                    if can_open_details_dialog and details_dialog is not None:
                         ui.button(
-                            self._app_enable_disable_label(model),
-                            on_click=_create_app_action_handler(enable_disable_action),
-                        ).classes(f"{self._app_enable_disable_button_classes(model)} mod-toolbar-button")
+                            "Details",
+                            on_click=details_dialog.open,
+                        ).classes("mod-list-button secondary mod-toolbar-button")
         if (can_control_app_runtime or can_kill_app_runtime) and refresh_async_runtime_model is not None:
             def apply_runtime_control_model(runtime_model: ModWebBasePageModel) -> None:
                 _apply_runtime_control_model(runtime_model, force=False)
@@ -3327,8 +3454,8 @@ class ModWebAppPageMixin(ModWebServiceSupport):
 
     @staticmethod
     def _mods_header_badges(summary: NodeModSummary) -> tuple[_ModWebBadgeSpec, ...]:
-        mod_label: Literal["mod", "mods"] = "mod" if summary.total_count == 1 else "mods"
-        coremod_label: Literal["coremod", "coremods"] = "coremod" if summary.coremod_count == 1 else "coremods"
+        mod_label = "mod" if summary.total_count == 1 else "mods"
+        coremod_label = "coremod" if summary.coremod_count == 1 else "coremods"
         badges: list[_ModWebBadgeSpec] = [_ModWebBadgeSpec(text=f"{summary.total_count} {mod_label}", tone="black")]
         if summary.non_downloadable_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{summary.non_downloadable_count} blocked", tone="warn"))
