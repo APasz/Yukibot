@@ -14,7 +14,6 @@ from .constants import (
 )
 from .nicegui_protocols import (
     AsyncRefresh,
-    Dialog,
     ModWebEventArgumentsContainer,
     ModWebUi,
     ModWebValueContainer,
@@ -79,6 +78,7 @@ from .ui_helpers import ModWebUiHelpersMixin
 
 if TYPE_CHECKING:
     from nicegui.element import Element
+    from nicegui.elements.dialog import Dialog
     from nicegui.elements.tabs import Tab
     from nicegui.elements.tooltip import Tooltip
     from nicegui.events import UploadEventArguments
