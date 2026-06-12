@@ -40,6 +40,7 @@ ALWAYS_SYNCED_FILES: tuple[Path, ...] = (
     Path("uv.lock"),
 )
 REMOTE_UV_SYNC_COMMAND = "uv sync"
+NO_CHANGED_PYTHON_FILES_ERROR = "git status returned no changed Python files"
 
 
 class TargetName(StrEnum):
@@ -207,14 +208,14 @@ def parse_changed_python_plan(stdout: str) -> SyncPlan:
             continue
         _append_unique_path(write_files, seen_write, path)
     if not write_files and not delete_files:
-        raise RuntimeError("git status returned no changed Python files")
+        raise RuntimeError(NO_CHANGED_PYTHON_FILES_ERROR)
     return SyncPlan(write_files=tuple(write_files), delete_files=tuple(delete_files))
 
 
 def parse_changed_python_files(stdout: str) -> list[Path]:
     files = list(parse_changed_python_plan(stdout).write_files)
     if not files:
-        raise RuntimeError("git status returned no changed Python files")
+        raise RuntimeError(NO_CHANGED_PYTHON_FILES_ERROR)
     return files
 
 
@@ -227,6 +228,22 @@ def changed_python_plan() -> SyncPlan:
         text=True,
     )
     return parse_changed_python_plan(result.stdout)
+
+
+def tracked_python_sync_plan() -> SyncPlan:
+    return SyncPlan(write_files=tuple(tracked_python_files()), delete_files=())
+
+
+def select_sync_plan(*, sync_all_tracked: bool) -> SyncPlan:
+    if sync_all_tracked:
+        return tracked_python_sync_plan()
+    try:
+        return changed_python_plan()
+    except RuntimeError as error:
+        if str(error) != NO_CHANGED_PYTHON_FILES_ERROR:
+            raise
+        print("No changed Python files detected; falling back to syncing all tracked Python files.")
+        return tracked_python_sync_plan()
 
 
 def changed_python_files() -> list[Path]:
@@ -562,7 +579,7 @@ def main() -> int:
     args = parse_args()
     require_program("git")
 
-    sync_plan = SyncPlan(write_files=tuple(tracked_python_files()), delete_files=()) if args.all_tracked else changed_python_plan()
+    sync_plan = select_sync_plan(sync_all_tracked=args.all_tracked)
     files = planned_sync_files(list(sync_plan.write_files))
     targets = configured_targets(args.targets)
     print(f"Preparing to sync {len(files)} files")
