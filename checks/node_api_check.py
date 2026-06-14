@@ -18,9 +18,10 @@ import requests
 from fastapi import HTTPException, Request, WebSocketDisconnect
 
 import config
+from _manager import AppStartBlocker, AppStartBlockerKind
 from _security import Access_Control, Power_Level
 from apps._app import App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
-from apps._config import App_Config, Mod_Config, ModDownloadBlockReason, ModType
+from apps._config import AppTitleFont, App_Config, Mod_Config, ModDownloadBlockReason, ModType
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod
@@ -44,6 +45,9 @@ from node_api import (
     NodeAppEntry,
     NodeAppMutationAction,
     NodeAppMutationResult,
+    NodeCapacityMutationResult,
+    NodeDiscordSettingsMutationResult,
+    NodeFontSourceSettingsMutationResult,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
@@ -327,12 +331,12 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.UPDATE_DETAILS), NodeApiScope.APP_MANAGE)
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS), Power_Level.sudo)
 
-    def test_mod_download_and_config_read_web_scopes_allow_visitors(self) -> None:
+    def test_mod_download_requires_user_but_config_read_allows_visitors(self) -> None:
         service = NodeApiService()
 
         self.assertEqual(
             service._required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.MODS_DOWNLOAD,)),
-            Power_Level.visitor,
+            Power_Level.user,
         )
         self.assertEqual(
             service._required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.CONFIGS_READ,)),
@@ -2304,12 +2308,15 @@ class NodeApiTests(unittest.TestCase):
 
     def test_mutate_app_start_blocks_when_another_app_is_running(self) -> None:
         service = NodeApiService()
-        running_app = object.__new__(_DummyApp)
-        running_app.name = "factorio_lab"
-        running_app.friendly = "Factorio Lab"
-        running_app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
         manager = Mock()
-        manager.get_current = running_app
+        manager.start_blocker = Mock(
+            return_value=AppStartBlocker(
+                kind=AppStartBlockerKind.SAME_SCOPE,
+                message="Cannot start Minecraft Alpha; Factorio Lab is already running for scope `minecraft`.",
+                blocking_app_name="factorio_lab",
+                blocking_app_friendly="Factorio Lab",
+            )
+        )
         service.set_manager(cast(Any, manager))
         acl = Mock()
         acl.perm_check = AsyncMock()
@@ -2331,7 +2338,7 @@ class NodeApiTests(unittest.TestCase):
         app = _build_app(Mock())
         app.cfg.enabled = True
         manager = Mock()
-        manager.get_current = None
+        manager.start_blocker = Mock(return_value=None)
         manager.toggle = Mock()
         service = NodeApiService()
         service.set_manager(cast(Any, manager))
@@ -2370,7 +2377,7 @@ class NodeApiTests(unittest.TestCase):
     def test_mutate_app_rename_updates_friendly_name(self) -> None:
         app = _build_app(Mock())
         manager = Mock()
-        manager.get_current = None
+        manager.start_blocker = Mock(return_value=None)
         manager.set_app_friendly_name = Mock(
             side_effect=lambda current_app, friendly_name: (
                 setattr(current_app, "friendly", friendly_name) or friendly_name
@@ -2416,7 +2423,7 @@ class NodeApiTests(unittest.TestCase):
     def test_mutate_app_update_details_persists_notes_and_notice_flags(self) -> None:
         app = _build_app(Mock())
         manager = Mock()
-        manager.get_current = None
+        manager.start_blocker = Mock(return_value=None)
 
         def _update_details(current_app: _DummyApp, details: object) -> str:
             setattr(current_app, "friendly", "Demo Alpha")
@@ -2456,17 +2463,250 @@ class NodeApiTests(unittest.TestCase):
                     action=NodeAppMutationAction.UPDATE_DETAILS,
                     actor_user_id=42,
                     friendly_name="Demo Alpha",
+                    title_font_preset=AppTitleFont.MINECRAFT_TEN.value,
                     notes="Main shard",
                     lifecycle_notice_started=False,
                     lifecycle_notice_stopped=True,
                     lifecycle_notice_crashed=False,
+                    running_cpu_points=3,
+                    running_ram_points=7,
+                    startup_cpu_points=None,
+                    startup_ram_points=None,
                 )
             )
 
         manager.update_app_details.assert_called_once()
+        details = manager.update_app_details.call_args.args[1]
+        self.assertEqual(details.title_font_preset, AppTitleFont.MINECRAFT_TEN.value)
+        self.assertEqual(details.running_cpu_points, 3)
+        self.assertEqual(details.running_ram_points, 7)
+        self.assertIsNone(details.startup_cpu_points)
+        self.assertIsNone(details.startup_ram_points)
         self.assertEqual(result.action, NodeAppMutationAction.UPDATE_DETAILS)
         self.assertEqual(result.app_friendly, "Demo Alpha")
         self.assertEqual(result.message, "Updated details for Demo Alpha.")
+
+    def test_mutate_app_update_details_allows_single_resource_startup_override(self) -> None:
+        app = _build_app(Mock())
+        manager = Mock()
+        manager.start_blocker = Mock(return_value=None)
+        manager.update_app_details = Mock(return_value="Demo Alpha")
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch.object(
+            service,
+            "build_app_runtime_summary",
+            new=AsyncMock(
+                return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=app.chat_relay_support,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )
+            ),
+        ):
+            asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.UPDATE_DETAILS,
+                    actor_user_id=42,
+                    friendly_name="Demo Alpha",
+                    notes="Main shard",
+                    lifecycle_notice_started=False,
+                    lifecycle_notice_stopped=True,
+                    lifecycle_notice_crashed=False,
+                    running_cpu_points=3,
+                    running_ram_points=7,
+                    startup_cpu_points=None,
+                    startup_ram_points=9,
+                )
+            )
+
+        manager.update_app_details.assert_called_once()
+        details = manager.update_app_details.call_args.args[1]
+        self.assertIsNone(details.startup_cpu_points)
+        self.assertEqual(details.startup_ram_points, 9)
+
+    def test_mutate_node_capacity_requires_root_and_returns_result(self) -> None:
+        manager = Mock()
+        manager.set_node_capacity = Mock(
+            return_value=config.NodeCapacityProfile(
+                cpu_points_total=8,
+                ram_points_total=12,
+                cpu_points_reserved=2,
+                ram_points_reserved=3,
+            )
+        )
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        result = asyncio.run(
+            service.mutate_node_capacity(
+                capacity=config.NodeCapacityProfile(
+                    cpu_points_total=8,
+                    ram_points_total=12,
+                    cpu_points_reserved=2,
+                    ram_points_reserved=3,
+                ),
+                actor_user_id=42,
+            )
+        )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+        manager.set_node_capacity.assert_called_once()
+        self.assertEqual(
+            result,
+            NodeCapacityMutationResult(
+                node=config.MOD_WEB_SERVER.node_name,
+                message=f"Updated node capacity for {config.MOD_WEB_SERVER.node_name}.",
+                capacity=config.NodeCapacityProfile(
+                    cpu_points_total=8,
+                    ram_points_total=12,
+                    cpu_points_reserved=2,
+                    ram_points_reserved=3,
+                ),
+            ),
+        )
+
+    def test_mutate_node_font_sources_requires_root_and_refreshes_assets(self) -> None:
+        manager = Mock()
+        manager.set_node_font_sources = Mock(
+            return_value=config.NodeFontSourceSettings(
+                google_font_urls=("https://fonts.googleapis.com/css2?family=Black+Ops+One&display=swap",)
+            )
+        )
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch("node_api.font_assets.schedule_startup_refresh") as schedule_refresh:
+            result = asyncio.run(
+                service.mutate_node_font_sources(
+                    settings=config.NodeFontSourceSettings(
+                        google_font_urls=("https://fonts.google.com/specimen/Black+Ops+One",)
+                    ),
+                    actor_user_id=42,
+                )
+            )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+        manager.set_node_font_sources.assert_called_once()
+        schedule_refresh.assert_called_once_with(
+            google_font_urls=("https://fonts.googleapis.com/css2?family=Black+Ops+One&display=swap",)
+        )
+        self.assertEqual(
+            result,
+            NodeFontSourceSettingsMutationResult(
+                node=config.MOD_WEB_SERVER.node_name,
+                message=f"Updated node font sources for {config.MOD_WEB_SERVER.node_name}.",
+                settings=config.NodeFontSourceSettings(
+                    google_font_urls=("https://fonts.googleapis.com/css2?family=Black+Ops+One&display=swap",)
+                ),
+            ),
+        )
+
+    def test_mutate_discord_settings_requires_sudo_and_refreshes_activity(self) -> None:
+        manager = Mock()
+        manager.discord_settings = Mock(
+            return_value=config.DiscordSettings(
+                activity=config.DiscordActivitySettings(
+                    fallback_text="Watching over Erin",
+                    refresh_interval_seconds=3,
+                    fields=(config.DiscordActivityField.APP,),
+                )
+            )
+        )
+        manager.set_discord_settings = Mock(
+            return_value=config.DiscordSettings(
+                activity=config.DiscordActivitySettings(
+                    fallback_text="Watching over Erin",
+                    refresh_interval_seconds=3,
+                    fields=(config.DiscordActivityField.APP,),
+                )
+            )
+        )
+        manager.activity_manager = SimpleNamespace(refresh=AsyncMock())
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+        settings = config.DiscordSettings(
+            activity=config.DiscordActivitySettings(
+                fallback_text="Watching over Erin",
+                refresh_interval_seconds=3,
+                fields=(config.DiscordActivityField.APP,),
+            )
+        )
+
+        result = asyncio.run(
+            service.mutate_discord_settings(
+                settings=settings,
+                actor_user_id=42,
+            )
+        )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        manager.set_discord_settings.assert_called_once_with(settings)
+        manager.activity_manager.refresh.assert_awaited_once()
+        self.assertEqual(
+            result,
+            NodeDiscordSettingsMutationResult(
+                node=config.MOD_WEB_SERVER.node_name,
+                message=f"Updated Discord settings for {config.MOD_WEB_SERVER.node_name}.",
+                settings=settings,
+            ),
+        )
+
+    def test_mutate_discord_settings_requires_root_when_refresh_interval_changes(self) -> None:
+        manager = Mock()
+        manager.discord_settings = Mock(
+            return_value=config.DiscordSettings(
+                activity=config.DiscordActivitySettings(
+                    refresh_interval_seconds=3,
+                )
+            )
+        )
+        manager.set_discord_settings = Mock(
+            return_value=config.DiscordSettings(
+                activity=config.DiscordActivitySettings(
+                    refresh_interval_seconds=5,
+                )
+            )
+        )
+        manager.activity_manager = SimpleNamespace(refresh=AsyncMock())
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        asyncio.run(
+            service.mutate_discord_settings(
+                settings=config.DiscordSettings(
+                    activity=config.DiscordActivitySettings(
+                        refresh_interval_seconds=5,
+                    )
+                ),
+                actor_user_id=42,
+            )
+        )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
 
     def test_mutate_app_start_returns_before_launch_finishes(self) -> None:
         app = _build_app(Mock())
@@ -2479,7 +2719,7 @@ class NodeApiTests(unittest.TestCase):
             await allow_launch_finish.wait()
 
         manager = Mock()
-        manager.get_current = None
+        manager.start_blocker = Mock(return_value=None)
         manager.launch = AsyncMock(side_effect=_launch)
         service = NodeApiService()
         service.set_manager(cast(Any, manager))
@@ -2529,7 +2769,7 @@ class NodeApiTests(unittest.TestCase):
         app = _build_app(Mock())
         app.cfg.enabled = True
         manager = Mock()
-        manager.get_current = None
+        manager.start_blocker = Mock(return_value=None)
         manager.kill = AsyncMock(return_value={app.name.title()})
         service = NodeApiService()
         service.set_manager(cast(Any, manager))
@@ -2984,7 +3224,15 @@ class NodeApiTests(unittest.TestCase):
                             friendly="BeamMP Test",
                             check_running=lambda: False,
                         ),
-                    }
+                    },
+                    start_blocker=lambda app, include_current_activity=False: (
+                        AppStartBlocker(
+                            kind=AppStartBlockerKind.CPU_POINTS,
+                            message=f"Cannot start {app.friendly}; insufficient CPU points.",
+                        )
+                        if app.name == "beammp_test"
+                        else None
+                    ),
                 ),
             )
         )
@@ -3000,6 +3248,8 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(summary.running_names, ("Factorio Lab", "Minecraft Alpha"))
         self.assertEqual(summary.running_app_ids, ("factorio_lab", "minecraft_alpha"))
+        self.assertEqual(summary.running_app_scopes, ("factorio", "minecraft"))
+        self.assertEqual(summary.start_blocked_app_ids, ("beammp_test",))
         self.assertEqual(summary.bot_uptime_seconds, 300)
         self.assertEqual(summary.uptime_seconds, 1_800)
 

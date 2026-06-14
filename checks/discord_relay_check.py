@@ -553,6 +553,7 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_chat_event_to_app_uses_display_name_when_discord_user_has_no_game_alias(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay).bot = cast(hikari.GatewayBot, object())
+        cast(Any, relay).names = _NamesStub()
         receiver = _RecordingReceiver()
         app = SimpleNamespace(
             _running=True,
@@ -577,9 +578,43 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(getattr(payload, "player"), "Tester")
 
+    async def test_send_chat_event_to_app_uses_scoped_relay_name_for_non_minecraft_app(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay).bot = cast(hikari.GatewayBot, object())
+        cast(Any, relay).names = _NamesStub(relay_display_name="FactorioAlice")
+        receiver = _RecordingReceiver()
+        app = SimpleNamespace(
+            _running=True,
+            am_receiver=receiver,
+            name_cache=SimpleNamespace(get_game_alias=Mock(return_value=None)),
+            scope="factorio",
+        )
+        event = ChatEvent(
+            room_id="factorio_lab",
+            source=ChatEndpointId.discord_channel("321"),
+            author=ChatAuthor(
+                kind=ChatAuthorKind.DISCORD_USER,
+                display_name="Tester",
+                discord_user_id=42,
+            ),
+            content="hello",
+            source_guild_id=100,
+        )
+
+        await relay._send_chat_event_to_app(event, cast(Any, app))
+
+        payload = receiver.payload
+        self.assertIsNotNone(payload)
+        self.assertEqual(getattr(payload, "player"), "FactorioAlice")
+        self.assertEqual(
+            cast(_NamesStub, cast(Any, relay).names).relay_display_name_calls,
+            [(42, "Tester", "factorio", 100)],
+        )
+
     async def test_send_chat_event_to_app_keeps_parsed_links_when_event_links_are_empty(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay).bot = cast(hikari.GatewayBot, object())
+        cast(Any, relay).names = _NamesStub()
         receiver = _RecordingReceiver()
         app = SimpleNamespace(
             _running=True,
@@ -607,6 +642,7 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_chat_event_to_app_skips_reenrichment_when_event_links_are_present(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay).bot = cast(hikari.GatewayBot, object())
+        cast(Any, relay).names = _NamesStub()
         receiver = _RecordingReceiver()
         app = SimpleNamespace(
             _running=True,
@@ -649,6 +685,7 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_chat_event_to_app_renders_typed_notice_content(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay).bot = cast(hikari.GatewayBot, object())
+        cast(Any, relay).names = _NamesStub()
         receiver = _RecordingReceiver()
         app = SimpleNamespace(
             _running=True,
@@ -686,6 +723,7 @@ class _NamesStub:
     ) -> None:
         self.names: list[object] = []
         self.parse_mention_calls: list[tuple[str, str | None]] = []
+        self.relay_display_name_calls: list[tuple[object, str, str | None, object | None]] = []
         self._parsed_text = parsed_text
         self._parsed_mentions = set() if parsed_mentions is None else set(parsed_mentions)
         self._relay_display_name = relay_display_name
@@ -716,7 +754,7 @@ class _NamesStub:
         scope: str | None = None,
         preferred_guild_id: object | None = None,
     ) -> str:
-        del user_id, scope, preferred_guild_id
+        self.relay_display_name_calls.append((user_id, fallback, scope, preferred_guild_id))
         return self._relay_display_name or fallback
 
     def discord_fallback_name(

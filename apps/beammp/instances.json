@@ -5,6 +5,16 @@
         "mods_dir": "{WD}/Resources/Client",
         "server_log_file": "{WD}/Server.log",
         "port": 30814,
+        "resource_points": {
+            "running": {
+                "cpu_points": 2,
+                "ram_points": 1
+            },
+            "startup": {
+                "cpu_points": 3,
+                "ram_points": 2
+            }
+        },
         "enabled": false
     }
 }

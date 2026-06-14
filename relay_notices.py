@@ -410,7 +410,7 @@ class BotLifecycleNotice:
     source: RelayNoticeSource
     severity: RelayNoticeSeverity = RelayNoticeSeverity.INFO
     debug_mode: bool = False
-    auto_launch_app_name: str | None = None
+    auto_launch_app_names: tuple[str, ...] = ()
     startup_disabled_lines: tuple[str, ...] = ()
     error_lines: tuple[str, ...] = ()
     uptime_seconds: int | None = None
@@ -421,8 +421,17 @@ class BotLifecycleNotice:
         return RelayNoticeType.BOT_LIFECYCLE
 
     def __post_init__(self) -> None:
-        if self.auto_launch_app_name is not None and not self.auto_launch_app_name.strip():
-            raise ValueError("Bot lifecycle auto-launch app name must not be blank.")
+        normalised_auto_launch_app_names: list[str] = []
+        seen_auto_launch_app_names: set[str] = set()
+        for raw_app_name in self.auto_launch_app_names:
+            app_name = raw_app_name.strip()
+            if not app_name:
+                raise ValueError("Bot lifecycle auto-launch app names must not be blank.")
+            if app_name in seen_auto_launch_app_names:
+                continue
+            seen_auto_launch_app_names.add(app_name)
+            normalised_auto_launch_app_names.append(app_name)
+        object.__setattr__(self, "auto_launch_app_names", tuple(normalised_auto_launch_app_names))
         if self.uptime_seconds is not None and self.uptime_seconds < 0:
             raise ValueError("Bot lifecycle uptime must not be negative.")
         if self.summary is not None and not self.summary.strip():
@@ -439,7 +448,7 @@ class BotLifecycleNotice:
             "source": self.source.value,
             "severity": self.severity.value,
             "debug_mode": self.debug_mode,
-            "auto_launch_app_name": self.auto_launch_app_name,
+            "auto_launch_app_names": list(self.auto_launch_app_names),
             "startup_disabled_lines": list(self.startup_disabled_lines),
             "error_lines": list(self.error_lines),
             "uptime_seconds": self.uptime_seconds,
@@ -472,13 +481,23 @@ class BotLifecycleNotice:
             if not isinstance(raw_line, str):
                 raise ValueError("error_lines are invalid.")
             error_lines.append(raw_line)
+        raw_auto_launch_app_names = payload.get("auto_launch_app_names")
+        if raw_auto_launch_app_names is None:
+            legacy_auto_launch_app_name = _optional_string(payload, "auto_launch_app_name")
+            auto_launch_app_names = () if legacy_auto_launch_app_name is None else (legacy_auto_launch_app_name,)
+        else:
+            if not isinstance(raw_auto_launch_app_names, list):
+                raise ValueError("auto_launch_app_names are invalid.")
+            auto_launch_app_names = tuple(
+                _required_string({"name": raw_name}, "name") for raw_name in raw_auto_launch_app_names
+            )
         try:
             return cls(
                 stage=BotLifecycleStage(_required_string(payload, "stage")),
                 source=RelayNoticeSource(_required_string(payload, "source")),
                 severity=RelayNoticeSeverity(_required_string(payload, "severity")),
                 debug_mode=raw_debug_mode,
-                auto_launch_app_name=_optional_string(payload, "auto_launch_app_name"),
+                auto_launch_app_names=auto_launch_app_names,
                 startup_disabled_lines=tuple(startup_disabled_lines),
                 error_lines=tuple(error_lines),
                 uptime_seconds=raw_uptime_seconds,
@@ -734,8 +753,8 @@ def render_system_notice_lines(notice: RelayNotice) -> tuple[str, ...]:
     if isinstance(notice, BotLifecycleNotice):
         if notice.stage is BotLifecycleStage.STARTED:
             lines = ["Started: DEBUG" if notice.debug_mode else "Started"]
-            if notice.auto_launch_app_name is not None:
-                lines.append(f"\tAuto-Launch Scheduled: {notice.auto_launch_app_name}")
+            for auto_launch_app_name in notice.auto_launch_app_names:
+                lines.append(f"\tAuto-Launch Scheduled: {auto_launch_app_name}")
             lines.extend(notice.startup_disabled_lines)
             lines.extend(notice.error_lines)
             return tuple(lines)

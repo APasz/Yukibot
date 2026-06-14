@@ -22,6 +22,8 @@ from .runtime_imports import (
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
+    NodeCapacityMutationResult,
+    NodeFontSourceSettingsMutationResult,
     NodeModEntry,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
@@ -141,6 +143,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_badge"]) -> Callable[..., Label]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_badge_spec"]) -> Callable[..., Element]: ...
 
     @overload
     def __getattr__(self, name: Literal["_badge_link"]) -> Callable[..., Element]: ...
@@ -282,6 +287,12 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_mutate_app"]) -> Callable[..., Awaitable[NodeAppMutationResult]]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_node_capacity"]) -> Callable[..., Awaitable[config.NodeCapacityProfile]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_font_sources"]) -> Callable[..., Awaitable[config.NodeFontSourceSettings]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_node_badge_style"]) -> Callable[..., str]: ...
 
     @overload
@@ -307,6 +318,16 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_player_count_tooltip_html"]) -> Callable[..., str | None]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_update_node_capacity"]
+    ) -> Callable[..., Awaitable[NodeCapacityMutationResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_update_node_font_sources"]
+    ) -> Callable[..., Awaitable[NodeFontSourceSettingsMutationResult]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_refresh_runtime_model"]) -> Callable[..., Awaitable[ModWebBasePageModel]]: ...

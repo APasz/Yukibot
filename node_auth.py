@@ -33,6 +33,7 @@ class NodeApiScope(StrEnum):
     FILES_UPLOAD = "files:upload"
     APP_CONTROL = "app:control"
     APP_MANAGE = "app:manage"
+    NODE_MANAGE = "node:manage"
     RELAY_TTS = "relay:tts"
 
 

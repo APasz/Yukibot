@@ -33,19 +33,19 @@ class _SelectionManager(App_Manager):
     def __init__(
         self,
         *,
-        auto_start_app_name: str | None,
+        auto_start_app_names: tuple[str, ...],
         app: App[App_Config] | None,
         error: Exception | None = None,
     ) -> None:
         super().__init__()
-        self._auto_start_app_name = auto_start_app_name
+        self._auto_start_app_names = auto_start_app_names
         self._app = app
         self._error = error
 
-    def consume_restart_auto_start_app(self) -> str | None:
+    def consume_restart_auto_start_apps(self) -> tuple[str, ...]:
         if self._error is not None:
             raise self._error
-        return self._auto_start_app_name
+        return self._auto_start_app_names
 
     def get(self, name: str) -> App[App_Config]:
         if self._app is None:
@@ -99,30 +99,30 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
 
     def test_consume_restart_auto_launch_selection_returns_scheduled_notice(self) -> None:
         auto_app = _build_fake_app(friendly="Minecraft Alpha")
-        manager = _SelectionManager(auto_start_app_name="minecraft_alpha", app=auto_app)
+        manager = _SelectionManager(auto_start_app_names=("minecraft_alpha",), app=auto_app)
 
         selection = main._consume_restart_auto_launch_selection(manager)
 
-        self.assertIs(selection.app, auto_app)
-        self.assertIsNone(selection.error_text)
-        self.assertEqual(selection.started_notice_line, "\tAuto-Launch Scheduled: Minecraft Alpha")
+        self.assertEqual(selection.apps, (auto_app,))
+        self.assertEqual(selection.error_lines, ())
+        self.assertEqual(selection.started_notice_lines, ("\tAuto-Launch Scheduled: Minecraft Alpha",))
 
     def test_consume_restart_auto_launch_selection_returns_error_text(self) -> None:
         manager = _SelectionManager(
-            auto_start_app_name="minecraft_alpha",
+            auto_start_app_names=("minecraft_alpha",),
             app=None,
             error=LookupError("unknown app"),
         )
 
         selection = main._consume_restart_auto_launch_selection(manager)
 
-        self.assertIsNone(selection.app)
-        self.assertEqual(selection.error_text, "unknown app")
-        self.assertIsNone(selection.started_notice_line)
+        self.assertEqual(selection.apps, ())
+        self.assertEqual(selection.error_lines, ("unknown app",))
+        self.assertEqual(selection.started_notice_lines, ())
 
     def test_build_startup_notice_renders_existing_lines(self) -> None:
         auto_app = _build_fake_app(friendly="Minecraft Alpha")
-        auto_launch = main.RestartAutoLaunchSelection(app=auto_app)
+        auto_launch = main.RestartAutoLaunchSelection(apps=(auto_app,))
 
         with patch.object(config, "IS_DEBUG", False):
             notice = main._build_startup_notice(
@@ -159,7 +159,7 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
         manager = _LaunchManager()
 
         with patch("main.asyncio.sleep", new=AsyncMock()) as sleep_mock:
-            await main._launch_restart_auto_app(manager, auto_app, delay_seconds=3.5)
+            await main._launch_restart_auto_apps(manager, (auto_app,), delay_seconds=3.5)
 
         sleep_mock.assert_awaited_once_with(3.5)
         self.assertEqual(manager.launched, [auto_app])

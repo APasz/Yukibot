@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import asyncio
 import enum
 import logging
 from collections.abc import Mapping, Sequence
@@ -34,7 +32,7 @@ import _errors
 import config
 from _discord import DC_Relay, Distils, FileDeliveryMode
 from _editor_session import startup_editor_prefix
-from _manager import App_Manager, AppInstanceCreateRequest, ac_all_apps, ac_enabled_apps
+from _manager import App_Manager, AppInstanceCreateRequest, ac_all_apps, ac_enabled_apps, ac_running_apps
 from _mod_ops import download_paths as build_mod_download_paths
 from _mod_ops import (
     install_attachments,
@@ -5359,16 +5357,18 @@ class AppConsoleService:
 class CMD_AppStop(
     lightbulb.SlashCommand,
     name="stop",
-    description="Stop the current app",
+    description="Stop a running app",
     hooks=[lightbulb.prefab.sliding_window(15, 1, "global")],
 ):
+    app = lightbulb.string("app", "Which running app to stop", autocomplete=ac_running_apps)  # pyright: ignore[reportAssignmentType, reportArgumentType]
+
     @lightbulb.invoke
     async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, manager: App_Manager) -> None:
         await acl.perm_check(ctx.user.id, acl.LvL.user)
         await ctx.defer()
-        log.info(f"App.Stop: {ctx.user.display_name}")
+        log.info(f"App.Stop; {self.app}: {ctx.user.display_name}")
 
-        details = await manager.end(manager.current)
+        details = await manager.end(self.app)
         apps: list[str] = []
         for proc in details:
             try:
@@ -5400,10 +5400,9 @@ class CMD_AppStart(
         log.info(f"App.Start; {self.app}: {ctx.user.display_name}")
 
         app = manager.get(self.app)
-        if await manager.end():
-            await asyncio.sleep(5)
-        else:
-            await asyncio.sleep(1)
+        if blocker := manager.start_blocker(app):
+            await ctx.respond(blocker.message)
+            return
         await manager.launch(app)
         await ctx.respond(_app_started_response_text(app))
 

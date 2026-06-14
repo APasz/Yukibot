@@ -2503,6 +2503,19 @@ class DC_Relay(metaclass=Singleton):
             )
         return event.author.display_name
 
+    def _app_author_display_name(self, event: ChatEvent, app: "App") -> str:
+        discord_user_id = event.author.discord_user_id
+        if discord_user_id is None:
+            return event.author.display_name
+        app_scope = getattr(app, "scope", None)
+        scope = app_scope if isinstance(app_scope, str) else None
+        return self.names.relay_display_name(
+            discord_user_id,
+            event.author.display_name,
+            scope=scope,
+            preferred_guild_id=event.source_guild_id,
+        )
+
     async def _chat_author_is_member_of_guild(
         self,
         discord_user_id: int,
@@ -2797,15 +2810,7 @@ class DC_Relay(metaclass=Singleton):
         channel_id = hikari.Snowflake(event.source_channel_id or 0)
         channel_name = event.source_label or "UNKNOWN"
         channel = hikari.TextableChannel(app=self.bot, id=channel_id, name=channel_name, type=1)
-        author: str | int
-        if event.author.discord_user_id is not None:
-            author = (
-                event.author.discord_user_id
-                if app.name_cache.get_game_alias(event.author.discord_user_id, app.scope) is not None
-                else event.author.display_name
-            )
-        else:
-            author = event.author.display_name
+        author = self._app_author_display_name(event, app)
         notice = event.resolved_notice()
         payload = App_Bound(
             channel,

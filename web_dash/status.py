@@ -30,6 +30,7 @@ from .nicegui_protocols import (
     ModWebValueContainer,
     WebChatRelayPublisher,
     _value_as_object,
+    _value_as_text,
 )
 from .runtime_imports import (
     MOD_WEB_ACTION_BASE_CLASSES,
@@ -359,12 +360,10 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
     def _render_login_page(self, *, ui: ModWebUi, next_path: str, request: Request, show_api_actions: bool) -> None:
         self._apply_theme(ui=ui)
-        request_path: str = self._request_path(request)
         simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
         node_statuses: tuple[ModWebNodeStatus, ...] = self._login_node_statuses(
             simulated_down_node_names=simulated_down_node_names
         )
-        dev_mode_enabled = config.INDEV
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             with ui.card().classes(self._hero_card_classes()):
                 with ui.column().classes(self._hero_shell_classes()):
@@ -378,25 +377,10 @@ class ModWebStatusMixin(ModWebServiceSupport):
                             def _render_login_node_badges(current_statuses: tuple[ModWebNodeStatus, ...]) -> None:
                                 with ui.row().classes(self._hero_badge_row_classes()):
                                     for status in current_statuses:
-                                        badge_toggle_url: str | None = None
-                                        badge_tooltip: str | None = None
-                                        if dev_mode_enabled and not status.node.is_current:
-                                            badge_toggle_url = self._toggle_simulated_down_node_url(
-                                                current_url=request_path,
-                                                node_name=status.node.node_name,
-                                                simulated_down_node_names=simulated_down_node_names,
-                                            )
-                                            badge_tooltip = (
-                                                "Restore this simulated outage."
-                                                if status.is_simulated_down
-                                                else "Simulate this node going down."
-                                            )
                                         self._interactive_badge(
                                             ui=ui,
                                             text=self._login_node_status_badge_text(status),
                                             tone=self._login_node_status_badge_tone(status),
-                                            url=badge_toggle_url,
-                                            tooltip_text=badge_tooltip,
                                             extra_classes="mod-node-status-badge",
                                         )
 
@@ -443,7 +427,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                                 self._action_link(ui=ui, label=action.label, url=action.url)
 
                     _render_login_actions()
-            if dev_mode_enabled:
+            if config.INDEV:
                 self._render_login_dev_error_preview_card(ui=ui)
 
     def _render_login_dev_error_preview_card(self, *, ui: ModWebUi) -> None:
@@ -525,16 +509,182 @@ class ModWebStatusMixin(ModWebServiceSupport):
         with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
             with ui.row().classes("items-center gap-3 flex-wrap min-w-0"):
                 ui.html(self._user_avatar_markup(avatar_uri=avatar_uri, display_name=display_name))
-                ui.label(f"Signed in as {display_name}").classes("text-sm mod-subtitle break-all")
+                ui.label(f"{display_name}").classes("text-sm mod-subtitle break-all")
                 self._badge(ui=ui, text=self._user_level_label(user), tone=self._user_level_tone(user))
             with ui.row().classes("items-center gap-2 flex-wrap"):
                 self._action_link(ui=ui, label="Home", url=self.index_path(), compact=True)
+                if self._user_can_manage_discord_settings(user):
+                    self._render_discord_settings_control(ui=ui, user=user)
                 if self._user_can_use_fake_chat_preview(user):
                     self._render_fake_chat_preview_control(ui=ui)
                 self._action_link(ui=ui, label="Log out", url="/auth/logout", compact=True)
 
     def _user_can_use_fake_chat_preview(self, user: ModWebUser) -> bool:
         return self._user_has_level(user, Power_Level.root)
+
+    def _user_can_manage_discord_settings(self, user: ModWebUser) -> bool:
+        return self._manager is not None and self._user_has_level(user, Power_Level.sudo)
+
+    def _render_discord_settings_control(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+        current_settings = self._node_api.read_discord_settings()
+        activity_settings = current_settings.activity
+        available_fields_text = config.format_discord_activity_fields(config.DiscordActivityField)
+        can_edit_refresh_rate = self._user_has_level(user, Power_Level.root)
+
+        def _show_discord_settings_panel() -> None:
+            discord_settings_overlay.style(remove="display: none;")
+
+        def _hide_discord_settings_panel() -> None:
+            discord_settings_overlay.style(add="display: none;")
+
+        def _parse_required_int_setting(*, raw_value: str, field_label: str) -> int:
+            value = raw_value.strip()
+            if not value:
+                raise ValueError(f"{field_label} must not be empty.")
+            try:
+                return int(value)
+            except ValueError as xcp:
+                raise ValueError(f"{field_label} must be a whole number.") from xcp
+
+        async def _handle_discord_settings_submit(_: object | None = None) -> None:
+            try:
+                next_refresh_interval_seconds = (
+                    activity_settings.refresh_interval_seconds
+                    if not can_edit_refresh_rate
+                    else _parse_required_int_setting(
+                        raw_value=_value_as_text(refresh_interval_input),
+                        field_label="Tick duration",
+                    )
+                )
+                next_settings = config.DiscordSettings(
+                    activity=config.DiscordActivitySettings(
+                        fallback_text=_value_as_text(fallback_text_input).strip(),
+                        prefix=_value_as_text(prefix_input),
+                        separator=_value_as_text(separator_input),
+                        suffix=_value_as_text(suffix_input),
+                        refresh_interval_seconds=next_refresh_interval_seconds,
+                        units_per_app=_parse_required_int_setting(
+                            raw_value=_value_as_text(units_per_app_input),
+                            field_label="Ticks per app",
+                        ),
+                        alt_text_percentage=_parse_required_int_setting(
+                            raw_value=_value_as_text(alt_text_percentage_input),
+                            field_label="Alt-text percentage",
+                        ),
+                        fields=config.parse_discord_activity_fields(
+                            _value_as_text(field_order_input),
+                            source="Discord activity field order",
+                        ),
+                    )
+                )
+            except (TypeError, ValueError) as xcp:
+                ui.notify(str(xcp), type="negative")
+                return
+
+            try:
+                result = await self._node_api.mutate_discord_settings(
+                    settings=next_settings,
+                    actor_user_id=user.discord_id,
+                )
+            except Exception as xcp:
+                log.warning("Discord settings update failed: user=%s error=%s", user.discord_id, xcp)
+                ui.notify(f"Discord settings update failed: {xcp}", type="negative")
+                return
+
+            ui.notify(result.message, type="positive")
+            _hide_discord_settings_panel()
+            ui.navigate.reload()
+
+        ui.button(
+            "Discord",
+            on_click=lambda _: _show_discord_settings_panel(),
+        ).classes(f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm")
+        with ui.element("div").classes("mod-node-settings-overlay").style("display: none;") as discord_settings_overlay:
+            backdrop = ui.element("div").classes("mod-node-settings-backdrop")
+            backdrop.on("click", lambda _: _hide_discord_settings_panel())
+            panel_shell = ui.element("div").classes("mod-node-settings-shell")
+            panel_shell.on("click", js_handler="(event) => event.stopPropagation()")
+            with panel_shell:
+                with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
+                    with ui.column().classes("w-full gap-4 mod-app-details-layout"):
+                        with ui.column().classes("gap-1"):
+                            ui.label("Discord Settings").classes("text-xl font-black mod-title-small")
+                            ui.label("Configure how this bot presents/acts on Discord.").classes("mod-subtitle text-sm")
+                        with ui.column().classes("mod-app-details-section"):
+                            ui.label("Activity Status").classes("mod-stat-label")
+                            ui.label(
+                                f"Available segments: {available_fields_text}. Use a comma-separated order.",
+                            ).classes("mod-subtitle text-xs")
+                            fallback_text_input = (
+                                ui.input("Fallback text", value=activity_settings.fallback_text)
+                                .props("filled square dense clearable hide-bottom-space color=accent maxlength=80")
+                                .classes("mod-app-details-field")
+                            )
+                            with ui.row().classes("w-full gap-2 flex-wrap"):
+                                refresh_interval_input = (
+                                    ui.input(
+                                        "Tick duration",
+                                        value=str(activity_settings.refresh_interval_seconds),
+                                    )
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        "type=number inputmode=numeric step=1 min=1 max=60"
+                                    )
+                                    .classes("mod-app-details-field mod-app-details-point-field")
+                                )
+                                units_per_app_input = (
+                                    ui.input(
+                                        "Ticks per app",
+                                        value=str(activity_settings.units_per_app),
+                                    )
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        "type=number inputmode=numeric step=1 min=1 max=20"
+                                    )
+                                    .classes("mod-app-details-field mod-app-details-point-field")
+                                )
+                                alt_text_percentage_input = (
+                                    ui.input(
+                                        "Alt-text percentage",
+                                        value=str(activity_settings.alt_text_percentage),
+                                    )
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        "type=number inputmode=numeric step=1 min=0 max=100"
+                                    )
+                                    .classes("mod-app-details-field mod-app-details-point-field")
+                                )
+                            if not can_edit_refresh_rate:
+                                refresh_interval_input.disable()
+                            with ui.row().classes("w-full gap-2 flex-wrap"):
+                                prefix_input = (
+                                    ui.input("Prefix", value=activity_settings.prefix)
+                                    .props("filled square dense clearable hide-bottom-space color=accent maxlength=40")
+                                    .classes("mod-app-details-field")
+                                )
+                                separator_input = (
+                                    ui.input("Separator", value=activity_settings.separator)
+                                    .props("filled square dense hide-bottom-space color=accent maxlength=16")
+                                    .classes("mod-app-details-field")
+                                )
+                            suffix_input = (
+                                ui.input("Suffix", value=activity_settings.suffix)
+                                .props("filled square dense clearable hide-bottom-space color=accent maxlength=40")
+                                .classes("mod-app-details-field")
+                            )
+                            field_order_input = (
+                                ui.input(
+                                    "Segment order",
+                                    value=config.format_discord_activity_fields(activity_settings.fields),
+                                )
+                                .props("filled square dense hide-bottom-space color=accent")
+                                .classes("mod-app-details-field")
+                            )
+                        with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
+                            ui.button("Cancel", on_click=lambda _: _hide_discord_settings_panel()).classes(
+                                "mod-list-button secondary"
+                            )
+                            ui.button("Save", on_click=_handle_discord_settings_submit).classes("mod-list-button")
 
     def _render_fake_chat_preview_control(self, *, ui: ModWebUi) -> None:
         app_options: dict[str, str] = self._fake_chat_preview_app_options()
@@ -1108,7 +1258,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
             return BotLifecycleNotice(
                 stage=BotLifecycleStage.STARTED,
                 source=notice_source,
-                auto_launch_app_name=state.detail_text.strip() or None,
+                auto_launch_app_names=((state.detail_text.strip(),) if state.detail_text.strip() else ()),
                 startup_disabled_lines=self._fake_chat_preview_detail_lines(state.embed_description),
             )
         if state.message_mode is _ModWebFakeChatMessageMode.BOT_ERROR:

@@ -4,7 +4,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from apps._config import APP_FRIENDLY_NAME_MAX_LENGTH
+from apps._config import (
+    APP_FRIENDLY_NAME_MAX_LENGTH,
+    app_title_font_default_label,
+    app_title_font_options,
+    normalise_app_title_font,
+    resolve_app_title_font,
+)
+from font_assets import font_assets
 
 from .constants import (
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
@@ -25,6 +32,7 @@ from .runtime_imports import (
     AbstractEventLoop,
     App,
     Awaitable,
+    BadgeTone,
     Button,
     Callable,
     Card,
@@ -46,6 +54,7 @@ from .runtime_imports import (
     NodeSettingList,
     NodeSystemSummary,
     Power_Level,
+    Select,
     Timer,
     Upload,
     assert_never,
@@ -65,6 +74,7 @@ from .types import (
     ModWebBasePageModel,
     ModWebOverviewPageModel,
     ModWebPageModel,
+    _ModWebAppHeroCornerBindings,
     _ModWebAppHeroRuntimeDetails,
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
@@ -113,7 +123,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             app_start_blocked: bool = self._app_start_blocked_remote(
                 app_name=model.app_name,
                 app_stats=next_app_stats,
-                running_app_ids=() if next_system_summary is None else next_system_summary.running_app_ids,
+                start_blocked_app_ids=() if next_system_summary is None else next_system_summary.start_blocked_app_ids,
             )
         return (
             self._model_with_runtime_state(
@@ -179,13 +189,21 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 self._hero_card_style(model.app_color_hex)
             )
             with hero_card:
-                self._render_app_node_badge(ui=ui, node_name=model.node_name)
+                hero_corner_bindings = self._render_app_hero_corner_badges(
+                    ui=ui,
+                    node_name=model.node_name,
+                    initial_system_summary=initial_system_summary,
+                    initial_app_stats=model.app_stats,
+                    is_local_node=local_app is not None,
+                )
                 with ui.column().classes(self._app_page_hero_shell_classes()):
                     apply_app_hero_runtime: Callable[[NodeAppRuntimeSummary | None], None] = (
                         self._render_live_app_hero_runtime(
                             ui=ui,
                             hero_card=hero_card,
+                            app_name=model.app_name,
                             title=model.app_friendly,
+                            title_font_preset=model.app_title_font_preset,
                             static_badges=self._app_page_hero_badges(model),
                             initial_app_stats=model.app_stats,
                             refresh_async_app_stats=refresh_async_app_stats,
@@ -222,6 +240,8 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         local_app=local_app,
                         last_system_summary=last_system_summary,
                     )
+                    hero_corner_bindings.apply_node_summary(last_system_summary)
+                    hero_corner_bindings.apply_app_stats(current_model.app_stats)
                     apply_app_hero_runtime(current_model.app_stats)
                     if toolbar_bindings.apply_runtime_model is not None:
                         toolbar_bindings.apply_runtime_model(current_model)
@@ -269,13 +289,21 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 self._hero_card_style(model.app_color_hex)
             )
             with hero_card:
-                self._render_app_node_badge(ui=ui, node_name=model.node_name)
+                hero_corner_bindings = self._render_app_hero_corner_badges(
+                    ui=ui,
+                    node_name=model.node_name,
+                    initial_system_summary=initial_system_summary,
+                    initial_app_stats=model.app_stats,
+                    is_local_node=local_app is not None,
+                )
                 with ui.column().classes(self._app_page_hero_shell_classes()):
                     apply_app_hero_runtime: Callable[[NodeAppRuntimeSummary | None], None] = (
                         self._render_live_app_hero_runtime(
                             ui=ui,
                             hero_card=hero_card,
+                            app_name=model.app_name,
                             title=model.app_friendly,
+                            title_font_preset=model.app_title_font_preset,
                             static_badges=self._app_page_hero_badges(model),
                             initial_app_stats=model.app_stats,
                             refresh_async_app_stats=refresh_async_app_stats,
@@ -315,6 +343,8 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         local_app=local_app,
                         last_system_summary=last_system_summary,
                     )
+                    hero_corner_bindings.apply_node_summary(last_system_summary)
+                    hero_corner_bindings.apply_app_stats(current_model.app_stats)
                     apply_app_hero_runtime(current_model.app_stats)
                     if toolbar_bindings.apply_runtime_model is not None:
                         toolbar_bindings.apply_runtime_model(current_model)
@@ -347,7 +377,8 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             return _ModWebAppHeroRuntimeDetails(
                 status_text="Unknown",
                 status_tone="grey",
-                badges=(relay_badge, version_badge, storage_badge),
+                relay_badge=relay_badge,
+                badges=(version_badge, storage_badge),
             )
 
         if app_stats.transition_state is NodeAppTransitionState.STOPPING:
@@ -372,8 +403,8 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             status_text = "Stopped"
             status_tone = "warn"
 
+        relay_badge = _ModWebBadgeSpec(text=f"{app_stats.relay_support.display_value}", tone="grey")
         badges: list[_ModWebBadgeSpec] = [
-            _ModWebBadgeSpec(text=f"{app_stats.relay_support.display_value}", tone="grey"),
             _ModWebBadgeSpec(text=f"{app_stats.version or 'Unknown'}", tone="black"),
             _ModWebBadgeSpec(
                 text=(
@@ -394,32 +425,45 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         return _ModWebAppHeroRuntimeDetails(
             status_text=status_text,
             status_tone=status_tone,
+            relay_badge=relay_badge,
             badges=tuple[_ModWebBadgeSpec, ...](badges),
             player_count_badge=player_count_badge,
         )
 
     def _app_page_hero_badges(self, model: ModWebBasePageModel) -> tuple[_ModWebBadgeSpec, ...]:
-        badges: list[_ModWebBadgeSpec] = []
-        if isinstance(model, ModWebPageModel):
-            badges.append(self._app_page_hero_mod_badge(model.mods.summary))
-            if model.supports_configs:
-                badges.append(_ModWebBadgeSpec(text=f"{len(model.configs.configs)} configs", tone="grey"))
-        else:
-            badges.append(_ModWebBadgeSpec(text="No mod index", tone="grey"))
-            if model.supports_configs:
-                badges.append(_ModWebBadgeSpec(text=f"{len(model.configs.configs)} configs", tone="black"))
-        if model.saves is not None:
-            badges.append(_ModWebBadgeSpec(text=f"{len(model.saves.saves)} saves", tone="black"))
-        if model.settings is not None:
-            badges.append(_ModWebBadgeSpec(text=f"{len(model.settings.settings)} settings", tone="black"))
-        if model.console_actions is not None and model.console_actions.actions:
-            badges.append(
-                _ModWebBadgeSpec(
-                    text=self._console_action_count_badge_text(action_count=len(model.console_actions.actions)),
-                    tone="black",
-                )
-            )
-        return tuple(badges)
+        return self._app_resource_point_badges(model)
+
+    @classmethod
+    def _app_resource_point_badges(cls, model: ModWebBasePageModel) -> tuple[_ModWebBadgeSpec, ...]:
+        resource_points = model.resource_points
+        if resource_points is None:
+            return ()
+        return (
+            _ModWebBadgeSpec(
+                text=cls._app_resource_point_badge_text(
+                    running_points=resource_points.cpu_points_running,
+                    startup_points=resource_points.cpu_points_startup,
+                ),
+                tone="black",
+                icon="speed",
+                tooltip_text="CPU",
+            ),
+            _ModWebBadgeSpec(
+                text=cls._app_resource_point_badge_text(
+                    running_points=resource_points.ram_points_running,
+                    startup_points=resource_points.ram_points_startup,
+                ),
+                tone="black",
+                icon="memory",
+                tooltip_text="RAM",
+            ),
+        )
+
+    @staticmethod
+    def _app_resource_point_badge_text(*, running_points: int, startup_points: int) -> str:
+        if startup_points == running_points:
+            return str(running_points)
+        return f"{running_points} ({startup_points})"
 
     @staticmethod
     def _app_page_hero_mod_badge(summary: NodeModSummary) -> _ModWebBadgeSpec:
@@ -448,12 +492,122 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             return classes
         return f"{classes} {runtime_state_class}"
 
+    def _render_app_hero_corner_badges(
+        self,
+        *,
+        ui: ModWebUi,
+        node_name: str,
+        initial_system_summary: NodeSystemSummary | None,
+        initial_app_stats: NodeAppRuntimeSummary | None,
+        is_local_node: bool,
+    ) -> _ModWebAppHeroCornerBindings:
+        initial_runtime_details = self._app_hero_runtime_details(initial_app_stats)
+        with ui.element("div").classes("mod-app-node-badge-wrap"):
+            with ui.row().classes("mod-app-node-badge-row"):
+                node_badge = self._badge(
+                    ui=ui,
+                    text=node_name,
+                    tone=self._app_page_node_badge_tone(
+                        node_name=node_name,
+                        system_summary=initial_system_summary,
+                        is_local_node=is_local_node,
+                    ),
+                    extra_classes="mod-app-corner-badge mod-app-node-badge",
+                )
+                if color_hex := self._node_role_color_hex(node_name=node_name):
+                    node_badge.style(self._node_badge_style(color_hex))
+                relay_badge = self._badge(
+                    ui=ui,
+                    text=initial_runtime_details.relay_badge.text,
+                    tone=initial_runtime_details.relay_badge.tone,
+                    extra_classes="mod-app-corner-badge",
+                )
+
+        def _apply_node_summary(system_summary: NodeSystemSummary | None) -> None:
+            self._set_badge_state(
+                node_badge,
+                node_name,
+                self._app_page_node_badge_tone(
+                    node_name=node_name,
+                    system_summary=system_summary,
+                    is_local_node=is_local_node,
+                ),
+                extra_classes="mod-app-corner-badge mod-app-node-badge",
+            )
+
+        def _apply_app_stats(app_stats: NodeAppRuntimeSummary | None) -> None:
+            runtime_details = self._app_hero_runtime_details(app_stats)
+            self._set_badge_state(
+                relay_badge,
+                runtime_details.relay_badge.text,
+                runtime_details.relay_badge.tone,
+                extra_classes="mod-app-corner-badge",
+            )
+
+        return _ModWebAppHeroCornerBindings(
+            apply_node_summary=_apply_node_summary,
+            apply_app_stats=_apply_app_stats,
+        )
+
+    @staticmethod
+    def _app_page_node_badge_tone(
+        *,
+        node_name: str,
+        system_summary: NodeSystemSummary | None,
+        is_local_node: bool,
+    ) -> BadgeTone:
+        del node_name
+        if system_summary is not None or is_local_node:
+            return "black"
+        return "red"
+
+    @staticmethod
+    def _app_scope_from_name(app_name: str) -> str | None:
+        scope, separator, _instance_key = app_name.partition("_")
+        if not separator or not scope.strip():
+            return None
+        return scope
+
+    @classmethod
+    def _app_title_font_style(
+        cls,
+        *,
+        app_name: str,
+        title_font_preset: str,
+    ) -> str | None:
+        resolved_font = resolve_app_title_font(
+            value=title_font_preset,
+            scope=cls._app_scope_from_name(app_name),
+        )
+        if resolved_font.css_font_family is None:
+            return None
+        if resolved_font.is_builtin:
+            return f"font-family: {resolved_font.css_font_family} !important;"
+        return (
+            f"font-family: {resolved_font.css_font_family} !important;"
+            "font-weight: 400 !important;"
+            "font-style: normal !important;"
+        )
+
+    @classmethod
+    def _app_title_font_options(cls, *, app_name: str, selected_value: str | None = None) -> dict[str, str]:
+        return app_title_font_options(
+            custom_font_families=font_assets.available_font_families(scope=cls._app_scope_from_name(app_name)),
+            selected_value=selected_value,
+        )
+
+    @classmethod
+    def _app_title_font_default_label(cls, *, app_name: str) -> str:
+        return app_title_font_default_label(scope=cls._app_scope_from_name(app_name))
+
     def _render_live_app_hero_runtime(
         self,
         *,
         ui: ModWebUi,
         hero_card: Card,
+        app_name: str,
         title: str,
+        title_font_preset: str,
         static_badges: tuple[_ModWebBadgeSpec, ...],
         initial_app_stats: NodeAppRuntimeSummary | None,
         refresh_async_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]] | None = None,
@@ -462,7 +616,13 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         with ui.column().classes("w-full gap-3"):
             with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
                 with ui.column().classes(self._hero_header_main_classes()):
-                    ui.label(title).classes(self._hero_title_classes())
+                    title_label = ui.label(title).classes(self._hero_title_classes())
+                    title_style = self._app_title_font_style(
+                        app_name=app_name,
+                        title_font_preset=title_font_preset,
+                    )
+                    if title_style is not None:
+                        title_label.style(title_style)
                 with ui.column().classes("mod-app-hero-status gap-1"):
                     ui.label("Status").classes("mod-app-hero-status-label")
                     status_value_label = ui.label(initial_runtime_details.status_text).classes(
@@ -499,7 +659,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 )
                 self._set_optional_badge_state(player_badge, initial_runtime_details.player_count_badge)
                 for badge in static_badges:
-                    self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                    self._badge_spec(ui=ui, badge=badge)
 
         def _apply_runtime(app_stats: NodeAppRuntimeSummary | None) -> None:
             hero_card.classes(replace=self._app_hero_card_classes(app_stats))
@@ -3080,7 +3240,12 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         details_dialog: Dialog | None = None
         details_enable_disable_button: Button | None = None
         friendly_name_input: Input | None = None
+        title_font_select: Select | None = None
         notes_input: Input | None = None
+        running_cpu_points_input: Input | None = None
+        running_ram_points_input: Input | None = None
+        startup_cpu_points_input: Input | None = None
+        startup_ram_points_input: Input | None = None
         lifecycle_started_checkbox: Checkbox | None = None
         lifecycle_stopped_checkbox: Checkbox | None = None
         lifecycle_crashed_checkbox: Checkbox | None = None
@@ -3178,16 +3343,47 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         async def _handle_details_enable_disable(_: object | None = None) -> None:
             await run_app_action(self._app_enable_disable_action(current_runtime_model))
 
+        def _parse_required_non_negative_int(*, raw_value: str, field_label: str) -> int:
+            value = raw_value.strip()
+            if not value:
+                raise ValueError(f"{field_label} must not be empty.")
+            try:
+                parsed = int(value)
+            except ValueError as xcp:
+                raise ValueError(f"{field_label} must be a whole number.") from xcp
+            if parsed < 0:
+                raise ValueError(f"{field_label} must not be negative.")
+            return parsed
+
+        def _parse_optional_positive_int(*, raw_value: str, field_label: str) -> int | None:
+            value = raw_value.strip()
+            if not value:
+                return None
+            try:
+                parsed = int(value)
+            except ValueError as xcp:
+                raise ValueError(f"{field_label} must be a whole number.") from xcp
+            if parsed < 0:
+                raise ValueError(f"{field_label} must not be negative.")
+            if parsed == 0:
+                return None
+            return parsed
+
         async def _handle_details_submit(_: object | None = None) -> None:
             if (
                 friendly_name_input is None
+                or title_font_select is None
                 or notes_input is None
+                or running_cpu_points_input is None
+                or running_ram_points_input is None
+                or startup_cpu_points_input is None
+                or startup_ram_points_input is None
                 or lifecycle_started_checkbox is None
                 or lifecycle_stopped_checkbox is None
                 or lifecycle_crashed_checkbox is None
             ):
                 return
-            next_friendly_name: str = _value_as_text(friendly_name_input.value).strip()
+            next_friendly_name: str = _value_as_text(friendly_name_input).strip()
             if not next_friendly_name:
                 ui.notify("Friendly name must not be empty.", type="negative")
                 return
@@ -3197,17 +3393,47 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     type="negative",
                 )
                 return
-            next_notes: str = _value_as_text(notes_input.value)
+            try:
+                next_title_font_preset = normalise_app_title_font(_value_as_text(title_font_select))
+            except (TypeError, ValueError):
+                ui.notify("Title font is invalid.", type="negative")
+                return
+            next_notes: str = _value_as_text(notes_input)
+            try:
+                next_running_cpu_points = _parse_required_non_negative_int(
+                    raw_value=_value_as_text(running_cpu_points_input),
+                    field_label="Running CPU points",
+                )
+                next_running_ram_points = _parse_required_non_negative_int(
+                    raw_value=_value_as_text(running_ram_points_input),
+                    field_label="Running RAM points",
+                )
+                next_startup_cpu_points = _parse_optional_positive_int(
+                    raw_value=_value_as_text(startup_cpu_points_input),
+                    field_label="Startup CPU points",
+                )
+                next_startup_ram_points = _parse_optional_positive_int(
+                    raw_value=_value_as_text(startup_ram_points_input),
+                    field_label="Startup RAM points",
+                )
+            except ValueError as xcp:
+                ui.notify(str(xcp), type="negative")
+                return
             try:
                 result = await self._mutate_app(
                     model=current_runtime_model,
                     action=NodeAppMutationAction.UPDATE_DETAILS,
                     user=user,
                     friendly_name=next_friendly_name,
+                    title_font_preset=next_title_font_preset,
                     notes=next_notes,
-                    lifecycle_notice_started=bool(_value_as_object(lifecycle_started_checkbox.value)),
-                    lifecycle_notice_stopped=bool(_value_as_object(lifecycle_stopped_checkbox.value)),
-                    lifecycle_notice_crashed=bool(_value_as_object(lifecycle_crashed_checkbox.value)),
+                    lifecycle_notice_started=bool(_value_as_object(lifecycle_started_checkbox)),
+                    lifecycle_notice_stopped=bool(_value_as_object(lifecycle_stopped_checkbox)),
+                    lifecycle_notice_crashed=bool(_value_as_object(lifecycle_crashed_checkbox)),
+                    running_cpu_points=next_running_cpu_points,
+                    running_ram_points=next_running_ram_points,
+                    startup_cpu_points=next_startup_cpu_points,
+                    startup_ram_points=next_startup_ram_points,
                 )
             except Exception as xcp:
                 log.warning(
@@ -3231,6 +3457,31 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                                 "mod-subtitle text-sm"
                             )
                         if can_edit_app_details:
+                            resource_points = model.resource_points
+                            running_cpu_points_value = (
+                                "0" if resource_points is None else str(resource_points.cpu_points_running)
+                            )
+                            running_ram_points_value = (
+                                "0" if resource_points is None else str(resource_points.ram_points_running)
+                            )
+                            startup_cpu_points_value = (
+                                ""
+                                if (
+                                    resource_points is None
+                                    or not resource_points.startup_defined
+                                    or resource_points.cpu_points_startup == resource_points.cpu_points_running
+                                )
+                                else str(resource_points.cpu_points_startup)
+                            )
+                            startup_ram_points_value = (
+                                ""
+                                if (
+                                    resource_points is None
+                                    or not resource_points.startup_defined
+                                    or resource_points.ram_points_startup == resource_points.ram_points_running
+                                )
+                                else str(resource_points.ram_points_startup)
+                            )
                             with ui.column().classes("mod-app-details-section"):
                                 friendly_name_input = (
                                     ui.input("Friendly name", value=model.app_friendly)
@@ -3240,11 +3491,62 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                                     )
                                     .classes("mod-app-details-field")
                                 )
+                                title_font_select = (
+                                    ui.select(
+                                        self._app_title_font_options(
+                                            app_name=model.app_name,
+                                            selected_value=model.app_title_font_preset,
+                                        ),
+                                        value=model.app_title_font_preset,
+                                        label=f"Title font [{self._app_title_font_default_label(app_name=model.app_name)}]",
+                                    )
+                                    .props("filled square dense hide-bottom-space color=accent options-dark")
+                                    .classes("mod-app-details-field")
+                                )
                                 notes_input = (
                                     ui.input("Shared instance notes", value=model.app_notes or "")
                                     .props("filled square type=textarea autogrow hide-bottom-space color=accent")
                                     .classes("mod-app-details-field mod-app-details-notes")
                                 )
+                                with ui.column().classes("mod-app-details-subsection"):
+                                    ui.label("Resource Points").classes("mod-stat-label")
+                                    ui.label("Leave a startup field blank, or set it to 0, to use that resource's running points.").classes(
+                                        "mod-subtitle text-xs"
+                                    )
+                                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                                        running_cpu_points_input = (
+                                            ui.input("Running CPU", value=running_cpu_points_value)
+                                            .props(
+                                                "filled square dense hide-bottom-space color=accent "
+                                                "type=number inputmode=numeric step=1 min=0"
+                                            )
+                                            .classes("mod-app-details-field mod-app-details-point-field")
+                                        )
+                                        running_ram_points_input = (
+                                            ui.input("Running RAM", value=running_ram_points_value)
+                                            .props(
+                                                "filled square dense hide-bottom-space color=accent "
+                                                "type=number inputmode=numeric step=1 min=0"
+                                            )
+                                            .classes("mod-app-details-field mod-app-details-point-field")
+                                        )
+                                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                                        startup_cpu_points_input = (
+                                            ui.input("Startup CPU", value=startup_cpu_points_value)
+                                            .props(
+                                                "filled square dense hide-bottom-space color=accent "
+                                                "type=number inputmode=numeric step=1 min=0"
+                                            )
+                                            .classes("mod-app-details-field mod-app-details-point-field")
+                                        )
+                                        startup_ram_points_input = (
+                                            ui.input("Startup RAM", value=startup_ram_points_value)
+                                            .props(
+                                                "filled square dense hide-bottom-space color=accent "
+                                                "type=number inputmode=numeric step=1 min=0"
+                                            )
+                                            .classes("mod-app-details-field mod-app-details-point-field")
+                                        )
                                 with ui.column().classes("mod-app-details-subsection"):
                                     ui.label("Lifecycle Notices").classes("mod-stat-label")
                                     lifecycle_started_checkbox = (

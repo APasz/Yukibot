@@ -18,12 +18,21 @@ from hikari_ui.action import PagedActionCodec
 import config
 from _discord import App_Bound, DC_Relay
 from _editor_session import EditorSessionNamespace
-from _manager import App_Manager, AppDetailsUpdate, AppInstanceCreateRequest, AppInstanceTemplate, Provider_Player
+from _manager import (
+    AppStartBlockerKind,
+    App_Manager,
+    AppDetailsUpdate,
+    AppInstanceCreateRequest,
+    AppInstanceTemplate,
+    Provider_Player,
+    Provider_Process,
+)
 from _relay_embeds import build_app_lifecycle_embed
 from _security import Power_Level
 from apps._app import AM_Receiver, App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport, RelayAdvancementTerms
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
+    AppTitleFont,
     App_Config,
     AppVersion,
     Mod_Config,
@@ -1158,11 +1167,10 @@ class AppManageTests(unittest.TestCase):
         app.process = cast(Any, _RunningProcess())
         manager.activity_manager = None
         manager.apps = {app.name: app}
-        manager.current = app.name
 
         lines = DashboardEditorService._service_lines(manager)
 
-        self.assertIn("join address: play.example.com:25565", lines)
+        self.assertIn("Dummy: play.example.com:25565", lines)
 
     def test_manager_rejects_chat_channel_updates_for_unsupported_apps(self) -> None:
         manager = object.__new__(App_Manager)
@@ -1934,12 +1942,8 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await manager.load_apps(cast(Any, object()))
 
-        manager.current = "minecraft_ermingham"
+        current = manager.get("minecraft_ermingham")
 
-        current = manager.get_current
-
-        self.assertIsNotNone(current)
-        assert current is not None
         self.assertEqual(current.name, "minecraft_ermingham")
 
     async def test_provider_player_calls_check_running_and_resets_error_budget_on_success(self) -> None:
@@ -2000,6 +2004,65 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         app.player_count.assert_awaited_once()
         self.assertEqual(app.act_err_counts["_manager"], 3)
         self.assertNotIn("_manager:recovery", app.act_err_counts)
+
+    async def test_provider_process_rotates_to_selected_app_alt_text(self) -> None:
+        manager = object.__new__(App_Manager)
+        alpha = _build_dummy_app()
+        alpha.name = "dummy_alpha"
+        alpha.friendly = "Dummy Alpha"
+        alpha.cfg.name = alpha.name
+        alpha.cfg.friendly_name = alpha.friendly
+        alpha.cfg.provider_alt_text = "Alpha Alt"
+        alpha._running = True
+        alpha.check_running = Mock(return_value=True)
+        bravo = _build_dummy_app()
+        bravo.name = "dummy_bravo"
+        bravo.friendly = "Dummy Bravo"
+        bravo.cfg.name = bravo.name
+        bravo.cfg.friendly_name = bravo.friendly
+        bravo._running = True
+        bravo.check_running = Mock(return_value=True)
+        manager.apps = {alpha.name: alpha, bravo.name: bravo}
+        manager.activity_manager = SimpleNamespace(current_rotation_slot=Mock(return_value=(0, True)))
+
+        provider = Provider_Process(manager)
+
+        value = await provider.get()
+
+        self.assertEqual(value, "<Alpha Alt>")
+
+    async def test_provider_player_uses_selected_app_count_instead_of_aggregating(self) -> None:
+        manager = object.__new__(App_Manager)
+        alpha = _build_dummy_app()
+        alpha.name = "dummy_alpha"
+        alpha.friendly = "Dummy Alpha"
+        alpha.cfg.name = alpha.name
+        alpha.cfg.friendly_name = alpha.friendly
+        alpha.act_err_threshold = 5
+        alpha.act_err_counts = {}
+        alpha._running = True
+        alpha.player_count = AsyncMock(return_value=(2, 20))
+        alpha.check_running = Mock(return_value=True)
+        bravo = _build_dummy_app()
+        bravo.name = "dummy_bravo"
+        bravo.friendly = "Dummy Bravo"
+        bravo.cfg.name = bravo.name
+        bravo.cfg.friendly_name = bravo.friendly
+        bravo.act_err_threshold = 5
+        bravo.act_err_counts = {}
+        bravo._running = True
+        bravo.player_count = AsyncMock(return_value=(7, 30))
+        bravo.check_running = Mock(return_value=True)
+        manager.apps = {alpha.name: alpha, bravo.name: bravo}
+        manager.activity_manager = SimpleNamespace(current_rotation_slot=Mock(return_value=(1, False)))
+
+        provider = Provider_Player(manager)
+
+        value = await provider.get()
+
+        self.assertEqual(value, "7/30")
+        alpha.player_count.assert_not_awaited()
+        bravo.player_count.assert_awaited_once()
 
     async def test_wait_for_ready_event_fails_when_process_stops_before_ready(self) -> None:
         app = object.__new__(_DummyApp)
@@ -2182,6 +2245,116 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Join: `play.example.com:25565`")
         self.assertIsNotNone(app.lifecycle_started_at)
 
+    def test_start_blocker_blocks_same_scope_app(self) -> None:
+        manager = object.__new__(App_Manager)
+        running_app = _build_dummy_app()
+        running_app.name = "minecraft_alpha"
+        running_app.friendly = "Minecraft Alpha"
+        running_app.scope = "minecraft"
+        running_app.cfg.name = running_app.name
+        running_app.cfg.friendly_name = running_app.friendly
+        running_app.cfg.scope = running_app.scope
+        running_app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        target_app = _build_dummy_app()
+        target_app.name = "minecraft_beta"
+        target_app.friendly = "Minecraft Beta"
+        target_app.scope = "minecraft"
+        target_app.cfg.name = target_app.name
+        target_app.cfg.friendly_name = target_app.friendly
+        target_app.cfg.scope = target_app.scope
+        target_app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        manager.apps = {running_app.name: running_app, target_app.name: target_app}
+
+        blocker = manager.start_blocker(target_app)
+
+        self.assertIsNotNone(blocker)
+        assert blocker is not None
+        self.assertEqual(blocker.kind, AppStartBlockerKind.SAME_SCOPE)
+        self.assertEqual(blocker.blocking_app_name, "minecraft_alpha")
+        self.assertIn("Minecraft Alpha", blocker.message)
+
+    def test_start_blocker_blocks_when_cpu_points_are_exhausted(self) -> None:
+        manager = object.__new__(App_Manager)
+        running_app = _build_dummy_app()
+        running_app.name = "factorio_lab"
+        running_app.friendly = "Factorio Lab"
+        running_app.scope = "factorio"
+        running_app.cfg.name = running_app.name
+        running_app.cfg.friendly_name = running_app.friendly
+        running_app.cfg.scope = running_app.scope
+        running_app.cfg.resource_points.running = config.ResourcePointSet(cpu_points=3, ram_points=1)
+        running_app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        target_app = _build_dummy_app()
+        target_app.name = "beammp_alpha"
+        target_app.friendly = "BeamMP Alpha"
+        target_app.scope = "beammp"
+        target_app.cfg.name = target_app.name
+        target_app.cfg.friendly_name = target_app.friendly
+        target_app.cfg.scope = target_app.scope
+        target_app.cfg.resource_points.startup = config.ResourcePointSet(cpu_points=3, ram_points=1)
+        target_app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        manager.apps = {running_app.name: running_app, target_app.name: target_app}
+
+        manager._load_bot_configuration = Mock(
+            return_value=config.BotConfiguration(
+                node_capacity=config.NodeCapacityProfile(
+                    cpu_points_total=5,
+                    ram_points_total=8,
+                    cpu_points_reserved=1,
+                    ram_points_reserved=1,
+                )
+            )
+        )
+        with patch.object(config, "NODE_NAME", "yuki"):
+            blocker = manager.start_blocker(target_app)
+
+        self.assertIsNotNone(blocker)
+        assert blocker is not None
+        self.assertEqual(blocker.kind, AppStartBlockerKind.CPU_POINTS)
+        self.assertEqual(blocker.required_points, 3)
+        self.assertEqual(blocker.available_points, 1)
+
+    def test_start_blocker_counts_pending_startup_points(self) -> None:
+        manager = object.__new__(App_Manager)
+        pending_app = _build_dummy_app()
+        pending_app.name = "minecraft_alpha"
+        pending_app.friendly = "Minecraft Alpha"
+        pending_app.scope = "minecraft"
+        pending_app.cfg.name = pending_app.name
+        pending_app.cfg.friendly_name = pending_app.friendly
+        pending_app.cfg.scope = pending_app.scope
+        pending_app.cfg.resource_points.running = config.ResourcePointSet(cpu_points=1, ram_points=1)
+        pending_app.cfg.resource_points.startup = config.ResourcePointSet(cpu_points=5, ram_points=2)
+        pending_app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        target_app = _build_dummy_app()
+        target_app.name = "beammp_alpha"
+        target_app.friendly = "BeamMP Alpha"
+        target_app.scope = "beammp"
+        target_app.cfg.name = target_app.name
+        target_app.cfg.friendly_name = target_app.friendly
+        target_app.cfg.scope = target_app.scope
+        target_app.cfg.resource_points.startup = config.ResourcePointSet(cpu_points=3, ram_points=1)
+        target_app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        manager.apps = {pending_app.name: pending_app, target_app.name: target_app}
+        manager._pending_start_names = {pending_app.name.casefold()}
+
+        manager._load_bot_configuration = Mock(
+            return_value=config.BotConfiguration(
+                node_capacity=config.NodeCapacityProfile(
+                    cpu_points_total=8,
+                    ram_points_total=8,
+                    cpu_points_reserved=1,
+                    ram_points_reserved=1,
+                )
+            )
+        )
+        with patch.object(config, "NODE_NAME", "yuki"):
+            blocker = manager.start_blocker(target_app)
+
+        self.assertIsNotNone(blocker)
+        assert blocker is not None
+        self.assertEqual(blocker.kind, AppStartBlockerKind.CPU_POINTS)
+
     async def test_launch_emits_lifecycle_start_embed_for_web_chat_only_relay_app(self) -> None:
         manager = object.__new__(App_Manager)
         manager.current = None
@@ -2263,7 +2436,6 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Failed to start the minecraft server")
         app.handle_unexpected_stop.assert_awaited_once()
         self.assertIsNone(app.lifecycle_started_at)
-        self.assertIsNone(manager.current)
 
     async def test_launch_emits_crash_embed_for_web_chat_only_relay_app(self) -> None:
         manager = object.__new__(App_Manager)
@@ -2295,7 +2467,6 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Failed to start the minecraft server")
         app.handle_unexpected_stop.assert_awaited_once()
         self.assertIsNone(app.lifecycle_started_at)
-        self.assertIsNone(manager.current)
 
     async def test_end_emits_lifecycle_stop_embed_with_uptime(self) -> None:
         manager = object.__new__(App_Manager)
@@ -2320,6 +2491,35 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Uptime: `1h 2m 3s`")
         self.assertIsNone(app.lifecycle_started_at)
 
+    async def test_active_resource_point_usage_drops_after_app_stop(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = "dummy"
+        app = _build_dummy_app()
+        app.chat_channel = hikari.Snowflake(123)
+        app.process = cast(Any, _RunningProcess())
+        app.cfg.resource_points.running = config.ResourcePointSet(cpu_points=3, ram_points=5)
+        manager.apps = {app.name: app}
+        manager._lookup = {app.name: app.name, app.name.lower(): app.name}
+
+        async def _stop() -> bool:
+            app.process = None
+            return True
+
+        app.stop = _stop  # type: ignore[method-assign]
+
+        self.assertEqual(
+            manager.active_resource_point_usage(),
+            config.ResourcePointSet(cpu_points=3, ram_points=5),
+        )
+
+        with patch("_manager.DC_Relay.add"):
+            await manager.end(manager.current)
+
+        self.assertEqual(
+            manager.active_resource_point_usage(),
+            config.ResourcePointSet(cpu_points=0, ram_points=0),
+        )
+
     async def test_handle_inactive_app_emits_lifecycle_stop_embed_for_unmanaged_shutdown(self) -> None:
         manager = object.__new__(App_Manager)
         manager.current = "dummy"
@@ -2340,7 +2540,33 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Uptime: `1h 2m 3s`")
         app.handle_unexpected_stop.assert_awaited_once()
         self.assertIsNone(app.lifecycle_started_at)
-        self.assertIsNone(manager.current)
+
+    async def test_active_resource_point_usage_drops_after_app_crash(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = "dummy"
+        app = _build_dummy_app(join_port=25565)
+        app.chat_channel = hikari.Snowflake(123)
+        app.cfg.resource_points.running = config.ResourcePointSet(cpu_points=4, ram_points=6)
+        app.lifecycle_started_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        app.handle_unexpected_stop = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        manager.apps = {app.name: app}
+
+        self.assertEqual(
+            manager.active_resource_point_usage(),
+            config.ResourcePointSet(cpu_points=4, ram_points=6),
+        )
+
+        app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+        app.runtime_fault = AppRuntimeFault(kind=AppRuntimeFaultKind.CRASH, summary="boom")
+
+        with patch("_manager.DC_Relay.add"):
+            await manager._handle_inactive_app(app)
+
+        self.assertEqual(
+            manager.active_resource_point_usage(),
+            config.ResourcePointSet(cpu_points=0, ram_points=0),
+        )
 
     async def test_handle_inactive_app_skips_duplicate_stop_embed_for_managed_shutdown(self) -> None:
         manager = object.__new__(App_Manager)
@@ -2357,7 +2583,6 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         add_mock.assert_not_called()
         app.handle_unexpected_stop.assert_awaited_once()
         self.assertIsNone(app.lifecycle_started_at)
-        self.assertIsNone(manager.current)
 
     async def test_notify_running_app_relays_targets_only_running_inbound_apps(self) -> None:
         manager = object.__new__(App_Manager)
@@ -2401,51 +2626,49 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(running_receiver.payloads[0].notice, restart_notice)
         self.assertEqual(len(stopped_receiver.payloads), 0)
 
-    def test_set_current_restart_auto_start_app_persists_then_consume_clears(self) -> None:
+    def test_set_running_restart_auto_start_apps_persists_then_consume_clears(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "configuration.json"
             manager = object.__new__(App_Manager)
             running_app = _build_dummy_app()
             running_app.name = "minecraft_alpha"
             running_app.friendly = "Minecraft Alpha"
+            running_app.process = cast(Any, _RunningProcess())
             manager.apps = {running_app.name: running_app}
-            manager.current = running_app.name
             manager._bot_configuration_path = config_path
 
-            persisted = manager.set_current_restart_auto_start_app()
+            persisted = manager.set_running_restart_auto_start_apps()
             loaded = config.load_bot_configuration(config_path)
-            consumed = manager.consume_restart_auto_start_app()
+            consumed = manager.consume_restart_auto_start_apps()
             cleared = config.load_bot_configuration(config_path)
 
-        self.assertEqual(persisted, "minecraft_alpha")
-        self.assertEqual(loaded.restart_state.auto_start_app, "minecraft_alpha")
-        self.assertEqual(consumed, "minecraft_alpha")
-        self.assertIsNone(cleared.restart_state.auto_start_app)
+        self.assertEqual(persisted, ("minecraft_alpha",))
+        self.assertEqual(loaded.restart_state.auto_start_apps, ("minecraft_alpha",))
+        self.assertEqual(consumed, ("minecraft_alpha",))
+        self.assertEqual(cleared.restart_state.auto_start_apps, ())
 
-    def test_set_current_restart_auto_start_app_clears_stale_value_when_no_app_running(self) -> None:
+    def test_set_running_restart_auto_start_apps_clears_stale_value_when_no_app_running(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "configuration.json"
             config.save_bot_configuration(
                 config_path,
                 config.BotConfiguration(
-                    restart_state=config.PersistedRestartState(auto_start_app="minecraft_alpha"),
+                    restart_state=config.PersistedRestartState(auto_start_apps=("minecraft_alpha",)),
                 ),
             )
             manager = object.__new__(App_Manager)
             manager.apps = {}
-            manager.current = None
             manager._bot_configuration_path = config_path
 
-            persisted = manager.set_current_restart_auto_start_app()
+            persisted = manager.set_running_restart_auto_start_apps()
             loaded = config.load_bot_configuration(config_path)
 
-        self.assertIsNone(persisted)
-        self.assertIsNone(loaded.restart_state.auto_start_app)
+        self.assertEqual(persisted, ())
+        self.assertEqual(loaded.restart_state.auto_start_apps, ())
 
-    async def test_launch_sets_current_while_start_is_in_progress(self) -> None:
+    async def test_launch_waits_for_start_completion_before_marking_lifecycle_started(self) -> None:
         manager = object.__new__(App_Manager)
-        manager.current = None
-        manager.end = AsyncMock(return_value=set())
+        manager.apps = {}
         app = object.__new__(_SlowStartApp)
         app.name = "satisfactory_alpha"
         app.friendly = "Satisfactory"
@@ -2472,14 +2695,17 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         app.process = None
         app.start_entered = asyncio.Event()
         app.release_start = asyncio.Event()
+        manager.apps = {app.name: app}
 
         launch_task = asyncio.create_task(manager.launch(app))
         await asyncio.wait_for(app.start_entered.wait(), timeout=1)
 
-        self.assertEqual(manager.current, app.name)
+        self.assertIsNone(app.lifecycle_started_at)
+        self.assertFalse(launch_task.done())
 
         app.release_start.set()
         await asyncio.wait_for(launch_task, timeout=1)
+        self.assertIsNotNone(app.lifecycle_started_at)
 
     async def test_force_invalidate_lock_closes_manager_when_response_is_still_live(self) -> None:
         service = AppManageService()
@@ -2543,6 +2769,48 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(app.chat_channel)
             self.assertIsNone(app.chat_channel_override)
             self.assertIs(app.chat_channel_source, RelayChannelSource.NONE)
+
+    async def test_launch_emits_lifecycle_start_embed_for_default_chat_channel_without_chat_relay(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = None
+        manager.end = AsyncMock(return_value=set())
+        manager.default_chat_channels = (hikari.Snowflake(123),)
+        manager.default_chat_channel = hikari.Snowflake(123)
+        manager.default_chat_channel_source = RelayChannelSource.DEFAULT
+        app = _build_dummy_app(join_port=25565)
+
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(json.dumps({"alpha": {"friendly_name": "Dummy", "directory": "{APPS}/dummy"}}), encoding="utf-8")
+            app.cfg = App_Config(
+                name="dummy_alpha",
+                instance_key="alpha",
+                friendly_name="Dummy",
+                directory=temp_path,
+                apps_dir=temp_path,
+                scope="dummy",
+                join_host="play.example.com",
+                join_port=25565,
+            )
+            app.file_instances = app.cfg.apps_dir / "instances.json"
+            DC_Relay._chat_channels.clear()
+
+            try:
+                manager._apply_relay_channel(app)
+                with patch("_manager.DC_Relay.add") as add_mock:
+                    await manager.launch(app)
+            finally:
+                DC_Relay._chat_channels.clear()
+
+        self.assertEqual(app.chat_channel, hikari.Snowflake(123))
+        self.assertEqual(app.chat_channels, (hikari.Snowflake(123),))
+        self.assertIs(app.chat_channel_source, RelayChannelSource.DEFAULT)
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.content, "Started")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Dummy Started")
 
     def test_create_instance_writes_new_entry_from_template(self) -> None:
         manager = object.__new__(App_Manager)
@@ -2770,10 +3038,15 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     AppDetailsUpdate(
                         friendly_name="Dummy Prime",
+                        title_font_preset=AppTitleFont.MINECRAFT_TEN.value,
                         notes="Main survival shard",
                         lifecycle_notice_started=False,
                         lifecycle_notice_stopped=True,
                         lifecycle_notice_crashed=False,
+                        running_cpu_points=3,
+                        running_ram_points=5,
+                        startup_cpu_points=None,
+                        startup_ram_points=None,
                     ),
                 )
             finally:
@@ -2781,14 +3054,67 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
 
             payload = json.loads(instances_path.read_text(encoding="utf-8"))
             self.assertEqual(updated_friendly_name, "Dummy Prime")
+            self.assertEqual(app.cfg.title_font_preset, AppTitleFont.MINECRAFT_TEN.value)
             self.assertEqual(app.cfg.notes, "Main survival shard")
             self.assertFalse(app.cfg.lifecycle_notice_started)
             self.assertTrue(app.cfg.lifecycle_notice_stopped)
             self.assertFalse(app.cfg.lifecycle_notice_crashed)
+            self.assertEqual(app.cfg.resource_points.running.cpu_points, 3)
+            self.assertEqual(app.cfg.resource_points.running.ram_points, 5)
+            self.assertIsNone(app.cfg.resource_points.startup)
             self.assertEqual(payload["alpha"]["notes"], "Main survival shard")
+            self.assertEqual(payload["alpha"]["title_font_preset"], AppTitleFont.MINECRAFT_TEN.value)
             self.assertFalse(payload["alpha"]["lifecycle_notice_started"])
             self.assertTrue(payload["alpha"]["lifecycle_notice_stopped"])
             self.assertFalse(payload["alpha"]["lifecycle_notice_crashed"])
+            self.assertEqual(payload["alpha"]["resource_points"], {"running": {"cpu_points": 3, "ram_points": 5}})
+
+    def test_update_app_details_allows_single_resource_startup_override(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps({"alpha": {"friendly_name": "Dummy", "directory": "{APPS}/dummy"}}),
+                encoding="utf-8",
+            )
+            app = _build_dummy_app()
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+
+            os.chdir(temp_path)
+            try:
+                manager.update_app_details(
+                    app,
+                    AppDetailsUpdate(
+                        friendly_name="Dummy",
+                        notes=None,
+                        lifecycle_notice_started=True,
+                        lifecycle_notice_stopped=True,
+                        lifecycle_notice_crashed=True,
+                        running_cpu_points=3,
+                        running_ram_points=5,
+                        startup_cpu_points=None,
+                        startup_ram_points=8,
+                    ),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(app.cfg.resource_points.startup)
+            self.assertEqual(app.cfg.resource_points.startup.cpu_points, 3)
+            self.assertEqual(app.cfg.resource_points.startup.ram_points, 8)
+            self.assertEqual(
+                payload["alpha"]["resource_points"],
+                {
+                    "running": {"cpu_points": 3, "ram_points": 5},
+                    "startup": {"cpu_points": 3, "ram_points": 8},
+                },
+            )
 
     def test_create_instance_requires_admin_password_for_satisfactory(self) -> None:
         manager = object.__new__(App_Manager)

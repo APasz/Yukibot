@@ -2433,6 +2433,7 @@ class Activities:
 class Provider_Day(config.Activity_Provider):
     def __init__(self, app: Minecraft):
         self.app = app
+        self.activity_scope_name = app.name
         self._timedelta = None
         self._count = 0
         self.task_funcs = [self._get_time]

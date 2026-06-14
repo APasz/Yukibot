@@ -3,6 +3,7 @@ from __future__ import annotations
 from mod_web_theme import BadgeTone
 
 from .runtime_imports import (
+    AppTitleFont,
     AppRuntimeFault,
     Awaitable,
     Button,
@@ -14,6 +15,7 @@ from .runtime_imports import (
     Enum,
     Literal,
     NodeAppMutationAction,
+    NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
     NodeBlueprintList,
@@ -51,6 +53,8 @@ class _ChatMediaPreview:
 class _ModWebBadgeSpec:
     text: str
     tone: BadgeTone
+    icon: str | None = None
+    tooltip_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +82,7 @@ class _ModWebTabActionSpec:
 class _ModWebAppHeroRuntimeDetails:
     status_text: str
     status_tone: BadgeTone
+    relay_badge: _ModWebBadgeSpec
     badges: tuple[_ModWebBadgeSpec, ...] = ()
     player_count_badge: _ModWebBadgeSpec | None = None
 
@@ -110,6 +115,12 @@ class _ModWebKillControlState:
 @dataclass(frozen=True, slots=True)
 class _ModWebRuntimeToolbarBindings:
     apply_runtime_model: Callable[["ModWebBasePageModel"], None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebAppHeroCornerBindings:
+    apply_node_summary: Callable[[NodeSystemSummary | None], None]
+    apply_app_stats: Callable[[NodeAppRuntimeSummary | None], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +340,7 @@ class ModWebBasePageModel:
     app_stats: NodeAppRuntimeSummary | None
     app_start_blocked: bool
     settings: NodeSettingList | None
+    app_title_font_preset: str = field(default=AppTitleFont.AUTO.value, kw_only=True)
     console_actions: NodeConsoleActionList | None = field(default=None, kw_only=True)
     blueprints: NodeBlueprintList | None = field(default=None, kw_only=True)
     map_url: str | None = field(default=None, kw_only=True)
@@ -336,6 +348,7 @@ class ModWebBasePageModel:
     can_write_map_annotations: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
+    resource_points: NodeAppResourcePointSummary | None = field(default=None, kw_only=True)
     app_notes: str | None = field(default=None, kw_only=True)
     lifecycle_notice_started: bool = field(default=True, kw_only=True)
     lifecycle_notice_stopped: bool = field(default=True, kw_only=True)
@@ -682,6 +695,7 @@ __all__: tuple[str, ...] = (
     "ModWebTitleStatLine",
     "_ChatMediaPreview",
     "_ModWebAppCardBadgeSpec",
+    "_ModWebAppHeroCornerBindings",
     "_ModWebAppHeroRuntimeDetails",
     "_ModWebAppRuntimeState",
     "_ModWebBadgeSpec",

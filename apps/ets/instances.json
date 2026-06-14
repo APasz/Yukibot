@@ -4,8 +4,18 @@
         "directory": "{APPS}/ets",
         "server_log_file": "{WD}/home_data/Euro Truck Simulator 2/server.log.txt",
         "port": 27015,
+        "resource_points": {
+            "running": {
+                "cpu_points": 1,
+                "ram_points": 1
+            },
+            "startup": {
+                "cpu_points": 2,
+                "ram_points": 1
+            }
+        },
         "version": {
-            "main": "1.55s"
+            "main": "1.55.0.3"
         }
     }
 }

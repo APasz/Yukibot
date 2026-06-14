@@ -1312,6 +1312,39 @@ class ModWebChatMixin(ModWebServiceSupport):
                     }}
                   }}
                 }};
+                const observeTimelineMutations = (timelineId, unreadBarId, unreadCountId) => {{
+                  const timeline = get(timelineId);
+                  if (!timeline || timeline._modChatMutationObserver) {{
+                    return;
+                  }}
+                  const observer = new MutationObserver((mutations) => {{
+                    let structureChanged = false;
+                    for (const mutation of mutations) {{
+                      if (mutation.type !== 'childList') {{
+                        continue;
+                      }}
+                      if (mutation.addedNodes.length > 0 || mutation.removedNodes.length > 0) {{
+                        structureChanged = true;
+                      }}
+                      for (const node of mutation.addedNodes) {{
+                        if (node instanceof Element) {{
+                          localizeTimes(node);
+                        }}
+                      }}
+                    }}
+                    if (!structureChanged) {{
+                      return;
+                    }}
+                    attachMediaListeners(timelineId, unreadBarId, unreadCountId);
+                    if (pinned(timeline)) {{
+                      jump(timelineId, unreadBarId, unreadCountId);
+                    }} else {{
+                      sync(timelineId, unreadBarId, unreadCountId);
+                    }}
+                  }});
+                  observer.observe(timeline, {{childList: true, subtree: true}});
+                  timeline._modChatMutationObserver = observer;
+                }};
                 const bind = (timelineId, unreadBarId, unreadCountId) => {{
                   const timeline = get(timelineId);
                   if (!timeline) {{
@@ -1333,6 +1366,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                   }}
                   sync(timelineId, unreadBarId, unreadCountId);
                   attachMediaListeners(timelineId, unreadBarId, unreadCountId);
+                  observeTimelineMutations(timelineId, unreadBarId, unreadCountId);
                   localizeTimes(timeline);
                 }};
                 const beforeRefresh = (timelineId, unreadBarId, unreadCountId) => {{

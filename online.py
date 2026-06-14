@@ -7,7 +7,7 @@ import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import hikari
 from modmux import Muxer, Provider, SteamCreds
@@ -338,6 +338,33 @@ class Online_Tracker(metaclass=config.Singleton):
 
     def set_ready_delay(self, seconds: int = 10):
         self.ready_at = datetime.now(timezone.utc) + timedelta(seconds=max(0, seconds))
+
+    def _tracked_presence_user_ids(self) -> tuple[hikari.Snowflake, ...]:
+        tracked: set[hikari.Snowflake] = set(self._watchers_by_target.keys())
+        tracked.update(self.drink_rules.keys())
+        tracked.update(self.nick_rules.keys())
+        return tuple(sorted(tracked, key=int))
+
+    def hydrate_cached_presences(self, bot: hikari.GatewayBot) -> int:
+        cache = getattr(bot, "cache", None)
+        get_presence = getattr(cache, "get_presence", None)
+        if not callable(get_presence):
+            return 0
+
+        hydrated = 0
+        now = datetime.now(timezone.utc)
+        for user_id in self._tracked_presence_user_ids():
+            if self.is_ignored_user(user_id) or user_id in self._snapshots:
+                continue
+            raw_presence = get_presence(config.DISCORD_GUILD, user_id)
+            presence = None if raw_presence is None else cast(hikari.MemberPresence, raw_presence)
+            snapshot = self._snapshot_from_presence(presence)
+            self._snapshots[user_id] = snapshot
+            self._update_game_sessions(user_id, snapshot, now)
+            self._record_seen_games(user_id, snapshot)
+            self._maybe_queue_nickname_for_snapshot(user_id, snapshot, bot)
+            hydrated += 1
+        return hydrated
 
     def _read(self):
         if not self.pointer.exists():

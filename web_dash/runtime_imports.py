@@ -38,7 +38,7 @@ import aiohttp
 import hikari
 import requests
 from fastapi import Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from hikari.impl.gateway_bot import GatewayBot
 from hikari.users import OwnUser
 from nicegui.elements.button import Button
@@ -63,7 +63,7 @@ from _manager import App_Manager, ManagedApp
 from _security import Access_Control, Power_Level
 from _utils import Utilities
 from apps._app import App, AppRuntimeFault
-from apps._config import ModType
+from apps._config import AppTitleFont, ModType
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
     ChatAttachment,
@@ -85,6 +85,7 @@ from mod_web_theme import MOD_WEB_ACTION_BASE_CLASSES, BadgeTone, apply_mod_web_
 from node_api import (
     NodeApiService,
     NodeAppEntry,
+    NodeAppResourcePointSummary,
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
@@ -100,10 +101,12 @@ from node_api import (
     NodeConfigContent,
     NodeConfigEntry,
     NodeConfigList,
+    NodeCapacityMutationResult,
     NodeConsoleActionEntry,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleActionParameter,
+    NodeFontSourceSettingsMutationResult,
     NodeModEntry,
     NodeModList,
     NodeModMutationAction,
@@ -134,6 +137,7 @@ __all__: tuple[str, ...] = (
     "App",
     "App_Manager",
     "AppRuntimeFault",
+    "AppTitleFont",
     "AuthorityEndpoint",
     "AuthorityResource",
     "Awaitable",
@@ -161,6 +165,7 @@ __all__: tuple[str, ...] = (
     "Coroutine",
     "DEFAULT_CHAT_AUTHOR_COLOR_HEX",
     "Enum",
+    "FileResponse",
     "GatewayBot",
     "Html",
     "Input",
@@ -181,6 +186,7 @@ __all__: tuple[str, ...] = (
     "NodeApiScope",
     "NodeApiService",
     "NodeAppEntry",
+    "NodeAppResourcePointSummary",
     "NodeAppMutationAction",
     "NodeAppMutationResult",
     "NodeAppRuntimeSummary",
@@ -196,10 +202,12 @@ __all__: tuple[str, ...] = (
     "NodeConfigContent",
     "NodeConfigEntry",
     "NodeConfigList",
+    "NodeCapacityMutationResult",
     "NodeConsoleActionEntry",
     "NodeConsoleActionExecutionResult",
     "NodeConsoleActionList",
     "NodeConsoleActionParameter",
+    "NodeFontSourceSettingsMutationResult",
     "NodeModEntry",
     "NodeModList",
     "NodeModMutationAction",

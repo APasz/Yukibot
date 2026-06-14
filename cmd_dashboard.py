@@ -2041,23 +2041,30 @@ class DashboardEditorService:
     @staticmethod
     def _service_lines(manager: App_Manager) -> list[str]:
         activity_manager = manager.activity_manager
-        current_app = manager.get_current
+        running_apps = manager.running_apps()
         lines = [
             f"apps loaded: {len(manager.apps)}",
-            f"current app: {manager.current or 'None'}",
+            f"running apps: {len(running_apps)}",
         ]
-        if current_app is not None and current_app.check_running() and current_app.cfg.join_display_address is not None:
-            lines.append(f"join address: {current_app.cfg.join_display_address}")
+        if running_apps:
+            lines.append("app names: " + ", ".join(app.name for app in running_apps))
+        for app in running_apps:
+            if app.cfg.join_display_address is not None:
+                lines.append(f"{app.friendly}: {app.cfg.join_display_address}")
         if activity_manager is None:
             lines.append("activity manager: unavailable")
             return lines
 
-        last_update_age = datetime.now(timezone.utc) - activity_manager.last_update
+        if activity_manager.last_update is None:
+            last_update_text = "never"
+        else:
+            last_update_age = datetime.now(timezone.utc) - activity_manager.last_update
+            last_update_text = f"{_format_duration(last_update_age.total_seconds())} ago"
         lines.extend(
             [
                 f"activity providers: {len(activity_manager.providers)}",
                 f"presence text: {activity_manager.state or 'None'}",
-                f"last activity update: {_format_duration(last_update_age.total_seconds())} ago",
+                f"last activity update: {last_update_text}",
             ]
         )
         return lines

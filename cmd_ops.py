@@ -78,10 +78,10 @@ async def restart_host_or_bot(
         raise ValueError("Voice restart requires the voice service to be enabled")
 
     await acl.perm_check(ctx.user.id, restart_required_level(restart_type))
-    auto_start_app = (
-        manager.set_current_restart_auto_start_app()
+    auto_start_apps = (
+        manager.set_running_restart_auto_start_apps()
         if auto_restart_running_app
-        else manager.set_restart_auto_start_app(None)
+        else manager.set_restart_auto_start_apps(())
     )
     await ctx.defer()
     log.critical(
@@ -89,7 +89,7 @@ async def restart_host_or_bot(
         restart_type.value,
         silent,
         auto_restart_running_app,
-        auto_start_app,
+        ",".join(auto_start_apps) if auto_start_apps else "none",
         ctx.user.display_name,
     )
     await _sys.restart(ctx, bot, manager, restart_type.value, silent)

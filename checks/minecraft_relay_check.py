@@ -45,7 +45,8 @@ from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeS
 
 class _NamesStub:
     @staticmethod
-    def parse_mentions(text: str) -> tuple[str, set[int]]:
+    def parse_mentions(text: str, *, scope: str | None = None) -> tuple[str, set[int]]:
+        del scope
         return text, set()
 
     @staticmethod

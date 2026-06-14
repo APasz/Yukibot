@@ -5,6 +5,16 @@
         "mods_dir": "{WD}/mods",
         "port": 25565,
         "enabled": true,
+        "resource_points": {
+            "running": {
+                "cpu_points": 6,
+                "ram_points": 5
+            },
+            "startup": {
+                "cpu_points": 7,
+                "ram_points": 6
+            }
+        },
         "version": {
             "main": "1.20.1",
             "framework": "47.4.0",
@@ -16,11 +26,26 @@
         "directory": "{APPS}/mc_creative",
         "mods_dir": "{WD}/mods",
         "port": 25565,
+        "resource_points": {
+            "running": {
+                "cpu_points": 4,
+                "ram_points": 4
+            },
+            "startup": {
+                "cpu_points": 5,
+                "ram_points": 5
+            }
+        },
         "version": {
             "main": "1.20.1",
             "framework": "47.4.0",
             "loader": "forge"
-        }
+        },
+        "title_font_preset": "MineCrafter 2.0",
+        "notes": null,
+        "lifecycle_notice_started": true,
+        "lifecycle_notice_stopped": true,
+        "lifecycle_notice_crashed": true
     },
     "all_fabric": {
         "friendly_name": "TestErm",
@@ -28,6 +53,16 @@
         "mods_dir": "{WD}/mods",
         "port": 25565,
         "enabled": true,
+        "resource_points": {
+            "running": {
+                "cpu_points": 5,
+                "ram_points": 5
+            },
+            "startup": {
+                "cpu_points": 6,
+                "ram_points": 6
+            }
+        },
         "version": {
             "main": "1.20.1",
             "framework": "47.4.10",

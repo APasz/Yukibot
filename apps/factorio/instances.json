@@ -5,6 +5,12 @@
         "mods_dir": "{WD}/mods",
         "server_log_file": "{WD}/factorio-current.log",
         "port": 34197,
+        "resource_points": {
+            "running": {
+                "cpu_points": 3,
+                "ram_points": 3
+            }
+        },
         "version": {
             "main": "2.0.76"
         },

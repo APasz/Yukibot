@@ -407,10 +407,17 @@ class ModWebTheme:
                     z-index: 2;
                     pointer-events: none;
                 }}
-                .mod-app-node-badge {{
+                .mod-app-node-badge-row {{
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 0.5rem;
+                }}
+                .mod-app-corner-badge {{
                     margin: 0 !important;
                     padding: 0.4rem 0.72rem !important;
                     border-top: 0 !important;
+                }}
+                .mod-app-node-badge {{
                     border-left: 0 !important;
                 }}
                 .mod-app-card {{ transition: border-color 150ms ease, background 150ms ease; }}
@@ -2284,9 +2291,20 @@ class ModWebTheme:
                 .mod-badge.red {{ background: #3a1117 !important; border-color: #dc2626; color: #fecaca !important; }}
                 .mod-badge.warn {{ background: #22161a !important; border-color: #7f1d1d; color: #fca5a5 !important; }}
                 .mod-badge.grey {{ background: #18181f !important; border-color: #3f3f46; color: #d4d4d8 !important; }}
+                .mod-badge-icon-label {{
+                    gap: 0.34rem;
+                }}
+                .mod-badge-icon {{
+                    font-size: 0.92rem !important;
+                    line-height: 1 !important;
+                }}
                 .mod-node-status-badge {{
                     justify-content: center;
                     min-width: 10.75rem;
+                }}
+                .mod-node-status-badge-actionable {{
+                    cursor: pointer !important;
+                    user-select: none;
                 }}
                 .mod-home-section-grid {{
                     display: grid;
@@ -2295,6 +2313,11 @@ class ModWebTheme:
                 }}
                 .mod-home-section {{
                     min-width: 0;
+                }}
+                .mod-home-section-avatar {{
+                    width: 1.6rem;
+                    height: 1.6rem;
+                    min-width: 1.6rem;
                 }}
                 @media (min-width: 1280px) {{
                     .mod-home-section-grid {{
@@ -2463,6 +2486,29 @@ class ModWebTheme:
                     width: min(30rem, calc(100vw - 2rem)) !important;
                     max-width: none !important;
                 }}
+                .mod-node-settings-overlay {{
+                    position: fixed;
+                    inset: 0;
+                    z-index: 4000;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 1rem;
+                }}
+                .mod-node-settings-backdrop {{
+                    position: absolute;
+                    inset: 0;
+                    background: rgba(2, 2, 4, 0.78);
+                    backdrop-filter: blur(7px);
+                }}
+                .mod-node-settings-shell {{
+                    position: relative;
+                    z-index: 1;
+                    width: 100%;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }}
                 .mod-app-details-dialog-card {{
                     width: min(44rem, calc(100vw - 1.5rem)) !important;
                 }}
@@ -2491,6 +2537,10 @@ class ModWebTheme:
                 }}
                 .mod-app-details-field {{
                     width: 100%;
+                }}
+                .mod-app-details-point-field {{
+                    flex: 0 1 11.5rem;
+                    max-width: 11.5rem;
                 }}
                 .mod-app-details-field .q-field__control {{
                     min-height: 2.9rem;
@@ -2537,6 +2587,26 @@ class ModWebTheme:
                 .mod-app-details-field .q-field__input {{
                     font-size: 0.9rem !important;
                     font-weight: 850 !important;
+                }}
+                .mod-app-details-point-field .q-field__control {{
+                    min-height: 2.55rem;
+                    padding: 0 0.45rem !important;
+                }}
+                .mod-app-details-point-field .q-field__native,
+                .mod-app-details-point-field .q-field__input {{
+                    font-size: 0.82rem !important;
+                }}
+                .mod-app-details-point-field input[type=number] {{
+                    appearance: textfield;
+                    -moz-appearance: textfield;
+                    padding-right: 0.2rem !important;
+                }}
+                .mod-app-details-point-field input[type=number]::-webkit-outer-spin-button,
+                .mod-app-details-point-field input[type=number]::-webkit-inner-spin-button {{
+                    opacity: 1;
+                    margin: 0;
+                    min-height: 2rem;
+                    filter: invert(0.82) sepia(0.16) saturate(0.75) hue-rotate(196deg) brightness(0.92);
                 }}
                 .mod-app-details-notes .q-field__control {{
                     min-height: 11.5rem !important;
@@ -3368,6 +3438,11 @@ class ModWebTheme:
                     .mod-config-search {{ flex-basis: 100%; min-width: 0; }}
                     .mod-app-details-dialog-card {{ width: calc(100vw - 1rem) !important; }}
                     .mod-app-details-section {{ padding: 0.85rem 0.85rem; }}
+                    .mod-app-details-point-field {{
+                        flex-basis: calc(50% - 0.25rem);
+                        max-width: none;
+                        min-width: 0;
+                    }}
                     .mod-app-details-state-button {{
                         width: 100% !important;
                         max-width: none !important;

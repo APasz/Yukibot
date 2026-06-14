@@ -319,6 +319,7 @@ class FactorioSettingDefinition(Generic[_FactorioSettingValue]):
     power_level: Power_Level = Power_Level.admin
     desc: str | None = None
     comment_key: str | None = None
+    prefer_comment_desc: bool = False
 
     def create_setting(self) -> Setting[_FactorioSettingValue]:
         return Setting(
@@ -517,6 +518,7 @@ _FACTORIO_SETTING_DEFINITIONS: tuple[_FactorioSettingDefinitionItem, ...] = (
         power_level=Power_Level.root,
         desc="Factorio account password used for mod portal authentication.",
         comment_key="credentials",
+        prefer_comment_desc=True,
     ),
     FactorioSettingDefinition[str](
         "Factorio Token",
@@ -552,10 +554,14 @@ class Factorio_Settings(App_Settings):
             setting: Setting[object] | None = self.get_setting(definition.key)
             if setting is None:
                 raise ValueError(f"Missing Factorio setting definition for {definition.key}")
+            comment_desc = _normalise_factorio_comment(data.get(f"_comment_{definition.comment_lookup_key}"))
+            if definition.prefer_comment_desc and comment_desc is not None:
+                setting.desc = comment_desc
+                continue
             if definition.desc is not None:
                 setting.desc = definition.desc
                 continue
-            setting.desc = _normalise_factorio_comment(data.get(f"_comment_{definition.comment_lookup_key}"))
+            setting.desc = comment_desc
 
     def load(self) -> None:
         data = _load_json_object(self.pointer.read_text(config.STR_ENCODE), label="Factorio server settings")

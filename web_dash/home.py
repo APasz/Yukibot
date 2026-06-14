@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from . import avatars as mod_web_avatars
 from .constants import (
     _APP_SECTION_QUERY_PARAM,
     _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
@@ -9,14 +10,18 @@ from .constants import (
     _SAME_ORIGIN_NODE_API_BASE,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
+    log,
 )
-from .nicegui_protocols import ModWebUi
+from .nicegui_protocols import ModWebUi, _value_as_text
 from .runtime_imports import (
     AbstractEventLoop,
     Awaitable,
     BadgeTone,
+    Button,
     Callable,
     Card,
+    Enum,
+    Input,
     Label,
     ManagedApp,
     ModWebUser,
@@ -25,10 +30,12 @@ from .runtime_imports import (
     NodeAppTransitionState,
     NodeStateStreamEvent,
     NodeSystemSummary,
+    Power_Level,
     Request,
     asyncio,
     config,
     dataclass,
+    escape,
     json,
     mod_web_badge_class,
     quote,
@@ -56,14 +63,14 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class _ModWebNodeLatencyBadgeSpec:
-    badge_id: int
+    text_element_id: int
     node_label: str
     fallback_text: str
     probe_url: str | None
 
     def to_mapping(self) -> dict[str, object]:
         return {
-            "badge_id": self.badge_id,
+            "text_element_id": self.text_element_id,
             "node_label": self.node_label,
             "fallback_text": self.fallback_text,
             "probe_url": self.probe_url,
@@ -90,6 +97,87 @@ class _ModWebHomeNodeStatSpec:
     running_text: str
     running_tone: BadgeTone
     running_tooltip: str | None = None
+
+
+class _ModWebNodeSettingsFieldKey(Enum):
+    CPU_TOTAL = "cpu_points_total"
+    RAM_TOTAL = "ram_points_total"
+    CPU_RESERVED = "cpu_points_reserved"
+    RAM_RESERVED = "ram_points_reserved"
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebNodeSettingsNumberFieldSpec:
+    key: _ModWebNodeSettingsFieldKey
+    label: str
+    field_label: str
+
+
+@dataclass(slots=True)
+class _ModWebNodeSettingsPanelState:
+    overlay: Element
+    title_label: Label
+    subtitle_label: Label
+    field_inputs: dict[_ModWebNodeSettingsFieldKey, Input]
+    google_font_urls_input: Input | None = None
+    simulate_button: Button | None = None
+    selected_node_name: str | None = None
+
+    def require_selected_node_name(self) -> str:
+        if self.selected_node_name is None:
+            raise RuntimeError("Node settings panel opened without a selected node.")
+        return self.selected_node_name
+
+    def show(self) -> None:
+        self.overlay.style(remove="display: none;")
+
+    def hide(self) -> None:
+        self.overlay.style(add="display: none;")
+
+    def input_for(self, key: _ModWebNodeSettingsFieldKey) -> Input:
+        return self.field_inputs[key]
+
+    def set_capacity_profile(self, capacity: config.NodeCapacityProfile) -> None:
+        self.input_for(_ModWebNodeSettingsFieldKey.CPU_TOTAL).set_value(str(capacity.cpu_points_total))
+        self.input_for(_ModWebNodeSettingsFieldKey.RAM_TOTAL).set_value(str(capacity.ram_points_total))
+        self.input_for(_ModWebNodeSettingsFieldKey.CPU_RESERVED).set_value(str(capacity.cpu_points_reserved))
+        self.input_for(_ModWebNodeSettingsFieldKey.RAM_RESERVED).set_value(str(capacity.ram_points_reserved))
+
+    def set_google_font_urls(self, settings: config.NodeFontSourceSettings) -> None:
+        if self.google_font_urls_input is None:
+            raise RuntimeError("Node settings panel Google font URL input is not available.")
+        self.google_font_urls_input.set_value("\n".join(settings.google_font_urls))
+
+
+_HOME_APPS_ICON: str = "apps"
+
+
+_NODE_SETTINGS_CAPACITY_FIELD_ROWS: tuple[tuple[_ModWebNodeSettingsNumberFieldSpec, ...], ...] = (
+    (
+        _ModWebNodeSettingsNumberFieldSpec(
+            key=_ModWebNodeSettingsFieldKey.CPU_TOTAL,
+            label="CPU Total",
+            field_label="CPU points total",
+        ),
+        _ModWebNodeSettingsNumberFieldSpec(
+            key=_ModWebNodeSettingsFieldKey.RAM_TOTAL,
+            label="RAM Total",
+            field_label="RAM points total",
+        ),
+    ),
+    (
+        _ModWebNodeSettingsNumberFieldSpec(
+            key=_ModWebNodeSettingsFieldKey.CPU_RESERVED,
+            label="CPU Reserved",
+            field_label="CPU points reserved",
+        ),
+        _ModWebNodeSettingsNumberFieldSpec(
+            key=_ModWebNodeSettingsFieldKey.RAM_RESERVED,
+            label="RAM Reserved",
+            field_label="RAM points reserved",
+        ),
+    ),
+)
 
 
 class ModWebHomeMixin(ModWebServiceSupport):
@@ -128,6 +216,12 @@ class ModWebHomeMixin(ModWebServiceSupport):
             summary.node.node_name: summary for summary in home_node_summaries
         }
         dev_mode_enabled: bool = config.INDEV
+        can_manage_node_configuration: bool = self._user_has_level(user, Power_Level.root)
+        simulated_down_keys: set[str] = {node_name.casefold() for node_name in simulated_down_node_names}
+        node_settings_panel: _ModWebNodeSettingsPanelState | None = None
+        node_dialog_simulate_button: Button | None = None
+        node_capacity_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
+        node_google_font_urls_input: Input | None = None
 
         def _current_sections() -> tuple[ModWebNodeAppSection, ...]:
             return tuple[ModWebNodeAppSection, ...](sections_by_node[node_name] for node_name in node_order)
@@ -142,9 +236,226 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 sections=_current_sections(), user=user
             )
 
+        def _parse_required_non_negative_int(*, raw_value: str, field_label: str) -> int:
+            value = raw_value.strip()
+            if not value:
+                raise ValueError(f"{field_label} must not be empty.")
+            try:
+                parsed = int(value)
+            except ValueError as xcp:
+                raise ValueError(f"{field_label} must be a whole number.") from xcp
+            if parsed < 0:
+                raise ValueError(f"{field_label} must not be negative.")
+            return parsed
+
+        def _require_node_settings_panel() -> _ModWebNodeSettingsPanelState:
+            if node_settings_panel is None:
+                raise RuntimeError("Node settings panel is not available.")
+            return node_settings_panel
+
+        def _render_node_settings_number_input(*, label: str) -> Input:
+            return (
+                ui.input(label)
+                .props("filled square dense hide-bottom-space color=accent type=number inputmode=numeric step=1 min=0")
+                .classes("mod-app-details-field mod-app-details-point-field")
+            )
+
+        def _render_node_settings_capacity_inputs() -> dict[_ModWebNodeSettingsFieldKey, Input]:
+            field_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
+            with ui.column().classes("mod-app-details-subsection"):
+                ui.label("Capacity").classes("mod-stat-label")
+                ui.label("Adjust total capacity and reserved headroom for this node.").classes("mod-subtitle text-xs")
+                for row_specs in _NODE_SETTINGS_CAPACITY_FIELD_ROWS:
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        for field_spec in row_specs:
+                            field_inputs[field_spec.key] = _render_node_settings_number_input(label=field_spec.label)
+            return field_inputs
+
+        def _render_node_settings_font_source_input() -> Input:
+            with ui.column().classes("mod-app-details-subsection"):
+                ui.label("Title Fonts").classes("mod-stat-label")
+                ui.label(
+                    "Add one Google Fonts specimen or CSS URL per line. These are downloaded on save and made available to app title fonts."
+                ).classes("mod-subtitle text-xs")
+                return (
+                    ui.input("Google Font URLs", value="")
+                    .props("filled square type=textarea autogrow hide-bottom-space color=accent")
+                    .classes("mod-app-details-field mod-app-details-notes")
+                )
+
+        def _node_settings_field_spec(
+            key: _ModWebNodeSettingsFieldKey,
+        ) -> _ModWebNodeSettingsNumberFieldSpec:
+            for row_specs in _NODE_SETTINGS_CAPACITY_FIELD_ROWS:
+                for field_spec in row_specs:
+                    if field_spec.key is key:
+                        return field_spec
+            raise RuntimeError(f"Missing node settings field spec for key: {key!r}")
+
+        def _set_node_settings_panel_context(node_name: str) -> None:
+            panel = _require_node_settings_panel()
+            panel.selected_node_name = node_name
+            section = sections_by_node.get(node_name)
+            if section is None:
+                raise RuntimeError(f"Cannot open node settings for unknown node: {node_name!r}")
+            node = section.node
+            panel.title_label.set_text("Node Details")
+            panel.subtitle_label.set_text(f"Update node-specific settings for {node.label}.")
+            if panel.simulate_button is not None:
+                panel.simulate_button.set_text(
+                    "Restore Availability" if node.node_name.casefold() in simulated_down_keys else "Simulate Down"
+                )
+            log.info("Node settings panel context set: node=%s", node_name)
+
+        def _hide_node_settings_panel() -> None:
+            _require_node_settings_panel().hide()
+
+        async def _refresh_node_settings_panel(node_name: str) -> None:
+            panel = _require_node_settings_panel()
+            log.info("Refreshing node settings panel: node=%s", node_name)
+            try:
+                capacity = await self._node_capacity(node_name=node_name, user=user)
+                font_sources = await self._node_font_sources(node_name=node_name, user=user)
+            except Exception as xcp:
+                log.warning("Node settings load failed: node=%s error=%s", node_name, xcp)
+                ui.notify(f"Node settings load failed: {xcp}", type="negative")
+                return
+            if panel.selected_node_name != node_name:
+                log.info(
+                    "Skipping stale node settings panel population: requested=%s selected=%s",
+                    node_name,
+                    panel.selected_node_name,
+                )
+                return
+            panel.set_capacity_profile(capacity)
+            panel.set_google_font_urls(font_sources)
+            log.info("Node settings panel populated: node=%s", node_name)
+
+        async def _open_node_configuration_panel(node_name: str) -> None:
+            panel = _require_node_settings_panel()
+            log.info("Node settings panel open scheduled: node=%s", node_name)
+            await asyncio.sleep(0)
+            _set_node_settings_panel_context(node_name)
+            panel.show()
+            log.info("Node settings panel shown: node=%s", node_name)
+            await _refresh_node_settings_panel(node_name)
+
+        def _create_open_node_configuration_handler(node_name: str) -> Callable[[object | None], None]:
+            def _handle(_: object | None = None) -> None:
+                log.info("Node settings badge clicked: node=%s", node_name)
+                if node_settings_panel is None:
+                    log.warning("Node settings overlay missing for node=%s", node_name)
+                    return
+                asyncio.create_task(_open_node_configuration_panel(node_name))
+
+            return _handle
+
+        async def _handle_toggle_simulated_down(_: object | None = None) -> None:
+            node_name = _require_node_settings_panel().require_selected_node_name()
+            target_url = self._toggle_simulated_down_node_url(
+                current_url=request_path,
+                node_name=node_name,
+                simulated_down_node_names=simulated_down_node_names,
+            )
+            log.info("Toggling simulated node availability: node=%s", node_name)
+            ui.navigate.to(target_url)
+
+        def _create_save_node_configuration_handler() -> Callable[[object | None], Awaitable[None]]:
+            async def _handle(_: object | None = None) -> None:
+                panel = _require_node_settings_panel()
+                node_name = panel.require_selected_node_name()
+                try:
+                    capacity = config.NodeCapacityProfile(
+                        cpu_points_total=_parse_required_non_negative_int(
+                            raw_value=_value_as_text(panel.input_for(_ModWebNodeSettingsFieldKey.CPU_TOTAL)),
+                            field_label=_node_settings_field_spec(_ModWebNodeSettingsFieldKey.CPU_TOTAL).field_label,
+                        ),
+                        ram_points_total=_parse_required_non_negative_int(
+                            raw_value=_value_as_text(panel.input_for(_ModWebNodeSettingsFieldKey.RAM_TOTAL)),
+                            field_label=_node_settings_field_spec(_ModWebNodeSettingsFieldKey.RAM_TOTAL).field_label,
+                        ),
+                        cpu_points_reserved=_parse_required_non_negative_int(
+                            raw_value=_value_as_text(panel.input_for(_ModWebNodeSettingsFieldKey.CPU_RESERVED)),
+                            field_label=_node_settings_field_spec(_ModWebNodeSettingsFieldKey.CPU_RESERVED).field_label,
+                        ),
+                        ram_points_reserved=_parse_required_non_negative_int(
+                            raw_value=_value_as_text(panel.input_for(_ModWebNodeSettingsFieldKey.RAM_RESERVED)),
+                            field_label=_node_settings_field_spec(_ModWebNodeSettingsFieldKey.RAM_RESERVED).field_label,
+                        ),
+                    )
+                    if panel.google_font_urls_input is None:
+                        raise RuntimeError("Node settings font URL input is unavailable.")
+                    font_sources = config.NodeFontSourceSettings(
+                        google_font_urls=_value_as_text(panel.google_font_urls_input)
+                    )
+                except (TypeError, ValueError) as xcp:
+                    ui.notify(str(xcp), type="negative")
+                    return
+                try:
+                    capacity_result = await self._update_node_capacity(node_name=node_name, user=user, capacity=capacity)
+                    font_source_result = await self._update_node_font_sources(
+                        node_name=node_name,
+                        user=user,
+                        settings=font_sources,
+                    )
+                except Exception as xcp:
+                    log.warning("Node settings update failed: node=%s error=%s", node_name, xcp)
+                    ui.notify(f"Node settings update failed: {xcp}", type="negative")
+                    return
+                ui.notify(f"{capacity_result.message} {font_source_result.message}", type="positive")
+                ui.navigate.reload()
+
+            return _handle
+
         with ui.column().classes("w-full gap-6 px-4 py-8 md:px-8"):
             with ui.column().classes("mod-page w-full gap-6"):
                 self._render_user_header(ui=ui, user=user)
+                if can_manage_node_configuration:
+                    with (
+                        ui.element("div")
+                        .classes("mod-node-settings-overlay")
+                        .style("display: none;") as node_configuration_overlay
+                    ):
+                        backdrop = ui.element("div").classes("mod-node-settings-backdrop")
+                        backdrop.on("click", lambda _: _hide_node_settings_panel())
+                        panel_shell = ui.element("div").classes("mod-node-settings-shell")
+                        panel_shell.on("click", js_handler="(event) => event.stopPropagation()")
+                        with panel_shell:
+                            with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
+                                with ui.column().classes("w-full gap-4 mod-app-details-layout"):
+                                    with ui.column().classes("gap-1"):
+                                        node_dialog_title_label = ui.label("Node Details").classes(
+                                            "text-xl font-black mod-title-small"
+                                        )
+                                        node_dialog_subtitle_label = ui.label("").classes("mod-subtitle text-sm")
+                                    with ui.column().classes("mod-app-details-section"):
+                                        node_capacity_inputs = _render_node_settings_capacity_inputs()
+                                        node_google_font_urls_input = _render_node_settings_font_source_input()
+                                    if dev_mode_enabled:
+                                        with ui.column().classes("mod-app-details-section"):
+                                            ui.label("Dev").classes("mod-stat-label")
+                                            node_dialog_simulate_button = ui.button(
+                                                "Simulate Down",
+                                                on_click=_handle_toggle_simulated_down,
+                                            ).classes("mod-list-button secondary")
+                                    with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
+                                        ui.button("Cancel", on_click=lambda _: _hide_node_settings_panel()).classes(
+                                            "mod-list-button secondary"
+                                        )
+                                        ui.button(
+                                            "Save",
+                                            on_click=_create_save_node_configuration_handler(),
+                                        ).classes("mod-list-button")
+                    node_settings_panel = _ModWebNodeSettingsPanelState(
+                        overlay=node_configuration_overlay,
+                        title_label=node_dialog_title_label,
+                        subtitle_label=node_dialog_subtitle_label,
+                        field_inputs=node_capacity_inputs,
+                        google_font_urls_input=node_google_font_urls_input,
+                        simulate_button=node_dialog_simulate_button,
+                    )
+                    for section in _current_sections():
+                        log.info("Node settings panel registered: node=%s", section.node.node_name)
                 with ui.card().classes(self._hero_card_classes()):
                     with ui.column().classes(self._hero_shell_classes()):
                         with ui.row().classes(self._hero_header_classes()):
@@ -163,29 +474,22 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     )
                                     with ui.row().classes(self._hero_badge_row_classes()):
                                         for section in current_sections:
-                                            badge_toggle_url: str | None = None
-                                            badge_tooltip: str | None = None
-                                            if dev_mode_enabled and not section.node.is_current:
-                                                badge_toggle_url = self._toggle_simulated_down_node_url(
-                                                    current_url=request_path,
-                                                    node_name=section.node.node_name,
-                                                    simulated_down_node_names=simulated_down_node_names,
-                                                )
-                                                badge_tooltip = (
-                                                    "Restore this simulated outage."
-                                                    if section.is_simulated_down
-                                                    else "Simulate this node going down."
-                                                )
-                                            badge = self._interactive_badge(
+                                            badge_text = self._render_home_node_status_badge(
                                                 ui=ui,
-                                                text=self._home_node_badge_initial_text(section),
-                                                tone=self._node_status_badge_tone(section),
-                                                url=badge_toggle_url,
-                                                tooltip_text=badge_tooltip,
-                                                extra_classes="mod-node-status-badge",
+                                                section=section,
+                                                on_click=(
+                                                    _create_open_node_configuration_handler(section.node.node_name)
+                                                    if can_manage_node_configuration
+                                                    else None
+                                                ),
+                                                extra_classes=(
+                                                    "mod-node-status-badge mod-node-status-badge-actionable"
+                                                    if can_manage_node_configuration
+                                                    else "mod-node-status-badge"
+                                                ),
                                             )
                                             badge_spec = self._home_node_latency_badge_spec(
-                                                badge=badge,
+                                                text_element=badge_text,
                                                 section=section,
                                             )
                                             if badge_spec is not None:
@@ -198,7 +502,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     ):
                                         with ui.row().classes(self._hero_badge_row_classes()):
                                             for badge in badge_row:
-                                                self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                                                self._badge_spec(ui=ui, badge=badge)
                                     self._run_home_node_latency_badges_javascript(
                                         ui=ui,
                                         badge_specs=tuple(home_node_latency_badges),
@@ -214,15 +518,19 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         )
 
             @ui.refreshable
-            def _render_home_sections(current_sections: tuple[ModWebNodeAppSection, ...]) -> None:
+            def _render_home_sections(
+                current_sections: tuple[ModWebNodeAppSection, ...],
+                current_summaries: tuple[ModWebHomeNodeSummary, ...],
+            ) -> None:
                 self._render_home_page_sections(
                     ui=ui,
                     sections=current_sections,
+                    node_summaries=current_summaries,
                     user=user,
                     show_api_actions=show_api_actions,
                 )
 
-            _render_home_sections(_current_sections())
+            _render_home_sections(_current_sections(), _current_summaries())
 
             page_closed = False
             loop: AbstractEventLoop = asyncio.get_running_loop()
@@ -265,10 +573,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     ),
                 )
                 current_sections = _current_sections()
+                current_summaries = _current_summaries()
                 if not self._sections_equal_for_card_render(previous_sections, current_sections):
                     _render_home_badges.refresh(current_sections)
-                    _render_home_sections.refresh(current_sections)
-                apply_home_node_stats(_current_summaries())
+                    _render_home_sections.refresh(current_sections, current_summaries)
+                apply_home_node_stats(current_summaries)
 
             def _node_state_callback(node: ModWebNodeLink) -> Callable[[NodeStateStreamEvent], None]:
                 def _handle_event(event: NodeStateStreamEvent) -> None:
@@ -421,7 +730,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     self._attach_text_tooltip(ui=ui, target=metric_row, text=metric.label)
                             running_row: Element = ui.row().classes("mod-home-node-running")
                             with running_row:
-                                ui.icon("dns").classes(
+                                ui.icon(_HOME_APPS_ICON).classes(
                                     f"mod-home-node-running-icon mod-tone-{stat.running_tone}"
                                 )
                                 ui.label(stat.running_text).classes("mod-home-node-running-value")
@@ -462,10 +771,14 @@ class ModWebHomeMixin(ModWebServiceSupport):
         *,
         ui: ModWebUi,
         sections: tuple[ModWebNodeAppSection, ...],
+        node_summaries: tuple[ModWebHomeNodeSummary, ...],
         user: ModWebUser,
         show_api_actions: bool,
     ) -> None:
         del user
+        summary_by_node_name: dict[str, ModWebHomeNodeSummary] = {
+            summary.node.node_name: summary for summary in node_summaries
+        }
         app_links: tuple[ModWebAppLink, ...] = tuple[ModWebAppLink, ...](
             app for section in sections for app in section.app_links
         )
@@ -481,9 +794,18 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     node_text_style: str | None = self._node_text_style(node_name=section.node.node_name)
                     with ui.row().classes("w-full items-center justify-between gap-1 flex-wrap"):
                         with ui.column().classes("gap-1"):
-                            section_title: Label = ui.label(section.node.label).classes("text-xl font-bold mod-title-small")
-                            if node_text_style is not None:
-                                section_title.style(node_text_style)
+                            with ui.row().classes("items-center gap-2 min-w-0"):
+                                ui.html(
+                                    self._home_section_avatar_markup(
+                                        node_name=section.node.node_name,
+                                        display_name=section.node.label,
+                                    )
+                                )
+                                section_title: Label = ui.label(section.node.label).classes(
+                                    "text-xl font-bold mod-title-small"
+                                )
+                                if node_text_style is not None:
+                                    section_title.style(node_text_style)
                             node_subtitle: str | None = self._node_display_subtitle(
                                 label=section.node.label,
                                 node_name=section.node.node_name,
@@ -493,7 +815,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 if node_text_style is not None:
                                     subtitle.style(node_text_style)
                         with ui.row().classes("gap-2 flex-wrap"):
-                            self._badge(ui=ui, text=f"{len(section.app_links)} apps", tone="black")
+                            self._badge_spec(ui=ui, badge=self._app_count_badge(app_count=len(section.app_links)))
+                            for badge in self._node_resource_point_badges(
+                                summary_by_node_name.get(section.node.node_name)
+                            ):
+                                self._badge_spec(ui=ui, badge=badge)
                             if section.error is not None:
                                 self._badge(ui=ui, text="Unavailable", tone="red")
                     if section.error is not None:
@@ -559,7 +885,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 ):
                                     with ui.row().classes(self._hero_badge_row_classes()):
                                         for badge in badge_row:
-                                            self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                                            self._badge_spec(ui=ui, badge=badge)
 
                             _render_node_badges(current_app_links)
                     with ui.row().classes(self._hero_action_row_classes()):
@@ -634,6 +960,59 @@ class ModWebHomeMixin(ModWebServiceSupport):
         return node_name
 
     @staticmethod
+    def _bot_avatar_uri_fallback() -> str:
+        resource_avatar_uri: str | None = mod_web_avatars._user_avatar_icon_data_uri(Power_Level.user)
+        if resource_avatar_uri is not None:
+            return resource_avatar_uri
+        return mod_web_avatars._user_avatar_fallback_svg_data_uri(Power_Level.user)
+
+    @staticmethod
+    def _avatar_url_text(candidate: object | None) -> str | None:
+        if candidate is None:
+            return None
+        for method_name in ("make_guild_avatar_url", "make_avatar_url"):
+            avatar_factory = getattr(candidate, method_name, None)
+            if not callable(avatar_factory):
+                continue
+            avatar_url = avatar_factory()
+            if avatar_url is not None:
+                return str(avatar_url)
+        display_avatar_url = getattr(candidate, "display_avatar_url", None)
+        if display_avatar_url is None:
+            return None
+        return str(display_avatar_url)
+
+    def _node_bot_avatar_uri(self, *, node_name: str) -> str:
+        bot = self._mod_web_bot()
+        if bot is None:
+            return self._bot_avatar_uri_fallback()
+        target_user_id: int | None = self._node_bot_user_id(node_name=node_name, bot=bot)
+        if target_user_id is None:
+            return self._bot_avatar_uri_fallback()
+        if node_name.casefold() == config.MOD_WEB_SERVER.node_name.casefold():
+            avatar_uri = self._avatar_url_text(bot.get_me())
+            if avatar_uri is not None:
+                return avatar_uri
+        cached_user = bot.cache.get_user(target_user_id)
+        avatar_uri = self._avatar_url_text(cached_user)
+        if avatar_uri is not None:
+            return avatar_uri
+        cached_member = bot.cache.get_member(config.DISCORD_GUILD, target_user_id)
+        avatar_uri = self._avatar_url_text(cached_member)
+        if avatar_uri is not None:
+            return avatar_uri
+        return self._bot_avatar_uri_fallback()
+
+    def _home_section_avatar_markup(self, *, node_name: str, display_name: str) -> str:
+        avatar_alt = escape(f"{display_name} bot avatar", quote=True)
+        avatar_uri = self._node_bot_avatar_uri(node_name=node_name)
+        return (
+            "<img"
+            f' class="mod-user-avatar mod-home-section-avatar" src="{escape(avatar_uri, quote=True)}"'
+            f' alt="{avatar_alt}" loading="lazy" referrerpolicy="no-referrer">'
+        )
+
+    @staticmethod
     def _node_status_badge_text(section: ModWebNodeAppSection) -> str:
         if section.is_simulated_down:
             return f"{section.node.label}: Simulated Down"
@@ -646,7 +1025,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         unavailable_count: int = 0,
     ) -> tuple[_ModWebBadgeSpec, ...]:
         badges: list[_ModWebBadgeSpec] = [
-            _ModWebBadgeSpec(text=f"{len(app_links)} apps", tone="black"),
+            ModWebHomeMixin._app_count_badge(app_count=len(app_links)),
             _ModWebBadgeSpec(
                 text=f"{sum(1 for app in app_links if app.supports_mods)} Modly",
                 tone="purple",
@@ -673,6 +1052,50 @@ class ModWebHomeMixin(ModWebServiceSupport):
         return tuple(badges)
 
     @staticmethod
+    def _app_count_badge(*, app_count: int) -> _ModWebBadgeSpec:
+        return _ModWebBadgeSpec(text=str(app_count), tone="black", icon=_HOME_APPS_ICON, tooltip_text="Apps")
+
+    @classmethod
+    def _node_resource_point_badges(
+        cls,
+        node_summary: ModWebHomeNodeSummary | None,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
+        if node_summary is None or node_summary.system_summary is None:
+            return ()
+        system_summary = node_summary.system_summary
+        cpu_badge = cls._node_resource_point_badge(
+            available_points=system_summary.cpu_points_available,
+            capacity_points=system_summary.cpu_points_capacity,
+            icon="speed",
+            tooltip_text="CPU",
+        )
+        ram_badge = cls._node_resource_point_badge(
+            available_points=system_summary.ram_points_available,
+            capacity_points=system_summary.ram_points_capacity,
+            icon="memory",
+            tooltip_text="RAM",
+        )
+        return tuple(badge for badge in (cpu_badge, ram_badge) if badge is not None)
+
+    @staticmethod
+    def _node_resource_point_badge(
+        *,
+        available_points: int | None,
+        capacity_points: int | None,
+        icon: str,
+        tooltip_text: str,
+    ) -> _ModWebBadgeSpec | None:
+        if available_points is None or capacity_points is None or capacity_points <= 0:
+            return None
+        if available_points <= 0:
+            tone: BadgeTone = "red"
+        elif available_points * 4 <= capacity_points:
+            tone = "warn"
+        else:
+            tone = "black"
+        return _ModWebBadgeSpec(text=f"{available_points}/{capacity_points}", tone=tone, icon=icon, tooltip_text=tooltip_text)
+
+    @staticmethod
     def _home_node_badge_initial_text(section: ModWebNodeAppSection) -> str:
         if section.error is not None:
             return ModWebHomeMixin._node_status_badge_text(section)
@@ -681,17 +1104,17 @@ class ModWebHomeMixin(ModWebServiceSupport):
     @staticmethod
     def _home_node_latency_badge_spec(
         *,
-        badge: Element,
+        text_element: Element,
         section: ModWebNodeAppSection,
     ) -> _ModWebNodeLatencyBadgeSpec | None:
-        badge_id = getattr(badge, "id", None)
-        if section.error is None and not isinstance(badge_id, int):
-            raise RuntimeError(f"Healthy node badge is missing its element id: {section.node.node_name}")
-        if not isinstance(badge_id, int):
+        text_element_id = getattr(text_element, "id", None)
+        if section.error is None and not isinstance(text_element_id, int):
+            raise RuntimeError(f"Healthy node badge text element is missing its id: {section.node.node_name}")
+        if not isinstance(text_element_id, int):
             return None
         probe_url: str | None = section.node.latency_probe_url if section.error is None else None
         return _ModWebNodeLatencyBadgeSpec(
-            badge_id=badge_id,
+            text_element_id=text_element_id,
             node_label=section.node.label,
             fallback_text=ModWebHomeMixin._node_status_badge_text(section),
             probe_url=probe_url,
@@ -724,19 +1147,19 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 const timeoutMs = {timeout_ms};
                 const bootstrapProbeCount = 4;
                 const bootstrapProbeDelayMs = 850;
-                const findBadge = (badgeId) => getElement(badgeId) || getHtmlElement(badgeId);
+                const findTextElement = (textElementId) => getElement(textElementId) || getHtmlElement(textElementId);
                 const existing = window[controllerKey];
                 const controllerState = existing && typeof existing === 'object'
                     ? existing
-                    : {{intervalId: null, inFlight: false, sampleId: 0, lastTextByBadgeId: {{}}, hasBootstrapped: false}};
-                controllerState.lastTextByBadgeId = controllerState.lastTextByBadgeId || {{}};
+                    : {{intervalId: null, inFlight: false, sampleId: 0, lastTextByElementId: {{}}, hasBootstrapped: false}};
+                controllerState.lastTextByElementId = controllerState.lastTextByElementId || {{}};
                 controllerState.hasBootstrapped = Boolean(controllerState.hasBootstrapped);
                 const renderText = (spec, text) => {{
-                    const badge = findBadge(spec.badge_id);
-                    if (!badge) {{
+                    const textElement = findTextElement(spec.text_element_id);
+                    if (!textElement) {{
                         return false;
                     }}
-                    badge.textContent = text;
+                    textElement.textContent = text;
                     return true;
                 }};
                 const probeLatencyMeasurement = async (spec) => {{
@@ -796,7 +1219,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 }};
                 const latencyText = (spec, latency) => `${{spec.node_label}}: ${{latency}}`;
                 const cachedText = (spec) => {{
-                    const cached = controllerState.lastTextByBadgeId[String(spec.badge_id)];
+                    const cached = controllerState.lastTextByElementId[String(spec.text_element_id)];
                     if (typeof cached === 'string' && cached) {{
                         return cached;
                     }}
@@ -826,14 +1249,14 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             if (!spec.probe_url) {{
                                 return;
                             }}
-                            if (!(String(spec.badge_id) in controllerState.lastTextByBadgeId)) {{
+                            if (!(String(spec.text_element_id) in controllerState.lastTextByElementId)) {{
                                 renderText(spec, latencyText(spec, '...'));
                             }}
                             const latency = controllerState.hasBootstrapped
                                 ? await probeLatencyMeasurement(spec)
                                 : await probeLatencySeries(spec, bootstrapProbeCount, bootstrapProbeDelayMs);
                             const nextText = latencyText(spec, formatLatency(latency));
-                            controllerState.lastTextByBadgeId[String(spec.badge_id)] = nextText;
+                            controllerState.lastTextByElementId[String(spec.text_element_id)] = nextText;
                             if (controllerState.sampleId === sampleId) {{
                                 renderText(spec, nextText);
                             }}
@@ -859,6 +1282,25 @@ class ModWebHomeMixin(ModWebServiceSupport):
         if section.error is not None:
             return "red"
         return "black"
+
+    def _render_home_node_status_badge(
+        self,
+        *,
+        ui: ModWebUi,
+        section: ModWebNodeAppSection,
+        on_click: Callable[[object | None], object] | None,
+        extra_classes: str,
+    ) -> Label:
+        badge_text = self._home_node_badge_initial_text(section)
+        badge = ui.element("span").classes(
+            f"{mod_web_badge_class(self._node_status_badge_tone(section))} {extra_classes}".strip()
+        )
+        if on_click is not None:
+            badge.on("click", on_click)
+        self._attach_badge_tooltip(ui=ui, target=badge, text=badge_text)
+        with badge:
+            text_label = ui.label(badge_text).classes("mod-home-node-status-badge-text")
+        return text_label
 
     @staticmethod
     def _login_node_status_badge_text(status: ModWebNodeStatus) -> str:
@@ -1084,6 +1526,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
     @staticmethod
     def _attach_text_tooltip(*, ui: ModWebUi, target: "Element", text: str) -> None:
+        if not hasattr(ui, "tooltip"):
+            return
         with target:
             ui.tooltip(text)
 
@@ -1226,7 +1670,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             app_start_blocked=self._app_start_blocked_remote(
                 app_name=model.app_name,
                 app_stats=app_stats,
-                running_app_ids=() if system_summary is None else system_summary.running_app_ids,
+                start_blocked_app_ids=() if system_summary is None else system_summary.start_blocked_app_ids,
             ),
         )
 

@@ -57,6 +57,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-badge-link", css)
         self.assertIn(".mod-home-section-grid", css)
         self.assertIn(".mod-home-section", css)
+        self.assertIn(".mod-home-section-avatar", css)
         self.assertIn("@media (min-width: 1280px)", css)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr));", css)
         self.assertIn(".mod-app-card-starting::before", css)

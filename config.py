@@ -12,10 +12,11 @@ from datetime import datetime, timedelta
 from functools import cache
 from logging import Logger
 from pathlib import Path
-from typing import Any, Literal, Protocol, overload
-from urllib.parse import SplitResult, urlencode, urlsplit, urlunsplit
+from typing import Any, Callable, Literal, Protocol, overload
+from urllib.parse import SplitResult, parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import hikari
+import psutil
 import requests
 from hikari.snowflakes import Snowflake
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
@@ -385,15 +386,40 @@ class PersistedMaintenanceSettings(BaseModel):
 
 
 class PersistedRestartState(BaseModel):
-    auto_start_app: str | None = None
+    auto_start_apps: tuple[str, ...] = Field(default_factory=tuple)
 
-    @field_validator("auto_start_app", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _validate_auto_start_app(cls, value: object) -> str | None:
+    def _migrate_legacy_auto_start_app(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "auto_start_apps" in payload:
+            return payload
+        legacy_auto_start_app = payload.pop("auto_start_app", None)
+        if legacy_auto_start_app is not None:
+            payload["auto_start_apps"] = [legacy_auto_start_app]
+        return payload
+
+    @field_validator("auto_start_apps", mode="before")
+    @classmethod
+    def _validate_auto_start_apps(cls, value: object) -> tuple[str, ...]:
         if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
+            return ()
+        if isinstance(value, str):
+            text = value.strip()
+            return (text,) if text else ()
+        if not isinstance(value, tuple | list | set | frozenset):
+            raise TypeError("auto_start_apps must be a sequence of app names")
+        app_names: list[str] = []
+        seen_names: set[str] = set()
+        for raw_name in value:
+            text = str(raw_name).strip()
+            if not text or text in seen_names:
+                continue
+            seen_names.add(text)
+            app_names.append(text)
+        return tuple(app_names)
 
 
 def normalise_discord_id_text(value: object, *, source: str) -> str:
@@ -513,6 +539,247 @@ class BotMetadataSnapshot(BaseModel):
     features: BotMetadataFeatures = Field(default_factory=BotMetadataFeatures)
 
 
+def normalise_google_font_source_url(raw: object) -> str:
+    if not isinstance(raw, str):
+        raise TypeError("Google font source URL must be a string.")
+    text = raw.strip()
+    if not text:
+        raise ValueError("Google font source URL must not be empty.")
+    parsed = urlsplit(text)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Google font source URLs must use http or https.")
+    if not parsed.netloc:
+        raise ValueError("Google font source URLs must include a host.")
+    host = parsed.netloc.casefold()
+    if host in {"fonts.google.com", "www.fonts.google.com"}:
+        specimen_prefix = "/specimen/"
+        if not parsed.path.startswith(specimen_prefix):
+            raise ValueError("Google Fonts URLs must point to a specimen page.")
+        family_name = unquote(parsed.path[len(specimen_prefix) :]).replace("+", " ").strip().strip("/")
+        if not family_name:
+            raise ValueError("Google Fonts specimen URLs must include a font family.")
+        return urlunsplit(
+            SplitResult(
+                scheme="https",
+                netloc="fonts.googleapis.com",
+                path="/css2",
+                query=urlencode({"family": family_name, "display": "swap"}),
+                fragment="",
+            )
+        )
+    if host != "fonts.googleapis.com":
+        raise ValueError("Unsupported font source host.")
+    if parsed.path not in {"/css", "/css2"}:
+        raise ValueError("Google Fonts API URLs must use /css or /css2.")
+    query_pairs = tuple((key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=False) if key)
+    family_values = tuple(value for key, value in query_pairs if key == "family" and value.strip())
+    if len(family_values) != 1:
+        raise ValueError("Google Fonts API URLs must specify exactly one non-empty family.")
+    normalized_query_pairs: list[tuple[str, str]] = []
+    for key, value in query_pairs:
+        if key == "display":
+            continue
+        normalized_query_pairs.append((key, value))
+    normalized_query_pairs.append(("display", "swap"))
+    return urlunsplit(
+        SplitResult(
+            scheme="https",
+            netloc="fonts.googleapis.com",
+            path=parsed.path,
+            query=urlencode(normalized_query_pairs, doseq=True),
+            fragment="",
+        )
+    )
+
+
+def normalise_google_font_source_urls(raw: object) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    raw_items: Iterable[object]
+    if isinstance(raw, str):
+        raw_items = tuple(line for line in raw.splitlines() if line.strip())
+    elif isinstance(raw, Iterable):
+        raw_items = raw
+    else:
+        raise TypeError("Google font source URLs must be a string or sequence of strings.")
+    normalised_urls: list[str] = []
+    seen_urls: set[str] = set()
+    for item in raw_items:
+        normalized_url = normalise_google_font_source_url(item)
+        if normalized_url.casefold() in seen_urls:
+            continue
+        seen_urls.add(normalized_url.casefold())
+        normalised_urls.append(normalized_url)
+    return tuple(normalised_urls)
+
+
+class NodeFontSourceSettings(BaseModel):
+    google_font_urls: tuple[str, ...] = Field(default_factory=tuple)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("google_font_urls", mode="before")
+    @classmethod
+    def _validate_google_font_urls(cls, raw: object) -> tuple[str, ...]:
+        return normalise_google_font_source_urls(raw)
+
+
+class DiscordActivityField(enum.StrEnum):
+    RAM = "ram"
+    CPU = "cpu"
+    PLAYERS = "players"
+    APP = "app"
+    DISK_ALERT = "disk_alert"
+
+    @property
+    def label(self) -> str:
+        labels: dict["DiscordActivityField", str] = {
+            DiscordActivityField.RAM: "RAM",
+            DiscordActivityField.CPU: "CPU",
+            DiscordActivityField.PLAYERS: "Players",
+            DiscordActivityField.APP: "App",
+            DiscordActivityField.DISK_ALERT: "Disk Alert",
+        }
+        return labels[self]
+
+
+_DEFAULT_DISCORD_ACTIVITY_FIELDS: tuple[DiscordActivityField, ...] = (
+    DiscordActivityField.RAM,
+    DiscordActivityField.CPU,
+    DiscordActivityField.PLAYERS,
+    DiscordActivityField.APP,
+    DiscordActivityField.DISK_ALERT,
+)
+
+
+def parse_discord_activity_fields(
+    raw_value: str | Iterable[str | DiscordActivityField],
+    *,
+    source: str,
+) -> tuple[DiscordActivityField, ...]:
+    raw_items: Iterable[str | DiscordActivityField]
+    if isinstance(raw_value, str):
+        raw_items = tuple(item.strip() for item in raw_value.split(","))
+    else:
+        raw_items = raw_value
+
+    parsed_fields: list[DiscordActivityField] = []
+    seen_fields: set[DiscordActivityField] = set()
+    for raw_item in raw_items:
+        if isinstance(raw_item, DiscordActivityField):
+            field = raw_item
+        else:
+            item_text = str(raw_item).strip()
+            if not item_text:
+                continue
+            try:
+                field = DiscordActivityField(item_text)
+            except ValueError as xcp:
+                raise ValueError(
+                    f"{source} contains an unknown activity field {item_text!r}. "
+                    "Valid fields: ram, cpu, players, app, disk_alert."
+                ) from xcp
+        if field in seen_fields:
+            raise ValueError(f"{source} must not contain duplicate activity fields.")
+        seen_fields.add(field)
+        parsed_fields.append(field)
+    return tuple(parsed_fields)
+
+
+def format_discord_activity_fields(fields: Iterable[DiscordActivityField]) -> str:
+    return ", ".join(field.value for field in fields)
+
+
+class DiscordActivitySettings(BaseModel):
+    fallback_text: str = NAME
+    prefix: str = ""
+    separator: str = " | "
+    suffix: str = ""
+    refresh_interval_seconds: int = 3
+    units_per_app: int = 2
+    alt_text_percentage: int = 50
+    fields: tuple[DiscordActivityField, ...] = _DEFAULT_DISCORD_ACTIVITY_FIELDS
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("fallback_text")
+    @classmethod
+    def _validate_fallback_text(cls, value: str) -> str:
+        text = str(value).strip()
+        if len(text) > 80:
+            raise ValueError("discord activity fallback_text must not exceed 80 characters.")
+        return text
+
+    @field_validator("prefix", "suffix")
+    @classmethod
+    def _validate_affix_text(cls, value: str) -> str:
+        text = str(value)
+        if len(text) > 40:
+            raise ValueError("discord activity prefix/suffix must not exceed 40 characters.")
+        return text
+
+    @field_validator("separator")
+    @classmethod
+    def _validate_separator_text(cls, value: str) -> str:
+        text = str(value)
+        if not text:
+            raise ValueError("discord activity separator must not be empty.")
+        if len(text) > 16:
+            raise ValueError("discord activity separator must not exceed 16 characters.")
+        return text
+
+    @field_validator("refresh_interval_seconds")
+    @classmethod
+    def _validate_refresh_interval_seconds(cls, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("discord activity refresh_interval_seconds must be an integer.")
+        if value < 1 or value > 60:
+            raise ValueError("discord activity refresh_interval_seconds must be between 1 and 60.")
+        return value
+
+    @field_validator("units_per_app")
+    @classmethod
+    def _validate_units_per_app(cls, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("discord activity units_per_app must be an integer.")
+        if value < 1 or value > 20:
+            raise ValueError("discord activity units_per_app must be between 1 and 20.")
+        return value
+
+    @field_validator("alt_text_percentage")
+    @classmethod
+    def _validate_alt_text_percentage(cls, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("discord activity alt_text_percentage must be an integer.")
+        if value < 0 or value > 100:
+            raise ValueError("discord activity alt_text_percentage must be between 0 and 100.")
+        return value
+
+    @field_validator("fields", mode="before")
+    @classmethod
+    def _validate_fields(
+        cls,
+        value: tuple[DiscordActivityField, ...] | list[DiscordActivityField] | str | None,
+    ) -> tuple[DiscordActivityField, ...]:
+        if value is None:
+            return ()
+        return parse_discord_activity_fields(value, source="discord activity fields")
+
+    @model_validator(mode="after")
+    def _validate_non_empty_output(self) -> "DiscordActivitySettings":
+        if self.fields:
+            return self
+        if self.fallback_text:
+            return self
+        raise ValueError("discord activity settings require at least one field or fallback_text.")
+
+
+class DiscordSettings(BaseModel):
+    activity: DiscordActivitySettings = Field(default_factory=DiscordActivitySettings)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 def build_discord_oauth_url(bot_id: hikari.Snowflakeish | int | str, *, install_type: OAuthInstallType) -> str:
     return urlunsplit(
         (
@@ -582,7 +849,10 @@ class BotConfiguration(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     disk_preferences: PersistedDiskPreferences = Field(default_factory=PersistedDiskPreferences)
+    discord_settings: DiscordSettings = Field(default_factory=DiscordSettings)
     maintenance: PersistedMaintenanceSettings = Field(default_factory=PersistedMaintenanceSettings)
+    node_capacity: NodeCapacityProfile = Field(default_factory=lambda: default_node_capacity_profile())
+    node_font_sources: NodeFontSourceSettings = Field(default_factory=NodeFontSourceSettings)
     restart_state: PersistedRestartState = Field(default_factory=PersistedRestartState)
     voice_targets: dict[str, PersistedVoiceTarget] = Field(default_factory=dict)
     oauth: PersistedOAuthLinks = Field(default_factory=PersistedOAuthLinks, alias="OAuth")
@@ -610,7 +880,12 @@ def load_bot_configuration(path: Path) -> BotConfiguration:
         return BotConfiguration()
 
     raw = json.loads(path.read_text(STR_ENCODE))
-    return BotConfiguration.model_validate(raw)
+    loaded = BotConfiguration.model_validate(raw)
+    if isinstance(raw, Mapping) and (
+        "node_capacity" not in raw or "discord_settings" not in raw or "node_font_sources" not in raw
+    ):
+        save_bot_configuration(path, loaded)
+    return loaded
 
 
 def save_bot_configuration(path: Path, bot_config: BotConfiguration) -> None:
@@ -825,6 +1100,80 @@ class RemoteNodeAutostartConfig:
     enabled: bool
     path: Path
     nodes: tuple[RemoteNodeSpec, ...]
+
+
+_RAM_POINT_BYTES: int = 500 * 1024 * 1024
+
+
+class ResourcePointSet(BaseModel):
+    cpu_points: int = 0
+    ram_points: int = 0
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("cpu_points", "ram_points")
+    @classmethod
+    def _validate_point_value(cls, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("resource points must be integers.")
+        if value < 0:
+            raise ValueError("resource points must not be negative.")
+        return value
+
+
+class NodeCapacityProfile(BaseModel):
+    cpu_points_total: int
+    ram_points_total: int
+    cpu_points_reserved: int = 0
+    ram_points_reserved: int = 0
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("cpu_points_total", "ram_points_total", "cpu_points_reserved", "ram_points_reserved")
+    @classmethod
+    def _validate_capacity_value(cls, value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("node capacity values must be integers.")
+        if value < 0:
+            raise ValueError("node capacity values must not be negative.")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_reserved_capacity(self) -> "NodeCapacityProfile":
+        if self.cpu_points_reserved > self.cpu_points_total:
+            raise ValueError("cpu_points_reserved must not exceed cpu_points_total.")
+        if self.ram_points_reserved > self.ram_points_total:
+            raise ValueError("ram_points_reserved must not exceed ram_points_total.")
+        return self
+
+    @property
+    def cpu_points_available(self) -> int:
+        return self.cpu_points_total - self.cpu_points_reserved
+
+    @property
+    def ram_points_available(self) -> int:
+        return self.ram_points_total - self.ram_points_reserved
+
+
+def voice_capacity_reserve_enabled(profile: "BotProfileConfig") -> bool:
+    return profile.has_service(BotService.MUSIC) or profile.has_service(BotService.VOICE_TTS)
+
+
+def default_node_capacity_profile(*, profile: "BotProfileConfig | None" = None) -> NodeCapacityProfile:
+    resolved_profile = ACTIVE_BOT_PROFILE if profile is None else profile
+    cpu_core_count = psutil.cpu_count(logical=True) or psutil.cpu_count(logical=False) or 1
+    ram_total_bytes = psutil.virtual_memory().total
+    cpu_points_total = max(1, cpu_core_count)
+    ram_points_total = max(1, int(ram_total_bytes // _RAM_POINT_BYTES))
+    voice_enabled = voice_capacity_reserve_enabled(resolved_profile)
+    cpu_points_reserved = min(cpu_points_total, 2 + (1 if voice_enabled else 0))
+    ram_points_reserved = min(ram_points_total, 2 + (2 if voice_enabled else 0))
+    return NodeCapacityProfile(
+        cpu_points_total=cpu_points_total,
+        ram_points_total=ram_points_total,
+        cpu_points_reserved=cpu_points_reserved,
+        ram_points_reserved=ram_points_reserved,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2919,6 +3268,8 @@ class Activity_Provider(Protocol):
     """Whether to log"""
     prio: int = 50
     "0 = RAM | 2 = CPU | 4 = Player | 6 = Process | 10-79 = whatever | 80 >= Alerts"
+    activity_field: DiscordActivityField | None = None
+    activity_scope_name: str | None = None
 
     async def get(self) -> str | None:
         return None
@@ -2927,14 +3278,30 @@ class Activity_Provider(Protocol):
 class Activity_Manager(Protocol):
     providers: dict[type[Activity_Provider], Activity_Provider]
     """Whether to log"""
-    last_update: datetime
+    last_update: datetime | None
     state: str | None
+    activity_settings: DiscordActivitySettings
 
     def register(self, provider: Activity_Provider) -> None:
         return
 
     def deregister(self, provider: Activity_Provider) -> None:
         return
+
+    def set_activity_settings(self, settings: DiscordActivitySettings) -> None:
+        return
+
+    def set_rotation_target_name_provider(self, provider: Callable[[], str | None] | None) -> None:
+        return
+
+    def current_rotation_target_name(self) -> str | None:
+        return None
+
+    async def refresh(self) -> None:
+        return
+
+    def current_rotation_slot(self, app_count: int) -> tuple[int, bool]:
+        return (0, False)
 
 
 IS_RESTARTING = False

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from font_assets import font_assets
+
 from .runtime_imports import (
     BadgeTone,
+    Callable,
     Html,
     Label,
     MOD_WEB_ACTION_BASE_CLASSES,
@@ -27,18 +30,114 @@ from .constants import (
 from .nicegui_protocols import ModWebUi
 
 from .service_base import ModWebServiceSupport
+from .types import _ModWebBadgeSpec
 
 if TYPE_CHECKING:
     from nicegui.element import Element
 
 class ModWebUiHelpersMixin(ModWebServiceSupport):
     @staticmethod
-    def _apply_theme(*, ui: ModWebUi) -> None:
-        apply_mod_web_theme(ui=ui)
+    def _resolved_badge_tooltip_text(*, text: str, tooltip_text: str | None) -> str:
+        return text if tooltip_text is None else tooltip_text
 
     @staticmethod
-    def _badge(*, ui: ModWebUi, text: str, tone: BadgeTone, extra_classes: str = "") -> Label:
-        return ui.label(text).classes(f"{mod_web_badge_class(tone)} {extra_classes}".strip())
+    def _attach_badge_tooltip(*, ui: ModWebUi, target: "Element", text: str) -> None:
+        if not hasattr(ui, "tooltip"):
+            return
+        with target:
+            try:
+                ui.tooltip(text)
+            except TypeError:
+                return
+
+    @staticmethod
+    def _apply_theme(*, ui: ModWebUi) -> None:
+        apply_mod_web_theme(ui=ui)
+        font_face_css_html = font_assets.font_face_css_html(base_path="/mod-web/assets/fonts")
+        if font_face_css_html:
+            ui.add_head_html(font_face_css_html)
+
+    @staticmethod
+    def _badge(
+        *,
+        ui: ModWebUi,
+        text: str,
+        tone: BadgeTone,
+        extra_classes: str = "",
+        tooltip_text: str | None = None,
+    ) -> Label:
+        badge = ui.label(text).classes(f"{mod_web_badge_class(tone)} {extra_classes}".strip())
+        ModWebUiHelpersMixin._attach_badge_tooltip(
+            ui=ui,
+            target=cast("Element", badge),
+            text=ModWebUiHelpersMixin._resolved_badge_tooltip_text(text=text, tooltip_text=tooltip_text),
+        )
+        return badge
+
+    @staticmethod
+    def _badge_clickable(
+        *,
+        ui: ModWebUi,
+        text: str,
+        tone: BadgeTone,
+        on_click: Callable[[object | None], object],
+        extra_classes: str = "",
+        tooltip_text: str | None = None,
+    ) -> Label:
+        badge = (
+            ui.label(text)
+            .classes(f"{mod_web_badge_class(tone)} {extra_classes}".strip())
+            .props("role=button tabindex=0")
+            .on("click", on_click)
+        )
+        ModWebUiHelpersMixin._attach_badge_tooltip(
+            ui=ui,
+            target=cast("Element", badge),
+            text=ModWebUiHelpersMixin._resolved_badge_tooltip_text(text=text, tooltip_text=tooltip_text),
+        )
+        return badge
+
+    @staticmethod
+    def _badge_icon(
+        *,
+        ui: ModWebUi,
+        text: str,
+        tone: BadgeTone,
+        icon: str,
+        extra_classes: str = "",
+        tooltip_text: str | None = None,
+    ) -> "Element":
+        badge = ui.element("span").classes(f"{mod_web_badge_class(tone)} mod-badge-icon-label {extra_classes}".strip())
+        with badge:
+            ui.label(text).classes("mod-badge-value")
+            ui.icon(icon).classes("mod-badge-icon")
+        ModWebUiHelpersMixin._attach_badge_tooltip(
+            ui=ui,
+            target=badge,
+            text=ModWebUiHelpersMixin._resolved_badge_tooltip_text(text=text, tooltip_text=tooltip_text),
+        )
+        return badge
+
+    def _badge_spec(self, *, ui: ModWebUi, badge: _ModWebBadgeSpec, extra_classes: str = "") -> "Element":
+        if badge.icon is None:
+            return cast(
+                "Element",
+                self._badge(
+                    ui=ui,
+                    text=badge.text,
+                    tone=badge.tone,
+                    extra_classes=extra_classes,
+                    tooltip_text=badge.tooltip_text,
+                ),
+            )
+        return self._badge_icon(
+            ui=ui,
+            text=badge.text,
+            tone=badge.tone,
+            icon=badge.icon,
+            extra_classes=extra_classes,
+            tooltip_text=badge.tooltip_text,
+        )
 
     def _interactive_badge(
         self,
@@ -47,15 +146,36 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         text: str,
         tone: BadgeTone,
         url: str | None = None,
+        on_click: Callable[[object | None], object] | None = None,
         tooltip_text: str | None = None,
         extra_classes: str = "",
     ) -> "Element":
-        if url is None:
-            badge = cast("Element", self._badge(ui=ui, text=text, tone=tone, extra_classes=extra_classes))
+        if url is None and on_click is not None:
+            badge = cast(
+                "Element",
+                self._badge_clickable(
+                    ui=ui,
+                    text=text,
+                    tone=tone,
+                    on_click=on_click,
+                    extra_classes=extra_classes,
+                    tooltip_text=tooltip_text,
+                ),
+            )
+        elif url is None:
+            badge = cast(
+                "Element",
+                self._badge(ui=ui, text=text, tone=tone, extra_classes=extra_classes, tooltip_text=tooltip_text),
+            )
         else:
-            badge = self._badge_link(ui=ui, text=text, tone=tone, url=url, extra_classes=extra_classes)
-        if tooltip_text is not None:
-            self._attach_text_tooltip(ui=ui, target=badge, text=tooltip_text)
+            badge = self._badge_link(
+                ui=ui,
+                text=text,
+                tone=tone,
+                url=url,
+                extra_classes=extra_classes,
+                tooltip_text=tooltip_text,
+            )
         return badge
 
     @staticmethod
@@ -69,9 +189,15 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         shift_url: str | None = None,
         stop_propagation: bool = False,
         extra_classes: str = "",
+        tooltip_text: str | None = None,
     ) -> "Element":
         badge = ui.link(text, url).classes(
             f"{mod_web_badge_class(tone)} mod-badge-link cursor-pointer {extra_classes}".strip()
+        )
+        ModWebUiHelpersMixin._attach_badge_tooltip(
+            ui=ui,
+            target=badge,
+            text=ModWebUiHelpersMixin._resolved_badge_tooltip_text(text=text, tooltip_text=tooltip_text),
         )
         if new_tab:
             badge.props('target="_blank" rel="noopener noreferrer"')
@@ -166,7 +292,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         return tuple(
             node.node_name
             for node in self._node_links()
-            if not node.is_current and node.node_name.strip().casefold() in requested_keys
+            if node.node_name.strip().casefold() in requested_keys
         )
 
     def _toggle_simulated_down_node_url(
@@ -176,20 +302,20 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         node_name: str,
         simulated_down_node_names: tuple[str, ...],
     ) -> str:
-        remote_node_names = tuple(node.node_name for node in self._node_links() if not node.is_current)
-        remote_node_name_keys = {remote_name.casefold() for remote_name in remote_node_names}
+        known_node_names = tuple(node.node_name for node in self._node_links())
+        known_node_name_keys = {known_name.casefold() for known_name in known_node_names}
         node_key = node_name.strip().casefold()
-        if node_key not in remote_node_name_keys:
-            raise ValueError(f"Cannot simulate current or unknown node as down: {node_name!r}")
+        if node_key not in known_node_name_keys:
+            raise ValueError(f"Cannot simulate unknown node as down: {node_name!r}")
 
-        updated_keys = {remote_name.casefold() for remote_name in simulated_down_node_names}
+        updated_keys = {configured_name.casefold() for configured_name in simulated_down_node_names}
         if node_key in updated_keys:
             updated_keys.remove(node_key)
         else:
             updated_keys.add(node_key)
 
         updated_node_names = tuple(
-            remote_name for remote_name in remote_node_names if remote_name.casefold() in updated_keys
+            known_name for known_name in known_node_names if known_name.casefold() in updated_keys
         )
         return self._request_url_with_query_values(
             current_url,

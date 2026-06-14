@@ -32,6 +32,7 @@ from cmd_online import CMD_Online, OnlineEditorService
 from cmd_ops import available_restart_targets, group_ops, reset_voice_runtime_services, voice_runtime_reset_lines
 from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, VoiceTTSService, group_voice
 from config import Activity_Provider, Name_Cache
+from font_assets import font_assets
 from maintenance import MaintenanceService
 from node_api import RemoteRelayTTSForwarder
 from online import Online_Tracker
@@ -69,37 +70,44 @@ _RESTART_AUTO_LAUNCH_DELAY_SECONDS = 7.0
 
 @dataclass(frozen=True, slots=True)
 class RestartAutoLaunchSelection:
-    app: App | None
-    error_text: str | None = None
+    apps: tuple[App, ...] = ()
+    error_lines: tuple[str, ...] = ()
 
     @property
-    def started_notice_line(self) -> str | None:
-        if self.app is None:
-            return None
-        return f"\tAuto-Launch Scheduled: {self.app.friendly}"
+    def started_notice_lines(self) -> tuple[str, ...]:
+        return tuple(f"\tAuto-Launch Scheduled: {app.friendly}" for app in self.apps)
 
 
 def _consume_restart_auto_launch_selection(app_manager: App_Manager) -> RestartAutoLaunchSelection:
+    selected_apps: list[App] = []
+    error_lines: list[str] = []
     try:
-        auto_start_app_name = app_manager.consume_restart_auto_start_app()
-        if auto_start_app_name is None:
-            return RestartAutoLaunchSelection(app=None)
-        return RestartAutoLaunchSelection(app=app_manager.get(auto_start_app_name))
+        auto_start_app_names = app_manager.consume_restart_auto_start_apps()
     except Exception as xcp:
-        return RestartAutoLaunchSelection(app=None, error_text=str(xcp))
+        return RestartAutoLaunchSelection(error_lines=(str(xcp),))
+    for auto_start_app_name in auto_start_app_names:
+        try:
+            selected_apps.append(app_manager.get(auto_start_app_name))
+        except Exception as xcp:
+            error_lines.append(str(xcp))
+    return RestartAutoLaunchSelection(apps=tuple(selected_apps), error_lines=tuple(error_lines))
 
 
-async def _launch_restart_auto_app(
+async def _launch_restart_auto_apps(
     app_manager: App_Manager,
-    auto_app: App,
+    auto_apps: tuple[App, ...],
     *,
     delay_seconds: float = _RESTART_AUTO_LAUNCH_DELAY_SECONDS,
 ) -> None:
-    log.info("Auto-launch scheduled for %s in %.1fs", auto_app.friendly, delay_seconds)
+    if not auto_apps:
+        return
+    auto_app_names = ", ".join(app.friendly for app in auto_apps)
+    log.info("Auto-launch scheduled for %s in %.1fs", auto_app_names, delay_seconds)
     await asyncio.sleep(delay_seconds)
-    log.info("Auto-launching: %s", auto_app.friendly)
-    await app_manager.launch(auto_app)
-    log.info("Auto-launched: %s", auto_app.friendly)
+    for auto_app in auto_apps:
+        log.info("Auto-launching: %s", auto_app.friendly)
+        await app_manager.launch(auto_app)
+        log.info("Auto-launched: %s", auto_app.friendly)
 
 
 def _build_startup_notice(
@@ -108,16 +116,16 @@ def _build_startup_notice(
     startup_disabled_lines: tuple[str, ...],
     error_lines: tuple[str, ...],
 ) -> BotLifecycleNotice:
-    severity = RelayNoticeSeverity.WARNING if startup_disabled_lines or error_lines else RelayNoticeSeverity.INFO
-    auto_launch_app_name = auto_launch.app.friendly if auto_launch.app is not None else None
+    combined_error_lines = (*error_lines, *auto_launch.error_lines)
+    severity = RelayNoticeSeverity.WARNING if startup_disabled_lines or combined_error_lines else RelayNoticeSeverity.INFO
     return BotLifecycleNotice(
         stage=BotLifecycleStage.STARTED,
         source=RelayNoticeSource.BOT,
         severity=severity,
         debug_mode=config.IS_DEBUG,
-        auto_launch_app_name=auto_launch_app_name,
+        auto_launch_app_names=tuple(app.friendly for app in auto_launch.apps),
         startup_disabled_lines=startup_disabled_lines,
-        error_lines=error_lines,
+        error_lines=combined_error_lines,
     )
 
 
@@ -354,6 +362,7 @@ def main():
             _clear_managed_files_once(file_cleaner, stats, profile=profile)
             am = await di_inject_providers()
             await app_manager.post_init(bot, am)
+            font_assets.schedule_startup_refresh(google_font_urls=app_manager.node_font_sources().google_font_urls)
             if profile.has_service(config.BotService.GAME_RELAY):
                 dc_relay.set_event_loop()
             log.info("Starting mod web service")
@@ -415,7 +424,7 @@ def main():
     async def task_sys_stats(stats: Stats_System):
         stats.update()
 
-    @client.task(lightbulb.uniformtrigger(3), max_failures=25)
+    @client.task(lightbulb.uniformtrigger(1, wait_first=False), max_failures=25)
     async def task_activity(actor: Activity_Manager | None):
         if not profile.has_service(config.BotService.ACTIVITY):
             return
@@ -516,10 +525,10 @@ def main():
                 warning_text,
                 notice=warning_notice,
             )
-            auto_start_app: str | None = None
+            auto_start_apps: tuple[str, ...] = ()
             tts_notice_count = 0
             if warning.lead_minutes == 1:
-                auto_start_app = manager.set_current_restart_auto_start_app()
+                auto_start_apps = manager.set_running_restart_auto_start_apps()
                 if voice_tts is not None:
                     tts_notice_count = await voice_tts.notify_connected_tts_channels(warning_text)
             log.info(
@@ -529,7 +538,7 @@ def main():
                 warning.lead_minutes,
                 warning.scheduled_for.isoformat(),
                 sent_count,
-                auto_start_app,
+                ",".join(auto_start_apps) if auto_start_apps else "none",
                 tts_notice_count,
             )
 
@@ -589,14 +598,14 @@ def main():
         if profile.has_service(config.BotService.GAME_RELAY):
             dc_relay.log_chat_relay_summary()
         online_tracker.set_ready_delay(8)
+        hydrated_presence_count = online_tracker.hydrate_cached_presences(bot)
+        if hydrated_presence_count:
+            log.info("Hydrated %s tracked presence snapshot(s) from cache on startup", hydrated_presence_count)
         synced_name_count = await asyncio.to_thread(name_cache.sync_cached_members, bot.cache)
         if synced_name_count:
             log.info(f"Synced {synced_name_count} cached member identities on startup")
 
         auto_launch = _consume_restart_auto_launch_selection(app_manager)
-        if auto_launch.error_text is not None:
-            starting_xcp.append(auto_launch.error_text)
-
         silent = Path("silent_restart")
         if config.STARTED_CHANNEL and not silent.exists():
             startup_notice = _build_startup_notice(
@@ -615,11 +624,11 @@ def main():
             if mess:
                 await mess.edit(f"{mess.content or ''} ...Done! :D")
 
-        if auto_launch.app is not None:
+        if auto_launch.apps:
             try:
-                await _launch_restart_auto_app(app_manager, auto_launch.app)
+                await _launch_restart_auto_apps(app_manager, auto_launch.apps)
             except Exception as xcp:
-                log.exception(f"AUTO_LAUNCH: {auto_launch.app}")
+                log.exception("AUTO_LAUNCH: %s", ", ".join(app.name for app in auto_launch.apps))
                 error_notice = _build_bot_error_notice(str(xcp))
                 await _post_started_channel_notice(bot, error_notice, error_context="AUTO LAUNCH ERROR MESSAGE")
 

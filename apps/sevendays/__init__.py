@@ -1273,6 +1273,7 @@ class Activities:
 class Provider_Time(config.Activity_Provider):
     def __init__(self, app: SevenDays):
         self.app = app
+        self.activity_scope_name = app.name
         self._time = None
         self._count = 0
         self.stats: dict[str, GameStatValue] = {}

@@ -3,6 +3,8 @@ from __future__ import annotations
 import enum
 import logging
 import re
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -95,6 +97,282 @@ class RelayChannelSource(enum.StrEnum):
     NONE = "none"
     DEFAULT = "default"
     INSTANCE = "instance"
+
+
+class AppTitleFont(enum.StrEnum):
+    AUTO = "auto"
+    DEFAULT = "default"
+    ARIAL = "arial"
+    ARIAL_NARROW = "arial_narrow"
+    AVENIR_NEXT = "avenir_next"
+    BAHNSCHRIFT = "bahnschrift"
+    CALIBRI = "calibri"
+    CONSOLAS = "consolas"
+    COURIER_NEW = "courier_new"
+    FIRA_SANS = "fira_sans"
+    FRANKLIN_GOTHIC_MEDIUM = "franklin_gothic_medium"
+    GEORGIA = "georgia"
+    GILL_SANS = "gill_sans"
+    HELVETICA_NEUE = "helvetica_neue"
+    IMPACT = "impact"
+    INTER = "inter"
+    JETBRAINS_MONO = "jetbrains_mono"
+    LATO = "lato"
+    LUCIDA_SANS = "lucida_sans"
+    MERRIWEATHER = "merriweather"
+    MINECRAFT_TEN = "minecraft_ten"
+    OPEN_SANS = "open_sans"
+    PALATINO_LINOTYPE = "palatino_linotype"
+    PLAYFAIR_DISPLAY = "playfair_display"
+    POPPINS = "poppins"
+    TITILLIUM_WEB = "titillium_web"
+    RAJDHANI = "rajdhani"
+    ROBOTO = "roboto"
+    SEGOE_UI = "segoe_ui"
+    SOURCE_SANS_3 = "source_sans_3"
+    TAHOMA = "tahoma"
+    TREBUCHET_MS = "trebuchet_ms"
+    VERDANA = "verdana"
+    BEBAS_NEUE = "bebas_neue"
+    MONTSERRAT = "montserrat"
+    OSWALD = "oswald"
+
+    @property
+    def label(self) -> str:
+        return _APP_TITLE_FONT_DEFINITIONS[self].label
+
+    @property
+    def css_font_family(self) -> str | None:
+        return _APP_TITLE_FONT_DEFINITIONS[self].css_font_family
+
+    def resolved(self, *, scope: str | None) -> "AppTitleFont":
+        if self is not AppTitleFont.AUTO:
+            return self
+        scope_key = (scope or "").strip().casefold()
+        return _APP_TITLE_FONT_AUTO_BY_SCOPE.get(scope_key, AppTitleFont.DEFAULT)
+
+
+@dataclass(frozen=True, slots=True)
+class _AppTitleFontDefinition:
+    label: str
+    css_font_family: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedAppTitleFont:
+    value: str
+    label: str
+    css_font_family: str | None
+    is_builtin: bool
+
+
+_APP_TITLE_FONT_DEFINITIONS: dict[AppTitleFont, _AppTitleFontDefinition] = {
+    AppTitleFont.AUTO: _AppTitleFontDefinition(label="Auto (by game)", css_font_family=None),
+    AppTitleFont.DEFAULT: _AppTitleFontDefinition(label="Default", css_font_family=None),
+    AppTitleFont.ARIAL: _AppTitleFontDefinition(label="Arial", css_font_family='"Arial", "Helvetica Neue", Helvetica, sans-serif'),
+    AppTitleFont.ARIAL_NARROW: _AppTitleFontDefinition(
+        label="Arial Narrow",
+        css_font_family='"Arial Narrow", "Bahnschrift SemiCondensed", "Helvetica Neue", Arial, sans-serif',
+    ),
+    AppTitleFont.AVENIR_NEXT: _AppTitleFontDefinition(
+        label="Avenir Next",
+        css_font_family='"Avenir Next", Avenir, "Helvetica Neue", Helvetica, Arial, sans-serif',
+    ),
+    AppTitleFont.BAHNSCHRIFT: _AppTitleFontDefinition(
+        label="Bahnschrift",
+        css_font_family='"Bahnschrift", "Arial Narrow", "Helvetica Neue", Arial, sans-serif',
+    ),
+    AppTitleFont.BEBAS_NEUE: _AppTitleFontDefinition(
+        label="Bebas Neue",
+        css_font_family='"Bebas Neue", Impact, "Arial Narrow Bold", sans-serif',
+    ),
+    AppTitleFont.CALIBRI: _AppTitleFontDefinition(
+        label="Calibri",
+        css_font_family='Calibri, "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+    ),
+    AppTitleFont.CONSOLAS: _AppTitleFontDefinition(
+        label="Consolas",
+        css_font_family='Consolas, "Lucida Console", "Courier New", monospace',
+    ),
+    AppTitleFont.COURIER_NEW: _AppTitleFontDefinition(
+        label="Courier New",
+        css_font_family='"Courier New", Courier, monospace',
+    ),
+    AppTitleFont.FIRA_SANS: _AppTitleFontDefinition(
+        label="Fira Sans",
+        css_font_family='"Fira Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+    ),
+    AppTitleFont.FRANKLIN_GOTHIC_MEDIUM: _AppTitleFontDefinition(
+        label="Franklin Gothic Medium",
+        css_font_family='"Franklin Gothic Medium", "Arial Narrow", Arial, sans-serif',
+    ),
+    AppTitleFont.GEORGIA: _AppTitleFontDefinition(
+        label="Georgia",
+        css_font_family='Georgia, "Times New Roman", Times, serif',
+    ),
+    AppTitleFont.GILL_SANS: _AppTitleFontDefinition(
+        label="Gill Sans",
+        css_font_family='"Gill Sans", "Gill Sans MT", Calibri, sans-serif',
+    ),
+    AppTitleFont.HELVETICA_NEUE: _AppTitleFontDefinition(
+        label="Helvetica Neue",
+        css_font_family='"Helvetica Neue", Helvetica, Arial, sans-serif',
+    ),
+    AppTitleFont.IMPACT: _AppTitleFontDefinition(
+        label="Impact",
+        css_font_family='Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif',
+    ),
+    AppTitleFont.INTER: _AppTitleFontDefinition(
+        label="Inter",
+        css_font_family='Inter, "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+    ),
+    AppTitleFont.JETBRAINS_MONO: _AppTitleFontDefinition(
+        label="JetBrains Mono",
+        css_font_family='"JetBrains Mono", "IBM Plex Mono", "Fira Code", monospace',
+    ),
+    AppTitleFont.LATO: _AppTitleFontDefinition(
+        label="Lato",
+        css_font_family='Lato, "Helvetica Neue", Helvetica, Arial, sans-serif',
+    ),
+    AppTitleFont.LUCIDA_SANS: _AppTitleFontDefinition(
+        label="Lucida Sans",
+        css_font_family='"Lucida Sans", "Lucida Sans Unicode", "Lucida Grande", sans-serif',
+    ),
+    AppTitleFont.MERRIWEATHER: _AppTitleFontDefinition(
+        label="Merriweather",
+        css_font_family='Merriweather, Georgia, "Times New Roman", serif',
+    ),
+    AppTitleFont.MINECRAFT_TEN: _AppTitleFontDefinition(
+        label="Minecraft Ten",
+        css_font_family='"Minecraft Ten", "Minecrafter", "Press Start 2P", "VT323", monospace',
+    ),
+    AppTitleFont.MONTSERRAT: _AppTitleFontDefinition(
+        label="Montserrat",
+        css_font_family='"Montserrat", "Avenir Next Condensed", "Arial Narrow", sans-serif',
+    ),
+    AppTitleFont.OPEN_SANS: _AppTitleFontDefinition(
+        label="Open Sans",
+        css_font_family='"Open Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+    ),
+    AppTitleFont.OSWALD: _AppTitleFontDefinition(
+        label="Oswald",
+        css_font_family='"Oswald", "Arial Narrow", sans-serif',
+    ),
+    AppTitleFont.PALATINO_LINOTYPE: _AppTitleFontDefinition(
+        label="Palatino Linotype",
+        css_font_family='"Palatino Linotype", Palatino, "Book Antiqua", serif',
+    ),
+    AppTitleFont.PLAYFAIR_DISPLAY: _AppTitleFontDefinition(
+        label="Playfair Display",
+        css_font_family='"Playfair Display", Georgia, "Times New Roman", serif',
+    ),
+    AppTitleFont.POPPINS: _AppTitleFontDefinition(
+        label="Poppins",
+        css_font_family='Poppins, "Avenir Next", "Helvetica Neue", Arial, sans-serif',
+    ),
+    AppTitleFont.RAJDHANI: _AppTitleFontDefinition(
+        label="Rajdhani",
+        css_font_family='"Rajdhani", Eurostile, Bahnschrift, sans-serif',
+    ),
+    AppTitleFont.ROBOTO: _AppTitleFontDefinition(
+        label="Roboto",
+        css_font_family='Roboto, "Helvetica Neue", Helvetica, Arial, sans-serif',
+    ),
+    AppTitleFont.SEGOE_UI: _AppTitleFontDefinition(
+        label="Segoe UI",
+        css_font_family='"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
+    ),
+    AppTitleFont.SOURCE_SANS_3: _AppTitleFontDefinition(
+        label="Source Sans 3",
+        css_font_family='"Source Sans 3", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
+    ),
+    AppTitleFont.TAHOMA: _AppTitleFontDefinition(
+        label="Tahoma",
+        css_font_family='Tahoma, Verdana, "Segoe UI", sans-serif',
+    ),
+    AppTitleFont.TITILLIUM_WEB: _AppTitleFontDefinition(
+        label="Titillium Web",
+        css_font_family='"Titillium Web", "Bahnschrift SemiCondensed", "Arial Narrow", sans-serif',
+    ),
+    AppTitleFont.TREBUCHET_MS: _AppTitleFontDefinition(
+        label="Trebuchet MS",
+        css_font_family='"Trebuchet MS", "Lucida Sans Unicode", "Lucida Grande", sans-serif',
+    ),
+    AppTitleFont.VERDANA: _AppTitleFontDefinition(
+        label="Verdana",
+        css_font_family='Verdana, Geneva, Tahoma, sans-serif',
+    ),
+}
+
+_APP_TITLE_FONT_AUTO_BY_SCOPE: dict[str, AppTitleFont] = {
+    "minecraft": AppTitleFont.MINECRAFT_TEN,
+    "factorio": AppTitleFont.TITILLIUM_WEB,
+    "satisfactory": AppTitleFont.RAJDHANI,
+    "sevendays": AppTitleFont.BEBAS_NEUE,
+    "beammp": AppTitleFont.MONTSERRAT,
+    "ets": AppTitleFont.OSWALD,
+}
+
+_APP_TITLE_FONT_BY_VALUE: dict[str, AppTitleFont] = {font.value: font for font in AppTitleFont}
+
+
+def normalise_app_title_font(raw: object) -> str:
+    if isinstance(raw, AppTitleFont):
+        return raw.value
+    if not isinstance(raw, str):
+        raise TypeError("title font must be a string")
+    value = raw.strip()
+    if not value:
+        raise ValueError("title font must not be empty")
+    return value
+
+
+def resolve_app_title_font(*, value: str, scope: str | None) -> ResolvedAppTitleFont:
+    normalised_value = normalise_app_title_font(value)
+    builtin_font = _APP_TITLE_FONT_BY_VALUE.get(normalised_value)
+    if builtin_font is not None:
+        resolved_builtin = builtin_font.resolved(scope=scope)
+        return ResolvedAppTitleFont(
+            value=normalised_value,
+            label=_APP_TITLE_FONT_DEFINITIONS[resolved_builtin].label if builtin_font is AppTitleFont.AUTO else builtin_font.label,
+            css_font_family=resolved_builtin.css_font_family,
+            is_builtin=True,
+        )
+    return ResolvedAppTitleFont(
+        value=normalised_value,
+        label=normalised_value,
+        css_font_family=_css_font_family_literal(normalised_value),
+        is_builtin=False,
+    )
+
+
+def app_title_font_options(*, custom_font_families: Iterable[str] = (), selected_value: str | None = None) -> dict[str, str]:
+    options: dict[str, str] = {font.value: font.label for font in AppTitleFont}
+    known_labels = {font.label.casefold() for font in AppTitleFont}
+    extra_families: set[str] = set()
+    for family_name in custom_font_families:
+        if not isinstance(family_name, str):
+            continue
+        cleaned_name = family_name.strip()
+        if not cleaned_name or cleaned_name.casefold() in known_labels:
+            continue
+        extra_families.add(cleaned_name)
+    if selected_value is not None:
+        cleaned_selected_value = normalise_app_title_font(selected_value)
+        if cleaned_selected_value not in options:
+            extra_families.add(cleaned_selected_value)
+    for family_name in sorted(extra_families, key=str.casefold):
+        options[family_name] = family_name
+    return options
+
+
+def app_title_font_default_label(*, scope: str | None) -> str:
+    return resolve_app_title_font(value=AppTitleFont.AUTO.value, scope=scope).label
+
+
+def _css_font_family_literal(family_name: str) -> str:
+    escaped_family_name = family_name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped_family_name}"'
 
 
 class ModDownloadBlockReason(enum.StrEnum):
@@ -194,10 +472,22 @@ def normalise_app_version(raw: object) -> AppVersion | None:
     raise TypeError("version must be a string or version object")
 
 
+class AppResourcePointProfile(BaseModel):
+    running: config.ResourcePointSet = Field(default_factory=config.ResourcePointSet)
+    startup: config.ResourcePointSet | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @property
+    def startup_points(self) -> config.ResourcePointSet:
+        return self.startup or self.running
+
+
 class App_Config(BaseModel):
     name: str
     instance_key: str
     friendly_name: str | None = None
+    title_font_preset: str = AppTitleFont.AUTO.value
     notes: str | None = None
     directory: Path
     apps_dir: Path
@@ -222,6 +512,7 @@ class App_Config(BaseModel):
     cmd_start: list[str] = Field(default_factory=list)
     provider_alt_text: str | None = None
     version: AppVersion | None = None
+    resource_points: AppResourcePointProfile = Field(default_factory=AppResourcePointProfile)
     config_file_read_level_override: Power_Level | None = None
     config_file_write_level_override: Power_Level | None = None
     save_file_write_level_override: Power_Level | None = None
@@ -235,6 +526,11 @@ class App_Config(BaseModel):
     @classmethod
     def validate_optional_text_fields(cls, raw: object) -> str | None:
         return normalise_optional_text(raw)
+
+    @field_validator("title_font_preset", mode="before")
+    @classmethod
+    def validate_title_font_preset(cls, raw: object) -> str:
+        return normalise_app_title_font(raw)
 
     @property
     def enabled_txt(self) -> str:

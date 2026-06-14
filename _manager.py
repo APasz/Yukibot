@@ -1,4 +1,5 @@
 import asyncio
+import enum
 import importlib
 import json
 import logging
@@ -18,6 +19,7 @@ from apps._app import App, AppRuntimeFaultKind
 from apps._config import (
     App_Config,
     RelayChannelSource,
+    normalise_app_title_font,
     normalise_optional_channel_id,
     normalise_optional_channel_ids,
     normalise_optional_friendly_name,
@@ -42,6 +44,23 @@ type ManagedApp = App[App_Config]
 type ManagedAppType = type[ManagedApp]
 
 
+class AppStartBlockerKind(enum.StrEnum):
+    ALREADY_RUNNING = "already_running"
+    SAME_SCOPE = "same_scope"
+    CPU_POINTS = "cpu_points"
+    RAM_POINTS = "ram_points"
+
+
+@dataclass(frozen=True, slots=True)
+class AppStartBlocker:
+    kind: AppStartBlockerKind
+    message: str
+    blocking_app_name: str | None = None
+    blocking_app_friendly: str | None = None
+    required_points: int | None = None
+    available_points: int | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class AppInstanceCreateRequest:
     scope: str
@@ -60,6 +79,11 @@ class AppDetailsUpdate:
     lifecycle_notice_started: bool
     lifecycle_notice_stopped: bool
     lifecycle_notice_crashed: bool
+    running_cpu_points: int
+    running_ram_points: int
+    startup_cpu_points: int | None
+    startup_ram_points: int | None
+    title_font_preset: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +156,13 @@ def _validate_required_friendly_name(raw: object) -> str:
     return friendly_name
 
 
+def app_scope_from_name(app_name: str) -> str | None:
+    scope, separator, _instance_key = app_name.partition("_")
+    if not separator or not scope.strip():
+        return None
+    return scope
+
+
 def format_enabled_app_dump(apps: Sequence[ManagedApp]) -> str:
     ordered_apps = sorted(apps, key=lambda app: app.name.casefold())
     return "\n".join(f"{app.name}: {app.cfg.enabled_txt}" for app in ordered_apps) + "\n"
@@ -143,10 +174,10 @@ class App_Manager(metaclass=config.Singleton):
     bot: hikari.GatewayBot | None = None
 
     def __init__(self):
-        self.current: str | None = None
         self.apps: dict[str, ManagedApp] = {}
         self._lookup: dict[str, str] = {}
         self._managed_shutdown_names: set[str] = set()
+        self._pending_start_names: set[str] = set()
         self.default_chat_channels: tuple[hikari.Snowflake, ...] = ()
         self.default_chat_channel: hikari.Snowflake | None = None
         self.default_chat_channel_source = RelayChannelSource.NONE
@@ -161,15 +192,174 @@ class App_Manager(metaclass=config.Singleton):
             self._managed_shutdown_names = managed_shutdown_names
         return managed_shutdown_names
 
+    def _pending_start_name_keys(self) -> set[str]:
+        pending_start_names = getattr(self, "_pending_start_names", None)
+        if pending_start_names is None:
+            pending_start_names = set()
+            self._pending_start_names = pending_start_names
+        return pending_start_names
+
     async def post_init(self, bot: hikari.GatewayBot, activity_manager: "Activity_Manager"):
         self.bot = bot
         self.activity_manager = activity_manager
+        self.activity_manager.set_activity_settings(self.discord_settings().activity)
+        self.activity_manager.set_rotation_target_name_provider(self._current_activity_target_name)
         await self.load_apps(bot)
-        self._update_task = asyncio.create_task(self.update_current())
+        self._update_task = asyncio.create_task(self.monitor_apps())
 
-    async def update_current(self):
+    def running_apps(self) -> tuple[ManagedApp, ...]:
+        apps = getattr(self, "apps", None)
+        if not isinstance(apps, dict):
+            return ()
+        return tuple(
+            sorted(
+                (app for app in apps.values() if app.check_running()),
+                key=lambda item: item.name.casefold(),
+            )
+        )
+
+    def running_app_names(self) -> tuple[str, ...]:
+        return tuple(app.name for app in self.running_apps())
+
+    def activity_rotation_target(self) -> tuple[ManagedApp, bool] | None:
+        running_apps = self.running_apps()
+        if not running_apps:
+            return None
+        activity_manager = self.activity_manager
+        if activity_manager is None:
+            return (running_apps[0], False)
+        app_index, show_alt_text = activity_manager.current_rotation_slot(len(running_apps))
+        return (running_apps[app_index], show_alt_text)
+
+    def _current_activity_target_name(self) -> str | None:
+        target = self.activity_rotation_target()
+        if target is None:
+            return None
+        return target[0].name
+
+    def starting_apps(self) -> tuple[ManagedApp, ...]:
+        apps = getattr(self, "apps", None)
+        if not isinstance(apps, dict):
+            return ()
+        pending_names = self._pending_start_name_keys()
+        return tuple(
+            sorted(
+                (app for app in apps.values() if app.name.casefold() in pending_names),
+                key=lambda item: item.name.casefold(),
+            )
+        )
+
+    def _start_admission_apps(self, *, exclude_name: str | None = None) -> tuple[ManagedApp, ...]:
+        apps = getattr(self, "apps", None)
+        if not isinstance(apps, dict):
+            return ()
+        pending_names = self._pending_start_name_keys()
+        excluded_key = exclude_name.casefold() if isinstance(exclude_name, str) else None
+        return tuple(
+            sorted(
+                (
+                    app
+                    for app in apps.values()
+                    if (excluded_key is None or app.name.casefold() != excluded_key)
+                    and (app.check_running() or app.name.casefold() in pending_names)
+                ),
+                key=lambda item: item.name.casefold(),
+            )
+        )
+
+    def running_scope_conflict(self, app: ManagedApp) -> ManagedApp | None:
+        for active_app in self._start_admission_apps(exclude_name=app.name):
+            if active_app.scope == app.scope:
+                return active_app
+        return None
+
+    @staticmethod
+    def _app_running_points(app: ManagedApp) -> config.ResourcePointSet:
+        return app.cfg.resource_points.running
+
+    @staticmethod
+    def _app_startup_points(app: ManagedApp) -> config.ResourcePointSet:
+        return app.cfg.resource_points.startup_points
+
+    def _active_resource_point_usage(self, *, exclude_name: str | None = None) -> config.ResourcePointSet:
+        pending_names = self._pending_start_name_keys()
+        cpu_points = 0
+        ram_points = 0
+        for app in self._start_admission_apps(exclude_name=exclude_name):
+            points = self._app_startup_points(app) if app.name.casefold() in pending_names else self._app_running_points(app)
+            cpu_points += points.cpu_points
+            ram_points += points.ram_points
+        return config.ResourcePointSet(cpu_points=cpu_points, ram_points=ram_points)
+
+    def active_resource_point_usage(self) -> config.ResourcePointSet:
+        return self._active_resource_point_usage()
+
+    def node_capacity(self) -> config.NodeCapacityProfile:
+        return self._load_bot_configuration().node_capacity
+
+    def discord_settings(self) -> config.DiscordSettings:
+        return self._load_bot_configuration().discord_settings
+
+    def capacity_conflict(self, app: ManagedApp) -> AppStartBlocker | None:
+        capacity = self.node_capacity()
+        active_points = self._active_resource_point_usage(exclude_name=app.name)
+        required_points = self._app_startup_points(app)
+        available_cpu_points = capacity.cpu_points_available - active_points.cpu_points
+        if required_points.cpu_points > available_cpu_points:
+            return AppStartBlocker(
+                kind=AppStartBlockerKind.CPU_POINTS,
+                message=(
+                    f"Cannot start {app.friendly}; node `{config.NODE_NAME}` has insufficient CPU points "
+                    f"(required {required_points.cpu_points}, available {max(0, available_cpu_points)})."
+                ),
+                required_points=required_points.cpu_points,
+                available_points=max(0, available_cpu_points),
+            )
+        available_ram_points = capacity.ram_points_available - active_points.ram_points
+        if required_points.ram_points > available_ram_points:
+            return AppStartBlocker(
+                kind=AppStartBlockerKind.RAM_POINTS,
+                message=(
+                    f"Cannot start {app.friendly}; node `{config.NODE_NAME}` has insufficient RAM points "
+                    f"(required {required_points.ram_points}, available {max(0, available_ram_points)})."
+                ),
+                required_points=required_points.ram_points,
+                available_points=max(0, available_ram_points),
+            )
+        return None
+
+    def start_blocker(
+        self,
+        app: ManagedApp,
+        *,
+        include_current_activity: bool = True,
+    ) -> AppStartBlocker | None:
+        pending_names = self._pending_start_name_keys()
+        if include_current_activity and (app.check_running() or app.name.casefold() in pending_names):
+            return AppStartBlocker(
+                kind=AppStartBlockerKind.ALREADY_RUNNING,
+                message=f"{app.friendly} is already running.",
+            )
+        if blocked_by := self.running_scope_conflict(app):
+            return AppStartBlocker(
+                kind=AppStartBlockerKind.SAME_SCOPE,
+                message=(
+                    f"Cannot start {app.friendly}; {blocked_by.friendly} is already running for scope `{app.scope}`."
+                ),
+                blocking_app_name=blocked_by.name,
+                blocking_app_friendly=blocked_by.friendly,
+            )
+        return self.capacity_conflict(app)
+
+    @staticmethod
+    def _should_monitor_app(app: ManagedApp) -> bool:
+        return app.lifecycle_started_at is not None or app.process is not None or app.is_started
+
+    async def monitor_apps(self):
         while True:
-            if app := self.get_current:
+            for app in tuple(self.apps.values()):
+                if not self._should_monitor_app(app):
+                    continue
                 if not app.check_running():
                     await self._handle_inactive_app(app)
             await asyncio.sleep(1)
@@ -188,8 +378,6 @@ class App_Manager(metaclass=config.Singleton):
         elif started_at is not None and not was_manager_initiated_shutdown:
             self._notify_app_lifecycle(app, started=False, uptime=uptime)
         app.lifecycle_started_at = None
-        if self.current == app.name:
-            self.current = None
 
     def dump_enabled(self) -> int:
         config.ENABLED_DUMP_FILE.parent.mkdir(exist_ok=True, parents=True)
@@ -285,13 +473,14 @@ class App_Manager(metaclass=config.Singleton):
             app = name
         else:
             app = self.get(name)
-        name = app.name
         if not app.cfg.enabled:
             raise LookupError("App Not Enabled")
-        await self.end()
+        if blocker := self.start_blocker(app):
+            raise RuntimeError(blocker.message)
         if app.settings:
             app.settings.app.save()
-        self.current = name
+        pending_names = self._pending_start_name_keys()
+        pending_names.add(app.name.casefold())
         try:
             await app.start()
             app.lifecycle_started_at = datetime.now(timezone.utc)
@@ -300,9 +489,9 @@ class App_Manager(metaclass=config.Singleton):
             runtime_fault = getattr(app, "runtime_fault", None)
             if not app.check_running() or runtime_fault is not None:
                 await self._handle_inactive_app(app)
-            if self.current == name:
-                self.current = None
             raise
+        finally:
+            pending_names.discard(app.name.casefold())
 
     async def _shutdown_apps(
         self,
@@ -311,12 +500,11 @@ class App_Manager(metaclass=config.Singleton):
         action_label: str,
         action_present_participle: str,
         shutdown: Callable[[ManagedApp], Awaitable[bool | None]],
-        allow_current_target_when_inactive: bool = False,
+        allow_named_target_when_inactive: bool = False,
     ) -> set[str]:
-        async def timed_shutdown(app: ManagedApp):
-            is_current_target = self.current == app.name
+        async def timed_shutdown(app: ManagedApp, *, allow_inactive_target: bool = False):
             if not app.check_running():
-                if not allow_current_target_when_inactive or not is_current_target:
+                if not allow_inactive_target:
                     log.info(f"{app.name} not running; skipping.")
                     return (app.name, 0.0, "Skipped", "Not running", None)
             t0 = time.perf_counter()
@@ -344,22 +532,9 @@ class App_Manager(metaclass=config.Singleton):
             except ValueError:
                 log.warning(f"Tried to {action_label} unknown app: {name}")
                 raise ProcessLookupError("Unknown App")
-            result = await timed_shutdown(app)
+            result = await timed_shutdown(app, allow_inactive_target=allow_named_target_when_inactive)
             status = f"{result[0]}: {result[2]} in {result[1]:.2f}s"
             log.info(status)
-            if result[2] == "Success":
-                if self.current == app.name:
-                    self.current = None
-                self._notify_app_lifecycle(app, started=False, uptime=result[4])
-            return {
-                result[0].title(),
-            }
-
-        if app := self.get_current:
-            log.info(f"{action_present_participle} current app: {self.current}")
-            result = await timed_shutdown(app)
-            log.info(f"{result[0]}: {result[2]} in {result[1]:.2f}s")
-            self.current = None
             if result[2] == "Success":
                 self._notify_app_lifecycle(app, started=False, uptime=result[4])
             return {
@@ -367,7 +542,10 @@ class App_Manager(metaclass=config.Singleton):
             }
 
         log.info(f"{action_present_participle} all apps...")
-        results = await asyncio.gather(*(timed_shutdown(app) for app in self.apps.values()))
+        running_apps = self.running_apps()
+        if not running_apps:
+            return set()
+        results = await asyncio.gather(*(timed_shutdown(app) for app in running_apps))
 
         names: set[str] = set()
         for app_name, secs, status, _, uptime in results:
@@ -379,7 +557,6 @@ class App_Manager(metaclass=config.Singleton):
                 self._notify_app_lifecycle(app, started=False, uptime=uptime)
 
         log.info(f"All apps finished {action_label}.")
-        self.current = None
         return names
 
     async def end(self, name: str | None = None) -> set[str]:
@@ -402,7 +579,7 @@ class App_Manager(metaclass=config.Singleton):
             action_label="kill",
             action_present_participle="Killing",
             shutdown=_kill,
-            allow_current_target_when_inactive=True,
+            allow_named_target_when_inactive=True,
         )
 
     def _notify_app_lifecycle(
@@ -530,12 +707,47 @@ class App_Manager(metaclass=config.Singleton):
         app = name if isinstance(name, App) else self.get(name)
         previous_friendly_name: str = app.friendly
         next_friendly_name = _validate_required_friendly_name(details.friendly_name)
+        next_title_font_preset = (
+            app.cfg.title_font_preset
+            if details.title_font_preset is None
+            else normalise_app_title_font(details.title_font_preset)
+        )
         next_notes: str | None = normalise_optional_text(details.notes)
-        if previous_friendly_name == next_friendly_name and app.cfg.notes == next_notes:
+        running_points = config.ResourcePointSet(
+            cpu_points=details.running_cpu_points,
+            ram_points=details.running_ram_points,
+        )
+        startup_points: config.ResourcePointSet | None
+        startup_cpu_points = (
+            running_points.cpu_points if details.startup_cpu_points is None else details.startup_cpu_points
+        )
+        startup_ram_points = (
+            running_points.ram_points if details.startup_ram_points is None else details.startup_ram_points
+        )
+        if (
+            details.startup_cpu_points is None
+            and details.startup_ram_points is None
+        ) or (
+            startup_cpu_points == running_points.cpu_points
+            and startup_ram_points == running_points.ram_points
+        ):
+            startup_points = None
+        else:
+            startup_points = config.ResourcePointSet(
+                cpu_points=startup_cpu_points,
+                ram_points=startup_ram_points,
+            )
+        if (
+            previous_friendly_name == next_friendly_name
+            and app.cfg.title_font_preset == next_title_font_preset
+            and app.cfg.notes == next_notes
+        ):
             if (
                 app.cfg.lifecycle_notice_started is details.lifecycle_notice_started
                 and app.cfg.lifecycle_notice_stopped is details.lifecycle_notice_stopped
                 and app.cfg.lifecycle_notice_crashed is details.lifecycle_notice_crashed
+                and app.cfg.resource_points.running == running_points
+                and app.cfg.resource_points.startup == startup_points
             ):
                 return app.friendly
         lookup_conflict = self._friendly_lookup_conflict(app=app, friendly_name=next_friendly_name)
@@ -550,21 +762,34 @@ class App_Manager(metaclass=config.Singleton):
         )
         next_payload = dict(instance_payload)
         next_payload["friendly_name"] = next_friendly_name
+        next_payload["title_font_preset"] = next_title_font_preset
         next_payload["notes"] = next_notes
         next_payload["lifecycle_notice_started"] = details.lifecycle_notice_started
         next_payload["lifecycle_notice_stopped"] = details.lifecycle_notice_stopped
         next_payload["lifecycle_notice_crashed"] = details.lifecycle_notice_crashed
+        next_resource_points_payload: dict[str, object] = {"running": running_points.model_dump(mode="json")}
+        if startup_points is not None:
+            next_resource_points_payload["startup"] = startup_points.model_dump(mode="json")
+        next_payload["resource_points"] = next_resource_points_payload
         raw[app.cfg.instance_key] = next_payload
         self._write_json_object(instances_path, raw)
         app.cfg.friendly_name = next_friendly_name
+        app.cfg.title_font_preset = next_title_font_preset
         app.cfg.notes = next_notes
         app.cfg.lifecycle_notice_started = details.lifecycle_notice_started
         app.cfg.lifecycle_notice_stopped = details.lifecycle_notice_stopped
         app.cfg.lifecycle_notice_crashed = details.lifecycle_notice_crashed
+        app.cfg.resource_points.running = running_points
+        app.cfg.resource_points.startup = startup_points
         app.friendly = next_friendly_name
         self._replace_friendly_lookup_aliases(app=app, previous_friendly_name=previous_friendly_name)
         ChatHub().bind(app.name, ChatEndpoint(ChatEndpointId.app(app.name), next_friendly_name))
-        log.info("Updated app details: app=%s friendly_name=%s", app.name, next_friendly_name)
+        log.info(
+            "Updated app details: app=%s friendly_name=%s title_font_preset=%s",
+            app.name,
+            next_friendly_name,
+            next_title_font_preset,
+        )
         return next_friendly_name
 
     def set_app_friendly_name(self, name: str | ManagedApp, friendly_name: str) -> str:
@@ -573,12 +798,49 @@ class App_Manager(metaclass=config.Singleton):
             app,
             AppDetailsUpdate(
                 friendly_name=friendly_name,
+                title_font_preset=app.cfg.title_font_preset,
                 notes=app.cfg.notes,
                 lifecycle_notice_started=app.cfg.lifecycle_notice_started,
                 lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
                 lifecycle_notice_crashed=app.cfg.lifecycle_notice_crashed,
+                running_cpu_points=app.cfg.resource_points.running.cpu_points,
+                running_ram_points=app.cfg.resource_points.running.ram_points,
+                startup_cpu_points=(
+                    None if app.cfg.resource_points.startup is None else app.cfg.resource_points.startup.cpu_points
+                ),
+                startup_ram_points=(
+                    None if app.cfg.resource_points.startup is None else app.cfg.resource_points.startup.ram_points
+                ),
             ),
         )
+
+    def set_node_capacity(self, capacity: config.NodeCapacityProfile) -> config.NodeCapacityProfile:
+        bot_config = self._load_bot_configuration()
+        if bot_config.node_capacity == capacity:
+            return capacity
+        bot_config = bot_config.model_copy(update={"node_capacity": capacity})
+        config.save_bot_configuration(self._bot_configuration_path, bot_config)
+        return capacity
+
+    def node_font_sources(self) -> config.NodeFontSourceSettings:
+        return self._load_bot_configuration().node_font_sources
+
+    def set_node_font_sources(self, settings: config.NodeFontSourceSettings) -> config.NodeFontSourceSettings:
+        bot_config = self._load_bot_configuration()
+        if bot_config.node_font_sources == settings:
+            return settings
+        bot_config = bot_config.model_copy(update={"node_font_sources": settings})
+        config.save_bot_configuration(self._bot_configuration_path, bot_config)
+        return settings
+
+    def set_discord_settings(self, settings: config.DiscordSettings) -> config.DiscordSettings:
+        bot_config = self._load_bot_configuration()
+        if bot_config.discord_settings != settings:
+            bot_config = bot_config.model_copy(update={"discord_settings": settings})
+            config.save_bot_configuration(self._bot_configuration_path, bot_config)
+        if self.activity_manager is not None:
+            self.activity_manager.set_activity_settings(settings.activity)
+        return settings
 
     def clear_app_chat_channel(self, name: str | ManagedApp) -> None:
         self.set_app_chat_channel(name, None)
@@ -711,38 +973,39 @@ class App_Manager(metaclass=config.Singleton):
         log.info(f"Created app instance `{instance_name}` from template `{scope}:{template_key}`")
         return instance_name
 
-    @property
-    def get_current(self) -> ManagedApp | None:
-        return self.apps.get(self.current) if self.current else None
-
-    def set_restart_auto_start_app(self, name: str | ManagedApp | None) -> str | None:
-        resolved_name: str | None
-        if name is None:
-            resolved_name = None
-        elif isinstance(name, App):
-            resolved_name = name.name
-        else:
-            resolved_name = self.get(name).name
+    def set_restart_auto_start_apps(self, apps: Sequence[str | ManagedApp] | None) -> tuple[str, ...]:
+        resolved_names: list[str] = []
+        seen_names: set[str] = set()
+        for raw_app in apps or ():
+            if isinstance(raw_app, App):
+                app_name = raw_app.name
+            else:
+                app_name = self.get(raw_app).name
+            if app_name in seen_names:
+                continue
+            seen_names.add(app_name)
+            resolved_names.append(app_name)
+        resolved_name_tuple = tuple(resolved_names)
 
         bot_config = self._load_bot_configuration()
-        if bot_config.restart_state.auto_start_app == resolved_name:
-            return resolved_name
+        if bot_config.restart_state.auto_start_apps == resolved_name_tuple:
+            return resolved_name_tuple
 
-        bot_config.restart_state = bot_config.restart_state.model_copy(update={"auto_start_app": resolved_name})
+        bot_config.restart_state = bot_config.restart_state.model_copy(update={"auto_start_apps": resolved_name_tuple})
         config.save_bot_configuration(self._bot_configuration_path, bot_config)
-        return resolved_name
+        return resolved_name_tuple
 
-    def set_current_restart_auto_start_app(self) -> str | None:
-        return self.set_restart_auto_start_app(self.get_current)
+    def set_running_restart_auto_start_apps(self) -> tuple[str, ...]:
+        return self.set_restart_auto_start_apps(self.running_apps())
 
-    def consume_restart_auto_start_app(self) -> str | None:
+    def consume_restart_auto_start_apps(self) -> tuple[str, ...]:
         bot_config = self._load_bot_configuration()
-        auto_start_app = bot_config.restart_state.auto_start_app
-        if auto_start_app is None:
-            return None
-        bot_config.restart_state = bot_config.restart_state.model_copy(update={"auto_start_app": None})
+        auto_start_apps = bot_config.restart_state.auto_start_apps
+        if not auto_start_apps:
+            return ()
+        bot_config.restart_state = bot_config.restart_state.model_copy(update={"auto_start_apps": ()})
         config.save_bot_configuration(self._bot_configuration_path, bot_config)
-        return auto_start_app
+        return auto_start_apps
 
     @property
     def _default_config_path(self) -> Path:
@@ -779,8 +1042,9 @@ class App_Manager(metaclass=config.Singleton):
         default_chat_channels = cast(tuple[hikari.Snowflake, ...], getattr(self, "default_chat_channels", ()))
         if default_chat_channels:
             return tuple(str(channel_id) for channel_id in default_chat_channels), (), self.default_chat_channel_source
-        if self.default_chat_channel is not None:
-            return (str(self.default_chat_channel),), (), self.default_chat_channel_source
+        default_chat_channel = cast(hikari.Snowflake | None, getattr(self, "default_chat_channel", None))
+        if default_chat_channel is not None:
+            return (str(default_chat_channel),), (), self.default_chat_channel_source
         return (), (), RelayChannelSource.NONE
 
     @staticmethod
@@ -879,6 +1143,16 @@ class App_Manager(metaclass=config.Singleton):
                 instance_payload=instance_payload,
             )
             self._clear_app_relay_state(app)
+            chat_channels, _chat_overrides, chat_source = self._resolve_relay_channels(
+                instance_chat_channel=None,
+                instance_chat_channels=None,
+            )
+            app.cfg.chat_channels = chat_channels
+            app.cfg.chat_channel = chat_channels[0] if chat_channels else None
+            app.cfg.chat_channel_source = chat_source
+            app.chat_channels = tuple(hikari.Snowflake(channel_id) for channel_id in chat_channels)
+            app.chat_channel = app.chat_channels[0] if app.chat_channels else None
+            app.chat_channel_source = chat_source
             DC_Relay.bind_app_channel(app)
             return
         default_channel_texts = self._default_chat_channel_texts()
@@ -1130,9 +1404,10 @@ class App_Manager(metaclass=config.Singleton):
         return None
 
     def _load_bot_configuration(self) -> config.BotConfiguration:
-        if not self._bot_configuration_path.exists():
+        bot_configuration_path = getattr(self, "_bot_configuration_path", self._BOT_CONFIGURATION_PATH)
+        if not bot_configuration_path.exists():
             return config.BotConfiguration()
-        return config.load_bot_configuration(self._bot_configuration_path)
+        return config.load_bot_configuration(bot_configuration_path)
 
     @classmethod
     def _select_instance_template(
@@ -1313,6 +1588,10 @@ async def ac_enabled_apps(ctx: lightbulb.AutocompleteContext[str], manager: App_
     await ctx.respond([a.friendly for a in manager.apps.values() if a.cfg.enabled])
 
 
+async def ac_running_apps(ctx: lightbulb.AutocompleteContext[str], manager: App_Manager) -> None:
+    await ctx.respond([app.friendly for app in manager.running_apps()])
+
+
 async def ac_disabled_apps(ctx: lightbulb.AutocompleteContext[str], manager: App_Manager) -> None:
     await ctx.respond([a.friendly for a in manager.apps.values() if not a.cfg.enabled])
 
@@ -1326,32 +1605,28 @@ async def ac_app_logs(ctx: lightbulb.AutocompleteContext[str], manager: App_Mana
 
 
 class Provider_Process(Activity_Provider):
+    activity_field = config.DiscordActivityField.APP
+
     def __init__(self, manager: App_Manager):
         self.manager = manager
         self.prio = 6
-        self._counter = 0
         super().__init__()
 
     async def get(self) -> str | None:
-        if not self.silent:
-            log.debug(f"Provider_Process: {self.manager.current}")
-        if app := self.manager.get_current:
-            if app.check_running():
-                if name := (app.cfg.provider_alt_text or (app.settings and app.settings.app.server_name)):
-                    if self._counter == 3:
-                        self._counter = 0
-                        return f"<{name.strip(' \'"_-:;<>')}>"
-                    self._counter += 1
-                return app.friendly
-            elif not self.silent:
-                log.debug("Provider_Process: not running")
-        elif not self.silent:
-            log.debug("Provider_Process: not app")
-        return None
+        target = self.manager.activity_rotation_target()
+        if target is None:
+            if not self.silent:
+                log.debug("Provider_Process: not app")
+            return None
+        app, show_alt_text = target
+        if show_alt_text and (name := (app.cfg.provider_alt_text or (app.settings and app.settings.app.server_name))):
+            return f"<{name.strip(' \'"_-:;<>')}>"
+        return app.friendly
 
 
 class Provider_Player(Activity_Provider):
     _RECOVERY_INTERVAL = 10
+    activity_field = config.DiscordActivityField.PLAYERS
 
     def __init__(self, manager: App_Manager):
         self.manager = manager
@@ -1367,48 +1642,46 @@ class Provider_Player(Activity_Provider):
         return f"{__name__}:recovery"
 
     async def get(self) -> str | None:
-        if app := self.manager.get_current:
-            if not app.check_running():
-                if not self.silent:
-                    log.debug("Provider_Player: %s is not running", app.name)
-                return None
-            if not app.is_started:
-                if not self.silent:
-                    log.debug("Provider_Player: %s has not finished startup", app.name)
-                return None
-            budget_key = self._budget_key()
-            recovery_key = self._recovery_key()
-            if app.act_err_counts.setdefault(budget_key, app.act_err_threshold) <= 0:
-                recovery_remaining = app.act_err_counts.get(recovery_key, self._RECOVERY_INTERVAL)
-                if recovery_remaining > 0:
-                    app.act_err_counts[recovery_key] = recovery_remaining - 1
-                    if not self.silent:
-                        log.debug(
-                            "Provider_Player: %s exhausted error budget; retrying in %s activity ticks",
-                            app.name,
-                            recovery_remaining - 1,
-                        )
-                    return None
-                app.act_err_counts[recovery_key] = self._RECOVERY_INTERVAL
-                if not self.silent:
-                    log.debug("Provider_Player: %s probing for recovery after exhausted error budget", app.name)
-            if players := await app.player_count():
-                app.act_err_counts[budget_key] = app.act_err_threshold
-                app.act_err_counts.pop(recovery_key, None)
-                status = f"{players[0]}/{players[1]}"
-                if not self.silent:
-                    log.debug("Provider_Player: %s -> %s", app.name, status)
-                return status
-            else:
-                app.act_err_counts[budget_key] -= 1
+        target = self.manager.activity_rotation_target()
+        if target is None:
+            if not self.silent:
+                log.debug("Provider_Player: not app")
+            return None
+        app, _show_alt_text = target
+        budget_key = self._budget_key()
+        recovery_key = self._recovery_key()
+        if not app.is_started:
+            if not self.silent:
+                log.debug("Provider_Player: %s has not finished startup", app.name)
+            return None
+        if app.act_err_counts.setdefault(budget_key, app.act_err_threshold) <= 0:
+            recovery_remaining = app.act_err_counts.get(recovery_key, self._RECOVERY_INTERVAL)
+            if recovery_remaining > 0:
+                app.act_err_counts[recovery_key] = recovery_remaining - 1
                 if not self.silent:
                     log.debug(
-                        "Provider_Player: %s returned no player count | attempts left %s",
+                        "Provider_Player: %s exhausted error budget; retrying in %s activity ticks",
                         app.name,
-                        app.act_err_counts[budget_key],
+                        recovery_remaining - 1,
                     )
-        elif not self.silent:
-            log.debug("Provider_Player: not app")
+                return None
+            app.act_err_counts[recovery_key] = self._RECOVERY_INTERVAL
+            if not self.silent:
+                log.debug("Provider_Player: %s probing for recovery after exhausted error budget", app.name)
+        if players := await app.player_count():
+            app.act_err_counts[budget_key] = app.act_err_threshold
+            app.act_err_counts.pop(recovery_key, None)
+            status = f"{players[0]}/{players[1]}"
+            if not self.silent:
+                log.debug("Provider_Player: %s -> %s", app.name, status)
+            return status
+        app.act_err_counts[budget_key] -= 1
+        if not self.silent:
+            log.debug(
+                "Provider_Player: %s returned no player count | attempts left %s",
+                app.name,
+                app.act_err_counts[budget_key],
+            )
         return None
 
 

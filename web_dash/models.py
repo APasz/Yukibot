@@ -29,12 +29,13 @@ from .runtime_imports import (
     Callable,
     Iterable,
     Literal,
-    ManagedApp,
     Mapping,
     ModWebUser,
     NodeAccessGrant,
+    NodeApiService,
     NodeApiScope,
     NodeAppEntry,
+    NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
     NodeBlueprintList,
@@ -155,6 +156,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 app_stats=mods.app_stats,
                 app_start_blocked=app_start_blocked,
                 settings=settings,
+                app_title_font_preset=app.cfg.title_font_preset,
                 console_actions=console_actions,
                 blueprints=blueprints,
                 map_url=app.public_map_url,
@@ -166,6 +168,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 can_write_map_annotations=app.supports_map and can_manage_app,
                 supports_chat=app.supports_chat_relay,
                 chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
+                resource_points=NodeApiService._app_resource_point_summary(app),
                 app_notes=app.cfg.notes,
                 lifecycle_notice_started=app.cfg.lifecycle_notice_started,
                 lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
@@ -257,6 +260,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 app_stats=app_stats,
                 app_start_blocked=app_start_blocked,
                 settings=settings,
+                app_title_font_preset=app.cfg.title_font_preset,
                 console_actions=console_actions,
                 blueprints=blueprints,
                 map_url=app.public_map_url,
@@ -268,6 +272,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 can_write_map_annotations=app.supports_map and can_manage_app,
                 supports_chat=app.supports_chat_relay,
                 chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
+                resource_points=NodeApiService._app_resource_point_summary(app),
                 app_notes=app.cfg.notes,
                 lifecycle_notice_started=app.cfg.lifecycle_notice_started,
                 lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
@@ -298,6 +303,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         chat_url: str | None,
         app_start_blocked: bool,
         app_color_hex: str | None,
+        resource_points: NodeAppResourcePointSummary | None,
+        app_title_font_preset: str,
         app_notes: str | None,
         lifecycle_notice_started: bool,
         lifecycle_notice_stopped: bool,
@@ -325,6 +332,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 app_stats=mods.app_stats,
                 app_start_blocked=app_start_blocked,
                 settings=settings,
+                app_title_font_preset=app_title_font_preset,
                 console_actions=console_actions,
                 blueprints=blueprints,
                 map_url=map_url,
@@ -332,6 +340,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 can_write_map_annotations=map_url is not None and can_write_map_annotations,
                 supports_chat=supports_chat,
                 chat_url=chat_url,
+                resource_points=resource_points,
                 app_notes=app_notes,
                 lifecycle_notice_started=lifecycle_notice_started,
                 lifecycle_notice_stopped=lifecycle_notice_stopped,
@@ -371,6 +380,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         chat_url: str | None,
         app_stats: NodeAppRuntimeSummary | None,
         app_start_blocked: bool,
+        resource_points: NodeAppResourcePointSummary | None,
+        app_title_font_preset: str,
         app_notes: str | None,
         lifecycle_notice_started: bool,
         lifecycle_notice_stopped: bool,
@@ -396,6 +407,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 app_stats=app_stats,
                 app_start_blocked=app_start_blocked,
                 settings=settings,
+                app_title_font_preset=app_title_font_preset,
                 console_actions=console_actions,
                 blueprints=blueprints,
                 map_url=map_url,
@@ -403,6 +415,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 can_write_map_annotations=map_url is not None and can_write_map_annotations,
                 supports_chat=supports_chat,
                 chat_url=chat_url,
+                resource_points=resource_points,
                 app_notes=app_notes,
                 lifecycle_notice_started=lifecycle_notice_started,
                 lifecycle_notice_stopped=lifecycle_notice_stopped,
@@ -772,13 +785,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _app_start_blocked_remote(
-        *, app_name: str, app_stats: NodeAppRuntimeSummary | None, running_app_ids: tuple[str, ...]
+        *,
+        app_name: str,
+        app_stats: NodeAppRuntimeSummary | None,
+        start_blocked_app_ids: tuple[str, ...],
     ) -> bool:
         if app_stats is not None and app_stats.running:
             return False
-        if not running_app_ids:
-            return False
-        return app_name not in running_app_ids
+        return app_name in start_blocked_app_ids
 
     def _remote_config_content(
         self,
@@ -1277,10 +1291,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         manager: App_Manager | None = self._manager
         if manager is None:
             return False
-        current: ManagedApp | None = manager.get_current
-        if current is None or not current.check_running():
-            return False
-        return current.name != app.name
+        return manager.start_blocker(app, include_current_activity=False) is not None
 
     @staticmethod
     def _percent_tone(percent: int) -> BadgeTone:
@@ -1450,20 +1461,20 @@ class ModWebModelsMixin(ModWebServiceSupport):
         summaries: list[ModWebHomeNodeSummary | None] = [None] * len(sections)
         remote_jobs: list[tuple[int, ModWebNodeAppSection]] = []
         for index, section in enumerate[ModWebNodeAppSection](sections):
-            if section.node.is_current:
-                summaries[index] = ModWebHomeNodeSummary(
-                    node=section.node,
-                    app_count=len(section.app_links),
-                    system_summary=self._node_api.build_system_summary(),
-                )
-            elif section.error is None:
-                remote_jobs.append((index, section))
-            else:
+            if section.error is not None:
                 summaries[index] = ModWebHomeNodeSummary(
                     node=section.node,
                     app_count=len(section.app_links),
                     system_summary=None,
                 )
+            elif section.node.is_current:
+                summaries[index] = ModWebHomeNodeSummary(
+                    node=section.node,
+                    app_count=len(section.app_links),
+                    system_summary=self._node_api.build_system_summary(),
+                )
+            else:
+                remote_jobs.append((index, section))
 
         async def _remote_summary(index: int, section: ModWebNodeAppSection) -> tuple[int, ModWebHomeNodeSummary]:
             system_summary = await self._remote_node_system_summary_or_none_async(

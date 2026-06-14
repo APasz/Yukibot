@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
+from font_assets import font_assets
+
 from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
 from .nicegui_protocols import ModWebFastApiApp, ModWebRouteUi
 from .runtime_imports import (
     Access_Control,
     Awaitable,
     Callable,
+    FileResponse,
     ModWebAuthError,
     ModWebUser,
     NodeApiScope,
+    Path,
     Power_Level,
     RedirectResponse,
     Request,
@@ -109,6 +113,22 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         nicegui_app.on_page_exception(_handle_page_exception)
         nicegui_app.on_startup(self._on_startup)
         self._backend.register_node_api_routes(nicegui_app)
+
+        @nicegui_app.get("/mod-web/assets/fonts/{asset_path:path}")
+        async def _font_asset(asset_path: str) -> FileResponse:
+            requested_path = font_assets.fonts_root / asset_path
+            try:
+                resolved_path = requested_path.resolve(strict=True)
+            except FileNotFoundError as xcp:
+                raise _http_exception(404, "Font asset not found.") from xcp
+            fonts_root = font_assets.fonts_root.resolve()
+            try:
+                resolved_path.relative_to(fonts_root)
+            except ValueError as xcp:
+                raise _http_exception(404, "Font asset not found.") from xcp
+            if resolved_path.suffix.casefold() not in {".woff", ".woff2"} or not resolved_path.is_file():
+                raise _http_exception(404, "Font asset not found.")
+            return FileResponse(path=Path(resolved_path), filename=resolved_path.name)
 
         @nicegui_app.get("/auth/login")
         def _login(request: Request, next_path: str | None = None) -> RedirectResponse:

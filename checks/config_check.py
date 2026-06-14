@@ -4,7 +4,7 @@ import logging
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import hikari
 from hikari import applications
@@ -81,6 +81,25 @@ class ConfigPublicUrlTests(unittest.TestCase):
         self.assertEqual(
             config.resolve_node_api_base_url("http://mods.apasz.com:8088"),
             "http://mods.apasz.com:8088/api/node",
+        )
+
+    def test_normalise_google_font_source_url_converts_specimen_page(self) -> None:
+        self.assertEqual(
+            config.normalise_google_font_source_url(
+                "https://fonts.google.com/specimen/Black+Ops+One?preview.script=Latn"
+            ),
+            "https://fonts.googleapis.com/css2?family=Black+Ops+One&display=swap",
+        )
+
+    def test_normalise_google_font_source_urls_accepts_multiline_text(self) -> None:
+        self.assertEqual(
+            config.normalise_google_font_source_urls(
+                "https://fonts.google.com/specimen/Black+Ops+One\nhttps://fonts.googleapis.com/css2?family=Roboto&display=swap"
+            ),
+            (
+                "https://fonts.googleapis.com/css2?family=Black+Ops+One&display=swap",
+                "https://fonts.googleapis.com/css2?family=Roboto&display=swap",
+            ),
         )
 
     def test_resolve_public_addr_uses_host_from_base_url(self) -> None:
@@ -233,6 +252,74 @@ class ConfigDataAuthorityTests(unittest.TestCase):
 
 
 class BotConfigurationTests(unittest.TestCase):
+    def test_default_node_capacity_profile_uses_logical_core_count_for_cpu_points(self) -> None:
+        with (
+            patch("config.psutil.cpu_count", return_value=8) as cpu_count,
+            patch("config.psutil.virtual_memory", return_value=Mock(total=4_000 * 1024 * 1024)),
+        ):
+            profile = config.default_node_capacity_profile(profile=config.BOT_PROFILES[config.BotProfileName.ERIN])
+
+        self.assertEqual(profile.cpu_points_total, 8)
+        self.assertEqual(profile.cpu_points_reserved, 2)
+        cpu_count.assert_called_once_with(logical=True)
+
+    def test_default_node_capacity_profile_falls_back_to_physical_core_count(self) -> None:
+        with (
+            patch("config.psutil.cpu_count", side_effect=[None, 4]) as cpu_count,
+            patch("config.psutil.virtual_memory", return_value=Mock(total=4_000 * 1024 * 1024)),
+        ):
+            profile = config.default_node_capacity_profile(profile=config.BOT_PROFILES[config.BotProfileName.ERIN])
+
+        self.assertEqual(profile.cpu_points_total, 4)
+        self.assertEqual(profile.cpu_points_reserved, 2)
+        self.assertEqual(cpu_count.call_args_list, [call(logical=True), call(logical=False)])
+
+    def test_parse_discord_activity_fields_rejects_duplicates(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not contain duplicate"):
+            config.parse_discord_activity_fields("ram, cpu, ram", source="Discord activity field order")
+
+    def test_save_bot_configuration_persists_discord_settings(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+
+            config.save_bot_configuration(
+                path,
+                config.BotConfiguration(
+                    discord_settings=config.DiscordSettings(
+                        activity=config.DiscordActivitySettings(
+                            fallback_text="Watching over Erin",
+                            prefix="[",
+                            separator=" :: ",
+                            suffix="]",
+                            refresh_interval_seconds=5,
+                            units_per_app=4,
+                            alt_text_percentage=25,
+                            fields=(
+                                config.DiscordActivityField.APP,
+                                config.DiscordActivityField.PLAYERS,
+                            ),
+                        )
+                    )
+                ),
+            )
+
+            loaded = config.load_bot_configuration(path)
+
+        self.assertEqual(loaded.discord_settings.activity.fallback_text, "Watching over Erin")
+        self.assertEqual(loaded.discord_settings.activity.prefix, "[")
+        self.assertEqual(loaded.discord_settings.activity.separator, " :: ")
+        self.assertEqual(loaded.discord_settings.activity.suffix, "]")
+        self.assertEqual(loaded.discord_settings.activity.refresh_interval_seconds, 5)
+        self.assertEqual(loaded.discord_settings.activity.units_per_app, 4)
+        self.assertEqual(loaded.discord_settings.activity.alt_text_percentage, 25)
+        self.assertEqual(
+            loaded.discord_settings.activity.fields,
+            (
+                config.DiscordActivityField.APP,
+                config.DiscordActivityField.PLAYERS,
+            ),
+        )
+
     def test_persisted_oauth_links_omit_unsupported_install_type_when_serialized(self) -> None:
         links = config.PersistedOAuthLinks(guild=None)
 
@@ -329,6 +416,27 @@ class BotConfigurationTests(unittest.TestCase):
         self.assertTrue(schedule.enabled)
         self.assertEqual(schedule.hour, 4)
         self.assertEqual(schedule.minute, 30)
+
+    def test_load_bot_configuration_backfills_missing_node_capacity(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            path.write_text('{"maintenance":{"restart_schedules":{}}}', encoding="utf-8")
+
+            with (
+                patch("config.psutil.cpu_count", return_value=8),
+                patch("config.psutil.virtual_memory", return_value=Mock(total=4_000 * 1024 * 1024)),
+                patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.YUKI]),
+            ):
+                loaded = config.load_bot_configuration(path)
+
+            saved_payload = path.read_text(encoding="utf-8")
+
+        self.assertEqual(loaded.node_capacity.cpu_points_total, 8)
+        self.assertEqual(loaded.node_capacity.ram_points_total, 8)
+        self.assertEqual(loaded.node_capacity.cpu_points_reserved, 3)
+        self.assertEqual(loaded.node_capacity.ram_points_reserved, 4)
+        self.assertIn('"node_capacity"', saved_payload)
+        self.assertIn('"node_font_sources"', saved_payload)
 
     def test_save_bot_configuration_persists_maintenance_restart_schedules(self) -> None:
         with TemporaryDirectory() as tmp:

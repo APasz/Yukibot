@@ -66,8 +66,22 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         remote_nodes: list[ModWebNodeLink] = []
         simulated_down_keys: set[str] = {node_name.casefold() for node_name in simulated_down_node_names}
         for node in self._node_links():
+            if node.node_name.casefold() in simulated_down_keys:
+                sections.append(self._simulated_remote_node_section(node))
+                continue
             if node.is_current:
-                sections.append(ModWebNodeAppSection(node=node, app_links=await self._app_links(user)))
+                try:
+                    sections.append(ModWebNodeAppSection(node=node, app_links=await self._app_links(user)))
+                except Exception as xcp:
+                    if not (self._shutting_down or config.IS_SHUTTINGDOWN):
+                        log.warning("Local mod web home node unavailable: node=%s error=%s", node.node_name, xcp)
+                    sections.append(
+                        ModWebNodeAppSection(
+                            node=node,
+                            app_links=(),
+                            error=self._friendly_remote_node_error_text(xcp),
+                        )
+                    )
             else:
                 remote_nodes.append(node)
 
@@ -92,11 +106,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         statuses: list[ModWebNodeStatus] = []
         simulated_down_keys: set[str] = {node_name.casefold() for node_name in simulated_down_node_names}
         for node in self._node_links():
-            if node.is_current:
-                statuses.append(ModWebNodeStatus(node=node, alive=True))
-                continue
             if node.node_name.casefold() in simulated_down_keys:
                 statuses.append(self._simulated_remote_node_status(node))
+                continue
+            if node.is_current:
+                statuses.append(ModWebNodeStatus(node=node, alive=True))
                 continue
             statuses.append(self._probe_node_status(node))
         return tuple(statuses)
@@ -348,6 +362,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),
                     app_color_hex=app_entry.color_hex,
+                    resource_points=app_entry.resource_points,
+                    app_title_font_preset=app_entry.title_font_preset,
                     app_notes=app_entry.notes,
                     lifecycle_notice_started=app_entry.lifecycle_notice_started,
                     lifecycle_notice_stopped=app_entry.lifecycle_notice_stopped,
@@ -355,7 +371,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=mods.app_name,
                         app_stats=mods.app_stats,
-                        running_app_ids=() if system_summary is None else system_summary.running_app_ids,
+                        start_blocked_app_ids=() if system_summary is None else system_summary.start_blocked_app_ids,
                     ),
                 )
                 chat_surface = (
@@ -463,6 +479,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),
                     app_stats=app_stats,
+                    resource_points=app_entry.resource_points,
+                    app_title_font_preset=app_entry.title_font_preset,
                     app_notes=app_entry.notes,
                     lifecycle_notice_started=app_entry.lifecycle_notice_started,
                     lifecycle_notice_stopped=app_entry.lifecycle_notice_stopped,
@@ -470,7 +488,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=app_entry.name,
                         app_stats=app_stats,
-                        running_app_ids=() if system_summary is None else system_summary.running_app_ids,
+                        start_blocked_app_ids=() if system_summary is None else system_summary.start_blocked_app_ids,
                     ),
                 )
                 chat_surface = (

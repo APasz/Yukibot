@@ -39,7 +39,7 @@ import config
 from _audit import audit_log
 from _authority import AuthorityResource, read_json_object
 from _file import File_Utils
-from _manager import App_Manager, AppDetailsUpdate
+from _manager import App_Manager, AppDetailsUpdate, app_scope_from_name
 from _mod_ops import (
     NonDownloadableModError,
     RunningAppModMutationError,
@@ -61,7 +61,7 @@ from apps._blueprint_files import (
     blueprint_file_type_from_name,
     classify_blueprint_upload_filenames,
 )
-from apps._config import ModDownloadBlockReason, ModType
+from apps._config import AppTitleFont, ModDownloadBlockReason, ModType, normalise_app_title_font
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
 from apps._console import (
     ConsoleAction,
@@ -74,6 +74,7 @@ from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub
+from font_assets import font_assets
 from map_annotations import (
     AppMapAnnotationStore,
     MapAnnotationDraft,
@@ -110,7 +111,7 @@ _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.CHAT_READ: Power_Level.visitor,
     NodeApiScope.CHAT_WRITE: Power_Level.visitor,
     NodeApiScope.MODS_READ: Power_Level.visitor,
-    NodeApiScope.MODS_DOWNLOAD: Power_Level.visitor,
+    NodeApiScope.MODS_DOWNLOAD: Power_Level.user,
     NodeApiScope.MODS_WRITE: Power_Level.user,
     NodeApiScope.CONFIGS_READ: Power_Level.visitor,
     NodeApiScope.CONFIGS_WRITE: Power_Level.sudo,
@@ -126,6 +127,7 @@ _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.FILES_UPLOAD: Power_Level.user,
     NodeApiScope.APP_CONTROL: Power_Level.user,
     NodeApiScope.APP_MANAGE: Power_Level.sudo,
+    NodeApiScope.NODE_MANAGE: Power_Level.root,
 }
 log = logging.getLogger(__name__)
 traffic_log = logging.getLogger(config.LOGGER_TRAFFIC)
@@ -266,6 +268,36 @@ class NodeAppTransitionState(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class NodeAppResourcePointSummary:
+    cpu_points_running: int
+    cpu_points_startup: int
+    ram_points_running: int
+    ram_points_startup: int
+    startup_defined: bool = False
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppResourcePointSummary":
+        return cls(
+            cpu_points_running=_required_int(payload, "cpu_points_running"),
+            cpu_points_startup=_required_int(payload, "cpu_points_startup"),
+            ram_points_running=_required_int(payload, "ram_points_running"),
+            ram_points_startup=_required_int(payload, "ram_points_startup"),
+            startup_defined=_required_bool(payload, "startup_defined")
+            if "startup_defined" in payload
+            else False,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "cpu_points_running": self.cpu_points_running,
+            "cpu_points_startup": self.cpu_points_startup,
+            "ram_points_running": self.ram_points_running,
+            "ram_points_startup": self.ram_points_startup,
+            "startup_defined": self.startup_defined,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeAppEntry:
     name: str
     friendly: str
@@ -292,6 +324,8 @@ class NodeAppEntry:
     save_write_level: Power_Level = Power_Level.sudo
     color_hex: str | None = None
     map_url: str | None = None
+    resource_points: NodeAppResourcePointSummary | None = None
+    title_font_preset: str = AppTitleFont.AUTO.value
     notes: str | None = field(default=None, kw_only=True)
     lifecycle_notice_started: bool = True
     lifecycle_notice_stopped: bool = True
@@ -325,6 +359,8 @@ class NodeAppEntry:
         save_write_level = _power_level(payload, "save_write_level", default=Power_Level.sudo)
         color_hex = payload.get("color_hex")
         map_url = payload.get("map_url")
+        raw_resource_points = payload.get("resource_points")
+        raw_title_font_preset = payload.get("title_font_preset", AppTitleFont.AUTO.value)
         lifecycle_notice_started = payload.get("lifecycle_notice_started", True)
         lifecycle_notice_stopped = payload.get("lifecycle_notice_stopped", True)
         lifecycle_notice_crashed = payload.get("lifecycle_notice_crashed", True)
@@ -362,10 +398,18 @@ class NodeAppEntry:
             raise ValueError("Node app entry supports_chat is invalid.")
         if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
             raise ValueError("Node app entry runtime_fault is invalid.")
+        if raw_resource_points is not None and not isinstance(raw_resource_points, Mapping):
+            raise ValueError("Node app entry resource_points is invalid.")
         if color_hex is not None and not isinstance(color_hex, str):
             raise ValueError("Node app entry color_hex is invalid.")
         if map_url is not None and not isinstance(map_url, str):
             raise ValueError("Node app entry map_url is invalid.")
+        if not isinstance(raw_title_font_preset, str):
+            raise ValueError("Node app entry title_font_preset is invalid.")
+        try:
+            title_font_preset = normalise_app_title_font(raw_title_font_preset)
+        except (TypeError, ValueError) as xcp:
+            raise ValueError("Node app entry title_font_preset is invalid.") from xcp
         if not isinstance(lifecycle_notice_started, bool):
             raise ValueError("Node app entry lifecycle_notice_started is invalid.")
         if not isinstance(lifecycle_notice_stopped, bool):
@@ -401,6 +445,12 @@ class NodeAppEntry:
             save_write_level=save_write_level,
             color_hex=color_hex,
             map_url=map_url,
+            resource_points=(
+                NodeAppResourcePointSummary.from_mapping(cast(Mapping[str, object], raw_resource_points))
+                if raw_resource_points is not None
+                else None
+            ),
+            title_font_preset=title_font_preset,
             lifecycle_notice_started=lifecycle_notice_started,
             lifecycle_notice_stopped=lifecycle_notice_stopped,
             lifecycle_notice_crashed=lifecycle_notice_crashed,
@@ -434,6 +484,8 @@ class NodeAppEntry:
             "save_write_level": self.save_write_level.name,
             "color_hex": self.color_hex,
             "map_url": self.map_url,
+            "resource_points": self.resource_points.to_mapping() if self.resource_points is not None else None,
+            "title_font_preset": self.title_font_preset,
             "lifecycle_notice_started": self.lifecycle_notice_started,
             "lifecycle_notice_stopped": self.lifecycle_notice_stopped,
             "lifecycle_notice_crashed": self.lifecycle_notice_crashed,
@@ -680,10 +732,15 @@ def required_app_mutation_scope(action: NodeAppMutationAction) -> NodeApiScope:
 class NodeAppMutationRequest(BaseModel):
     action: NodeAppMutationAction
     friendly_name: str | None = None
+    title_font_preset: str | None = None
     notes: str | None = None
     lifecycle_notice_started: bool | None = None
     lifecycle_notice_stopped: bool | None = None
     lifecycle_notice_crashed: bool | None = None
+    running_cpu_points: int | None = None
+    running_ram_points: int | None = None
+    startup_cpu_points: int | None = None
+    startup_ram_points: int | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -700,10 +757,89 @@ class NodeAppMutationRequest(BaseModel):
                 raise ValueError("Stopped lifecycle notice flag is required for update-details requests.")
             if self.lifecycle_notice_crashed is None:
                 raise ValueError("Crash lifecycle notice flag is required for update-details requests.")
+            if self.running_cpu_points is None:
+                raise ValueError("Running CPU points are required for update-details requests.")
+            if self.running_ram_points is None:
+                raise ValueError("Running RAM points are required for update-details requests.")
             return self
         if self.friendly_name is None or not self.friendly_name:
             raise ValueError("Friendly name is required for rename requests.")
         return self
+
+
+@dataclass(frozen=True, slots=True)
+class NodeCapacityMutationResult:
+    node: str
+    message: str
+    capacity: config.NodeCapacityProfile
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeCapacityMutationResult":
+        raw_capacity = payload.get("capacity")
+        if not isinstance(raw_capacity, Mapping):
+            raise ValueError("Node capacity mutation capacity is invalid.")
+        return cls(
+            node=_required_string(payload, "node"),
+            message=_required_string(payload, "message"),
+            capacity=config.NodeCapacityProfile.model_validate(raw_capacity),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "message": self.message,
+            "capacity": self.capacity.model_dump(mode="json"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeFontSourceSettingsMutationResult:
+    node: str
+    message: str
+    settings: config.NodeFontSourceSettings
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeFontSourceSettingsMutationResult":
+        raw_settings = payload.get("settings")
+        if not isinstance(raw_settings, Mapping):
+            raise ValueError("Node font source settings mutation settings are invalid.")
+        return cls(
+            node=_required_string(payload, "node"),
+            message=_required_string(payload, "message"),
+            settings=config.NodeFontSourceSettings.model_validate(raw_settings),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "message": self.message,
+            "settings": self.settings.model_dump(mode="json"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeDiscordSettingsMutationResult:
+    node: str
+    message: str
+    settings: config.DiscordSettings
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeDiscordSettingsMutationResult":
+        raw_settings = payload.get("settings")
+        if not isinstance(raw_settings, Mapping):
+            raise ValueError("Node Discord settings mutation settings are invalid.")
+        return cls(
+            node=_required_string(payload, "node"),
+            message=_required_string(payload, "message"),
+            settings=config.DiscordSettings.model_validate(raw_settings),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "message": self.message,
+            "settings": self.settings.model_dump(mode="json"),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1099,8 +1235,14 @@ class NodeSystemSummary:
     storage_total_bytes: int | None
     bot_uptime_seconds: int | None = None
     uptime_seconds: int | None = None
+    cpu_points_available: int | None = None
+    cpu_points_capacity: int | None = None
+    ram_points_available: int | None = None
+    ram_points_capacity: int | None = None
     running_names: tuple[str, ...] = ()
     running_app_ids: tuple[str, ...] = ()
+    running_app_scopes: tuple[str, ...] = ()
+    start_blocked_app_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemSummary:
@@ -1120,6 +1262,22 @@ class NodeSystemSummary:
             if not isinstance(raw_app_id, str) or not raw_app_id:
                 raise ValueError("running_app_ids is invalid.")
             running_app_ids.append(raw_app_id)
+        raw_running_app_scopes = payload.get("running_app_scopes", ())
+        if not isinstance(raw_running_app_scopes, Sequence) or isinstance(raw_running_app_scopes, (str, bytes)):
+            raise ValueError("running_app_scopes is invalid.")
+        running_app_scopes: list[str] = []
+        for raw_scope in raw_running_app_scopes:
+            if not isinstance(raw_scope, str) or not raw_scope:
+                raise ValueError("running_app_scopes is invalid.")
+            running_app_scopes.append(raw_scope)
+        raw_start_blocked_app_ids = payload.get("start_blocked_app_ids", ())
+        if not isinstance(raw_start_blocked_app_ids, Sequence) or isinstance(raw_start_blocked_app_ids, (str, bytes)):
+            raise ValueError("start_blocked_app_ids is invalid.")
+        start_blocked_app_ids: list[str] = []
+        for raw_app_id in raw_start_blocked_app_ids:
+            if not isinstance(raw_app_id, str) or not raw_app_id:
+                raise ValueError("start_blocked_app_ids is invalid.")
+            start_blocked_app_ids.append(raw_app_id)
         return cls(
             cpu_percent=_optional_int(payload, "cpu_percent"),
             ram_percent=_optional_int(payload, "ram_percent"),
@@ -1130,8 +1288,14 @@ class NodeSystemSummary:
             storage_total_bytes=_optional_int(payload, "storage_total_bytes"),
             bot_uptime_seconds=_optional_int(payload, "bot_uptime_seconds"),
             uptime_seconds=_optional_int(payload, "uptime_seconds"),
+            cpu_points_available=_optional_int(payload, "cpu_points_available"),
+            cpu_points_capacity=_optional_int(payload, "cpu_points_capacity"),
+            ram_points_available=_optional_int(payload, "ram_points_available"),
+            ram_points_capacity=_optional_int(payload, "ram_points_capacity"),
             running_names=tuple(running_names),
             running_app_ids=tuple(running_app_ids),
+            running_app_scopes=tuple(running_app_scopes),
+            start_blocked_app_ids=tuple(start_blocked_app_ids),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1145,8 +1309,14 @@ class NodeSystemSummary:
             "storage_total_bytes": self.storage_total_bytes,
             "bot_uptime_seconds": self.bot_uptime_seconds,
             "uptime_seconds": self.uptime_seconds,
+            "cpu_points_available": self.cpu_points_available,
+            "cpu_points_capacity": self.cpu_points_capacity,
+            "ram_points_available": self.ram_points_available,
+            "ram_points_capacity": self.ram_points_capacity,
             "running_names": list(self.running_names),
             "running_app_ids": list(self.running_app_ids),
+            "running_app_scopes": list(self.running_app_scopes),
+            "start_blocked_app_ids": list(self.start_blocked_app_ids),
         }
 
 
@@ -2450,6 +2620,81 @@ class NodeApiService:
             self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
             return self.build_system_summary().to_mapping()
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/node-capacity")
+        async def _node_capacity(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API node capacity request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            return self.read_node_capacity().model_dump(mode="json")
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/node-capacity")
+        async def _update_node_capacity(
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API node capacity update request: node=%s", self.node_name)
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+                verified_grant=grant,
+            )
+            capacity = config.NodeCapacityProfile.model_validate(payload)
+            result = await self.mutate_node_capacity(capacity=capacity, actor_user_id=actor_user_id)
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/node-font-sources")
+        async def _node_font_sources(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API node font sources request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            return self.read_node_font_sources().model_dump(mode="json")
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/node-font-sources")
+        async def _update_node_font_sources(
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API node font sources update request: node=%s", self.node_name)
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+                verified_grant=grant,
+            )
+            settings = config.NodeFontSourceSettings.model_validate(payload)
+            result = await self.mutate_node_font_sources(settings=settings, actor_user_id=actor_user_id)
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/discord-settings")
+        async def _discord_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API Discord settings request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            return self.read_discord_settings().model_dump(mode="json")
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/discord-settings")
+        async def _update_discord_settings(
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Discord settings update request: node=%s", self.node_name)
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+                verified_grant=grant,
+            )
+            settings = config.DiscordSettings.model_validate(payload)
+            result = await self.mutate_discord_settings(settings=settings, actor_user_id=actor_user_id)
+            return result.to_mapping()
+
         @nicegui_app.websocket(f"{_NODE_API_PREFIX}/state/stream")
         async def _node_state_stream(
             websocket: WebSocket,
@@ -2802,10 +3047,15 @@ class NodeApiService:
                 action=mutation_request.action,
                 actor_user_id=actor_user_id,
                 friendly_name=mutation_request.friendly_name,
+                title_font_preset=mutation_request.title_font_preset,
                 notes=mutation_request.notes,
                 lifecycle_notice_started=mutation_request.lifecycle_notice_started,
                 lifecycle_notice_stopped=mutation_request.lifecycle_notice_stopped,
                 lifecycle_notice_crashed=mutation_request.lifecycle_notice_crashed,
+                running_cpu_points=mutation_request.running_cpu_points,
+                running_ram_points=mutation_request.running_ram_points,
+                startup_cpu_points=mutation_request.startup_cpu_points,
+                startup_ram_points=mutation_request.startup_ram_points,
             )
             return result.to_mapping()
 
@@ -3419,7 +3669,7 @@ class NodeApiService:
                     enabled=app.cfg.enabled,
                     supports_mods=app.mods is not None,
                     supports_configs=app.supports_config_files,
-                    scope=app_scope if isinstance(app_scope, str) else None,
+                    scope=app_scope if isinstance(app_scope, str) else app_scope_from_name(app.name),
                     transition_state=self._cached_app_transition_state(app.name),
                     player_count=player_count,
                     player_capacity=player_capacity,
@@ -3437,10 +3687,12 @@ class NodeApiService:
                     save_write_level=app.save_file_write_level,
                     color_hex=self.app_color_hex(app.manage_embed_color),
                     map_url=app.public_map_url,
-                    notes=app.cfg.notes,
-                    lifecycle_notice_started=app.cfg.lifecycle_notice_started,
-                    lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
-                    lifecycle_notice_crashed=app.cfg.lifecycle_notice_crashed,
+                    resource_points=self._app_resource_point_summary(app),
+                    title_font_preset=getattr(app.cfg, "title_font_preset", AppTitleFont.AUTO.value),
+                    notes=getattr(app.cfg, "notes", None),
+                    lifecycle_notice_started=getattr(app.cfg, "lifecycle_notice_started", True),
+                    lifecycle_notice_stopped=getattr(app.cfg, "lifecycle_notice_stopped", True),
+                    lifecycle_notice_crashed=getattr(app.cfg, "lifecycle_notice_crashed", True),
                 )
             )
         return tuple(entries)
@@ -3533,6 +3785,21 @@ class NodeApiService:
             raise ValueError(f"App color must be between 0x000000 and 0xFFFFFF, got {color!r}.")
         return f"#{color:06X}"
 
+    @staticmethod
+    def _app_resource_point_summary(app: App) -> NodeAppResourcePointSummary | None:
+        resource_points = getattr(getattr(app, "cfg", None), "resource_points", None)
+        running_points = getattr(resource_points, "running", None)
+        startup_points = getattr(resource_points, "startup_points", None)
+        if running_points is None or startup_points is None:
+            return None
+        return NodeAppResourcePointSummary(
+            cpu_points_running=getattr(running_points, "cpu_points", 0),
+            cpu_points_startup=getattr(startup_points, "cpu_points", 0),
+            ram_points_running=getattr(running_points, "ram_points", 0),
+            ram_points_startup=getattr(startup_points, "ram_points", 0),
+            startup_defined=getattr(resource_points, "startup", None) is not None,
+        )
+
     def build_system_summary(self) -> NodeSystemSummary:
         cpu_percent: int | None = None
         ram_percent: int | None = None
@@ -3543,8 +3810,14 @@ class NodeApiService:
         storage_total_bytes: int | None = None
         bot_uptime_seconds: int | None = None
         uptime_seconds: int | None = None
+        cpu_points_available: int | None = None
+        cpu_points_capacity: int | None = None
+        ram_points_available: int | None = None
+        ram_points_capacity: int | None = None
         running_names: tuple[str, ...] = ()
         running_app_ids: tuple[str, ...] = ()
+        running_app_scopes: tuple[str, ...] = ()
+        start_blocked_app_ids: tuple[str, ...] = ()
 
         try:
             system_stats: Stats_System = Stats_System()
@@ -3570,13 +3843,33 @@ class NodeApiService:
         except Exception as xcp:
             log.warning("Node API uptime probe failed: node=%s error=%s", self.node_name, xcp)
         if self._manager is not None:
+            try:
+                capacity = self._manager.node_capacity()
+                usage = self._manager.active_resource_point_usage()
+            except Exception as xcp:
+                log.warning("Node API resource point summary failed: node=%s error=%s", self.node_name, xcp)
+            else:
+                cpu_points_capacity = capacity.cpu_points_available
+                ram_points_capacity = capacity.ram_points_available
+                cpu_points_available = max(0, cpu_points_capacity - usage.cpu_points)
+                ram_points_available = max(0, ram_points_capacity - usage.ram_points)
             running_apps = tuple(
-                (app.name, app.friendly)
+                (
+                    app.name,
+                    app.friendly,
+                    app.scope if isinstance(getattr(app, "scope", None), str) else app_scope_from_name(app.name) or "",
+                )
                 for app in sorted(self._manager.apps.values(), key=lambda item: item.friendly.casefold())
                 if app.check_running()
             )
-            running_names = tuple(app_friendly for _app_name, app_friendly in running_apps)
-            running_app_ids = tuple(app_name for app_name, _app_friendly in running_apps)
+            running_names = tuple(app_friendly for _app_name, app_friendly, _app_scope in running_apps)
+            running_app_ids = tuple(app_name for app_name, _app_friendly, _app_scope in running_apps)
+            running_app_scopes = tuple(app_scope for _app_name, _app_friendly, app_scope in running_apps)
+            start_blocked_app_ids = tuple(
+                app.name
+                for app in sorted(self._manager.apps.values(), key=lambda item: item.friendly.casefold())
+                if not app.check_running() and self._manager.start_blocker(app, include_current_activity=False) is not None
+            )
 
         return NodeSystemSummary(
             cpu_percent=cpu_percent,
@@ -3588,8 +3881,14 @@ class NodeApiService:
             storage_total_bytes=storage_total_bytes,
             bot_uptime_seconds=bot_uptime_seconds,
             uptime_seconds=uptime_seconds,
+            cpu_points_available=cpu_points_available,
+            cpu_points_capacity=cpu_points_capacity,
+            ram_points_available=ram_points_available,
+            ram_points_capacity=ram_points_capacity,
             running_names=running_names,
             running_app_ids=running_app_ids,
+            running_app_scopes=running_app_scopes,
+            start_blocked_app_ids=start_blocked_app_ids,
         )
 
     @staticmethod
@@ -4779,17 +5078,22 @@ class NodeApiService:
         action: NodeAppMutationAction,
         actor_user_id: int,
         friendly_name: str | None = None,
+        title_font_preset: str | None = None,
         notes: str | None = None,
         lifecycle_notice_started: bool | None = None,
         lifecycle_notice_stopped: bool | None = None,
         lifecycle_notice_crashed: bool | None = None,
+        running_cpu_points: int | None = None,
+        running_ram_points: int | None = None,
+        startup_cpu_points: int | None = None,
+        startup_ram_points: int | None = None,
     ) -> NodeAppMutationResult:
         await self._require_acl().perm_check(actor_user_id, required_app_mutation_level(action))
         manager: App_Manager = self._require_manager()
         if action is NodeAppMutationAction.START:
-            blocked_by: str | None = self._running_blocker_name(app)
-            if blocked_by is not None:
-                raise _http_exception(409, f"Blocked by running app: {blocked_by}")
+            blocker = manager.start_blocker(app)
+            if blocker is not None:
+                raise _http_exception(409, blocker.message)
             self._track_app_mutation_task(
                 app_name=app.name,
                 action=action,
@@ -4837,14 +5141,23 @@ class NodeApiService:
                 raise ValueError("Stopped lifecycle notice flag must not be empty.")
             if lifecycle_notice_crashed is None:
                 raise ValueError("Crash lifecycle notice flag must not be empty.")
+            if running_cpu_points is None:
+                raise ValueError("Running CPU points must not be empty.")
+            if running_ram_points is None:
+                raise ValueError("Running RAM points must not be empty.")
             manager.update_app_details(
                 app,
                 AppDetailsUpdate(
                     friendly_name=friendly_name,
+                    title_font_preset=title_font_preset,
                     notes=notes,
                     lifecycle_notice_started=lifecycle_notice_started,
                     lifecycle_notice_stopped=lifecycle_notice_stopped,
                     lifecycle_notice_crashed=lifecycle_notice_crashed,
+                    running_cpu_points=running_cpu_points,
+                    running_ram_points=running_ram_points,
+                    startup_cpu_points=startup_cpu_points,
+                    startup_ram_points=startup_ram_points,
                 ),
             )
             message = f"Updated details for {app.friendly}."
@@ -4866,6 +5179,72 @@ class NodeApiService:
             action=action,
             message=message,
             app_stats=app_stats,
+        )
+
+    def read_node_capacity(self) -> config.NodeCapacityProfile:
+        manager = self._require_manager()
+        return manager.node_capacity()
+
+    def read_node_font_sources(self) -> config.NodeFontSourceSettings:
+        manager = self._require_manager()
+        return manager.node_font_sources()
+
+    def read_discord_settings(self) -> config.DiscordSettings:
+        manager = self._require_manager()
+        return manager.discord_settings()
+
+    async def mutate_node_capacity(
+        self,
+        *,
+        capacity: config.NodeCapacityProfile,
+        actor_user_id: int,
+    ) -> NodeCapacityMutationResult:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        manager = self._require_manager()
+        updated_capacity = manager.set_node_capacity(capacity)
+        return NodeCapacityMutationResult(
+            node=self.node_name,
+            message=f"Updated node capacity for {self.node_name}.",
+            capacity=updated_capacity,
+        )
+
+    async def mutate_node_font_sources(
+        self,
+        *,
+        settings: config.NodeFontSourceSettings,
+        actor_user_id: int,
+    ) -> NodeFontSourceSettingsMutationResult:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        manager = self._require_manager()
+        updated_settings = manager.set_node_font_sources(settings)
+        font_assets.schedule_startup_refresh(google_font_urls=updated_settings.google_font_urls)
+        return NodeFontSourceSettingsMutationResult(
+            node=self.node_name,
+            message=f"Updated node font sources for {self.node_name}.",
+            settings=updated_settings,
+        )
+
+    async def mutate_discord_settings(
+        self,
+        *,
+        settings: config.DiscordSettings,
+        actor_user_id: int,
+    ) -> NodeDiscordSettingsMutationResult:
+        manager = self._require_manager()
+        current_settings = manager.discord_settings()
+        required_level = (
+            Power_Level.root
+            if current_settings.activity.refresh_interval_seconds != settings.activity.refresh_interval_seconds
+            else Power_Level.sudo
+        )
+        await self._require_acl().perm_check(actor_user_id, required_level)
+        updated_settings = manager.set_discord_settings(settings)
+        if manager.activity_manager is not None:
+            await manager.activity_manager.refresh()
+        return NodeDiscordSettingsMutationResult(
+            node=self.node_name,
+            message=f"Updated Discord settings for {self.node_name}.",
+            settings=updated_settings,
         )
 
     async def build_mod_download_response(self, *, app: App, request: NodeDownloadRequest) -> FileResponse:
@@ -6202,10 +6581,11 @@ class NodeApiService:
 
     def _running_blocker_name(self, app: App) -> str | None:
         manager = self._require_manager()
-        current = manager.get_current
-        if current is None or not current.check_running() or current.name == app.name:
+        blocker = manager.start_blocker(app, include_current_activity=False)
+        friendly_name = blocker.blocking_app_friendly if blocker is not None else None
+        if blocker is None or not isinstance(friendly_name, str) or not friendly_name.strip():
             return None
-        return current.friendly
+        return friendly_name
 
     @staticmethod
     def _settings_for_app(app: App) -> tuple[Setting[object], ...]:

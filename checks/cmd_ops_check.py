@@ -22,8 +22,8 @@ async def test_restart_host_or_bot_persists_current_app_when_requested() -> None
     acl = SimpleNamespace(perm_check=AsyncMock())
     bot = Mock()
     manager = Mock()
-    manager.set_current_restart_auto_start_app = Mock(return_value="minecraft_alpha")
-    manager.set_restart_auto_start_app = Mock()
+    manager.set_running_restart_auto_start_apps = Mock(return_value=("minecraft_alpha",))
+    manager.set_restart_auto_start_apps = Mock()
 
     with patch("cmd_ops._sys.restart", new=AsyncMock()) as restart_mock:
         await cmd_ops.restart_host_or_bot(
@@ -37,8 +37,8 @@ async def test_restart_host_or_bot_persists_current_app_when_requested() -> None
         )
 
     acl.perm_check.assert_awaited_once_with(1234, cmd_ops.restart_required_level(RestartTarget.BOT))
-    manager.set_current_restart_auto_start_app.assert_called_once_with()
-    manager.set_restart_auto_start_app.assert_not_called()
+    manager.set_running_restart_auto_start_apps.assert_called_once_with()
+    manager.set_restart_auto_start_apps.assert_not_called()
     ctx.defer.assert_awaited_once_with()
     restart_mock.assert_awaited_once_with(ctx, bot, manager, RestartTarget.BOT.value, False)
 
@@ -49,8 +49,8 @@ async def test_restart_host_or_bot_clears_auto_restart_state_by_default() -> Non
     acl = SimpleNamespace(perm_check=AsyncMock())
     bot = Mock()
     manager = Mock()
-    manager.set_current_restart_auto_start_app = Mock()
-    manager.set_restart_auto_start_app = Mock(return_value=None)
+    manager.set_running_restart_auto_start_apps = Mock()
+    manager.set_restart_auto_start_apps = Mock(return_value=())
 
     with patch("cmd_ops._sys.restart", new=AsyncMock()) as restart_mock:
         await cmd_ops.restart_host_or_bot(
@@ -64,8 +64,8 @@ async def test_restart_host_or_bot_clears_auto_restart_state_by_default() -> Non
         )
 
     acl.perm_check.assert_awaited_once_with(1234, cmd_ops.restart_required_level(RestartTarget.SYSTEM))
-    manager.set_current_restart_auto_start_app.assert_not_called()
-    manager.set_restart_auto_start_app.assert_called_once_with(None)
+    manager.set_running_restart_auto_start_apps.assert_not_called()
+    manager.set_restart_auto_start_apps.assert_called_once_with(())
     ctx.defer.assert_awaited_once_with()
     restart_mock.assert_awaited_once_with(ctx, bot, manager, RestartTarget.SYSTEM.value, True)
 

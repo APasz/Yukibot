@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import hikari
 
+import config
 from online import ActivityChange, Online_Tracker, PresenceSnapshot
 
 
@@ -32,6 +33,57 @@ def _presence(
 
 
 class OnlineTrackerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        config.Singleton._instances.pop(Online_Tracker, None)
+
+    def tearDown(self) -> None:
+        config.Singleton._instances.pop(Online_Tracker, None)
+
+    async def test_hydrated_cached_presence_provides_baseline_for_first_post_boot_transition(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tracker = Online_Tracker(Path(tmp) / "online_watch.json")
+            watcher_id = hikari.Snowflake(100)
+            target_id = hikari.Snowflake(200)
+            tracker.ensure_rule(watcher_id, target_id)
+            tracker._notify = AsyncMock()
+            tracker.ready_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            bot = cast(
+                hikari.GatewayBot,
+                SimpleNamespace(
+                    cache=SimpleNamespace(
+                        get_presence=lambda guild_id, user_id: _presence(
+                            user_id=int(user_id),
+                            status="online",
+                            desktop="online",
+                        )
+                    )
+                ),
+            )
+
+            hydrated_count = tracker.hydrate_cached_presences(bot)
+
+            self.assertEqual(hydrated_count, 1)
+            event = SimpleNamespace(
+                presence=_presence(user_id=int(target_id), status="offline"),
+                old_presence=None,
+            )
+
+            await tracker.on_presence_update(
+                cast(hikari.PresenceUpdateEvent, event),
+                bot,
+                None,
+            )
+
+            tracker._notify.assert_awaited_once()
+            await_args = tracker._notify.await_args
+            self.assertIsNotNone(await_args)
+            assert await_args is not None
+            args = await_args.args
+            kwargs = await_args.kwargs
+            self.assertEqual(args[1], watcher_id)
+            self.assertEqual(args[2], [f"⚪ ❔ <@{int(target_id)}> offline"])
+            self.assertTrue(kwargs["silent"])
+
     async def test_first_observed_transition_is_flushed_after_ready_delay(self) -> None:
         with TemporaryDirectory() as tmp:
             tracker = Online_Tracker(Path(tmp) / "online_watch.json")
