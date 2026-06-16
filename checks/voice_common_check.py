@@ -7,6 +7,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
 from hikariwave.connection import ConnectionState, VoiceConnection
+from hikariwave.networking.server import Protocol as VoiceDiscoveryProtocol
 
 from voice_common import VoiceUdpDiscoveryTimeoutError, _await_voice_connect_ready
 
@@ -67,6 +68,17 @@ class _FakeVoiceConnection:
 
 
 class VoiceCommonPatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_patched_udp_protocol_error_received_sets_pending_future_exception(self) -> None:
+        future: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+        protocol = VoiceDiscoveryProtocol(future, lambda _data: None)
+        error = OSError("UDP discovery failed")
+
+        protocol.error_received(error)
+
+        self.assertTrue(future.done())
+        with self.assertRaises(OSError):
+            future.result()
+
     async def test_await_voice_connect_ready_propagates_listener_failure(self) -> None:
         ready = asyncio.Event()
 

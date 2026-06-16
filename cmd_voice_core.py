@@ -55,7 +55,7 @@ from cmd_voice_common import (
     VoiceRuntimeResetResult,
     log,
 )
-from voice_common import VoiceUdpDiscoveryTimeoutError, cached_voice_channel_occupants
+from voice_common import VoiceUdpDiscoveryNetworkError, VoiceUdpDiscoveryTimeoutError, cached_voice_channel_occupants
 
 tts_log = logging.getLogger(config.LOGGER_TTS)
 
@@ -748,6 +748,8 @@ class VoiceTTSCoreMixin:
     def _voice_connect_failure_reason(self, error: Exception) -> tuple[str, float]:
         if isinstance(error, VoiceUdpDiscoveryTimeoutError):
             return "udp_discovery_timeout", self._VOICE_UDP_DISCOVERY_COOLDOWN_SECONDS
+        if isinstance(error, VoiceUdpDiscoveryNetworkError):
+            return "udp_discovery_network_error", self._VOICE_UDP_DISCOVERY_COOLDOWN_SECONDS
         if isinstance(error, asyncio.TimeoutError):
             return "connect_timeout", self._VOICE_CONNECT_FAILURE_COOLDOWN_SECONDS
         return "connect_failed", self._VOICE_CONNECT_FAILURE_COOLDOWN_SECONDS

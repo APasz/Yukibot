@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import io
 import logging
+import struct
 import wave
 from collections.abc import Awaitable, Mapping
 from typing import Callable, Protocol, cast
@@ -14,6 +15,13 @@ import hikari
 log = logging.getLogger(__name__)
 
 _patches_applied = False
+_VOICE_UDP_DISCOVERY_ATTEMPTS = 3
+_VOICE_UDP_DISCOVERY_TIMEOUT_SECONDS = 5.0
+_VOICE_UDP_DISCOVERY_RETRY_DELAY_STEP_SECONDS = 0.25
+_VOICE_UDP_DISCOVERY_PACKET_LENGTH = 70
+_VOICE_UDP_DISCOVERY_REQUEST_TYPE = 0x0001
+_VOICE_UDP_DISCOVERY_RESPONSE_TYPE = 0x0002
+_VOICE_UDP_DISCOVERY_RESPONSE_MIN_LENGTH = 74
 
 
 class _VoiceBotLike(Protocol):
@@ -94,7 +102,10 @@ class _UdpTransportLike(Protocol):
 class _VoiceServerLike(Protocol):
     _ip: str | None
     _port: int | None
+    _ssrc: int | None
     _udp: _UdpTransportLike | None
+
+    def _rtp_packet(self, data: bytes) -> None: ...
 
 
 class VoiceUdpDiscoveryTimeoutError(asyncio.TimeoutError):
@@ -105,6 +116,18 @@ class VoiceUdpDiscoveryTimeoutError(asyncio.TimeoutError):
         super().__init__(f"Voice UDP discovery timed out after {attempts} attempts (ip={ip!r} port={port!r})")
 
 
+class VoiceUdpDiscoveryNetworkError(OSError):
+    def __init__(self, *, ip: str | None, port: int | None, attempts: int, cause: OSError):
+        self.ip = ip
+        self.port = port
+        self.attempts = attempts
+        self.cause = cause
+        super().__init__(
+            f"Voice UDP discovery failed after {attempts} attempts "
+            f"(ip={ip!r} port={port!r}): {type(cause).__name__}: {cause}"
+        )
+
+
 def apply_hikariwave_patches() -> None:
     global _patches_applied
     if _patches_applied:
@@ -112,6 +135,7 @@ def apply_hikariwave_patches() -> None:
 
     _patch_hikariwave_cache_state_update_bug()
     _patch_hikariwave_connect_wait_hang()
+    _patch_hikariwave_udp_protocol_error_bug()
     _patch_hikariwave_udp_discovery_timeout()
     _patch_hikariwave_player_idle_queue_race()
     _patches_applied = True
@@ -315,9 +339,10 @@ def _patch_hikariwave_connect_wait_hang() -> None:
 
 
 def _patch_hikariwave_udp_discovery_timeout() -> None:
-    """Retry UDP IP discovery to avoid transient 3s timeout failures during voice connect."""
+    """Retry UDP IP discovery and surface UDP socket failures instead of silent timeouts."""
     try:
-        from hikariwave.networking.server import VoiceServer
+        from hikariwave.internal.error import ServerError
+        from hikariwave.networking.server import Protocol as VoiceProtocol, VoiceServer
     except Exception as xcp:
         log.warning(f"Voice workaround skipped: couldn't import hikariwave voice server module: {xcp}")
         return
@@ -330,39 +355,131 @@ def _patch_hikariwave_udp_discovery_timeout() -> None:
         return
     discover_ip = cast(Callable[[_VoiceServerLike], Awaitable[tuple[str, int]]], discover_ip_obj)
 
+    def _close_udp_transport(server: _VoiceServerLike) -> None:
+        udp = server._udp
+        if udp is None:
+            return
+        with contextlib.suppress(Exception):
+            udp.close()
+        server._udp = None
+
+    async def _discover_ip_once(self: _VoiceServerLike) -> tuple[str, int]:
+        ip = self._ip
+        port = self._port
+        ssrc = self._ssrc
+        if not ip or port is None or ssrc is None:
+            raise RuntimeError("Voice UDP discovery requires IP, port, and SSRC to be populated.")
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[bytes] = loop.create_future()
+        rtp_listener = cast(Callable[[int], None], cast(object, self._rtp_packet))
+
+        udp, _ = await loop.create_datagram_endpoint(
+            lambda: VoiceProtocol(future, rtp_listener),
+            remote_addr=(ip, port),
+        )
+        self._udp = cast(_UdpTransportLike, udp)
+
+        packet = struct.pack(
+            "!HHI",
+            _VOICE_UDP_DISCOVERY_REQUEST_TYPE,
+            _VOICE_UDP_DISCOVERY_PACKET_LENGTH,
+            ssrc,
+        ) + bytes(_VOICE_UDP_DISCOVERY_PACKET_LENGTH)
+        udp.sendto(packet)
+
+        data = await asyncio.wait_for(future, _VOICE_UDP_DISCOVERY_TIMEOUT_SECONDS)
+        if len(data) < _VOICE_UDP_DISCOVERY_RESPONSE_MIN_LENGTH:
+            raise ServerError(
+                "Expected IP discovery packet "
+                f"of at least {_VOICE_UDP_DISCOVERY_RESPONSE_MIN_LENGTH} bytes, got {len(data)}"
+            )
+
+        packet_type = cast(int, struct.unpack("!H", data[0:2])[0])
+        if packet_type != _VOICE_UDP_DISCOVERY_RESPONSE_TYPE:
+            raise ServerError(f"Expected packet type {_VOICE_UDP_DISCOVERY_RESPONSE_TYPE}, got {packet_type}")
+
+        packet_length = cast(int, struct.unpack("!H", data[2:4])[0])
+        if packet_length != _VOICE_UDP_DISCOVERY_PACKET_LENGTH:
+            raise ServerError(
+                f"Expected packet length of {_VOICE_UDP_DISCOVERY_PACKET_LENGTH}, got {packet_length}"
+            )
+
+        external_ip = data[8:72].split(b"\x00", 1)[0].decode("ascii")
+        external_port = cast(int, struct.unpack("!H", data[72:74])[0])
+        return external_ip, external_port
+
     async def _patched_discover_ip(self: _VoiceServerLike) -> tuple[str, int]:
         last_timeout: asyncio.TimeoutError | None = None
-        for attempt in range(1, 4):
+        last_network_error: OSError | None = None
+        for attempt in range(1, _VOICE_UDP_DISCOVERY_ATTEMPTS + 1):
+            attempt_failed = False
             try:
-                return await discover_ip(self)
+                return await _discover_ip_once(self)
             except asyncio.TimeoutError as xcp:
+                attempt_failed = True
                 last_timeout = xcp
                 log.warning(
-                    f"Voice UDP discovery timeout attempt={attempt}/3 "
+                    f"Voice UDP discovery timeout attempt={attempt}/{_VOICE_UDP_DISCOVERY_ATTEMPTS} "
                     f"ip={getattr(self, '_ip', None)!r} port={getattr(self, '_port', None)!r}"
                 )
-                udp = self._udp
-                if udp:
-                    with contextlib.suppress(Exception):
-                        udp.close()
-                    self._udp = None
-                if attempt < 3:
-                    await asyncio.sleep(0.25 * attempt)
+            except OSError as xcp:
+                attempt_failed = True
+                last_network_error = xcp
+                log.warning(
+                    f"Voice UDP discovery socket failure attempt={attempt}/{_VOICE_UDP_DISCOVERY_ATTEMPTS} "
+                    f"ip={getattr(self, '_ip', None)!r} port={getattr(self, '_port', None)!r} "
+                    f"error={type(xcp).__name__}: {xcp}"
+                )
+            finally:
+                if attempt_failed and self._udp is not None:
+                    _close_udp_transport(self)
+
+            if attempt < _VOICE_UDP_DISCOVERY_ATTEMPTS:
+                await asyncio.sleep(_VOICE_UDP_DISCOVERY_RETRY_DELAY_STEP_SECONDS * attempt)
 
         if last_timeout:
             raise VoiceUdpDiscoveryTimeoutError(
                 ip=getattr(self, "_ip", None),
                 port=getattr(self, "_port", None),
-                attempts=3,
+                attempts=_VOICE_UDP_DISCOVERY_ATTEMPTS,
             ) from last_timeout
-        raise VoiceUdpDiscoveryTimeoutError(
-            ip=getattr(self, "_ip", None),
-            port=getattr(self, "_port", None),
-            attempts=3,
-        )
+        if last_network_error:
+            raise VoiceUdpDiscoveryNetworkError(
+                ip=getattr(self, "_ip", None),
+                port=getattr(self, "_port", None),
+                attempts=_VOICE_UDP_DISCOVERY_ATTEMPTS,
+                cause=last_network_error,
+            ) from last_network_error
+        return await discover_ip(self)
 
     setattr(VoiceServer, discover_name, _patched_discover_ip)
     log.warning("Applied hikari-wave UDP discovery timeout workaround")
+
+
+def _patch_hikariwave_udp_protocol_error_bug() -> None:
+    """Propagate UDP socket errors to discovery callers instead of stalling until timeout."""
+    try:
+        from hikariwave.networking.server import Protocol as VoiceProtocol
+    except Exception as xcp:
+        log.warning(f"Voice workaround skipped: couldn't import hikariwave voice protocol module: {xcp}")
+        return
+
+    error_received_name = "error_received"
+    error_received_obj = getattr(VoiceProtocol, error_received_name, None)
+    if not callable(error_received_obj):
+        return
+    if getattr(error_received_obj, "__name__", "") == "_patched_error_received":
+        return
+
+    def _patched_error_received(self: object, exc: Exception) -> None:
+        future = cast(asyncio.Future[bytes] | None, getattr(self, "_ip_discover_future", None))
+        if future is None or future.done():
+            return
+        future.set_exception(exc)
+
+    setattr(VoiceProtocol, error_received_name, _patched_error_received)
+    log.warning("Applied hikari-wave UDP discovery socket-error workaround")
 
 
 def _patch_hikariwave_player_idle_queue_race() -> None:

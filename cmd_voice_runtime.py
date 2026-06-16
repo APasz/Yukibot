@@ -46,7 +46,11 @@ from cmd_voice_common import (
     VoiceLinkRules,
     log,
 )
-from voice_common import wav_audio_duration_seconds
+from voice_common import (
+    VoiceUdpDiscoveryNetworkError,
+    VoiceUdpDiscoveryTimeoutError,
+    wav_audio_duration_seconds,
+)
 
 tts_log = logging.getLogger(config.LOGGER_TTS)
 
@@ -993,6 +997,18 @@ class VoiceTTSRuntimeMixin:
                     )
                 self._clear_voice_connect_backoff(guild_id)
                 return connected
+            except VoiceUdpDiscoveryTimeoutError as xcp:
+                last_xcp = xcp
+                log.warning(
+                    f"TTS connect attempt failed {guild_id=} attempt={attempt} "
+                    f"reason=udp_discovery_timeout detail={xcp}"
+                )
+            except VoiceUdpDiscoveryNetworkError as xcp:
+                last_xcp = xcp
+                log.warning(
+                    f"TTS connect attempt failed {guild_id=} attempt={attempt} "
+                    f"reason=udp_discovery_network_error detail={xcp}"
+                )
             except asyncio.TimeoutError as xcp:
                 last_xcp = xcp
                 log.warning(
