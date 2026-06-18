@@ -19,11 +19,13 @@ from apps._app import App, AppRuntimeFaultKind
 from apps._config import (
     App_Config,
     RelayChannelSource,
+    SteamUpdateConfig,
     normalise_app_title_font,
     normalise_optional_channel_id,
     normalise_optional_channel_ids,
     normalise_optional_friendly_name,
     normalise_optional_text,
+    steam_update_preset_for_scope,
 )
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatHub
 from config import Activity_Manager, Activity_Provider
@@ -84,6 +86,8 @@ class AppDetailsUpdate:
     startup_cpu_points: int | None
     startup_ram_points: int | None
     title_font_preset: str | None = None
+    steam_update_enabled: bool | None = None
+    steam_update_selected_branch: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +97,7 @@ class AppInstanceTemplate:
     join_port: int | None = None
     api_host: str | None = None
     api_port: int | None = None
+    steam_update: SteamUpdateConfig | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {}
@@ -106,6 +111,8 @@ class AppInstanceTemplate:
             payload["api_host"] = self.api_host
         if self.api_port is not None:
             payload["api_port"] = self.api_port
+        if self.steam_update is not None:
+            payload["steam_update"] = self.steam_update.model_dump(mode="json", exclude_none=True)
         return payload
 
 
@@ -116,6 +123,13 @@ class StartupDisabledAppNotice:
 
     def format_line(self) -> str:
         return f"Auto-disabled: {self.app_name} ({self.reason})"
+
+
+def _required_scope_steam_update_template(scope: str) -> SteamUpdateConfig:
+    preset = steam_update_preset_for_scope(scope)
+    if preset is None:
+        raise ValueError(f"Steam update preset is not defined for scope {scope!r}.")
+    return preset.build_config()
 
 
 _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
@@ -140,11 +154,13 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
     "satisfactory": AppInstanceTemplate(
         join_port=7777,
         api_host="127.0.0.1",
+        steam_update=_required_scope_steam_update_template("satisfactory"),
     ),
     "sevendays": AppInstanceTemplate(
         mods_dir="{WD}/Mods",
         server_log_file="{WD}/server_stdout.log",
         join_port=26900,
+        steam_update=_required_scope_steam_update_template("sevendays"),
     ),
 }
 
@@ -706,6 +722,7 @@ class App_Manager(metaclass=config.Singleton):
     def update_app_details(self, name: str | ManagedApp, details: AppDetailsUpdate) -> str:
         app = name if isinstance(name, App) else self.get(name)
         previous_friendly_name: str = app.friendly
+        previous_steam_update = app.cfg.steam_update
         next_friendly_name = _validate_required_friendly_name(details.friendly_name)
         next_title_font_preset = (
             app.cfg.title_font_preset
@@ -713,6 +730,12 @@ class App_Manager(metaclass=config.Singleton):
             else normalise_app_title_font(details.title_font_preset)
         )
         next_notes: str | None = normalise_optional_text(details.notes)
+        next_steam_update = self._resolve_next_steam_update_config(app=app, details=details)
+        self._validate_steam_update_change_allowed(
+            app=app,
+            previous_steam_update=previous_steam_update,
+            next_steam_update=next_steam_update,
+        )
         running_points = config.ResourcePointSet(
             cpu_points=details.running_cpu_points,
             ram_points=details.running_ram_points,
@@ -741,6 +764,7 @@ class App_Manager(metaclass=config.Singleton):
             previous_friendly_name == next_friendly_name
             and app.cfg.title_font_preset == next_title_font_preset
             and app.cfg.notes == next_notes
+            and previous_steam_update == next_steam_update
         ):
             if (
                 app.cfg.lifecycle_notice_started is details.lifecycle_notice_started
@@ -771,6 +795,10 @@ class App_Manager(metaclass=config.Singleton):
         if startup_points is not None:
             next_resource_points_payload["startup"] = startup_points.model_dump(mode="json")
         next_payload["resource_points"] = next_resource_points_payload
+        if next_steam_update is None:
+            next_payload.pop("steam_update", None)
+        else:
+            next_payload["steam_update"] = next_steam_update.model_dump(mode="json", exclude_none=True)
         raw[app.cfg.instance_key] = next_payload
         self._write_json_object(instances_path, raw)
         app.cfg.friendly_name = next_friendly_name
@@ -781,7 +809,13 @@ class App_Manager(metaclass=config.Singleton):
         app.cfg.lifecycle_notice_crashed = details.lifecycle_notice_crashed
         app.cfg.resource_points.running = running_points
         app.cfg.resource_points.startup = startup_points
+        app.cfg.steam_update = next_steam_update
         app.friendly = next_friendly_name
+        self._sync_app_steam_updater(
+            app=app,
+            previous_steam_update=previous_steam_update,
+            next_steam_update=next_steam_update,
+        )
         self._replace_friendly_lookup_aliases(app=app, previous_friendly_name=previous_friendly_name)
         ChatHub().bind(app.name, ChatEndpoint(ChatEndpointId.app(app.name), next_friendly_name))
         log.info(
@@ -791,6 +825,74 @@ class App_Manager(metaclass=config.Singleton):
             next_title_font_preset,
         )
         return next_friendly_name
+
+    @staticmethod
+    def _resolve_next_steam_update_config(*, app: ManagedApp, details: AppDetailsUpdate) -> SteamUpdateConfig | None:
+        current_steam_update = app.cfg.steam_update
+        if details.steam_update_enabled is None:
+            return current_steam_update
+        if not details.steam_update_enabled:
+            return None
+        selected_branch = details.steam_update_selected_branch
+        if current_steam_update is not None:
+            if selected_branch is None:
+                return current_steam_update
+            return current_steam_update.model_copy(update={"selected_branch": selected_branch})
+        preset = steam_update_preset_for_scope(app.scope)
+        if preset is None:
+            raise ValueError(f"{app.friendly} does not support Steam update configuration.")
+        return preset.build_config(selected_branch=selected_branch)
+
+    @staticmethod
+    def _steam_update_runtime_rebuild_required(
+        *,
+        previous_steam_update: SteamUpdateConfig | None,
+        next_steam_update: SteamUpdateConfig | None,
+    ) -> bool:
+        if previous_steam_update is None or next_steam_update is None:
+            return previous_steam_update != next_steam_update
+        return (
+            previous_steam_update.app_id != next_steam_update.app_id
+            or previous_steam_update.steamcmd_executable != next_steam_update.steamcmd_executable
+            or previous_steam_update.login != next_steam_update.login
+            or previous_steam_update.branches != next_steam_update.branches
+        )
+
+    @staticmethod
+    def _validate_steam_update_change_allowed(
+        *,
+        app: ManagedApp,
+        previous_steam_update: SteamUpdateConfig | None,
+        next_steam_update: SteamUpdateConfig | None,
+    ) -> None:
+        if app.updater is None:
+            return
+        current_status = app.updater.status()
+        if current_status is None or not current_status.running:
+            return
+        if previous_steam_update != next_steam_update:
+            raise ValueError("Cannot change Steam update configuration while an update is running.")
+
+    def _sync_app_steam_updater(
+        self,
+        *,
+        app: ManagedApp,
+        previous_steam_update: SteamUpdateConfig | None,
+        next_steam_update: SteamUpdateConfig | None,
+    ) -> None:
+        if steam_update_preset_for_scope(app.scope) is None:
+            return
+        if next_steam_update is None:
+            app.updater = None
+            return
+        if app.updater is not None and not self._steam_update_runtime_rebuild_required(
+            previous_steam_update=previous_steam_update,
+            next_steam_update=next_steam_update,
+        ):
+            return
+        from apps._updater import SteamCmd_Update_Manager
+
+        app.updater = SteamCmd_Update_Manager(app)
 
     def set_app_friendly_name(self, name: str | ManagedApp, friendly_name: str) -> str:
         app = name if isinstance(name, App) else self.get(name)

@@ -15,7 +15,6 @@ from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
 import requests
-from font_assets import FontAssetEntry, font_assets
 from aiohttp.client_reqrep import RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from nicegui.elements.link import Link
@@ -26,6 +25,14 @@ from _minecraft_heads import minecraft_dev_bypass_head_data_uri
 from _security import Access_Control, Power_Level
 from apps._app import AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
 from apps._config import AppTitleFont, ModType
+from apps._updater import (
+    AppUpdateBranchState,
+    AppUpdateInfo,
+    AppUpdateOperationKind,
+    AppUpdateProviderKind,
+    AppUpdateState,
+    AppUpdateStatus,
+)
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
     ChatAttachment,
@@ -42,6 +49,7 @@ from chat_hub import (
     ChatReferenceKind,
 )
 from config import BotConfiguration, BotMetadataSnapshot, ModWebServerConfig
+from font_assets import FontAssetEntry, font_assets
 from mod_web_auth import ModWebUser
 from node_api import (
     ConsoleResponseSource,
@@ -90,6 +98,7 @@ from relay_notices import (
     RelayNoticeSource,
 )
 from web_dash.home import _ModWebNodeLatencyBadgeSpec
+from web_dash.models import _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
 from web_dash.nicegui_protocols import ModWebUi
 from web_dash.service import ModWebService
 from web_dash.types import (
@@ -274,6 +283,7 @@ class ModWebTests(unittest.TestCase):
         permission_level_name: str | None = None,
         default_text: str = "",
         description: str | None = None,
+        paragraph: bool = False,
         is_sensitive: bool = False,
         value_text: str = "",
         revealed_value_text: str = "",
@@ -297,6 +307,7 @@ class ModWebTests(unittest.TestCase):
             permission_level_name=resolved_permission_level_name,
             default_text=default_text,
             description=description,
+            paragraph=paragraph,
             is_sensitive=is_sensitive,
             value_text=value_text,
             revealed_value_text=revealed_value_text,
@@ -885,6 +896,49 @@ class ModWebTests(unittest.TestCase):
             "This node is taking too long to respond. It may be offline or still waking up.",
         )
 
+    def test_remote_save_delete_uses_delete_request(self) -> None:
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "app_name": "sevendays_alpha",
+            "app_friendly": "7D2D Alpha",
+            "node": "erin",
+            "message": "Deleted save `AlphaWorld` for 7D2D Alpha.",
+            "save": {
+                "id": "save-abcd1234/AlphaWorld",
+                "label": "AlphaWorld",
+                "relative_path": "AlphaWorld",
+                "root_id": "save-abcd1234",
+                "root_label": "Navezgane",
+                "kind": "directory",
+                "size_bytes": 0,
+                "size_text": "0 B",
+                "modified_at": "2026-06-17 12:00:00",
+                "can_delete": True,
+            },
+        }
+
+        with (
+            patch.object(ModWebService, "_remote_token", return_value="test-token"),
+            patch("web_dash.models.requests.delete", return_value=response) as delete_request,
+        ):
+            result = ModWebService()._remote_save_delete(node, "sevendays_alpha", "save-abcd1234/AlphaWorld", user)
+
+        self.assertEqual(result.save.label, "AlphaWorld")
+        delete_request.assert_called_once_with(
+            "https://erin.example/api/node/apps/sevendays_alpha/saves/save-abcd1234/AlphaWorld",
+            headers={"Authorization": "Bearer test-token"},
+            timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+        )
+
     def test_login_node_status_badge_marks_current_node_alive(self) -> None:
         status = ModWebNodeStatus(
             node=ModWebNodeLink(
@@ -978,6 +1032,300 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ModWebService._format_uptime_seconds(59), "<1m")
         self.assertEqual(ModWebService._format_uptime_seconds(3661), "1h 1m")
         self.assertEqual(ModWebService._format_uptime_seconds(90061), "1d 1h 1m")
+
+    def test_format_update_timestamp_uses_utc(self) -> None:
+        self.assertEqual(
+            ModWebService._format_update_timestamp(0),
+            "1970-01-01 00:00:00 UTC",
+        )
+
+    def test_format_update_duration_compacts_running_and_completed_attempts(self) -> None:
+        self.assertEqual(
+            ModWebService._format_update_duration(started_at_unix_ms=0, finished_at_unix_ms=59_000),
+            "59s",
+        )
+        self.assertEqual(
+            ModWebService._format_update_duration(started_at_unix_ms=0, finished_at_unix_ms=125_000),
+            "2m 5s",
+        )
+        self.assertEqual(
+            ModWebService._format_update_duration(started_at_unix_ms=0, finished_at_unix_ms=3_661_000),
+            "1h 1m",
+        )
+
+    def test_prefer_newer_update_status_keeps_running_state_over_older_idle_snapshot(self) -> None:
+        current_status = AppUpdateStatus(
+            state=AppUpdateState.RUNNING,
+            summary="Downloading",
+            operation_kind=AppUpdateOperationKind.UPDATE,
+            progress_percent=24.0,
+            started_at_unix_ms=2_000,
+        )
+        next_status = AppUpdateStatus(
+            state=AppUpdateState.IDLE,
+            summary="Ready",
+        )
+
+        preferred = ModWebService._prefer_newer_update_status(current_status, next_status)
+
+        self.assertEqual(preferred, current_status)
+
+    def test_resolve_update_target_branch_id_falls_back_when_selection_is_stale(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(
+                AppUpdateBranchState(branch_id="public", label="Stable", selected=True),
+                AppUpdateBranchState(branch_id="latest_experimental", label="Experimental", selected=False),
+            ),
+            supports_verify=True,
+        )
+
+        resolved_branch_id = ModWebService._resolve_update_target_branch_id(update_info, "removed_branch")
+
+        self.assertEqual(resolved_branch_id, "public")
+
+    def test_pending_update_target_branch_id_returns_pending_branch(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(
+                AppUpdateBranchState(branch_id="public", label="Stable", selected=True),
+                AppUpdateBranchState(branch_id="latest_experimental", label="Experimental", selected=False),
+            ),
+            supports_verify=True,
+        )
+
+        pending_branch_id = ModWebService._pending_update_target_branch_id(update_info, "latest_experimental")
+
+        self.assertEqual(pending_branch_id, "latest_experimental")
+
+    def test_pending_update_target_branch_id_returns_none_when_branch_is_current(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+        )
+
+        pending_branch_id = ModWebService._pending_update_target_branch_id(update_info, "public")
+
+        self.assertIsNone(pending_branch_id)
+
+    def test_update_branch_display_text_includes_label_and_branch_id(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(
+                AppUpdateBranchState(branch_id="public", label="Stable", selected=True),
+                AppUpdateBranchState(branch_id="latest_experimental", label="Experimental", selected=False),
+            ),
+            supports_verify=True,
+        )
+
+        branch_text = ModWebService._update_branch_display_text(update_info, "latest_experimental")
+
+        self.assertEqual(branch_text, "Experimental (latest_experimental)")
+
+    def test_details_steam_update_preset_resolves_scope_default(self) -> None:
+        preset = ModWebService._details_steam_update_preset("sevendays_alpha")
+
+        self.assertIsNotNone(preset)
+        assert preset is not None
+        self.assertEqual(preset.app_id, 294420)
+        self.assertEqual(preset.default_selected_branch, "latest_experimental")
+
+    def test_details_steam_update_branch_options_fall_back_to_scope_preset(self) -> None:
+        options = ModWebService._details_steam_update_branch_options(
+            app_name="satisfactory_alpha",
+            update_info=None,
+        )
+
+        self.assertEqual(
+            options,
+            {
+                "public": "Stable (public)",
+                "experimental": "Experimental (experimental)",
+            },
+        )
+
+    def test_pending_update_target_display_text_reports_no_change_when_current(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+        )
+
+        pending_text = ModWebService._pending_update_target_display_text(update_info, "public")
+
+        self.assertEqual(pending_text, "No pending change")
+
+    def test_update_progress_text_reports_unavailable_when_percent_missing(self) -> None:
+        self.assertEqual(
+            ModWebService._update_progress_text(
+                AppUpdateStatus(
+                    state=AppUpdateState.RUNNING,
+                    summary="Downloading",
+                    operation_kind=AppUpdateOperationKind.UPDATE,
+                )
+            ),
+            "Progress unavailable",
+        )
+
+    def test_update_action_block_reason_reports_verify_provider_limit(self) -> None:
+        self.assertEqual(
+            ModWebService._update_action_block_reason(
+                action=NodeAppMutationAction.VERIFY,
+                can_manage_updates=True,
+                app_running=False,
+                update_running=False,
+                supports_verify=False,
+            ),
+            "Verification is not available for this update provider.",
+        )
+
+    def test_update_action_block_reason_prioritises_running_operation(self) -> None:
+        self.assertEqual(
+            ModWebService._update_action_block_reason(
+                action=NodeAppMutationAction.UPDATE,
+                can_manage_updates=True,
+                app_running=True,
+                update_running=True,
+                supports_verify=True,
+            ),
+            "Another update operation is already running.",
+        )
+
+    def test_update_install_alignment_badge_reports_matching_manifest_branch(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+            installed_branch_id="public",
+        )
+
+        badge = ModWebService._update_install_alignment_badge(update_info)
+
+        self.assertEqual(badge, _ModWebBadgeSpec(text="Installed matches configured target", tone="black"))
+
+    def test_update_install_alignment_badge_reports_branch_drift(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(
+                AppUpdateBranchState(branch_id="public", label="Stable", selected=True),
+                AppUpdateBranchState(branch_id="latest_experimental", label="Experimental", selected=False),
+            ),
+            supports_verify=True,
+            installed_branch_id="latest_experimental",
+        )
+
+        badge = ModWebService._update_install_alignment_badge(update_info)
+
+        self.assertEqual(badge, _ModWebBadgeSpec(text="Installed differs from configured target", tone="purple"))
+
+    def test_update_section_view_signature_ignores_irrelevant_runtime_fields(self) -> None:
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+        )
+        update_status = AppUpdateStatus(state=AppUpdateState.IDLE, summary="Ready")
+        base_stats = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version="1.2.3",
+            player_count=0,
+            player_capacity=20,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            footprint_bytes=None,
+            connected_player_names=(),
+        )
+        changed_stats = replace(
+            base_stats,
+            player_count=4,
+            player_capacity=24,
+            connected_player_names=("One", "Two"),
+        )
+        base_model = ModWebBasePageModel(
+            node_name="erin",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=True,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=cast(Any, SimpleNamespace(configs=())),
+            saves=None,
+            app_stats=base_stats,
+            app_start_blocked=False,
+            settings=None,
+            update_info=update_info,
+            update_status=update_status,
+        )
+        changed_model = replace(base_model, app_stats=changed_stats)
+
+        self.assertEqual(
+            ModWebService._update_section_view_signature(base_model),
+            ModWebService._update_section_view_signature(changed_model),
+        )
+
+    def test_update_section_view_signature_tracks_running_and_version(self) -> None:
+        base_stats = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version="1.2.3",
+            player_count=0,
+            player_capacity=20,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            footprint_bytes=None,
+            connected_player_names=(),
+        )
+        changed_stats = replace(base_stats, running=True, version="1.2.4")
+
+        self.assertNotEqual(
+            ModWebService._update_section_runtime_signature(base_stats),
+            ModWebService._update_section_runtime_signature(changed_stats),
+        )
+
+    def test_dry_update_preview_statuses_cover_running_success_and_failure_states(self) -> None:
+        statuses = ModWebService._dry_update_preview_statuses()
+
+        self.assertEqual(len(statuses), 5)
+        self.assertEqual(statuses[0].state, AppUpdateState.RUNNING)
+        self.assertEqual(statuses[0].operation_kind, AppUpdateOperationKind.UPDATE)
+        self.assertEqual(statuses[1].state, AppUpdateState.SUCCEEDED)
+        self.assertEqual(statuses[2].state, AppUpdateState.FAILED)
+        self.assertEqual(statuses[3].operation_kind, AppUpdateOperationKind.VERIFY)
+        self.assertEqual(statuses[4].operation_kind, AppUpdateOperationKind.VERIFY)
 
     def test_user_level_helpers_reflect_acl_level(self) -> None:
         with TemporaryDirectory[str]() as tmp:
@@ -1281,6 +1629,57 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(links[1].api_url, "/api/node-proxy/erin/apps")
         self.assertEqual(links[1].latency_probe_url, "http://erin.example:3180/api/node/ping")
 
+    def test_portal_node_links_omit_local_current_node(self) -> None:
+        yuki_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="764270771350142976",
+                label="Yuki",
+                bot_profile=config.BotProfileName.YUKI,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="yuki",
+                    public_base_url="https://wakusei.apasz.com",
+                    node_api_base_url="https://wakusei.apasz.com/api/node",
+                )
+            ),
+        )
+        erin_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="123456789012345678",
+                label="Erin",
+                bot_profile=config.BotProfileName.ERIN,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="erin",
+                    public_base_url="https://erin.example",
+                    node_api_base_url="https://erin.example/api/node",
+                )
+            ),
+        )
+        bot_config = config.BotConfiguration(
+            KnownBots={
+                yuki_snapshot.profile.id: yuki_snapshot,
+                erin_snapshot.profile.id: erin_snapshot,
+            }
+        )
+        portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+        server = replace(config.MOD_WEB_SERVER, node_name="portal")
+
+        with TemporaryDirectory[str]() as temp_dir:
+            missing_cache = Path(temp_dir) / "bots.json"
+            with (
+                patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile),
+                patch.object(config, "MOD_WEB_SERVER", server),
+                patch.object(config, "load_bot_configuration", return_value=bot_config),
+                patch.object(config, "authority_cache_path", return_value=missing_cache),
+            ):
+                links = ModWebService()._node_links()
+
+        self.assertEqual([link.node_name for link in links], ["yuki", "erin"])
+        self.assertTrue(all(not link.is_current for link in links))
+
     def test_app_links_include_dedicated_chat_link_for_local_chat_relay_apps(self) -> None:
         service: ModWebService = ModWebService()
         app: SimpleNamespace = SimpleNamespace(
@@ -1425,6 +1824,187 @@ class ModWebTests(unittest.TestCase):
             self.assertIsNone(summary)
 
         asyncio.run(exercise())
+
+    def test_remote_page_model_uses_same_origin_api_urls_for_current_node(self) -> None:
+        service = ModWebService()
+        current_node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/",
+            api_base_url="/api/node",
+            api_url="/api/node/apps",
+            is_current=True,
+        )
+        mods = NodeModList(
+            app_name="minecraft alpha",
+            app_friendly="Minecraft Alpha",
+            node="yuki",
+            summary=NodeModSummary(
+                total_count=1,
+                enabled_count=1,
+                disabled_count=0,
+                coremod_count=0,
+                downloadable_count=1,
+                non_downloadable_count=0,
+            ),
+            mods=(self._mod_entry(name="Some Mod+1.0.jar"),),
+            app_stats=None,
+        )
+
+        model = service._remote_page_model(
+            node=current_node,
+            mods=mods,
+            supports_configs=True,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=True,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            blueprints=None,
+            settings=None,
+            console_actions=None,
+            map_url="https://example.invalid/map",
+            can_write_map_annotations=True,
+            supports_chat=True,
+            supports_updates=False,
+            chat_url="/mod-web/chat/minecraft_alpha",
+            update_info=None,
+            update_status=None,
+            app_start_blocked=False,
+            app_color_hex="#22C55E",
+            resource_points=None,
+            app_title_font_preset=AppTitleFont.AUTO.value,
+            app_notes=None,
+            lifecycle_notice_started=True,
+            lifecycle_notice_stopped=True,
+            lifecycle_notice_crashed=True,
+        )
+
+        self.assertEqual(model.map_api_url, "/api/node/apps/minecraft%20alpha/map")
+        self.assertEqual(model.download_all_url, "/api/node/apps/minecraft%20alpha/mods/download?enabled_only=false")
+        self.assertEqual(
+            model.download_enabled_url,
+            "/api/node/apps/minecraft%20alpha/mods/download?enabled_only=true",
+        )
+        self.assertEqual(
+            model.mod_download_urls["Some Mod+1.0.jar"],
+            "/api/node/apps/minecraft%20alpha/mods/Some%20Mod%2B1.0.jar/download",
+        )
+
+    def test_build_local_app_page_data_uses_mod_list_when_app_entry_supports_mods(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        app = cast(Any, SimpleNamespace(name="minecraft_alpha"))
+        app_entry = NodeAppEntry(
+            name="minecraft_alpha",
+            friendly="Minecraft Alpha",
+            node="yuki",
+            running=True,
+            enabled=True,
+            supports_mods=True,
+            supports_configs=False,
+        )
+        mod_list = NodeModList(
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            node="yuki",
+            summary=NodeModSummary(
+                total_count=1,
+                enabled_count=1,
+                disabled_count=0,
+                coremod_count=0,
+                downloadable_count=1,
+                non_downloadable_count=0,
+            ),
+            mods=(self._mod_entry(name="server.jar"),),
+            app_stats=NodeAppRuntimeSummary(
+                running=True,
+                enabled=True,
+                version=None,
+                player_count=1,
+                player_capacity=8,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+            ),
+        )
+
+        with (
+            patch.object(service._node_api, "build_app_entry", return_value=app_entry),
+            patch.object(service._node_api, "build_mod_list", new=AsyncMock(return_value=mod_list)) as build_mod_list,
+            patch.object(
+                service._node_api,
+                "build_app_runtime_summary",
+                new=AsyncMock(return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=ChatRelaySupport.NONE,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )),
+            ) as build_app_runtime_summary,
+        ):
+            page_data = asyncio.run(service._build_local_app_page_data(app, user=user))
+
+        self.assertIs(page_data.app_entry, app_entry)
+        self.assertIs(page_data.mods, mod_list)
+        self.assertEqual(page_data.app_stats, mod_list.app_stats)
+        build_mod_list.assert_awaited_once_with(app)
+        build_app_runtime_summary.assert_not_awaited()
+
+    def test_build_local_app_page_data_uses_runtime_summary_when_app_entry_has_no_mods(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        app = cast(Any, SimpleNamespace(name="factorio_alpha"))
+        app_entry = NodeAppEntry(
+            name="factorio_alpha",
+            friendly="Factorio Alpha",
+            node="yuki",
+            running=False,
+            enabled=True,
+            supports_mods=False,
+            supports_configs=False,
+        )
+        runtime_summary = NodeAppRuntimeSummary(
+            running=False,
+            enabled=True,
+            version=None,
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+
+        with (
+            patch.object(service._node_api, "build_app_entry", return_value=app_entry),
+            patch.object(service._node_api, "build_mod_list", new=AsyncMock()) as build_mod_list,
+            patch.object(
+                service._node_api,
+                "build_app_runtime_summary",
+                new=AsyncMock(return_value=runtime_summary),
+            ) as build_app_runtime_summary,
+        ):
+            page_data = asyncio.run(service._build_local_app_page_data(app, user=user))
+
+        self.assertIs(page_data.app_entry, app_entry)
+        self.assertIsNone(page_data.mods)
+        self.assertEqual(page_data.app_stats, runtime_summary)
+        build_mod_list.assert_not_awaited()
+        build_app_runtime_summary.assert_awaited_once_with(app)
 
     def test_home_app_sections_format_remote_failures_for_people(self) -> None:
         service: ModWebService = ModWebService()
@@ -4711,6 +5291,8 @@ class ModWebTests(unittest.TestCase):
             app_stats=app_stats,
             system_summary=None,
             previous_app_stats=None,
+            update_info=None,
+            update_status=None,
             previous_system_summary=NodeSystemSummary(
                 cpu_percent=20,
                 ram_percent=30,
@@ -4720,6 +5302,8 @@ class ModWebTests(unittest.TestCase):
                 storage_free_bytes=20,
                 storage_total_bytes=30,
             ),
+            previous_update_info=None,
+            previous_update_status=None,
         )
 
         self.assertEqual(
@@ -4787,6 +5371,9 @@ class ModWebTests(unittest.TestCase):
                 running_names=("Minecraft Alpha",),
             )
             service._remote_app_runtime_summary_async = AsyncMock(return_value=app_stats)  # type: ignore[method-assign]
+            service._remote_app_entry_async = AsyncMock(  # type: ignore[method-assign]
+                return_value=SimpleNamespace(update_info=None, update_status=None)
+            )
             service._remote_node_system_summary_or_none_async = AsyncMock(return_value=system_summary)  # type: ignore[method-assign]
             session = _FailingClientSession()
             updates: list[NodeAppStateStreamEvent] = []
@@ -5465,8 +6052,8 @@ class ModWebTests(unittest.TestCase):
                 return False
 
         class FakeButton:
-            def __init__(self) -> None:
-                self.text: str = ""
+            def __init__(self, text: str = "") -> None:
+                self.text: str = text
                 self.enabled: bool = True
                 self.class_value: str | None = None
 
@@ -5543,6 +6130,7 @@ class ModWebTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.labels: list[FakeLabel] = []
                 self.inputs: list[FakeInput] = []
+                self.buttons: list[FakeButton] = []
                 self.navigate = SimpleNamespace(reload=lambda: None)
 
             def refreshable(self, func: Callable[[str], None]) -> FakeRefreshable:
@@ -5565,8 +6153,11 @@ class ModWebTests(unittest.TestCase):
                 return FakeUpload()
 
             def button(self, *args: object, **kwargs: object) -> FakeButton:
-                del args, kwargs
-                return FakeButton()
+                del kwargs
+                text = str(args[0]) if args else ""
+                button = FakeButton(text)
+                self.buttons.append(button)
+                return button
 
             def label(self, text: str) -> FakeLabel:
                 label = FakeLabel(text)
@@ -5656,6 +6247,218 @@ class ModWebTests(unittest.TestCase):
             search_handler(SimpleNamespace(args="missing"))
 
         self.assertIn("No mods match that search.", [label.text for label in ui.labels])
+
+    def test_render_mods_section_shows_sudo_delete_toolbar_and_selectable_blocked_mods(self) -> None:
+        class FakeContainer:
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                del exc_type, exc, tb
+                return False
+
+            def classes(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+        class FakeButton:
+            def __init__(self, text: str = "") -> None:
+                self.text: str = text
+                self.class_value: str | None = None
+                self.enabled: bool = True
+
+            def classes(self, value: str) -> "FakeButton":
+                self.class_value = value
+                return self
+
+            def set_text(self, value: str) -> None:
+                self.text = value
+
+            def set_enabled(self, enabled: bool) -> None:
+                self.enabled = enabled
+
+        class FakeLabel:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def classes(self, value: str) -> "FakeLabel":
+                del value
+                return self
+
+        class FakeInput:
+            def props(self, value: str) -> "FakeInput":
+                del value
+                return self
+
+            def classes(self, value: str) -> "FakeInput":
+                del value
+                return self
+
+            def on(self, event_name: str, handler: Callable[[object], None]) -> "FakeInput":
+                del event_name, handler
+                return self
+
+        class FakeUpload:
+            def classes(self, value: str) -> "FakeUpload":
+                del value
+                return self
+
+            def disable(self) -> None:
+                return None
+
+            def enable(self) -> None:
+                return None
+
+        class FakeDialog(FakeContainer):
+            def open(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FakeRefreshable:
+            def __init__(self, func: Callable[[str], None]) -> None:
+                self._func = func
+
+            def __call__(self, search_query: str) -> None:
+                self._func(search_query)
+
+            def refresh(self, search_query: str) -> None:
+                self._func(search_query)
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.buttons: list[FakeButton] = []
+                self.navigate = SimpleNamespace(reload=lambda: None)
+
+            def refreshable(self, func: Callable[[str], None]) -> FakeRefreshable:
+                return FakeRefreshable(func)
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def dialog(self) -> FakeDialog:
+                return FakeDialog()
+
+            def upload(self, *args: object, **kwargs: object) -> FakeUpload:
+                del args, kwargs
+                return FakeUpload()
+
+            def button(self, *args: object, **kwargs: object) -> FakeButton:
+                del kwargs
+                text = str(args[0]) if args else ""
+                button = FakeButton(text)
+                self.buttons.append(button)
+                return button
+
+            def label(self, text: str) -> FakeLabel:
+                return FakeLabel(text)
+
+            def input(self, *args: object, **kwargs: object) -> FakeInput:
+                del args, kwargs
+                return FakeInput()
+
+            def notify(self, message: str, *, type: str | None = None) -> None:
+                del message, type
+                return None
+
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=NodeModList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                summary=NodeModSummary(
+                    total_count=3,
+                    enabled_count=3,
+                    disabled_count=0,
+                    coremod_count=0,
+                    downloadable_count=1,
+                    non_downloadable_count=2,
+                ),
+                mods=(
+                    self._mod_entry(name="downloadable.jar", friendly="Downloadable Mod"),
+                    self._mod_entry(
+                        name="server-only.jar",
+                        friendly="Server Only Mod",
+                        downloadable=False,
+                        mod_type=ModType.SERVER_ONLY,
+                        download_block_label="Server only",
+                    ),
+                    self._mod_entry(
+                        name="builtin.zip",
+                        friendly="Built In Mod",
+                        downloadable=False,
+                        mod_type=ModType.BUILTIN,
+                        download_block_label="Built in",
+                    ),
+                ),
+                app_stats=None,
+            ),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={"downloadable.jar": "/mods/download/downloadable.jar"},
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        ui = FakeUi()
+        can_select_by_mod: dict[str, bool] = {}
+
+        def _capture_row(**kwargs: object) -> None:
+            entry = cast(NodeModEntry, kwargs["entry"])
+            can_select_by_mod[entry.name] = cast(bool, kwargs["can_select"])
+            return None
+
+        with patch.object(
+            service,
+            "_user_has_level",
+            side_effect=lambda _user, level: level in {Power_Level.user, Power_Level.sudo},
+        ):
+            with patch.object(
+                ModWebService,
+                "_render_mod_download_row",
+                side_effect=_capture_row,
+            ):
+                service._render_mods_section(ui=cast(ModWebUi, cast(object, ui)), model=model, user=user)
+
+        toolbar_text = [
+            button.text for button in ui.buttons if button.class_value is not None and "mod-toolbar-button" in button.class_value
+        ]
+        self.assertIn("Delete", toolbar_text)
+        self.assertEqual(
+            can_select_by_mod,
+            {
+                "downloadable.jar": True,
+                "server-only.jar": True,
+                "builtin.zip": False,
+            },
+        )
 
     def test_render_saves_editor_uses_settings_search_styling(self) -> None:
         class FakeContainer:
@@ -5896,6 +6699,41 @@ class ModWebTests(unittest.TestCase):
             response.headers["location"],
             "https://wakusei.apasz.com/mod-web/nodes/erin/mods/minecraft_survival?tab=mods",
         )
+
+    def test_portal_profile_redirects_local_alias_app_page_to_default_remote_node(self) -> None:
+        yuki_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="1350601198637551659",
+                label="Yuki",
+                bot_profile=config.BotProfileName.YUKI,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="yuki",
+                    public_base_url="https://wakusei.apasz.com",
+                    node_api_base_url="https://wakusei.apasz.com/api/node",
+                )
+            ),
+        )
+        bot_config = config.BotConfiguration(KnownBots={yuki_snapshot.profile.id: yuki_snapshot})
+        portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+        server = replace(config.MOD_WEB_SERVER, node_name="portal")
+        request = SimpleNamespace(method="GET", url=SimpleNamespace(path="/mods/minecraft_survival", query="tab=mods"))
+
+        with TemporaryDirectory() as temp_dir:
+            missing_cache = Path(temp_dir) / "bots.json"
+            with (
+                patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile),
+                patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
+                patch.object(config, "MOD_WEB_SERVER", server),
+                patch.object(config, "load_bot_configuration", return_value=bot_config),
+                patch.object(config, "authority_cache_path", return_value=missing_cache),
+            ):
+                response = ModWebService()._remote_portal_redirect(cast(Any, request))
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(response.headers["location"], "/mod-web/nodes/yuki/mods/minecraft_survival?tab=mods")
 
     def test_remote_node_chat_page_redirects_to_yuki_portal_app_chat_page(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="erin")
@@ -6617,6 +7455,29 @@ class ModWebTests(unittest.TestCase):
             "filled square dense clearable hide-bottom-space color=accent type=password autocomplete=off",
         )
 
+    def test_setting_paragraph_props_use_full_height_textarea_contract(self) -> None:
+        text_setting = self._setting_entry(key="motd", label="MOTD", type_name="str", paragraph=True)
+        hidden_setting = self._setting_entry(
+            key="token",
+            label="Token",
+            type_name="str",
+            paragraph=True,
+            value_is_hidden=True,
+        )
+
+        self.assertEqual(
+            ModWebService._setting_paragraph_props(text_setting),
+            "filled square hide-bottom-space color=accent "
+            "spellcheck=false autocorrect=off autocapitalize=off "
+            "rows=2 input-style=height:100%;min-height:100%;max-height:100%;resize:none",
+        )
+        self.assertEqual(
+            ModWebService._setting_paragraph_props(hidden_setting),
+            "filled square hide-bottom-space color=accent "
+            "type=password autocomplete=off spellcheck=false autocorrect=off autocapitalize=off "
+            "rows=2 input-style=height:100%;min-height:100%;max-height:100%;resize:none",
+        )
+
     def test_hidden_text_settings_do_not_initialise_blank_drafts(self) -> None:
         hidden_setting = self._setting_entry(
             key="admin_password",
@@ -6687,6 +7548,77 @@ class ModWebTests(unittest.TestCase):
             "Enter a whole number.",
         )
         self.assertIsNone(ModWebService._setting_text_validation_message(setting, "12"))
+
+    def test_setting_text_draft_validation_ignores_unchanged_invalid_text(self) -> None:
+        setting = self._setting_entry(
+            key="server_name",
+            label="Server Name",
+            type_name="str",
+            current_input_value="",
+            allows_blank_input=False,
+        )
+
+        self.assertIsNone(
+            ModWebService._setting_text_draft_validation_message(
+                setting=setting,
+                value="",
+                draft_values={},
+            )
+        )
+        self.assertEqual(
+            ModWebService._setting_text_draft_validation_message(
+                setting=setting,
+                value="",
+                draft_values={"server_name": ""},
+            ),
+            "Value required.",
+        )
+
+    def test_setting_text_input_value_prefers_event_payload_over_control_state(self) -> None:
+        input_control = SimpleNamespace(value="0")
+        event = SimpleNamespace(args="6")
+
+        self.assertEqual(
+            ModWebService._setting_text_input_value(input_control=cast(Any, input_control), event=cast(Any, event)),
+            "6",
+        )
+        self.assertEqual(
+            ModWebService._setting_text_input_value(input_control=cast(Any, input_control)),
+            "0",
+        )
+
+    def test_apply_linked_setting_drafts_swaps_trader_biome_values(self) -> None:
+        rekt = self._setting_entry(
+            key="TraderRektBiome",
+            label="Trader Rekt Biome",
+            type_name="str",
+            current_input_value="Forest",
+            strict_choice=True,
+        )
+        jen = self._setting_entry(
+            key="TraderJenBiome",
+            label="Trader Jen Biome",
+            type_name="str",
+            current_input_value="Burnt Forest",
+            strict_choice=True,
+        )
+        drafts: dict[str, bool | str] = {}
+
+        ModWebService._set_setting_draft_value(
+            setting=rekt,
+            value="Burnt Forest",
+            draft_values=drafts,
+        )
+        refreshed = ModWebService._apply_linked_setting_drafts(
+            settings=(rekt, jen),
+            setting=rekt,
+            previous_value="Forest",
+            next_value="Burnt Forest",
+            draft_values=drafts,
+        )
+
+        self.assertTrue(refreshed)
+        self.assertEqual(drafts, {"TraderRektBiome": "Burnt Forest", "TraderJenBiome": "Forest"})
 
     def test_config_root_options_group_by_root(self) -> None:
         configs = (
@@ -8220,10 +9152,63 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(updated_app_stats.transition_state, NodeAppTransitionState.STOPPING)
         self.assertEqual(updated_app_stats.player_capacity, 20)
 
-    def test_app_action_pending_feedback_messages_cover_start_stop_and_kill(self) -> None:
+    def test_apply_live_app_state_update_updates_update_state_without_runtime_change(self) -> None:
+        service = ModWebService()
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+        )
+        initial_status = AppUpdateStatus(state=AppUpdateState.IDLE, summary="Ready")
+        next_status = AppUpdateStatus(
+            state=AppUpdateState.RUNNING,
+            summary="Downloading",
+            operation_kind=AppUpdateOperationKind.UPDATE,
+            progress_percent=5.0,
+        )
+        model = ModWebBasePageModel(
+            node_name="erin",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=True,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=cast(Any, SimpleNamespace(configs=())),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            update_info=update_info,
+            update_status=initial_status,
+        )
+
+        updated_model, _ = service._apply_live_app_state_update(
+            model=model,
+            event=NodeAppStateStreamEvent.update(
+                app_name="minecraft_alpha",
+                update_info=update_info,
+                update_status=next_status,
+            ),
+            local_app=None,
+            last_system_summary=None,
+        )
+
+        self.assertEqual(updated_model.update_info, update_info)
+        self.assertEqual(updated_model.update_status, next_status)
+
+    def test_app_action_pending_feedback_messages_cover_runtime_and_update_actions(self) -> None:
         self.assertEqual(ModWebService._app_action_pending_label(NodeAppMutationAction.START), "Starting...")
         self.assertEqual(ModWebService._app_action_pending_label(NodeAppMutationAction.STOP), "Stopping...")
         self.assertEqual(ModWebService._app_action_pending_label(NodeAppMutationAction.KILL), "Killing...")
+        self.assertEqual(ModWebService._app_action_pending_label(NodeAppMutationAction.UPDATE), "Updating...")
+        self.assertEqual(ModWebService._app_action_pending_label(NodeAppMutationAction.VERIFY), "Verifying...")
         self.assertEqual(
             ModWebService._app_action_pending_message(NodeAppMutationAction.START, "Minecraft Alpha"),
             "Start requested for Minecraft Alpha.",
@@ -8235,6 +9220,14 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             ModWebService._app_action_pending_message(NodeAppMutationAction.KILL, "Minecraft Alpha"),
             "Kill requested for Minecraft Alpha.",
+        )
+        self.assertEqual(
+            ModWebService._app_action_pending_message(NodeAppMutationAction.UPDATE, "Minecraft Alpha"),
+            "Update requested for Minecraft Alpha.",
+        )
+        self.assertEqual(
+            ModWebService._app_action_pending_message(NodeAppMutationAction.VERIFY, "Minecraft Alpha"),
+            "Verify requested for Minecraft Alpha.",
         )
 
     def test_render_global_app_toolbar_exposes_details_dialog_for_sudo_users(self) -> None:

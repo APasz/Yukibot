@@ -15,6 +15,8 @@ from .constants import (
 from .nicegui_protocols import ModWebUi, _value_as_text
 from .runtime_imports import (
     AbstractEventLoop,
+    AppUpdateInfo,
+    AppUpdateStatus,
     Awaitable,
     BadgeTone,
     Button,
@@ -33,6 +35,7 @@ from .runtime_imports import (
     Power_Level,
     Request,
     asyncio,
+    cast,
     config,
     dataclass,
     escape,
@@ -41,6 +44,8 @@ from .runtime_imports import (
     quote,
     replace,
 )
+
+_KEEP_PAGE_MODEL_VALUE = object()
 from .service_base import ModWebServiceSupport
 from .types import (
     ModWebAppLink,
@@ -1638,8 +1643,26 @@ class ModWebHomeMixin(ModWebServiceSupport):
         *,
         app_stats: NodeAppRuntimeSummary | None,
         app_start_blocked: bool,
+        update_info: AppUpdateInfo | None | object = _KEEP_PAGE_MODEL_VALUE,
+        update_status: AppUpdateStatus | None | object = _KEEP_PAGE_MODEL_VALUE,
     ) -> ModWebBasePageModel:
-        return self._page_model_with_tabs(replace(model, app_stats=app_stats, app_start_blocked=app_start_blocked))
+        next_update_info: AppUpdateInfo | None = (
+            model.update_info if update_info is _KEEP_PAGE_MODEL_VALUE else cast(AppUpdateInfo | None, update_info)
+        )
+        next_update_status: AppUpdateStatus | None = (
+            model.update_status
+            if update_status is _KEEP_PAGE_MODEL_VALUE
+            else cast(AppUpdateStatus | None, update_status)
+        )
+        return self._page_model_with_tabs(
+            replace(
+                model,
+                app_stats=app_stats,
+                app_start_blocked=app_start_blocked,
+                update_info=next_update_info,
+                update_status=next_update_status,
+            )
+        )
 
     @staticmethod
     def _is_current_node_name(node_name: str) -> bool:
@@ -1648,15 +1671,19 @@ class ModWebHomeMixin(ModWebServiceSupport):
     async def _refresh_runtime_model(self, *, model: ModWebBasePageModel, user: ModWebUser) -> ModWebBasePageModel:
         if self._is_current_node_name(model.node_name):
             app: ManagedApp = self._resolve_app(model.app_name)
+            app_entry = self._node_api.build_app_entry(app)
             app_stats: NodeAppRuntimeSummary = await self._node_api.build_app_runtime_summary(app)
             return self._model_with_runtime_state(
                 model,
                 app_stats=app_stats,
                 app_start_blocked=self._app_start_blocked_local(app),
+                update_info=app_entry.update_info,
+                update_status=app_entry.update_status,
             )
 
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        app_stats, system_summary = await asyncio.gather(
+        app_entry, app_stats, system_summary = await asyncio.gather(
+            self._remote_app_entry_async(node, model.app_name, user),
             self._remote_app_runtime_summary_async(node, model.app_name, user),
             self._remote_node_system_summary_or_none_async(
                 node,
@@ -1672,6 +1699,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 app_stats=app_stats,
                 start_blocked_app_ids=() if system_summary is None else system_summary.start_blocked_app_ids,
             ),
+            update_info=app_entry.update_info,
+            update_status=app_entry.update_status,
         )
 
     def _app_link_from_entry(self, *, entry: NodeAppEntry, user: ModWebUser, node_name: str) -> ModWebAppLink:
@@ -1750,6 +1779,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 supports_blueprints=entry.supports_blueprints,
                 supports_console_actions=entry.supports_console_actions,
                 supports_chat=entry.supports_chat,
+                supports_updates=entry.supports_updates,
                 chat_url=chat_url,
+                update_status=entry.update_status,
             )
         )

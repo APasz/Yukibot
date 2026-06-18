@@ -9,6 +9,7 @@ import signal
 import subprocess
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from typing import IO, Any, Callable, Generic, Protocol, TypeVar, cast
 
 import hikari
 import psutil
+from hikari.snowflakes import Snowflake
 
 import _errors
 import config
@@ -38,8 +40,8 @@ from apps._console import ConsoleAction
 from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveRoot, list_app_save_files, resolve_app_save_path
 from apps._settings import App_Settings, Settings_Manager
-from apps._updater import Update_Manager
-from config import Activity_Manager
+from apps._updater import AppUpdateInfo, AppUpdateStatus, Update_Manager
+from config import Activity_Manager, Name_Cache
 
 log = logging.getLogger(__name__)
 
@@ -112,14 +114,14 @@ class AppRuntimeFault:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "AppRuntimeFault":
-        raw_kind = payload.get("kind")
-        raw_summary = payload.get("summary")
+        raw_kind: object | None = payload.get("kind")
+        raw_summary: object | None = payload.get("summary")
         if not isinstance(raw_kind, str):
             raise ValueError("App runtime fault kind is invalid.")
         if raw_summary is not None and not isinstance(raw_summary, str):
             raise ValueError("App runtime fault summary is invalid.")
         try:
-            kind = AppRuntimeFaultKind(raw_kind)
+            kind: AppRuntimeFaultKind = AppRuntimeFaultKind(raw_kind)
         except ValueError as xcp:
             raise ValueError("App runtime fault kind is invalid.") from xcp
         return cls(kind=kind, summary=raw_summary)
@@ -129,6 +131,12 @@ class AppRuntimeFault:
             "kind": self.kind.value,
             "summary": self.summary,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class AppStdoutTail:
+    lines: tuple[str, ...]
+    truncated: bool
 
 
 class App(Generic[ConfigT], ABC):
@@ -152,8 +160,8 @@ class App(Generic[ConfigT], ABC):
     file_stdout: Path
     file_errout: Path
     act_err_counts: dict[str, int] = {}
-    act_err_threshold = 25
-    name_cache = config.Name_Cache()
+    act_err_threshold: int = 25
+    name_cache: Name_Cache = config.Name_Cache()
     am_receiver: "AM_Receiver | None" = None
     chat_relay_outbound: bool = False
     cmd_start: list[str]
@@ -185,7 +193,7 @@ class App(Generic[ConfigT], ABC):
         stg: App_Settings | None = None,
         mod_cls: type[Mod] | None = None,
         modcf_cls: type[Mod_Config] | None = None,
-    ):
+    ) -> None:
         if not bot:
             raise ValueError("App missing bot")  # pyright: ignore[reportUnreachable]
         if not cfg:
@@ -198,9 +206,9 @@ class App(Generic[ConfigT], ABC):
         self.scope = cfg.scope
         self.directory = cfg.directory
         self.chat_channel = hikari.Snowflake(cfg.chat_channel) if cfg.chat_channel else None
-        self.chat_channels = tuple(hikari.Snowflake(channel_id) for channel_id in cfg.chat_channels)
+        self.chat_channels = tuple[Snowflake, ...](hikari.Snowflake(channel_id) for channel_id in cfg.chat_channels)
         self.chat_channel_override = hikari.Snowflake(cfg.chat_channel_override) if cfg.chat_channel_override else None
-        self.chat_channel_overrides = tuple(
+        self.chat_channel_overrides = tuple[Snowflake, ...](
             hikari.Snowflake(channel_id) for channel_id in cfg.chat_channel_overrides
         )
         self.chat_channel_source = cfg.chat_channel_source
@@ -234,15 +242,15 @@ class App(Generic[ConfigT], ABC):
 
         log.debug(f"{__name__} | {self.cmd_start=} @ {self.cmd_cwd=}")
 
-    async def post_init(self):
+    async def post_init(self) -> None:
         if self.mods:
             await self.mods.load_mods()
         log.debug(f"{self.name}.__post_init__")
 
     @property
     def chat_relay_support(self) -> ChatRelaySupport:
-        has_inbound = self.am_receiver is not None
-        has_outbound = self.chat_relay_outbound
+        has_inbound: bool = self.am_receiver is not None
+        has_outbound: bool = self.chat_relay_outbound
         if has_inbound and has_outbound:
             return ChatRelaySupport.BIDIRECTIONAL
         if has_inbound:
@@ -297,6 +305,8 @@ class App(Generic[ConfigT], ABC):
             overrides["lifecycle_notice_crashed"] = self.cfg.lifecycle_notice_crashed
         if self.cfg.version is not None:
             overrides["version"] = self.cfg.version.model_dump(mode="json", exclude_none=True)
+        if self.cfg.steam_update is not None:
+            overrides["steam_update"] = self.cfg.steam_update.model_dump(mode="json", exclude_none=True)
         if self.config_file_read_level_override is not None:
             overrides["config_file_read_level_override"] = self.config_file_read_level_override.name
         if self.config_file_write_level_override is not None:
@@ -304,6 +314,25 @@ class App(Generic[ConfigT], ABC):
         if self.save_file_write_level_override is not None:
             overrides["save_file_write_level_override"] = self.save_file_write_level_override.name
         return overrides
+
+    @property
+    def update_info(self) -> AppUpdateInfo | None:
+        if self.updater is None:
+            return None
+        return self.updater.info()
+
+    @property
+    def update_status(self) -> AppUpdateStatus | None:
+        if self.updater is None:
+            return None
+        return self.updater.status()
+
+    @property
+    def supports_update_tab(self) -> bool:
+        return self.update_info is not None
+
+    def detect_installed_version(self) -> AppVersion | None:
+        return None
 
     def apply_version(self, version: AppVersion | str | None, *, persist: bool) -> bool:
         normalised_version = normalise_app_version(version)
@@ -409,6 +438,11 @@ class App(Generic[ConfigT], ABC):
     def console_actions(self) -> tuple[ConsoleAction, ...]:
         return ()
 
+    def available_console_actions(self, actions: tuple[ConsoleAction, ...]) -> tuple[ConsoleAction, ...]:
+        cfg = getattr(self, "cfg", None)
+        app_version = normalise_app_version(getattr(cfg, "version", None))
+        return tuple(action for action in actions if action.supports_app_version(app_version))
+
     @property
     def supports_console_actions(self) -> bool:
         return bool(self.console_actions)
@@ -495,6 +529,10 @@ class App(Generic[ConfigT], ABC):
         return False
 
     @property
+    def supports_save_delete(self) -> bool:
+        return False
+
+    @property
     def save_file_write_level(self) -> Power_Level:
         if self.save_file_write_level_override is not None:
             return self.save_file_write_level_override
@@ -511,6 +549,9 @@ class App(Generic[ConfigT], ABC):
         destination_relative_path: str,
     ) -> AppSaveEntry:
         raise ValueError(f"{self.friendly} does not support save relocation.")
+
+    def delete_save_file(self, *, file_id: str) -> AppSaveEntry:
+        raise ValueError(f"{self.friendly} does not support save deletion.")
 
     @property
     def supports_blueprints(self) -> bool:
@@ -568,6 +609,41 @@ class App(Generic[ConfigT], ABC):
             file_id,
             content,
             default_read_level=self.config_file_read_level,
+        )
+
+    def read_stdout_tail(self, *, max_lines: int = 200) -> AppStdoutTail:
+        if max_lines < 1:
+            raise ValueError("Stdout tail line limit must be at least 1.")
+        stdout_path: Path = self.file_stdout
+        if not stdout_path.exists():
+            return AppStdoutTail(lines=(), truncated=False)
+        with stdout_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            file_size: int = handle.tell()
+            if file_size <= 0:
+                return AppStdoutTail(lines=(), truncated=False)
+
+            chunk_size = 8192
+            position = file_size
+            buffer = bytearray()
+            newline_count = 0
+            while position > 0 and newline_count <= max_lines:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                if not chunk:
+                    break
+                buffer[:0] = chunk
+                newline_count = buffer.count(b"\n")
+
+        decoded_lines = deque(
+            buffer.decode(config.STR_ENCODE, errors="replace").splitlines(),
+            maxlen=max_lines,
+        )
+        return AppStdoutTail(
+            lines=tuple(decoded_lines),
+            truncated=position > 0 or newline_count > max_lines,
         )
 
     @property
@@ -740,29 +816,31 @@ class App(Generic[ConfigT], ABC):
         if self.process is None and not self.proc_name:
             log.info(f"{self.name} already terminated, skipping.")
             return
-        if self.process:
+        process = self.process
+        if process is not None:
             log.info(f"Terminating {self.name} via stored process")
 
             try:
-                self.process.terminate()
-                await asyncio.to_thread(self.process.wait, 5)
+                process.terminate()
+                await asyncio.to_thread(process.wait, 5)
                 await self._drain_stderr_task()
             except Exception as xcp:
                 log.exception(f"Termination failed: {xcp}")
 
             for _ in range(10):
-                if self.process.poll() is not None:
+                if process.poll() is not None:
                     break
                 await asyncio.sleep(0.3)
             else:
                 try:
-                    self.process.kill()
-                    await asyncio.to_thread(self.process.wait, 5)
+                    process.kill()
+                    await asyncio.to_thread(process.wait, 5)
                     await self._drain_stderr_task()
                     log.warning(f"{self.name} kill escalation")
                 except Exception as xcp:
                     log.exception(f"Kill escalation failed: {xcp}")
-            self.process = None
+            if self.process is process:
+                self.process = None
 
         if not self.proc_name:
             log.warning("No process name specified for process scan")

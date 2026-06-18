@@ -43,8 +43,8 @@ from apps._blueprint_files import (
     list_blueprint_files,
     resolve_blueprint_file_path,
     resolve_blueprint_upload_target,
-    validate_blueprint_upload_pair,
     validate_blueprint_session_name,
+    validate_blueprint_upload_pair,
 )
 from apps._config import App_Config, AppVersion, resolve_config_path
 from apps._settings import (
@@ -58,6 +58,7 @@ from apps._settings import (
     StringSettingSpec,
 )
 from apps._tailer import Tailer
+from apps._updater import SteamCmd_Update_Manager
 from config import Activity_Manager
 
 log: Logger = logging.getLogger(__name__)
@@ -125,13 +126,30 @@ def _candidate_satisfactory_logs(*, directory: Path, server_log: Path | None) ->
     return tuple[Path, ...](existing)
 
 
+def _app_version_from_satisfactory_build_match(
+    match: re.Match[str],
+    *,
+    framework: str | None = None,
+    loader: str | None = None,
+    current: AppVersion | None = None,
+) -> AppVersion:
+    return AppVersion(
+        main=match.group("version").strip(),
+        build=int(match.group("build")),
+        framework=framework if framework is not None else current.framework if current is not None else None,
+        loader=loader if loader is not None else current.loader if current is not None else None,
+    )
+
+
 def detect_satisfactory_version(*, directory: Path, server_log: Path | None) -> AppVersion | None:
     game_version: str | None = None
+    game_build: int | None = None
     for pointer in _candidate_satisfactory_logs(directory=directory, server_log=server_log):
         try:
             for line in pointer.read_text(config.STR_ENCODE, errors="ignore").splitlines():
                 if match := _SATISFACTORY_BUILD_RE.search(line):
                     game_version = match.group("version").strip()
+                    game_build = int(match.group("build"))
                     break
         except OSError as xcp:
             log.warning("Failed to inspect Satisfactory log %s: %s", pointer, xcp)
@@ -153,9 +171,9 @@ def detect_satisfactory_version(*, directory: Path, server_log: Path | None) -> 
             raise ValueError(f"SML plugin manifest must be a JSON object: {pointer}")
         framework_raw: object | None = payload.get("VersionName") or payload.get("SemVersion")
         framework: str | None = str(framework_raw).strip() if framework_raw is not None else None
-        return AppVersion(main=game_version, framework=framework or None, loader="sml")
+        return AppVersion(main=game_version, build=game_build, framework=framework or None, loader="sml")
 
-    return AppVersion(main=game_version)
+    return AppVersion(main=game_version, build=game_build)
 
 
 def _normalise_api_address(raw: str) -> str:
@@ -526,6 +544,8 @@ class SatisfactorySettings(App_Settings):
         is_running: Callable[[], bool],
         cfg: Satisfactory_Config,
         instances_path: Path,
+        *,
+        version_getter: Callable[[], AppVersion | None] | None = None,
     ) -> None:
         self._bridge: SatisfactorySettingsBridge = bridge
         self._is_running: Callable[[], bool] = is_running
@@ -612,6 +632,7 @@ class SatisfactorySettings(App_Settings):
                 self._network_quality,
                 self._admin_password,
             ],
+            version_getter=version_getter,
         )
 
     def _snapshot_from_settings(self) -> SatisfactorySettingsSnapshot:
@@ -823,6 +844,8 @@ class Satisfactory(App[Satisfactory_Config]):
         if not settings_cache.exists():
             settings_cache.write_text("{}", config.STR_ENCODE)
         super().__init__(bot, am, cfg)
+        if cfg.steam_update is not None:
+            self.updater = SteamCmd_Update_Manager(self)
         self._blueprint_ownership_store = SatisfactoryBlueprintOwnershipStore(
             self.dir_log / "satisfactory-blueprints.json"
         )
@@ -832,6 +855,7 @@ class Satisfactory(App[Satisfactory_Config]):
             lambda: self._running,
             cfg,
             self.file_instances,
+            version_getter=lambda: cfg.version,
         )
         self.settings = Settings_Manager(cfg, self._settings)
         self.act_err_threshold = 50
@@ -844,6 +868,9 @@ class Satisfactory(App[Satisfactory_Config]):
         self._tail_matchers: set[Callable[[str], Awaitable[None]]] = set()
         self._tail_matchers.add(self._match_version)
         self._players: SatisfactoryPlayers = SatisfactoryPlayers(self)
+
+    def detect_installed_version(self) -> AppVersion | None:
+        return detect_satisfactory_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file)
 
     @property
     def supports_blueprints(self) -> bool:
@@ -1035,7 +1062,11 @@ class Satisfactory(App[Satisfactory_Config]):
 
     async def _match_version(self, line: str) -> None:
         if match := _SATISFACTORY_BUILD_RE.search(line):
-            self.apply_version(match.group("version"), persist=True)
+            current_version = self.cfg.version
+            self.apply_version(
+                _app_version_from_satisfactory_build_match(match, current=current_version),
+                persist=True,
+            )
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")

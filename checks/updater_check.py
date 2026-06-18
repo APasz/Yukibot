@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import asyncio
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock, patch
+
+import config
+from apps._config import App_Config, AppVersion, SteamUpdateConfig
+from apps._updater import AppUpdateOperationKind, AppUpdateProviderKind, AppUpdateState, SteamCmd_Update_Manager
+
+
+class _FakeApp:
+    def __init__(self, temp_path: Path) -> None:
+        self.friendly = "7 Days Alpha"
+        self.directory = temp_path
+        self.dir_log = temp_path / "logs"
+        self.dir_log.mkdir(parents=True, exist_ok=True)
+        self.mods = None
+        self.cfg = App_Config(
+            name="sevendays_alpha",
+            instance_key="alpha",
+            friendly_name=self.friendly,
+            directory=temp_path,
+            apps_dir=temp_path,
+            scope="sevendays",
+            steam_update=SteamUpdateConfig.model_validate(
+                {
+                    "app_id": 294420,
+                    "branches": [
+                        {"branch_id": "public", "label": "Stable"},
+                        {"branch_id": "latest_experimental", "label": "Experimental"},
+                    ],
+                    "selected_branch": "public",
+                }
+            ),
+        )
+        self.persisted = 0
+        self.applied_versions: list[AppVersion | str | None] = []
+        self.running = False
+
+    def persist_instance_config_overrides(self) -> None:
+        self.persisted += 1
+
+    def apply_version(self, version: AppVersion | str | None, *, persist: bool) -> bool:
+        self.applied_versions.append(version)
+        return bool(persist or version is not None)
+
+    def check_running(self) -> bool:
+        return self.running
+
+
+class UpdaterTests(unittest.TestCase):
+    def test_steam_update_config_rejects_unknown_selected_branch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "selected steam branch"):
+            SteamUpdateConfig.model_validate(
+                {
+                    "app_id": 294420,
+                    "branches": [{"branch_id": "public", "label": "Stable"}],
+                    "selected_branch": "latest_experimental",
+                }
+            )
+
+    def test_steamcmd_update_manager_select_branch_persists_choice(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            updater = SteamCmd_Update_Manager(app)
+
+            update_info = updater.select_branch("latest_experimental")
+
+        self.assertEqual(app.cfg.steam_update.selected_branch, "latest_experimental")  # type: ignore[union-attr]
+        self.assertEqual(app.persisted, 1)
+        self.assertEqual(update_info.provider_kind, AppUpdateProviderKind.STEAMCMD)
+        self.assertEqual(update_info.selected_branch_label, "Experimental")
+
+    def test_verify_selected_requires_app_to_be_stopped(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            app.running = True
+            with patch("apps._updater.config.load_bot_configuration", return_value=config.BotConfiguration()):
+                updater = SteamCmd_Update_Manager(app)
+
+            with self.assertRaisesRegex(RuntimeError, "must be stopped"):
+                asyncio.run(updater.verify_selected())
+
+    def test_steamcmd_update_manager_uses_global_configuration_script_path(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            with patch(
+                "apps._updater.config.load_bot_configuration",
+                return_value=config.BotConfiguration(steamcmd_path="./steamcmd.sh"),
+            ):
+                updater = SteamCmd_Update_Manager(app)
+
+        self.assertEqual(updater._steamcmd_command_prefix, ("bash", "./steamcmd.sh"))
+
+    def test_start_selected_update_sets_running_status_immediately(self) -> None:
+        async def _run() -> None:
+            with TemporaryDirectory() as temp_dir:
+                app = _FakeApp(Path(temp_dir))
+                with patch("apps._updater.config.load_bot_configuration", return_value=config.BotConfiguration()):
+                    updater = SteamCmd_Update_Manager(app)
+                gate = asyncio.Event()
+
+                async def _pending_run(*, kind: AppUpdateOperationKind, branch: object) -> object:
+                    del kind, branch
+                    await gate.wait()
+                    return object()
+
+                with patch.object(updater, "_run_started_operation", new=AsyncMock(side_effect=_pending_run)):
+                    result = await updater.start_selected_update()
+                    status = updater.status()
+                    self.assertEqual(result.kind, AppUpdateOperationKind.UPDATE)
+                    self.assertTrue(status.running)
+                    self.assertEqual(status.state, AppUpdateState.RUNNING)
+                    self.assertEqual(status.operation_kind, AppUpdateOperationKind.UPDATE)
+                    self.assertEqual(status.progress_percent, 0.0)
+                    gate.set()
+                    active_task = updater._active_task
+                    if active_task is not None:
+                        await active_task
+
+        asyncio.run(_run())
+
+    def test_info_reads_installed_steam_manifest_build_and_branch(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            manifest_dir = app.directory / "steamapps"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            manifest_dir.joinpath("appmanifest_294420.acf").write_text(
+                "\n".join(
+                    (
+                        '"AppState"',
+                        "{",
+                        '    "appid" "294420"',
+                        '    "buildid" "9876543"',
+                        '    "UserConfig"',
+                        "    {",
+                        '        "betakey" "latest_experimental"',
+                        "    }",
+                        "}",
+                    )
+                ),
+                encoding=config.STR_ENCODE,
+            )
+            with patch("apps._updater.config.load_bot_configuration", return_value=config.BotConfiguration()):
+                updater = SteamCmd_Update_Manager(app)
+
+            update_info = updater.info()
+
+        self.assertEqual(update_info.installed_build_id, 9876543)
+        self.assertEqual(update_info.installed_branch_id, "latest_experimental")
+
+    def test_info_reads_manifest_from_ancestor_steamapps_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_root = root / "steamapps" / "common" / "server"
+            app_root.mkdir(parents=True, exist_ok=True)
+            app = _FakeApp(app_root)
+            root.joinpath("steamapps", "appmanifest_294420.acf").write_text(
+                "\n".join(
+                    (
+                        '"AppState"',
+                        "{",
+                        '    "appid" "294420"',
+                        '    "buildid" "13579"',
+                        "}",
+                    )
+                ),
+                encoding=config.STR_ENCODE,
+            )
+            with patch("apps._updater.config.load_bot_configuration", return_value=config.BotConfiguration()):
+                updater = SteamCmd_Update_Manager(app)
+
+            update_info = updater.info()
+
+        self.assertEqual(update_info.installed_build_id, 13579)
+        self.assertEqual(update_info.installed_branch_id, "public")
+
+    def test_safe_read_installed_manifest_logs_once_for_same_manifest(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = _FakeApp(Path(temp_dir))
+            manifest_dir = app.directory / "steamapps"
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            manifest_dir.joinpath("appmanifest_294420.acf").write_text(
+                "\n".join(
+                    (
+                        '"AppState"',
+                        "{",
+                        '    "appid" "294420"',
+                        '    "buildid" "9876543"',
+                        "}",
+                    )
+                ),
+                encoding=config.STR_ENCODE,
+            )
+            with patch("apps._updater.config.load_bot_configuration", return_value=config.BotConfiguration()):
+                updater = SteamCmd_Update_Manager(app)
+
+            with self.assertLogs("apps._updater", level="INFO") as captured:
+                updater._safe_read_installed_manifest()
+                updater._safe_read_installed_manifest()
+
+        self.assertEqual(
+            [
+                line
+                for line in captured.output
+                if "Steam app manifest loaded: app=7 Days Alpha app_id=294420 branch=public build=9876543" in line
+            ],
+            [
+                "INFO:apps._updater:Steam app manifest loaded: app=7 Days Alpha app_id=294420 branch=public build=9876543"
+            ],
+        )
+
+    def test_update_selected_persists_detected_version_with_steam_manifest_metadata(self) -> None:
+        async def _run() -> None:
+            with TemporaryDirectory() as temp_dir:
+                app = _FakeApp(Path(temp_dir))
+                manifest_dir = app.directory / "steamapps"
+                manifest_dir.mkdir(parents=True, exist_ok=True)
+                manifest_dir.joinpath("appmanifest_294420.acf").write_text(
+                    "\n".join(
+                        (
+                            '"AppState"',
+                            "{",
+                            '    "appid" "294420"',
+                            '    "buildid" "24680"',
+                            '    "UserConfig"',
+                            "    {",
+                            '        "betakey" "latest_experimental"',
+                            "    }",
+                            "}",
+                        )
+                    ),
+                    encoding=config.STR_ENCODE,
+                )
+                with patch("apps._updater.config.load_bot_configuration", return_value=config.BotConfiguration()):
+                    updater = SteamCmd_Update_Manager(app)
+                with (
+                    patch.object(updater, "_run_steamcmd", new=AsyncMock(return_value=True)),
+                    patch.object(updater, "_detect_installed_version", return_value=AppVersion(main="2.0", build=8)),
+                ):
+                    result = await updater.update_selected()
+
+                self.assertEqual(
+                    app.applied_versions[-1],
+                    AppVersion(main="2.0", build=8, steam_build=24680, steam_branch="latest_experimental"),
+                )
+                self.assertEqual(
+                    result.version_text,
+                    "2.0:8 [Steam latest_experimental build 24680]",
+                )
+
+        asyncio.run(_run())

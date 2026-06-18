@@ -17,7 +17,26 @@
             }
         },
         "version": {
-            "main": "1.4b8"
+            "main": "1.4",
+            "build": 8
+        },
+        "steam_update": {
+            "app_id": 294420,
+            "steamcmd_executable": "steamcmd",
+            "login": {
+                "username": "anonymous"
+            },
+            "branches": [
+                {
+                    "branch_id": "public",
+                    "label": "Stable"
+                },
+                {
+                    "branch_id": "latest_experimental",
+                    "label": "Experimental"
+                }
+            ],
+            "selected_branch": "latest_experimental"
         },
         "enabled": true,
         "notes": null,
@@ -43,6 +62,20 @@
         },
         "version": {
             "main": "1.4b8"
+        },
+        "steam_update": {
+            "app_id": 294420,
+            "branches": [
+                {
+                    "branch_id": "public",
+                    "label": "Stable"
+                },
+                {
+                    "branch_id": "latest_experimental",
+                    "label": "Experimental"
+                }
+            ],
+            "selected_branch": "latest_experimental"
         },
         "enabled": false
     }

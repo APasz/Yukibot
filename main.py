@@ -2,7 +2,9 @@ import asyncio
 import inspect
 import logging
 import os
+import signal
 import traceback
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,6 +37,7 @@ from config import Activity_Provider, Name_Cache
 from font_assets import font_assets
 from maintenance import MaintenanceService
 from node_api import RemoteRelayTTSForwarder
+from node_api_http import NodeApiHttpService
 from online import Online_Tracker
 from relay_notices import (
     BotLifecycleNotice,
@@ -46,6 +49,7 @@ from relay_notices import (
 )
 from remote_node import RemoteNodeSupervisor
 from restart_targets import RestartTarget
+from web_dash.service import ModWebService
 
 log = logging.getLogger("system")
 
@@ -208,10 +212,34 @@ def _clear_managed_files_once(
         cleaner.clear(set(folder.iterdir()), effective_threshold)
 
 
+async def _run_portal() -> None:
+    log.info("Starting portal profile")
+    acl = Access_Control()
+    mod_web = ModWebService()
+    await mod_web.start(acl=acl)
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_stop() -> None:
+        log.info("Stopping portal profile")
+        mod_web.begin_shutdown()
+        stop_event.set()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with suppress(NotImplementedError):
+            loop.add_signal_handler(signum, _request_stop)
+
+    await stop_event.wait()
+
+
 def main():
     config.IS_SHUTTINGDOWN = False
     log.info(f"Running {os.getpid()}")
     profile = config.ACTIVE_BOT_PROFILE
+    if profile.name is config.BotProfileName.PORTAL:
+        asyncio.run(_run_portal())
+        return
     log.info(
         "Bot profile: "
         f"{profile.name.value} | "
@@ -263,6 +291,7 @@ def main():
     utilities = Utilities()
     resolutator = Resolutator(bot)
     authority_server = AuthorityServer(name_cache)
+    node_api_server = NodeApiHttpService()
     remote_node = RemoteNodeSupervisor()
     registry = client.di.registry_for(lightbulb.di.Contexts.DEFAULT)
     acl = Access_Control()
@@ -275,6 +304,7 @@ def main():
     dc_relay = DC_Relay(bot)
     if profile.has_service(config.BotService.GAME_RELAY):
         app_editor.set_chat_relay_service(dc_relay)
+        node_api_server.set_chat_relay_service(dc_relay)
     voice_client: hikariwave.VoiceClient | None = None
     voice_tts: VoiceTTSService | None = None
     music: MusicService | None = None
@@ -293,6 +323,7 @@ def main():
         dc_relay.set_voice_tts_service(voice_tts)
         app_editor.set_relay_tts_service(voice_tts)
         app_editor.set_voice_target_service(voice_tts)
+        node_api_server.set_relay_tts_service(voice_tts)
     elif profile.has_service(config.BotService.GAME_RELAY):
         dc_relay.set_voice_tts_service(RemoteRelayTTSForwarder())
     if music and voice_tts:
@@ -365,6 +396,7 @@ def main():
             font_assets.schedule_startup_refresh(google_font_urls=app_manager.node_font_sources().google_font_urls)
             if profile.has_service(config.BotService.GAME_RELAY):
                 dc_relay.set_event_loop()
+            await node_api_server.start(app_manager, acl=acl)
             log.info("Starting mod web service")
             await app_editor.start_web(app_manager, acl)
             log.info("Mod web service startup returned")
@@ -647,6 +679,7 @@ def main():
         if voice_client:
             await voice_client.close()
         await remote_node.stop()
+        await node_api_server.stop()
         await authority_server.stop()
         await app_manager.end()
         if profile.has_service(config.BotService.GAME_RELAY):

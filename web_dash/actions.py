@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from .constants import (
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
+    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     log,
 )
 from .nicegui_protocols import ModWebUi
@@ -14,13 +15,13 @@ from .runtime_imports import (
     ManagedApp,
     ModType,
     ModWebUser,
-    NodeCapacityMutationResult,
-    NodeFontSourceSettingsMutationResult,
     NodeApiScope,
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    NodeCapacityMutationResult,
+    NodeFontSourceSettingsMutationResult,
     NodeModEntry,
     NodeModMutationAction,
     NodeModMutationResult,
@@ -64,6 +65,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
         running_ram_points: int | None = None,
         startup_cpu_points: int | None = None,
         startup_ram_points: int | None = None,
+        steam_update_enabled: bool | None = None,
+        steam_update_selected_branch: str | None = None,
+        update_branch_id: str | None = None,
+        timeout_seconds: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> NodeAppMutationResult:
         json_payload: dict[str, object] = {"action": action.value}
         if friendly_name is not None:
@@ -83,6 +88,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload["running_ram_points"] = running_ram_points
             json_payload["startup_cpu_points"] = startup_cpu_points
             json_payload["startup_ram_points"] = startup_ram_points
+            json_payload["steam_update_enabled"] = steam_update_enabled
+            json_payload["steam_update_selected_branch"] = steam_update_selected_branch
+        if update_branch_id is not None:
+            json_payload["update_branch_id"] = update_branch_id
         payload: dict[str, object] = self._remote_json(
             node=node,
             app_name=app_name,
@@ -91,6 +100,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             user=user,
             method="POST",
             json_payload=json_payload,
+            timeout=timeout_seconds,
         )
         return NodeAppMutationResult.from_mapping(payload)
 
@@ -238,6 +248,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
             current: str = str(selected_count)
         return f"Download {current}/{downloadable_count}"
 
+    @staticmethod
+    def _delete_selection_label(*, selected_count: int) -> str:
+        if selected_count <= 0:
+            return "Delete"
+        return f"Delete {selected_count}"
+
     async def _mutate_app(
         self,
         *,
@@ -254,6 +270,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
         running_ram_points: int | None = None,
         startup_cpu_points: int | None = None,
         startup_ram_points: int | None = None,
+        steam_update_enabled: bool | None = None,
+        steam_update_selected_branch: str | None = None,
+        update_branch_id: str | None = None,
+        timeout_seconds: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> NodeAppMutationResult:
         required_level: Power_Level = required_app_mutation_level(action)
         if not self._user_has_level(user, required_level):
@@ -274,6 +294,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 running_ram_points=running_ram_points,
                 startup_cpu_points=startup_cpu_points,
                 startup_ram_points=startup_ram_points,
+                steam_update_enabled=steam_update_enabled,
+                steam_update_selected_branch=steam_update_selected_branch,
+                update_branch_id=update_branch_id,
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(
@@ -292,6 +315,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
             running_ram_points,
             startup_cpu_points,
             startup_ram_points,
+            steam_update_enabled,
+            steam_update_selected_branch,
+            update_branch_id,
+            timeout_seconds,
         )
 
     async def _node_capacity(self, *, node_name: str, user: ModWebUser) -> config.NodeCapacityProfile:
@@ -432,6 +459,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
             return "Stopping..."
         if action is NodeAppMutationAction.KILL:
             return "Killing..."
+        if action is NodeAppMutationAction.UPDATE:
+            return "Updating..."
+        if action is NodeAppMutationAction.VERIFY:
+            return "Verifying..."
         return None
 
     @classmethod
@@ -442,6 +473,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
             return f"Stop requested for {app_friendly}."
         if action is NodeAppMutationAction.KILL:
             return f"Kill requested for {app_friendly}."
+        if action is NodeAppMutationAction.UPDATE:
+            return f"Update requested for {app_friendly}."
+        if action is NodeAppMutationAction.VERIFY:
+            return f"Verify requested for {app_friendly}."
         return None
 
     @staticmethod
@@ -571,6 +606,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         entry: NodeModEntry,
         download_url: str | None,
         on_change: Callable[["ValueChangeEventArguments"], None],
+        can_select: bool,
         app_friendly: str,
         model: ModWebPageModel,
         user: ModWebUser,
@@ -584,7 +620,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         row = ui.row().classes(" ".join((*row_classes, "mod-row-clickable")))
         row.on("click", lambda _: dialog.open())
         with row:
-            if entry.downloadable:
+            if can_select:
                 checkbox = ui.checkbox(value=False, on_change=on_change).props("dense")
                 checkbox.on("click", js_handler="(event) => event.stopPropagation()")
             else:
@@ -618,7 +654,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.button("Download", on_click=download_single).props("flat dense no-caps").classes(
                     "mod-row-download"
                 ).on("click", js_handler="(event) => event.stopPropagation()")
-        return checkbox if entry.downloadable else None
+        return checkbox if can_select else None
 
     async def _start_download(self, *, ui: ModWebUi, url: str, message: str) -> None:
         ui.notify(message, type="info")

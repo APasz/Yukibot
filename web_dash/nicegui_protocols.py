@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 from .runtime_imports import (
+    TYPE_CHECKING,
     Button,
     Callable,
     Card,
+    ChatEvent,
     Checkbox,
     CodeMirror,
     Column,
-    ChatEvent,
     Coroutine,
     Input,
     Label,
     MutableMapping,
     ParamSpec,
     Protocol,
+    ScrollArea,
     Select,
-    TYPE_CHECKING,
     Timer,
     Tooltip,
     TypeVar,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from nicegui.elements.link import Link
     from nicegui.elements.row import Row
     from nicegui.elements.switch import Switch
+    from nicegui.elements.textarea import Textarea
     from nicegui.elements.tabs import Tab, TabPanel, TabPanels, Tabs
 
 RefreshableFunction = TypeVar("RefreshableFunction", bound=Callable[..., object])
@@ -104,6 +106,8 @@ class ModWebUi(Protocol):
 
     def row(self, *args: object, **kwargs: object) -> "Row": ...
 
+    def scroll_area(self, *args: object, **kwargs: object) -> "ScrollArea": ...
+
     def grid(self, *args: object, **kwargs: object) -> "Grid": ...
 
     def label(self, text: str = "", *args: object, **kwargs: object) -> "Label": ...
@@ -113,6 +117,8 @@ class ModWebUi(Protocol):
     def element(self, tag: str = "div", *args: object, **kwargs: object) -> "Element": ...
 
     def input(self, *args: object, **kwargs: object) -> "Input": ...
+
+    def textarea(self, *args: object, **kwargs: object) -> "Textarea": ...
 
     def select(self, *args: object, **kwargs: object) -> "Select": ...
 
@@ -182,11 +188,15 @@ def _event_args_as_text(container: ModWebEventArgumentsContainer) -> str:
     return "" if value is None else str(value)
 
 
-def _value_as_object(container: ModWebValueContainer) -> object:
-    return container.value
+def _value_as_object(container: object) -> object:
+    if hasattr(container, "value"):
+        return cast(object, getattr(container, "value"))
+    if hasattr(container, "args"):
+        return cast(object, getattr(container, "args"))
+    raise AttributeError(f"{type(container).__name__!r} does not expose a recognised value payload.")
 
 
-def _value_as_text(container: ModWebValueContainer) -> str:
+def _value_as_text(container: object) -> str:
     value = _value_as_object(container)
     return "" if value is None else str(value)
 

@@ -22,6 +22,7 @@ dependencies = [
     "pathvalidate",
     "piper-tts",
     "psutil",
+    "py7zr",
     "pydantic",
     "pydantic-settings",
     "python-dateutil",

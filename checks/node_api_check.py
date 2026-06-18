@@ -21,7 +21,7 @@ import config
 from _manager import AppStartBlocker, AppStartBlockerKind
 from _security import Access_Control, Power_Level
 from apps._app import App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
-from apps._config import AppTitleFont, App_Config, Mod_Config, ModDownloadBlockReason, ModType
+from apps._config import App_Config, AppTitleFont, AppVersion, Mod_Config, ModDownloadBlockReason, ModType
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod
@@ -36,7 +36,16 @@ from apps._settings import (
     Settings_Manager,
     StringSettingSpec,
 )
-from apps._updater import Update_Manager
+from apps._updater import (
+    AppUpdateBranchState,
+    AppUpdateInfo,
+    AppUpdateOperationKind,
+    AppUpdateOperationResult,
+    AppUpdateProviderKind,
+    AppUpdateState,
+    AppUpdateStatus,
+    Update_Manager,
+)
 from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore, SatisfactoryServerState
 from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
 from map_annotations import MapAnnotationDraft
@@ -45,21 +54,22 @@ from node_api import (
     NodeAppEntry,
     NodeAppMutationAction,
     NodeAppMutationResult,
-    NodeCapacityMutationResult,
-    NodeDiscordSettingsMutationResult,
-    NodeFontSourceSettingsMutationResult,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
+    NodeCapacityMutationResult,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
+    NodeConsoleStdoutSnapshot,
+    NodeDiscordSettingsMutationResult,
     NodeDownloadRequest,
+    NodeFontSourceSettingsMutationResult,
     NodeModMutationAction,
     NodeModMutationResult,
     NodeModUploadResult,
@@ -91,7 +101,7 @@ class _ConsoleActionApp(_DummyApp):
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
-        return self._console_actions
+        return self.available_console_actions(self._console_actions)
 
 
 class _TestMod(Mod):
@@ -206,6 +216,7 @@ def _string_setting(
     power_level: Power_Level,
     is_sensitive: bool = False,
     do_hide: Power_Level | None = None,
+    paragraph: bool = False,
 ) -> Setting[str]:
     spec = StringSettingSpec(choice_spec, allow_blank=True, is_sensitive=is_sensitive, do_hide=do_hide)
     setting = Setting(
@@ -215,6 +226,7 @@ def _string_setting(
         [],
         default=spec.parse_input(value),
         power_level=power_level,
+        paragraph=paragraph,
     )
     setting.update(value)
     return setting
@@ -331,6 +343,21 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.UPDATE_DETAILS), NodeApiScope.APP_MANAGE)
         self.assertEqual(required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS), Power_Level.sudo)
 
+    def test_app_mutation_update_requires_manage_scope_and_sudo_level(self) -> None:
+        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.UPDATE), NodeApiScope.APP_MANAGE)
+        self.assertEqual(required_app_mutation_level(NodeAppMutationAction.UPDATE), Power_Level.sudo)
+
+    def test_app_mutation_verify_requires_manage_scope_and_sudo_level(self) -> None:
+        self.assertEqual(required_app_mutation_scope(NodeAppMutationAction.VERIFY), NodeApiScope.APP_MANAGE)
+        self.assertEqual(required_app_mutation_level(NodeAppMutationAction.VERIFY), Power_Level.sudo)
+
+    def test_app_mutation_branch_select_requires_manage_scope_and_sudo_level(self) -> None:
+        self.assertEqual(
+            required_app_mutation_scope(NodeAppMutationAction.SELECT_UPDATE_BRANCH),
+            NodeApiScope.APP_MANAGE,
+        )
+        self.assertEqual(required_app_mutation_level(NodeAppMutationAction.SELECT_UPDATE_BRANCH), Power_Level.sudo)
+
     def test_mod_download_requires_user_but_config_read_allows_visitors(self) -> None:
         service = NodeApiService()
 
@@ -406,6 +433,50 @@ class NodeApiTests(unittest.TestCase):
         assert result.actions[0].parameter is not None
         self.assertEqual(result.actions[0].parameter.recent_inputs, ("Hello world",))
 
+    def test_build_console_action_list_omits_actions_outside_current_app_version(self) -> None:
+        gated_action = ConsoleAction(
+            key="say",
+            label="Say",
+            description="Broadcast to all players.",
+            power_level=Power_Level.user,
+            execute=AsyncMock(return_value=ConsoleActionResult(summary="ok")),
+            min_app_version=AppVersion(main="1.1.0", build=100),
+        )
+        app = _build_console_action_app(actions=(gated_action,))
+        app.cfg.version = AppVersion(main="1.1.0", build=99)
+        acl = Mock()
+        acl.can = Mock(return_value=True)
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        result: NodeConsoleActionList = service.build_console_action_list(app=app, actor_user_id=42)
+
+        self.assertEqual(result.actions, ())
+        self.assertFalse(app.supports_console_actions)
+
+    def test_build_console_action_list_includes_actions_at_matching_app_version(self) -> None:
+        gated_action = ConsoleAction(
+            key="say",
+            label="Say",
+            description="Broadcast to all players.",
+            power_level=Power_Level.user,
+            execute=AsyncMock(return_value=ConsoleActionResult(summary="ok")),
+            min_app_version=AppVersion(main="1.1.0", build=100),
+            max_app_version=AppVersion(main="1.1.0", build=200),
+        )
+        app = _build_console_action_app(actions=(gated_action,))
+        app.cfg.version = AppVersion(main="1.1.0", build=100)
+        acl = Mock()
+        acl.can = Mock(return_value=True)
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        result: NodeConsoleActionList = service.build_console_action_list(app=app, actor_user_id=42)
+
+        self.assertEqual(len(result.actions), 1)
+        self.assertEqual(result.actions[0].key, "say")
+        self.assertTrue(app.supports_console_actions)
+
     def test_execute_console_action_returns_structured_result_and_tracks_recent_inputs(self) -> None:
         parameter = ConsoleActionParameter[str](
             key="message",
@@ -466,6 +537,27 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(str(raised.exception.detail), "Minecraft Alpha is not running.")
+
+    def test_read_console_stdout_returns_recent_tail_and_truncation_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            stdout_path = Path(temp_dir) / "stdout.log"
+            stdout_path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            app = _build_console_action_app(actions=(), running=True)
+            app.file_stdout = stdout_path
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+
+            result: NodeConsoleStdoutSnapshot = asyncio.run(
+                service.read_console_stdout(app=app, actor_user_id=42, max_lines=2)
+            )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.user)
+        self.assertEqual(result.app_name, "minecraft_alpha")
+        self.assertEqual(result.lines, ("two", "three"))
+        self.assertTrue(result.truncated)
+        self.assertTrue(result.running)
 
     def test_list_apps_marks_console_action_support(self) -> None:
         action = ConsoleAction(
@@ -826,10 +918,26 @@ class NodeApiTests(unittest.TestCase):
             running_names=("Minecraft Alpha",),
             running_app_ids=("minecraft_alpha",),
         )
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+        )
+        update_status = AppUpdateStatus(
+            state=AppUpdateState.RUNNING,
+            summary="Downloading",
+            operation_kind=AppUpdateOperationKind.UPDATE,
+            progress_percent=42.5,
+        )
         event = NodeAppStateStreamEvent.initial(
             app_name="minecraft_alpha",
             app_stats=app_stats,
             system_summary=system_summary,
+            update_info=update_info,
+            update_status=update_status,
         )
 
         mapped = event.to_mapping()
@@ -900,6 +1008,7 @@ class NodeApiTests(unittest.TestCase):
             permission_level_name="user",
             default_text="",
             description=None,
+            paragraph=True,
             is_sensitive=False,
             value_text="",
             revealed_value_text="",
@@ -1198,6 +1307,10 @@ class NodeApiTests(unittest.TestCase):
             def save_file_roots(self) -> tuple[AppSaveRoot, ...]:
                 return self._save_file_roots
 
+            @property
+            def supports_save_delete(self) -> bool:
+                return True
+
         app = cast(_SaveListApp, object.__new__(_SaveListApp))
         app.name = "minecraft_alpha"
         app.friendly = "Minecraft Alpha"
@@ -1225,13 +1338,13 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
         )
-
         result = NodeApiService().build_save_list(app)
 
         self.assertIsInstance(result, NodeSaveList)
         self.assertEqual(result.roots[0].id, "world")
         self.assertEqual(result.saves[0].kind, "directory")
         self.assertEqual(result.saves[0].size_text, "Directory")
+        self.assertTrue(result.saves[0].can_delete)
 
     def test_build_save_download_response_returns_existing_save_file(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1567,6 +1680,35 @@ class NodeApiTests(unittest.TestCase):
             destination_relative_path="new.zip",
         )
 
+    def test_delete_save_file_returns_save_mutation_result(self) -> None:
+        deleted = AppSaveEntry(
+            id="world/world",
+            label="world",
+            relative_path="world",
+            root_id="world",
+            root_label="Current World",
+            kind=AppSaveEntryKind.DIRECTORY,
+            size_bytes=0,
+            modified_at=datetime(2026, 6, 16, 12, 0, 0),
+        )
+        app = SimpleNamespace(
+            name="sevendays_alpha",
+            friendly="7D2D Alpha",
+            supports_save_delete=True,
+            delete_save_file=Mock(return_value=deleted),
+        )
+
+        result = NodeApiService().delete_save_file(
+            app=cast(Any, app),
+            save_id="world/world",
+            actor_user_id=42,
+        )
+
+        self.assertIsInstance(result, NodeSaveMutationResult)
+        self.assertEqual(result.save.id, "world/world")
+        self.assertTrue(result.save.can_delete)
+        app.delete_save_file.assert_called_once_with(file_id="world/world")
+
     def test_update_setting_and_save_settings_use_attached_settings_manager(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1772,6 +1914,82 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(entries[0].supports_chat)
         self.assertEqual(entries[0].scope, "minecraft")
         self.assertEqual(entries[0].map_url, "https://example.invalid/squaremap/?world=minecraft_overworld")
+
+    def test_list_apps_includes_update_info(self) -> None:
+        app = _build_app(Mock())
+        app.updater = Mock()
+        app.updater.info.return_value = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            app_id=294420,
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            supports_verify=True,
+        )
+        app.updater.status.return_value = AppUpdateStatus(
+            state=AppUpdateState.RUNNING,
+            summary="Downloading",
+            operation_kind=AppUpdateOperationKind.UPDATE,
+            progress_percent=42.5,
+        )
+        service = NodeApiService()
+        service.set_manager(cast(Any, SimpleNamespace(apps={app.name: app})))
+
+        entries = asyncio.run(service.list_apps())
+
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(entries[0].supports_updates)
+        self.assertIsNotNone(entries[0].update_info)
+        self.assertEqual(entries[0].update_info.selected_branch_label, "Stable")  # type: ignore[union-attr]
+        self.assertIsNotNone(entries[0].update_status)
+        self.assertEqual(entries[0].update_status.progress_percent, 42.5)  # type: ignore[union-attr]
+
+    def test_build_app_entry_captures_dashboard_metadata(self) -> None:
+        class _MappedApp(_DummyApp):
+            @property
+            def public_map_url(self) -> str | None:
+                return "https://example.invalid/squaremap/?world=minecraft_overworld"
+
+        app = _build_app(Mock())
+        app.__class__ = _MappedApp
+        app.cfg.title_font_preset = AppTitleFont.MINECRAFT_TEN.value
+        app.cfg.notes = "Keep two slots reserved for staff."
+        app.cfg.lifecycle_notice_started = False
+        app.cfg.lifecycle_notice_stopped = True
+        app.cfg.lifecycle_notice_crashed = False
+        app.cfg.resource_points = SimpleNamespace(
+            running=SimpleNamespace(cpu_points=3, ram_points=6),
+            startup_points=SimpleNamespace(cpu_points=5, ram_points=8),
+            startup=True,
+        )
+        app.chat_relay_outbound = True
+        app.am_receiver = _DummyReceiver()
+
+        entry = NodeApiService().build_app_entry(
+            app,
+            transition_state=NodeAppTransitionState.STARTING,
+            player_count=2,
+            player_capacity=8,
+            connected_player_names=("Alice", "Bob"),
+        )
+
+        self.assertEqual(entry.name, app.name)
+        self.assertEqual(entry.node, config.MOD_WEB_SERVER.node_name)
+        self.assertEqual(entry.transition_state, NodeAppTransitionState.STARTING)
+        self.assertEqual(entry.player_count, 2)
+        self.assertEqual(entry.player_capacity, 8)
+        self.assertEqual(entry.connected_player_names, ("Alice", "Bob"))
+        self.assertTrue(entry.supports_chat)
+        self.assertEqual(entry.map_url, "https://example.invalid/squaremap/?world=minecraft_overworld")
+        self.assertEqual(entry.title_font_preset, AppTitleFont.MINECRAFT_TEN.value)
+        self.assertEqual(entry.notes, "Keep two slots reserved for staff.")
+        self.assertFalse(entry.lifecycle_notice_started)
+        self.assertTrue(entry.lifecycle_notice_stopped)
+        self.assertFalse(entry.lifecycle_notice_crashed)
+        self.assertIsNotNone(entry.resource_points)
+        self.assertEqual(entry.resource_points.cpu_points_running if entry.resource_points is not None else None, 3)
+        self.assertEqual(entry.resource_points.cpu_points_startup if entry.resource_points is not None else None, 5)
 
     def test_build_map_manifest_uses_squaremap_settings_and_initial_world(self) -> None:
         class _MappedApp(_DummyApp):
@@ -2472,6 +2690,8 @@ class NodeApiTests(unittest.TestCase):
                     running_ram_points=7,
                     startup_cpu_points=None,
                     startup_ram_points=None,
+                    steam_update_enabled=True,
+                    steam_update_selected_branch="latest_experimental",
                 )
             )
 
@@ -2482,6 +2702,8 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(details.running_ram_points, 7)
         self.assertIsNone(details.startup_cpu_points)
         self.assertIsNone(details.startup_ram_points)
+        self.assertTrue(details.steam_update_enabled)
+        self.assertEqual(details.steam_update_selected_branch, "latest_experimental")
         self.assertEqual(result.action, NodeAppMutationAction.UPDATE_DETAILS)
         self.assertEqual(result.app_friendly, "Demo Alpha")
         self.assertEqual(result.message, "Updated details for Demo Alpha.")
@@ -2535,6 +2757,107 @@ class NodeApiTests(unittest.TestCase):
         details = manager.update_app_details.call_args.args[1]
         self.assertIsNone(details.startup_cpu_points)
         self.assertEqual(details.startup_ram_points, 9)
+
+    def test_mutate_app_select_update_branch_uses_updater(self) -> None:
+        app = _build_app(Mock())
+        app.updater = Mock()
+        app.updater.select_branch.return_value = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            app_id=294420,
+            selected_branch_id="latest_experimental",
+            selected_branch_label="Experimental",
+            branches=(
+                AppUpdateBranchState(branch_id="public", label="Stable", selected=False),
+                AppUpdateBranchState(branch_id="latest_experimental", label="Experimental", selected=True),
+            ),
+            supports_verify=True,
+        )
+        manager = Mock()
+        manager.start_blocker = Mock(return_value=None)
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch.object(
+            service,
+            "build_app_runtime_summary",
+            new=AsyncMock(
+                return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=app.chat_relay_support,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )
+            ),
+        ):
+            result = asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.SELECT_UPDATE_BRANCH,
+                    actor_user_id=42,
+                    update_branch_id="latest_experimental",
+                )
+            )
+
+        app.updater.select_branch.assert_called_once_with("latest_experimental")
+        self.assertEqual(result.action, NodeAppMutationAction.SELECT_UPDATE_BRANCH)
+        self.assertEqual(result.message, "Selected update branch Experimental for Minecraft Alpha.")
+
+    def test_mutate_app_update_uses_updater_result(self) -> None:
+        app = _build_app(Mock())
+        app.updater = Mock()
+        app.updater.start_selected_update = AsyncMock(
+            return_value=AppUpdateOperationResult(
+                kind=AppUpdateOperationKind.UPDATE,
+                message="Started update for Minecraft Alpha on Steam branch Stable.",
+                selected_branch_id="public",
+                selected_branch_label="Stable",
+            )
+        )
+        manager = Mock()
+        manager.start_blocker = Mock(return_value=None)
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch.object(
+            service,
+            "build_app_runtime_summary",
+            new=AsyncMock(
+                return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=app.chat_relay_support,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )
+            ),
+        ):
+            result = asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.UPDATE,
+                    actor_user_id=42,
+                )
+            )
+
+        app.updater.start_selected_update.assert_awaited_once()
+        self.assertEqual(result.action, NodeAppMutationAction.UPDATE)
+        self.assertEqual(result.message, "Started update for Minecraft Alpha on Steam branch Stable.")
 
     def test_mutate_node_capacity_requires_root_and_returns_result(self) -> None:
         manager = Mock()
@@ -2996,6 +3319,87 @@ class NodeApiTests(unittest.TestCase):
                 [
                     NodeAppStateStreamEvent.initial(app_name=app.name, app_stats=first_summary),
                     NodeAppStateStreamEvent.runtime(app_name=app.name, app_stats=second_summary),
+                ],
+            )
+
+        asyncio.run(exercise())
+
+    def test_subscribe_local_app_runtime_can_emit_update_only_changes(self) -> None:
+        async def exercise() -> None:
+            app = _build_app(Mock())
+            service = NodeApiService()
+            service.set_manager(cast(Any, SimpleNamespace(apps={app.name: app}, get=Mock(return_value=app))))
+            runtime_summary = NodeAppRuntimeSummary(
+                running=False,
+                enabled=True,
+                version="1.21.1",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                footprint_bytes=None,
+                transition_state=NodeAppTransitionState.NONE,
+            )
+            update_info = AppUpdateInfo(
+                provider_kind=AppUpdateProviderKind.STEAMCMD,
+                provider_label="SteamCMD",
+                selected_branch_id="public",
+                selected_branch_label="Stable",
+                branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+                supports_verify=True,
+            )
+            idle_status = AppUpdateStatus(state=AppUpdateState.IDLE, summary="Ready")
+            running_status = AppUpdateStatus(
+                state=AppUpdateState.RUNNING,
+                summary="Downloading",
+                operation_kind=AppUpdateOperationKind.UPDATE,
+                progress_percent=12.5,
+            )
+            app.updater = Mock()
+            app.updater.info = Mock(return_value=update_info)
+            app.updater.status = Mock(side_effect=(idle_status, running_status, running_status))
+            notifications: list[NodeAppStateStreamEvent] = []
+            second_notification = asyncio.Event()
+
+            async def build_live_summary(_: App) -> NodeAppRuntimeSummary:
+                return runtime_summary
+
+            def on_update(update: NodeAppStateStreamEvent) -> None:
+                notifications.append(update)
+                if len(notifications) >= 2:
+                    second_notification.set()
+
+            with (
+                patch.object(service, "build_live_app_runtime_summary", side_effect=build_live_summary),
+                patch("node_api._LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS", 0.01),
+            ):
+                unsubscribe = service.subscribe_local_app_runtime(
+                    app.name,
+                    on_update,
+                    include_update_state=True,
+                )
+                try:
+                    await asyncio.wait_for(second_notification.wait(), timeout=0.2)
+                finally:
+                    unsubscribe()
+                    await asyncio.sleep(0)
+
+            self.assertEqual(
+                notifications,
+                [
+                    NodeAppStateStreamEvent.initial(
+                        app_name=app.name,
+                        app_stats=runtime_summary,
+                        update_info=update_info,
+                        update_status=idle_status,
+                    ),
+                    NodeAppStateStreamEvent.update(
+                        app_name=app.name,
+                        update_info=update_info,
+                        update_status=running_status,
+                    ),
                 ],
             )
 

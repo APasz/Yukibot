@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import enum
 import logging
 from collections.abc import Mapping, Sequence
@@ -52,9 +53,9 @@ from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionRe
 from apps._mod import Mod
 from apps._settings import Setting, Settings_Manager
 from config import VoiceTargetConfig
+from node_api import RelayTTSQueue
 from web_dash.nicegui_protocols import WebChatRelayPublisher
 from web_dash.service import ModWebService
-from node_api import RelayTTSQueue
 
 log: Logger = logging.getLogger(__name__)
 
@@ -3309,15 +3310,8 @@ class AppManageService:
                 raise RuntimeError(reason)
             if app.updater is None:
                 raise _errors.UnsupportedUpdate(f"{app.friendly} does not have an updater")
-
-            previous = app.updater.stringise(app.updater.version) if app.updater.version is not None else None
-            updated = await app.updater.base()
-            if updated is None:
-                status = f"No new update found for `{app.friendly}`."
-            elif previous is None:
-                status = f"Downloaded update `{updated}` for `{app.friendly}`."
-            else:
-                status = f"`{app.friendly}` update: `{previous} -> {updated}`."
+            result = await app.updater.update_selected()
+            status = result.message
         except Exception as xcp:
             status = _error_status(f"Error: update failed for `{app.friendly}`: {xcp}")
 

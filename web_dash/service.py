@@ -1,5 +1,26 @@
 from __future__ import annotations
 
+from . import avatars as mod_web_avatars
+from .actions import ModWebActionsMixin
+from .app_page import ModWebAppPageMixin
+from .backend import ModWebDashboardBackend
+from .chat import ModWebChatMixin
+from .constants import (
+    _MOD_WEB_STARTUP_TIMEOUT_SECONDS,
+    log,
+)
+from .editors import ModWebEditorsMixin
+from .home import ModWebHomeMixin
+from .models import ModWebModelsMixin
+from .nicegui_protocols import (
+    ModWebFastApiApp,
+    ModWebRouteUi,
+    ModWebRunnerUi,
+    WebChatRelayPublisher,
+    _cast_mod_web_route_ui,
+)
+from .page_handlers import ModWebPageHandlersMixin
+from .routes import ModWebRoutesMixin
 from .runtime_imports import (
     Access_Control,
     App,
@@ -13,28 +34,6 @@ from .runtime_imports import (
     quote,
     threading,
 )
-from .constants import (
-    _MOD_WEB_STARTUP_TIMEOUT_SECONDS,
-    log,
-)
-from .backend import ModWebDashboardBackend
-from .nicegui_protocols import (
-    ModWebFastApiApp,
-    ModWebRouteUi,
-    ModWebRunnerUi,
-    WebChatRelayPublisher,
-    _cast_mod_web_route_ui,
-)
-
-from . import avatars as mod_web_avatars
-from .actions import ModWebActionsMixin
-from .app_page import ModWebAppPageMixin
-from .chat import ModWebChatMixin
-from .editors import ModWebEditorsMixin
-from .home import ModWebHomeMixin
-from .models import ModWebModelsMixin
-from .page_handlers import ModWebPageHandlersMixin
-from .routes import ModWebRoutesMixin
 from .status import ModWebStatusMixin
 from .streams import ModWebStreamsMixin
 from .tabs import ModWebTabsMixin
@@ -140,8 +139,9 @@ class ModWebService(
     def index_path(self) -> str:
         return "/"
 
-    async def start(self, manager: App_Manager, acl: Access_Control | None = None) -> None:
-        self.set_manager(manager)
+    async def start(self, manager: App_Manager | None = None, acl: Access_Control | None = None) -> None:
+        if manager is not None:
+            self.set_manager(manager)
         if acl is not None:
             self.set_acl(acl)
         self._shutting_down = False

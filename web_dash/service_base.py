@@ -22,15 +22,16 @@ from .runtime_imports import (
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
-    NodeCapacityMutationResult,
-    NodeFontSourceSettingsMutationResult,
-    NodeModEntry,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
+    NodeCapacityMutationResult,
     NodeConfigContent,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
+    NodeConsoleStdoutSnapshot,
+    NodeFontSourceSettingsMutationResult,
+    NodeModEntry,
     NodeModList,
     NodeModUploadResult,
     NodeSaveList,
@@ -62,8 +63,8 @@ from .types import (
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
     _ModWebKillControlState,
-    _ModWebStatusPageConfig,
     _ModWebStartStopControlState,
+    _ModWebStatusPageConfig,
 )
 from .utils import _http_exception
 
@@ -187,6 +188,11 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_create_remote_app_state_subscription"]) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_create_remote_console_stdout_subscription"]
+    ) -> Callable[..., Callable[[], None]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_create_remote_node_state_subscription"]) -> Callable[..., Callable[[], None]]: ...
@@ -339,6 +345,11 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_register_timer_cleanup"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_subscribe_local_app_console_stdout"]
+    ) -> Callable[..., Callable[[], None]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_remote_app_entry"]) -> Callable[..., NodeAppEntry]: ...
 
     @overload
@@ -374,6 +385,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_console_action_list"]) -> Callable[..., NodeConsoleActionList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_console_stdout"]) -> Callable[..., NodeConsoleStdoutSnapshot]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_download_redirect"]) -> Callable[..., RedirectResponse]: ...
@@ -439,6 +453,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_save_list"]) -> Callable[..., NodeSaveList]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_save_delete"]) -> Callable[..., NodeSaveMutationResult]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_save_rename"]) -> Callable[..., NodeSaveMutationResult]: ...

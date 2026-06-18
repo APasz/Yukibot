@@ -154,6 +154,22 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
 
 
 class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
+    def test_delete_save_file_removes_current_world_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            world_dir = root / "world"
+            world_dir.mkdir()
+            (world_dir / "level.dat").write_text("save-data", encoding="utf-8")
+            app = cast(Any, object.__new__(Minecraft))
+            app.directory = root
+            app.settings = None
+            app.check_running = lambda: False
+
+            deleted = app.delete_save_file(file_id="world/world")
+
+            self.assertEqual(deleted.id, "world/world")
+            self.assertFalse(world_dir.exists())
+
     def test_sync_kubejs_yuki_log_script_creates_bundled_script_when_enabled(self) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)

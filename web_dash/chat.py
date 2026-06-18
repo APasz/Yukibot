@@ -31,7 +31,6 @@ from .constants import (
     _CHAT_MEDIA_AUDIO_EXTENSIONS,
     _CHAT_MEDIA_IMAGE_EXTENSIONS,
     _CHAT_MEDIA_VIDEO_EXTENSIONS,
-    _CHAT_TIMELINE_AUTO_SCROLL_HIDDEN_MESSAGE_LIMIT,
     _CHAT_TIMELINE_BOTTOM_THRESHOLD_PX,
     _REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
     _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS,
@@ -57,7 +56,6 @@ from .runtime_imports import (
     ChatLink,
     ChatMessageReference,
     ChatReferenceKind,
-    Column,
     Html,
     Input,
     Label,
@@ -73,6 +71,7 @@ from .runtime_imports import (
     Power_Level,
     PurePosixPath,
     Request,
+    ScrollArea,
     Tooltip,
     aiohttp,
     asyncio,
@@ -105,9 +104,8 @@ from .types import (
 from .ui_helpers import ModWebUiHelpersMixin
 
 if TYPE_CHECKING:
-    from nicegui.element import Element
     from nicegui.elements.link import Link
-    from nicegui.elements.row import Row
+    from nicegui.events import ScrollEventArguments
 
 class ModWebChatMixin(ModWebServiceSupport):
     def _local_chat_snapshot(self, room_id: str) -> NodeChatRoomSnapshot:
@@ -318,17 +316,13 @@ class ModWebChatMixin(ModWebServiceSupport):
         async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
             return await self._remote_app_runtime_summary_async(node, app_name, user)
 
-        hero_badges: tuple[_ModWebBadgeSpec, ...] = ()
-        if initial_app_stats is not None:
-            hero_badges = (_ModWebBadgeSpec(text=initial_app_stats.relay_support.display_value, tone="grey"),)
-
         return _ModWebChatSurfaceConfig(
             panel=panel,
             node_name=node.node_name,
             app_friendly=resolved_app_entry.friendly,
             app_color_hex=resolved_app_entry.color_hex,
             app_stats=initial_app_stats,
-            hero_badges=hero_badges,
+            hero_badges=(_ModWebBadgeSpec(text=initial_app_stats.relay_support.display_value, tone="grey"),),
             refresh_app_stats=_refresh_app_stats if include_runtime_updates else None,
             popout_url=self.node_app_chat_path(node.node_name, resolved_app_entry.name),
             map_url=resolved_app_entry.map_url,
@@ -460,7 +454,8 @@ class ModWebChatMixin(ModWebServiceSupport):
         }
         runtime_changed = include_runtime_updates and (
             event.app_stats is not None
-            or event.kind in {
+            or event.kind
+            in {
                 NodeChatStreamEventKind.INITIAL,
                 NodeChatStreamEventKind.RUNTIME_CHANGED,
             }
@@ -703,9 +698,8 @@ class ModWebChatMixin(ModWebServiceSupport):
         endpoint_count_tooltip_content_display = endpoint_count_tooltip_content
         player_count_tooltip_display = player_count_tooltip
         player_count_tooltip_content_display = player_count_tooltip_content
-        timeline_column: Column | None = None
-        unread_bar: Row | None = None
-        unread_count_label: Label | None = None
+        chat_scroll_area: ScrollArea | None = None
+        chat_near_bottom = True
         last_chat_signature: tuple[str, ...] | None = None
         page_closed = False
         refresh_in_flight = False
@@ -740,6 +734,25 @@ class ModWebChatMixin(ModWebServiceSupport):
                         player_count_tooltip_content_display,
                         player_count_tooltip_html or "",
                     )
+
+        def update_chat_scroll_position(event: "ScrollEventArguments") -> None:
+            nonlocal chat_near_bottom
+            if event.vertical_size <= event.vertical_container_size + 1:
+                chat_near_bottom = True
+                return
+            chat_near_bottom = event.vertical_percentage >= 0.97
+
+        async def scroll_chat_to_bottom() -> None:
+            if page_closed or chat_scroll_area is None:
+                return
+            await asyncio.sleep(0)
+            chat_scroll_area.scroll_to(percent=1e6)
+            await asyncio.sleep(0.05)
+            if not page_closed:
+                chat_scroll_area.scroll_to(percent=1e6)
+
+        def queue_chat_scroll_to_bottom() -> None:
+            asyncio.create_task(scroll_chat_to_bottom())
 
         def clear_reply_target() -> None:
             nonlocal reply_reference, reply_reference_source_guild_id, reply_to_event_id
@@ -804,7 +817,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             use_runtime_override: bool = False,
             force_scroll: bool = False,
         ) -> None:
-            nonlocal app_stats, last_chat_signature, refresh_in_flight, runtime_refresh_in_flight
+            nonlocal app_stats, chat_near_bottom, last_chat_signature, refresh_in_flight, runtime_refresh_in_flight
             if page_closed:
                 return
             snapshot: NodeChatRoomSnapshot | None = None
@@ -854,36 +867,17 @@ class ModWebChatMixin(ModWebServiceSupport):
             events = snapshot.events
             previous_signature = last_chat_signature or ()
             next_signature = self._chat_history_signature(events)
-            appended_count = self._chat_history_append_count(previous_signature, next_signature)
             changed = next_signature != previous_signature
             if changed:
-                if timeline_column is not None and unread_bar is not None and unread_count_label is not None:
-                    self._capture_chat_timeline_state(
-                        timeline_column,
-                        unread_bar=unread_bar,
-                        unread_count_label=unread_count_label,
-                    )
+                should_scroll_after_refresh = force_scroll or chat_near_bottom
                 last_chat_signature = next_signature
                 _chat_messages.refresh(events)
-            if (
-                timeline_column is not None
-                and unread_bar is not None
-                and unread_count_label is not None
-                and (changed or force_scroll)
-            ):
-                if force_scroll:
-                    self._scroll_chat_to_bottom(
-                        timeline_column,
-                        unread_bar=unread_bar,
-                        unread_count_label=unread_count_label,
-                    )
-                elif changed:
-                    self._apply_chat_timeline_refresh(
-                        timeline_column,
-                        unread_bar=unread_bar,
-                        unread_count_label=unread_count_label,
-                        appended_count=appended_count,
-                    )
+                if should_scroll_after_refresh:
+                    await scroll_chat_to_bottom()
+                    chat_near_bottom = True
+            elif force_scroll:
+                await scroll_chat_to_bottom()
+                chat_near_bottom = True
 
         loop = asyncio.get_running_loop()
 
@@ -968,15 +962,6 @@ class ModWebChatMixin(ModWebServiceSupport):
                 return
             message_count_label.set_text(f"{len(_value_as_text(message_input))} / {_WEB_CHAT_MESSAGE_MAX_LENGTH}")
 
-        def jump_to_latest() -> None:
-            if timeline_column is None or unread_bar is None or unread_count_label is None:
-                return
-            self._scroll_chat_to_bottom(
-                timeline_column,
-                unread_bar=unread_bar,
-                unread_count_label=unread_count_label,
-            )
-
         initial_snapshot = chat_panel.initial_snapshot
         panel_classes = "mod-chat-panel w-full"
         if embedded:
@@ -986,7 +971,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                 with ui.column().classes("mod-chat-header w-full"):
                     with ui.row().classes("mod-chat-header-top w-full items-start justify-between gap-4 flex-wrap"):
                         with ui.column().classes("mod-chat-header-main min-w-0 gap-1"):
-                            ui.label(f"{app_friendly}").classes("mod-chat-title mod-title-small break-all")
+                            ui.label(f"{app_friendly}").classes("mod-chat-title mod-title-small")
                         with ui.row().classes("mod-chat-status-row items-center justify-end gap-2 flex-wrap"):
                             for badge in header_badges:
                                 self._badge(ui=ui, text=badge.text, tone=badge.tone)
@@ -1036,24 +1021,14 @@ class ModWebChatMixin(ModWebServiceSupport):
             initial_events = initial_snapshot.events
             last_chat_signature = self._chat_history_signature(initial_events)
             with ui.column().classes("mod-chat-timeline-shell w-full"):
-                timeline_column = ui.column().classes("mod-chat-timeline w-full")
-                with timeline_column:
-                    _chat_messages(initial_events)
-                unread_bar = ui.row().classes("mod-chat-unread-bar items-center justify-center")
-                unread_bar.style("display: none;")
-                unread_bar.on("click", jump_to_latest)
-                with unread_bar:
-                    unread_count_label = ui.label("0 new").classes("mod-chat-unread-count")
-            self._bind_chat_timeline_state(
-                timeline_column,
-                unread_bar=unread_bar,
-                unread_count_label=unread_count_label,
-            )
-            self._scroll_chat_to_bottom(
-                timeline_column,
-                unread_bar=unread_bar,
-                unread_count_label=unread_count_label,
-            )
+                chat_scroll_area = ui.scroll_area(on_scroll=update_chat_scroll_position).classes(
+                    "mod-chat-scroll-area w-full"
+                )
+                with chat_scroll_area:
+                    with ui.column().classes("mod-chat-timeline w-full"):
+                        _chat_messages(initial_events)
+            initial_scroll_timer = ui.timer(0.1, queue_chat_scroll_to_bottom, once=True)
+            self._register_timer_cleanup(ui=ui, timer=initial_scroll_timer)
             with ui.column().classes("mod-chat-composer w-full"):
                 with ui.column().classes("mod-chat-composer-surface w-full"):
                     _reply_banner()
@@ -1114,29 +1089,81 @@ class ModWebChatMixin(ModWebServiceSupport):
         ui.add_head_html(ModWebChatMixin._chat_client_script())
 
     @staticmethod
+    def _chat_history_append_count(previous_event_ids: tuple[str, ...], next_event_ids: tuple[str, ...]) -> int:
+        max_overlap = min(len(previous_event_ids), len(next_event_ids))
+        for overlap in range(max_overlap, 0, -1):
+            if previous_event_ids[-overlap:] == next_event_ids[:overlap]:
+                return len(next_event_ids) - overlap
+        return len(next_event_ids)
+
+    @staticmethod
     def _chat_client_script() -> str:
         return f"""
             <script>
-            if (!window.modWebChat) {{
-              window.modWebChat = (() => {{
+            window.modWebChat = (() => {{
+                const bindVersion = '2026-06-17-newest-first';
                 const bottomThresholdPx = {_CHAT_TIMELINE_BOTTOM_THRESHOLD_PX};
-                const autoScrollHiddenMessageLimit = {_CHAT_TIMELINE_AUTO_SCROLL_HIDDEN_MESSAGE_LIMIT};
-                const get = (elementId) => getElement(elementId);
+                const autoScrollHiddenMessageLimit = 3;
+                const get = (elementId) => document.getElementById(String(elementId)) || getElement(elementId);
+                const disableLegacyScroll = () => {{
+                  window.modWebChatTimelineObserver?.disconnect?.();
+                  for (const timeline of document.querySelectorAll('.mod-chat-timeline')) {{
+                    timeline.dataset.modChatSticky = '0';
+                    timeline._modChatMutationObserver?.disconnect?.();
+                    delete timeline._modChatMutationObserver;
+                  }}
+                }};
+                const isScrollable = (element) => {{
+                  if (!element) {{
+                    return false;
+                  }}
+                  const style = window.getComputedStyle(element);
+                  return element.scrollHeight > element.clientHeight + 1
+                    || style.overflowY === 'auto'
+                    || style.overflowY === 'scroll'
+                    || style.overflowY === 'overlay';
+                }};
+                const scrollTargetFor = (timelineId) => {{
+                  const root = get(timelineId);
+                  if (!root) {{
+                    return null;
+                  }}
+                  const candidates = [
+                    root,
+                    root.querySelector(':scope > .nicegui-content'),
+                    ...root.querySelectorAll('.nicegui-content'),
+                  ].filter(Boolean);
+                  return candidates.find((candidate) => isScrollable(candidate)) || root;
+                }};
                 const jumpStateByTimeline = new WeakMap();
-                const pinned = (timeline) => timeline.dataset.modChatPinned !== '0';
-                const hiddenMessageCount = (timeline) => {{
-                  const viewportBottom = timeline.scrollTop + timeline.clientHeight + bottomThresholdPx;
-                  let hiddenCount = 0;
-                  for (const message of timeline.querySelectorAll('.mod-chat-message')) {{
-                    const messageBottom = message.offsetTop + message.offsetHeight;
-                    if (messageBottom > viewportBottom) {{
-                      hiddenCount += 1;
+                const programmaticScrollTimelines = new WeakSet();
+                const sticky = (_timeline) => false;
+                const timelineAnchors = (timeline) =>
+                  Array.from(timeline.querySelectorAll('.mod-chat-entry[data-mod-chat-event-id]'));
+                const timelineEventIds = (timeline) =>
+                  timelineAnchors(timeline)
+                    .map((entry) => entry.dataset.modChatEventId || '')
+                    .filter((eventId) => eventId.length > 0);
+                const hiddenMessageCount = (previousEventIds, nextEventIds) => {{
+                  const maxOverlap = Math.min(previousEventIds.length, nextEventIds.length);
+                  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {{
+                    const previousTail = previousEventIds.slice(previousEventIds.length - overlap);
+                    const nextHead = nextEventIds.slice(0, overlap);
+                    if (previousTail.join('\\u0000') === nextHead.join('\\u0000')) {{
+                      return Math.max(0, nextEventIds.length - overlap);
                     }}
                   }}
-                  return hiddenCount;
+                  return nextEventIds.length;
+                }};
+                const clampScrollTop = (timeline, value) =>
+                  Math.max(0, Math.min(Math.max(0, timeline.scrollHeight - timeline.clientHeight), value));
+                const setTimelineScrollTop = (timeline, value) => {{
+                  programmaticScrollTimelines.add(timeline);
+                  timeline.scrollTop = clampScrollTop(timeline, value);
+                  requestAnimationFrame(() => programmaticScrollTimelines.delete(timeline));
                 }};
                 const setUnread = (timelineId, unreadBarId, unreadCountId, count) => {{
-                  const timeline = get(timelineId);
+                  const timeline = scrollTargetFor(timelineId);
                   const unreadBar = get(unreadBarId);
                   const unreadCount = get(unreadCountId);
                   if (!timeline || !unreadBar || !unreadCount) {{
@@ -1148,14 +1175,12 @@ class ModWebChatMixin(ModWebServiceSupport):
                   unreadBar.style.display = nextCount > 0 ? 'flex' : 'none';
                 }};
                 const sync = (timelineId, unreadBarId, unreadCountId) => {{
-                  const timeline = get(timelineId);
+                  const timeline = scrollTargetFor(timelineId);
                   if (!timeline) {{
                     return false;
                   }}
                   const remaining = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
                   const atBottom = remaining <= bottomThresholdPx;
-                  timeline.dataset.modChatPinned = atBottom ? '1' : '0';
-                  timeline.dataset.modChatHiddenCount = String(hiddenMessageCount(timeline));
                   if (atBottom) {{
                     setUnread(timelineId, unreadBarId, unreadCountId, 0);
                   }}
@@ -1286,12 +1311,12 @@ class ModWebChatMixin(ModWebServiceSupport):
                   window.modWebChatTimeObserver.observe(document.body, {{childList: true, subtree: true}});
                 }};
                 const attachMediaListeners = (timelineId, unreadBarId, unreadCountId) => {{
-                  const timeline = get(timelineId);
+                  const timeline = scrollTargetFor(timelineId);
                   if (!timeline) {{
                     return;
                   }}
                   const onMediaReady = () => {{
-                    if (pinned(timeline)) {{
+                    if (sticky(timeline)) {{
                       jump(timelineId, unreadBarId, unreadCountId);
                     }} else {{
                       sync(timelineId, unreadBarId, unreadCountId);
@@ -1313,7 +1338,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                   }}
                 }};
                 const observeTimelineMutations = (timelineId, unreadBarId, unreadCountId) => {{
-                  const timeline = get(timelineId);
+                  const timeline = scrollTargetFor(timelineId);
                   if (!timeline || timeline._modChatMutationObserver) {{
                     return;
                   }}
@@ -1336,7 +1361,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                       return;
                     }}
                     attachMediaListeners(timelineId, unreadBarId, unreadCountId);
-                    if (pinned(timeline)) {{
+                    if (sticky(timeline)) {{
                       jump(timelineId, unreadBarId, unreadCountId);
                     }} else {{
                       sync(timelineId, unreadBarId, unreadCountId);
@@ -1346,18 +1371,34 @@ class ModWebChatMixin(ModWebServiceSupport):
                   timeline._modChatMutationObserver = observer;
                 }};
                 const bind = (timelineId, unreadBarId, unreadCountId) => {{
-                  const timeline = get(timelineId);
+                  const root = get(timelineId);
+                  const timeline = scrollTargetFor(timelineId);
                   if (!timeline) {{
                     return;
                   }}
-                  if (timeline.dataset.modChatBound !== '1') {{
-                    timeline.dataset.modChatBound = '1';
-                    timeline.dataset.modChatPinned = timeline.dataset.modChatPinned || '1';
+                  if (root?.dataset.modChatBound !== bindVersion) {{
+                    root?._modChatMutationObserver?.disconnect?.();
+                    if (root) {{
+                      delete root._modChatMutationObserver;
+                    }}
+                    timeline._modChatMutationObserver?.disconnect?.();
+                    delete timeline._modChatMutationObserver;
+                    root.dataset.modChatBound = bindVersion;
+                    timeline.dataset.modChatSticky = '0';
                     timeline.dataset.modChatUnread = timeline.dataset.modChatUnread || '0';
+                    timeline.dataset.modChatWasPinned = timeline.dataset.modChatWasPinned || '0';
                     timeline.dataset.modChatHiddenCount = timeline.dataset.modChatHiddenCount || '0';
-                    timeline.addEventListener('scroll', () => sync(timelineId, unreadBarId, unreadCountId), {{passive: true}});
+                    timeline.addEventListener('scroll', () => {{
+                      if (!programmaticScrollTimelines.has(timeline)) {{
+                        clearScheduledJump(timeline);
+                        if (sticky(timeline)) {{
+                          jump(timelineId, unreadBarId, unreadCountId);
+                        }}
+                      }}
+                      sync(timelineId, unreadBarId, unreadCountId);
+                    }}, {{passive: true}});
                     window.addEventListener('resize', () => {{
-                      if (pinned(timeline)) {{
+                      if (sticky(timeline)) {{
                         jump(timelineId, unreadBarId, unreadCountId);
                       }} else {{
                         sync(timelineId, unreadBarId, unreadCountId);
@@ -1371,12 +1412,13 @@ class ModWebChatMixin(ModWebServiceSupport):
                 }};
                 const beforeRefresh = (timelineId, unreadBarId, unreadCountId) => {{
                   bind(timelineId, unreadBarId, unreadCountId);
-                  const timeline = get(timelineId);
+                  const timeline = scrollTargetFor(timelineId);
                   if (!timeline) {{
                     return;
                   }}
-                  timeline.dataset.modChatWasPinned = pinned(timeline) ? '1' : '0';
-                  timeline.dataset.modChatHiddenCount = String(hiddenMessageCount(timeline));
+                  timeline.dataset.modChatWasPinned = sticky(timeline) ? '1' : '0';
+                  timeline.dataset.modChatPreviousEventIds = JSON.stringify(timelineEventIds(timeline));
+                  timeline.dataset.modChatHiddenCount = '0';
                 }};
                 const clearScheduledJump = (timeline) => {{
                   const state = jumpStateByTimeline.get(timeline);
@@ -1391,144 +1433,156 @@ class ModWebChatMixin(ModWebServiceSupport):
                   }}
                   jumpStateByTimeline.delete(timeline);
                 }};
-                const settleBottom = (timelineId, unreadBarId, unreadCountId) => {{
-                  const timeline = get(timelineId);
-                  if (!timeline) {{
-                    return;
-                  }}
-                  timeline.scrollTop = timeline.scrollHeight;
-                  timeline.dataset.modChatPinned = '1';
-                  sync(timelineId, unreadBarId, unreadCountId);
-                }};
-                const jump = (timelineId, unreadBarId, unreadCountId) => {{
-                  const timeline = get(timelineId);
-                  if (!timeline) {{
-                    return;
-                  }}
+                const scheduleTimelineTask = (timeline, settle) => {{
                   clearScheduledJump(timeline);
                   const frameIds = [];
                   const timeoutIds = [];
-                  const settle = () => settleBottom(timelineId, unreadBarId, unreadCountId);
                   settle();
                   frameIds.push(requestAnimationFrame(settle));
                   frameIds.push(requestAnimationFrame(() => requestAnimationFrame(settle)));
                   timeoutIds.push(setTimeout(settle, 0));
                   timeoutIds.push(setTimeout(settle, 120));
                   timeoutIds.push(setTimeout(settle, 320));
+                  timeoutIds.push(setTimeout(settle, 800));
+                  timeoutIds.push(setTimeout(settle, 1500));
                   jumpStateByTimeline.set(timeline, {{frameIds, timeoutIds}});
                 }};
-                const shouldAutoScrollAfterRefresh = (timeline, appendedCount) => {{
-                  if (appendedCount <= 0) {{
-                    return false;
-                  }}
-                  const hiddenCountBeforeRefresh = Number.parseInt(timeline.dataset.modChatHiddenCount || '0', 10) || 0;
-                  return hiddenCountBeforeRefresh + appendedCount <= autoScrollHiddenMessageLimit;
-                }};
-                const afterRefresh = (timelineId, unreadBarId, unreadCountId, appendedCount, forceScroll) => {{
-                  bind(timelineId, unreadBarId, unreadCountId);
-                  const timeline = get(timelineId);
+                const settleBottom = (timelineId, unreadBarId, unreadCountId) => {{
+                  const timeline = scrollTargetFor(timelineId);
                   if (!timeline) {{
                     return;
                   }}
-                  const wasPinned = forceScroll || timeline.dataset.modChatWasPinned !== '0';
-                  timeline.dataset.modChatWasPinned = '0';
+                  const anchors = timelineAnchors(timeline);
+                  const lastAnchor = anchors[anchors.length - 1];
+                  lastAnchor?.scrollIntoView?.({{block: 'end', inline: 'nearest'}});
+                  setTimelineScrollTop(timeline, timeline.scrollHeight);
+                  setTimelineScrollTop(timeline, timeline.scrollHeight);
+                  sync(timelineId, unreadBarId, unreadCountId);
+                }};
+                const jump = (timelineId, unreadBarId, unreadCountId) => {{
+                  const timeline = scrollTargetFor(timelineId);
+                  if (!timeline) {{
+                    return;
+                  }}
+                  scheduleTimelineTask(timeline, () => settleBottom(timelineId, unreadBarId, unreadCountId));
+                }};
+                const shouldAutoScrollAfterRefresh = (timeline, forceScroll, appendedCount) => {{
+                  if (forceScroll || sticky(timeline)) {{
+                    return true;
+                  }}
+                  return timeline.dataset.modChatWasPinned === '1' && appendedCount <= autoScrollHiddenMessageLimit;
+                }};
+                const afterRefresh = (timelineId, unreadBarId, unreadCountId, appendedCount, forceScroll) => {{
+                  bind(timelineId, unreadBarId, unreadCountId);
+                  const timeline = scrollTargetFor(timelineId);
+                  if (!timeline) {{
+                    return;
+                  }}
                   localizeTimes(timeline);
-                  if (wasPinned || shouldAutoScrollAfterRefresh(timeline, appendedCount)) {{
+                  let previousEventIds = [];
+                  try {{
+                    previousEventIds = JSON.parse(timeline.dataset.modChatPreviousEventIds || '[]');
+                  }} catch (_error) {{
+                    previousEventIds = [];
+                  }}
+                  const hiddenCount = hiddenMessageCount(previousEventIds, timelineEventIds(timeline));
+                  timeline.dataset.modChatHiddenCount = String(hiddenCount);
+                  delete timeline.dataset.modChatPreviousEventIds;
+                  const effectiveAppendCount = Math.max(0, Math.max(appendedCount, hiddenCount));
+                  if (shouldAutoScrollAfterRefresh(timeline, forceScroll, effectiveAppendCount)) {{
                     jump(timelineId, unreadBarId, unreadCountId);
                     return;
                   }}
                   const currentUnread = Number.parseInt(timeline.dataset.modChatUnread || '0', 10) || 0;
-                  setUnread(timelineId, unreadBarId, unreadCountId, currentUnread + Math.max(0, appendedCount));
+                  setUnread(timelineId, unreadBarId, unreadCountId, currentUnread + effectiveAppendCount);
                 }};
+                const setSticky = (timelineId, unreadBarId, unreadCountId, stickyEnabled) => {{
+                  bind(timelineId, unreadBarId, unreadCountId);
+                  const timeline = scrollTargetFor(timelineId);
+                  if (!timeline) {{
+                    return;
+                  }}
+                  timeline.dataset.modChatSticky = stickyEnabled ? '1' : '0';
+                  if (stickyEnabled) {{
+                    setUnread(timelineId, unreadBarId, unreadCountId, 0);
+                    jump(timelineId, unreadBarId, unreadCountId);
+                  }} else {{
+                    clearScheduledJump(timeline);
+                    sync(timelineId, unreadBarId, unreadCountId);
+                  }}
+                }};
+                const bindTimelineElement = (root, forceInitialJump) => {{
+                  const shell = root.closest('.mod-chat-timeline-shell') || root.parentElement;
+                  const unreadBar = shell?.querySelector?.('.mod-chat-unread-bar');
+                  const unreadCount = unreadBar?.querySelector?.('.mod-chat-unread-count');
+                  if (!root.id || !unreadBar?.id || !unreadCount?.id) {{
+                    return;
+                  }}
+                  bind(root.id, unreadBar.id, unreadCount.id);
+                  const timeline = scrollTargetFor(root.id);
+                  if (
+                    forceInitialJump
+                    && timeline
+                    && sticky(timeline)
+                    && root.dataset.modChatInitialSettled !== bindVersion
+                  ) {{
+                    root.dataset.modChatInitialSettled = bindVersion;
+                    jump(root.id, unreadBar.id, unreadCount.id);
+                  }}
+                }};
+                const bindAllTimelines = (forceInitialJump = false) => {{
+                  for (const root of document.querySelectorAll('.mod-chat-timeline')) {{
+                    bindTimelineElement(root, forceInitialJump);
+                  }}
+                }};
+                const observeTimelines = () => {{
+                  window.modWebChatTimelineObserver?.disconnect?.();
+                  if (!document.body) {{
+                    return;
+                  }}
+                  let queued = false;
+                  const flush = () => {{
+                    queued = false;
+                    bindAllTimelines(true);
+                  }};
+                  const queue = () => {{
+                    if (queued) {{
+                      return;
+                    }}
+                    queued = true;
+                    requestAnimationFrame(flush);
+                  }};
+                  window.modWebChatTimelineObserver = new MutationObserver((mutations) => {{
+                    for (const mutation of mutations) {{
+                      for (const node of mutation.addedNodes) {{
+                        if (!(node instanceof Element)) {{
+                          continue;
+                        }}
+                        if (node.matches('.mod-chat-timeline') || node.querySelector('.mod-chat-timeline')) {{
+                          queue();
+                          return;
+                        }}
+                      }}
+                    }}
+                  }});
+                  window.modWebChatTimelineObserver.observe(document.body, {{childList: true, subtree: true}});
+                  bindAllTimelines(true);
+                }};
+                disableLegacyScroll();
                 localizeTimes(document);
                 observeLocalizedTimes();
-                window.setInterval(() => localizeTimes(document), 30000);
-                return {{bind, beforeRefresh, jump, afterRefresh, localizeTimes}};
-              }})();
-            }}
+                if (window.modWebChatTimeInterval) {{
+                  window.clearInterval(window.modWebChatTimeInterval);
+                }}
+                window.modWebChatTimeInterval = window.setInterval(() => localizeTimes(document), 30000);
+                return {{localizeTimes, disableLegacyScroll}};
+            }})();
             </script>
             """
 
     @staticmethod
-    def _bind_chat_timeline_state(
-        timeline: "Element",
-        *,
-        unread_bar: "Element",
-        unread_count_label: "Element",
-    ) -> None:
-        timeline.client.run_javascript(
-            (f"window.modWebChat?.bind({timeline.id}, {unread_bar.id}, {unread_count_label.id});"),
-            timeout=0.1,
-        )
-
-    @staticmethod
-    def _capture_chat_timeline_state(
-        timeline: "Element",
-        *,
-        unread_bar: "Element",
-        unread_count_label: "Element",
-    ) -> None:
-        timeline.client.run_javascript(
-            (f"window.modWebChat?.beforeRefresh({timeline.id}, {unread_bar.id}, {unread_count_label.id});"),
-            timeout=0.1,
-        )
-
-    @staticmethod
-    def _apply_chat_timeline_refresh(
-        timeline: "Element",
-        *,
-        unread_bar: "Element",
-        unread_count_label: "Element",
-        appended_count: int,
-    ) -> None:
-        timeline.client.run_javascript(
-            (
-                "window.modWebChat?.afterRefresh("
-                f"{timeline.id}, {unread_bar.id}, {unread_count_label.id}, {appended_count}, false"
-                ");"
-            ),
-            timeout=0.1,
-        )
-
-    @staticmethod
-    def _scroll_chat_to_bottom(
-        timeline: "Element",
-        *,
-        unread_bar: "Element | None" = None,
-        unread_count_label: "Element | None" = None,
-    ) -> None:
-        if unread_bar is None or unread_count_label is None:
-            timeline.client.run_javascript(
-                f"""
-                const element = getElement({timeline.id});
-                if (!element) {{
-                    return;
-                }}
-                const settleChatTimeline = () => {{
-                    element.scrollTop = element.scrollHeight;
-                }};
-                settleChatTimeline();
-                requestAnimationFrame(settleChatTimeline);
-                """,
-                timeout=0.1,
-            )
-            return
-        timeline.client.run_javascript(
-            (f"window.modWebChat?.afterRefresh({timeline.id}, {unread_bar.id}, {unread_count_label.id}, 0, true);"),
-            timeout=0.1,
-        )
-
-    @staticmethod
     def _chat_history_signature(events: tuple[ChatEvent, ...]) -> tuple[str, ...]:
         return tuple(event.id for event in events)
-
-    @staticmethod
-    def _chat_history_append_count(previous: tuple[str, ...], current: tuple[str, ...]) -> int:
-        max_overlap = min(len(previous), len(current))
-        for overlap_length in range(max_overlap, 0, -1):
-            if previous[-overlap_length:] == current[:overlap_length]:
-                return len(current) - overlap_length
-        return len(current)
 
     def _chat_event_reference(self, event: ChatEvent) -> ChatMessageReference:
         app = self._chat_room_app(event.room_id)
@@ -1634,7 +1688,11 @@ class ModWebChatMixin(ModWebServiceSupport):
         on_reply: Callable[[ChatEvent], None],
     ) -> None:
         copy_text: str = self._chat_event_copy_text(event)
-        with ui.row().classes("mod-chat-entry w-full items-start gap-2"):
+        with (
+            ui.row()
+            .classes("mod-chat-entry w-full items-start gap-2")
+            .props(f'data-mod-chat-event-id="{escape(event.id)}"')
+        ):
             with ui.column().classes("mod-chat-entry-main min-w-0 grow"):
                 self._render_chat_event_body(ui=ui, event=event)
             with ui.row().classes("mod-chat-entry-meta items-start justify-end gap-1"):

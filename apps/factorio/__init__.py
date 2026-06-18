@@ -318,6 +318,7 @@ class FactorioSettingDefinition(Generic[_FactorioSettingValue]):
     default: _FactorioSettingValue
     power_level: Power_Level = Power_Level.admin
     desc: str | None = None
+    paragraph: bool = False
     comment_key: str | None = None
     prefer_comment_desc: bool = False
 
@@ -330,6 +331,7 @@ class FactorioSettingDefinition(Generic[_FactorioSettingValue]):
             default=self.default,
             power_level=self.power_level,
             desc=self.desc,
+            paragraph=self.paragraph,
         )
 
     @property
@@ -376,6 +378,7 @@ _FACTORIO_SETTING_DEFINITIONS: tuple[_FactorioSettingDefinitionItem, ...] = (
         (),
         StringSettingSpec(allow_blank=True),
         "",
+        paragraph=True,
     ),
     FactorioSettingDefinition[int](
         Setting_Label.max_player,
@@ -545,9 +548,11 @@ _FACTORIO_SETTING_DEFINITIONS: tuple[_FactorioSettingDefinitionItem, ...] = (
 
 
 class Factorio_Settings(App_Settings):
-    def __init__(self, pointer: Path) -> None:
+    def __init__(self, pointer: Path, *, version_getter: Callable[[], AppVersion | None] | None = None) -> None:
         self._definitions: tuple[_FactorioSettingDefinitionItem, ...] = _FACTORIO_SETTING_DEFINITIONS
-        super().__init__(pointer, [definition.create_setting() for definition in self._definitions])
+        super().__init__(
+            pointer, [definition.create_setting() for definition in self._definitions], version_getter=version_getter
+        )
 
     def _apply_descriptions(self, data: dict[str, object]) -> None:
         for definition in self._definitions:
@@ -601,7 +606,9 @@ class Factorio(App[App_Config]):
         ]
 
         self.process = None
-        super().__init__(bot, am, cfg, Factorio_Settings(file_settings), Mod_Factorio)
+        super().__init__(
+            bot, am, cfg, Factorio_Settings(file_settings, version_getter=lambda: cfg.version), Mod_Factorio
+        )
         self.act_err_threshold = 100
         self._lock: Path = self.directory / ".lock"
 
@@ -667,6 +674,10 @@ class Factorio(App[App_Config]):
     def supports_save_rename(self) -> bool:
         return True
 
+    @property
+    def supports_save_delete(self) -> bool:
+        return True
+
     def upload_save_file(self, *, root_id: str, upload_name: str, source_path: Path) -> AppSaveEntry:
         root = get_app_save_root(self.save_file_roots, root_id)
         relative_path = normalise_app_save_relative_path(upload_name)
@@ -705,6 +716,22 @@ class Factorio(App[App_Config]):
             raise FileExistsError(f"Save file already exists: {relative_path}")
         File_Utils.move(source, target, overwrite=False)
         return describe_app_save_path(root=source_root, path=target, relative_path=relative_path)
+
+    def delete_save_file(self, *, file_id: str) -> AppSaveEntry:
+        if self.check_running():
+            raise ValueError("Stop the server before deleting saves.")
+        source_root = get_app_save_root(self.save_file_roots, "saves")
+        try:
+            current_save = next(save for save in self.list_save_files() if save.id == file_id)
+        except StopIteration as xcp:
+            raise FileNotFoundError(f"Unknown save file: {file_id}") from xcp
+        save_path = self.resolve_save_file(file_id)
+        if not save_path.exists():
+            raise FileNotFoundError(f"Save file does not exist: {Path(file_id).name}")
+        if save_path.parent.resolve() != source_root.resolved_path:
+            raise ValueError("Factorio save deletion only supports files directly inside the saves root.")
+        File_Utils.remove(save_path, silent=False, resolve=False)
+        return current_save
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")

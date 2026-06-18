@@ -52,7 +52,7 @@ from _mod_ops import (
 from _security import Access_Control, Power_Level
 from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
 from _utils import Utilities
-from apps._app import App, AppRuntimeFault, ChatRelaySupport
+from apps._app import App, AppRuntimeFault, AppStdoutTail, ChatRelaySupport
 from apps._blueprint_files import (
     AppBlueprintEntry,
     AppBlueprintFileEntry,
@@ -73,6 +73,7 @@ from apps._console import (
 from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
+from apps._updater import AppUpdateInfo, AppUpdateStatus
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub
 from font_assets import font_assets
 from map_annotations import (
@@ -98,6 +99,7 @@ _APP_FOOTPRINT_CACHE_TTL_SECONDS = 60.0
 _APP_TRANSITION_TTL_SECONDS = 15.0
 _LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS = 0.75
 _LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 1.0
+_LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
 _SQUAREMAP_REQUEST_TIMEOUT_SECONDS = 10.0
 _MAP_SOURCE_HEADER_NAME = "X-Yukibot-Map-Source"
@@ -318,7 +320,10 @@ class NodeAppEntry:
     supports_settings: bool = False
     supports_console_actions: bool = False
     supports_chat: bool = False
+    supports_updates: bool = False
     runtime_fault: AppRuntimeFault | None = None
+    update_info: AppUpdateInfo | None = None
+    update_status: AppUpdateStatus | None = None
     config_read_level: Power_Level = _DEFAULT_REMOTE_CONFIG_READ_LEVEL
     config_write_level: Power_Level = _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL
     save_write_level: Power_Level = Power_Level.sudo
@@ -353,7 +358,10 @@ class NodeAppEntry:
         supports_settings = payload.get("supports_settings", False)
         supports_console_actions = payload.get("supports_console_actions", False)
         supports_chat = payload.get("supports_chat", False)
+        supports_updates = payload.get("supports_updates", False)
         raw_runtime_fault = payload.get("runtime_fault")
+        raw_update_info = payload.get("update_info")
+        raw_update_status = payload.get("update_status")
         config_read_level = _power_level(payload, "config_read_level", default=_DEFAULT_REMOTE_CONFIG_READ_LEVEL)
         config_write_level = _power_level(payload, "config_write_level", default=_DEFAULT_REMOTE_CONFIG_WRITE_LEVEL)
         save_write_level = _power_level(payload, "save_write_level", default=Power_Level.sudo)
@@ -396,8 +404,14 @@ class NodeAppEntry:
             raise ValueError("Node app entry supports_console_actions is invalid.")
         if not isinstance(supports_chat, bool):
             raise ValueError("Node app entry supports_chat is invalid.")
+        if not isinstance(supports_updates, bool):
+            raise ValueError("Node app entry supports_updates is invalid.")
         if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
             raise ValueError("Node app entry runtime_fault is invalid.")
+        if raw_update_info is not None and not isinstance(raw_update_info, Mapping):
+            raise ValueError("Node app entry update_info is invalid.")
+        if raw_update_status is not None and not isinstance(raw_update_status, Mapping):
+            raise ValueError("Node app entry update_status is invalid.")
         if raw_resource_points is not None and not isinstance(raw_resource_points, Mapping):
             raise ValueError("Node app entry resource_points is invalid.")
         if color_hex is not None and not isinstance(color_hex, str):
@@ -437,8 +451,15 @@ class NodeAppEntry:
             supports_settings=supports_settings,
             supports_console_actions=supports_console_actions,
             supports_chat=supports_chat,
+            supports_updates=supports_updates,
             runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
             if raw_runtime_fault is not None
+            else None,
+            update_info=AppUpdateInfo.from_mapping(cast(Mapping[str, object], raw_update_info))
+            if raw_update_info is not None
+            else None,
+            update_status=AppUpdateStatus.from_mapping(cast(Mapping[str, object], raw_update_status))
+            if raw_update_status is not None
             else None,
             config_read_level=config_read_level,
             config_write_level=config_write_level,
@@ -478,7 +499,10 @@ class NodeAppEntry:
             "supports_settings": self.supports_settings,
             "supports_console_actions": self.supports_console_actions,
             "supports_chat": self.supports_chat,
+            "supports_updates": self.supports_updates,
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
+            "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
+            "update_status": self.update_status.to_mapping() if self.update_status is not None else None,
             "config_read_level": self.config_read_level.name,
             "config_write_level": self.config_write_level.name,
             "save_write_level": self.save_write_level.name,
@@ -699,6 +723,9 @@ class NodeAppMutationAction(StrEnum):
     DISABLE = "disable"
     RENAME = "rename"
     UPDATE_DETAILS = "update_details"
+    UPDATE = "update"
+    VERIFY = "verify"
+    SELECT_UPDATE_BRANCH = "select_update_branch"
 
 
 def required_app_mutation_level(action: NodeAppMutationAction) -> Power_Level:
@@ -710,6 +737,9 @@ def required_app_mutation_level(action: NodeAppMutationAction) -> Power_Level:
         NodeAppMutationAction.DISABLE,
         NodeAppMutationAction.RENAME,
         NodeAppMutationAction.UPDATE_DETAILS,
+        NodeAppMutationAction.UPDATE,
+        NodeAppMutationAction.VERIFY,
+        NodeAppMutationAction.SELECT_UPDATE_BRANCH,
     }:
         return Power_Level.sudo
     raise ValueError(f"Unsupported app mutation action: {action}")
@@ -724,6 +754,9 @@ def required_app_mutation_scope(action: NodeAppMutationAction) -> NodeApiScope:
         NodeAppMutationAction.DISABLE,
         NodeAppMutationAction.RENAME,
         NodeAppMutationAction.UPDATE_DETAILS,
+        NodeAppMutationAction.UPDATE,
+        NodeAppMutationAction.VERIFY,
+        NodeAppMutationAction.SELECT_UPDATE_BRANCH,
     }:
         return NodeApiScope.APP_MANAGE
     raise ValueError(f"Unsupported app mutation action: {action}")
@@ -741,11 +774,18 @@ class NodeAppMutationRequest(BaseModel):
     running_ram_points: int | None = None
     startup_cpu_points: int | None = None
     startup_ram_points: int | None = None
+    steam_update_enabled: bool | None = None
+    steam_update_selected_branch: str | None = None
+    update_branch_id: str | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
     @model_validator(mode="after")
     def _validate_payload(self) -> "NodeAppMutationRequest":
+        if self.action is NodeAppMutationAction.SELECT_UPDATE_BRANCH:
+            if self.update_branch_id is None or not self.update_branch_id.strip():
+                raise ValueError("Update branch id is required for branch-selection requests.")
+            return self
         if self.action is not NodeAppMutationAction.RENAME:
             if self.action is not NodeAppMutationAction.UPDATE_DETAILS:
                 return self
@@ -997,18 +1037,25 @@ class NodeAppStateStreamEvent:
     is_initial: bool = False
     runtime_changed: bool = False
     system_changed: bool = False
+    update_changed: bool = False
     app_stats: NodeAppRuntimeSummary | None = None
     system_summary: NodeSystemSummary | None = None
+    update_info: AppUpdateInfo | None = None
+    update_status: AppUpdateStatus | None = None
 
     def __post_init__(self) -> None:
         if not self.app_name.strip():
             raise ValueError("Node app state stream event app name is invalid.")
-        if not self.is_initial and not self.runtime_changed and not self.system_changed:
-            raise ValueError("Node app state stream event must signal initial, runtime, or system changes.")
+        if not self.is_initial and not self.runtime_changed and not self.system_changed and not self.update_changed:
+            raise ValueError("Node app state stream event must signal initial, runtime, system, or update changes.")
         if self.app_stats is not None and not (self.is_initial or self.runtime_changed):
             raise ValueError("Node app state stream event app stats require initial or runtime changes.")
         if self.system_summary is not None and not (self.is_initial or self.system_changed):
             raise ValueError("Node app state stream event system summary requires initial or system changes.")
+        if (self.update_info is not None or self.update_status is not None) and not (
+            self.is_initial or self.update_changed
+        ):
+            raise ValueError("Node app state stream event update state requires initial or update changes.")
 
     @classmethod
     def initial(
@@ -1017,14 +1064,19 @@ class NodeAppStateStreamEvent:
         app_name: str,
         app_stats: NodeAppRuntimeSummary,
         system_summary: NodeSystemSummary | None = None,
+        update_info: AppUpdateInfo | None = None,
+        update_status: AppUpdateStatus | None = None,
     ) -> "NodeAppStateStreamEvent":
         return cls(
             app_name=app_name,
             is_initial=True,
             runtime_changed=True,
             system_changed=system_summary is not None,
+            update_changed=update_info is not None or update_status is not None,
             app_stats=app_stats,
             system_summary=system_summary,
+            update_info=update_info,
+            update_status=update_status,
         )
 
     @classmethod
@@ -1033,8 +1085,17 @@ class NodeAppStateStreamEvent:
         *,
         app_name: str,
         app_stats: NodeAppRuntimeSummary,
+        update_info: AppUpdateInfo | None = None,
+        update_status: AppUpdateStatus | None = None,
     ) -> "NodeAppStateStreamEvent":
-        return cls(app_name=app_name, runtime_changed=True, app_stats=app_stats)
+        return cls(
+            app_name=app_name,
+            runtime_changed=True,
+            update_changed=update_info is not None or update_status is not None,
+            app_stats=app_stats,
+            update_info=update_info,
+            update_status=update_status,
+        )
 
     @classmethod
     def system(
@@ -1052,32 +1113,56 @@ class NodeAppStateStreamEvent:
         app_name: str,
         app_stats: NodeAppRuntimeSummary,
         system_summary: NodeSystemSummary,
+        update_info: AppUpdateInfo | None = None,
+        update_status: AppUpdateStatus | None = None,
     ) -> "NodeAppStateStreamEvent":
         return cls(
             app_name=app_name,
             runtime_changed=True,
             system_changed=True,
+            update_changed=update_info is not None or update_status is not None,
             app_stats=app_stats,
             system_summary=system_summary,
+            update_info=update_info,
+            update_status=update_status,
         )
+
+    @classmethod
+    def update(
+        cls,
+        *,
+        app_name: str,
+        update_info: AppUpdateInfo | None,
+        update_status: AppUpdateStatus | None,
+    ) -> "NodeAppStateStreamEvent":
+        return cls(app_name=app_name, update_changed=True, update_info=update_info, update_status=update_status)
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppStateStreamEvent":
         raw_app_stats = payload.get("app_stats")
         raw_system_summary = payload.get("system_summary")
+        raw_update_info = payload.get("update_info")
+        raw_update_status = payload.get("update_status")
         if raw_app_stats is not None and not isinstance(raw_app_stats, Mapping):
             raise ValueError("Node app state stream event app stats are invalid.")
         if raw_system_summary is not None and not isinstance(raw_system_summary, Mapping):
             raise ValueError("Node app state stream event system summary is invalid.")
+        if raw_update_info is not None and not isinstance(raw_update_info, Mapping):
+            raise ValueError("Node app state stream event update info is invalid.")
+        if raw_update_status is not None and not isinstance(raw_update_status, Mapping):
+            raise ValueError("Node app state stream event update status is invalid.")
         return cls(
             app_name=_required_string(payload, "app_name"),
             is_initial=_required_bool(payload, "initial"),
             runtime_changed=_required_bool(payload, "runtime_changed"),
             system_changed=_required_bool(payload, "system_changed"),
+            update_changed=_required_bool(payload, "update_changed") if "update_changed" in payload else False,
             app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
             system_summary=NodeSystemSummary.from_mapping(raw_system_summary)
             if raw_system_summary is not None
             else None,
+            update_info=AppUpdateInfo.from_mapping(raw_update_info) if raw_update_info is not None else None,
+            update_status=AppUpdateStatus.from_mapping(raw_update_status) if raw_update_status is not None else None,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1086,8 +1171,11 @@ class NodeAppStateStreamEvent:
             "initial": self.is_initial,
             "runtime_changed": self.runtime_changed,
             "system_changed": self.system_changed,
+            "update_changed": self.update_changed,
             "app_stats": self.app_stats.to_mapping() if self.app_stats is not None else None,
             "system_summary": self.system_summary.to_mapping() if self.system_summary is not None else None,
+            "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
+            "update_status": self.update_status.to_mapping() if self.update_status is not None else None,
         }
 
 
@@ -1212,9 +1300,15 @@ class NodeAppFootprintSnapshot:
     size_bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class _NodeLocalAppRuntimeSubscription:
+    callback: Callable[[NodeAppStateStreamEvent], None]
+    include_update_state: bool = False
+
+
 @dataclass(slots=True)
 class _NodeLocalAppRuntimeWatchState:
-    callbacks: dict[str, Callable[[NodeAppStateStreamEvent], None]] = field(default_factory=dict)
+    callbacks: dict[str, _NodeLocalAppRuntimeSubscription] = field(default_factory=dict)
     task: asyncio.Task[None] | None = None
 
 
@@ -1512,9 +1606,13 @@ class NodeSaveEntry:
     size_bytes: int
     size_text: str
     modified_at: str
+    can_delete: bool = False
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeSaveEntry:
+        raw_can_delete = payload.get("can_delete", False)
+        if not isinstance(raw_can_delete, bool):
+            raise ValueError("Node save entry can_delete is invalid.")
         return cls(
             id=_required_string(payload, "id"),
             label=_required_string(payload, "label"),
@@ -1525,6 +1623,7 @@ class NodeSaveEntry:
             size_bytes=_required_int(payload, "size_bytes"),
             size_text=_required_string(payload, "size_text"),
             modified_at=_required_string(payload, "modified_at"),
+            can_delete=raw_can_delete,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1538,6 +1637,7 @@ class NodeSaveEntry:
             "size_bytes": self.size_bytes,
             "size_text": self.size_text,
             "modified_at": self.modified_at,
+            "can_delete": self.can_delete,
         }
 
 
@@ -1803,6 +1903,7 @@ class NodeSettingEntry:
     permission_level_name: str
     default_text: str
     description: str | None
+    paragraph: bool
     is_sensitive: bool
     value_text: str
     revealed_value_text: str
@@ -1856,6 +1957,7 @@ class NodeSettingEntry:
             permission_level_name=permission_level_name,
             default_text=_required_text(payload, "default_text"),
             description=_optional_string(payload, "description"),
+            paragraph=_required_bool(payload, "paragraph"),
             is_sensitive=_required_bool(payload, "is_sensitive"),
             value_text=_required_text(payload, "value_text"),
             revealed_value_text=_required_text(payload, "revealed_value_text"),
@@ -1880,6 +1982,7 @@ class NodeSettingEntry:
             "permission_level_name": self.permission_level_name,
             "default_text": self.default_text,
             "description": self.description,
+            "paragraph": self.paragraph,
             "is_sensitive": self.is_sensitive,
             "value_text": self.value_text,
             "revealed_value_text": self.revealed_value_text,
@@ -2151,6 +2254,45 @@ class NodeConsoleActionList:
             "app_friendly": self.app_friendly,
             "node": self.node,
             "actions": [action.to_mapping() for action in self.actions],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeConsoleStdoutSnapshot:
+    app_name: str
+    app_friendly: str
+    node: str
+    lines: tuple[str, ...]
+    truncated: bool
+    running: bool
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleStdoutSnapshot":
+        raw_lines = payload.get("lines")
+        if not isinstance(raw_lines, Sequence) or isinstance(raw_lines, (str, bytes)):
+            raise ValueError("Node console stdout snapshot lines are invalid.")
+        lines: list[str] = []
+        for raw_line in raw_lines:
+            if not isinstance(raw_line, str):
+                raise ValueError("Node console stdout snapshot contains an invalid line.")
+            lines.append(raw_line)
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            lines=tuple(lines),
+            truncated=_required_bool(payload, "truncated"),
+            running=_required_bool(payload, "running"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "lines": list(self.lines),
+            "truncated": self.truncated,
+            "running": self.running,
         }
 
 
@@ -3056,6 +3198,9 @@ class NodeApiService:
                 running_ram_points=mutation_request.running_ram_points,
                 startup_cpu_points=mutation_request.startup_cpu_points,
                 startup_ram_points=mutation_request.startup_ram_points,
+                steam_update_enabled=mutation_request.steam_update_enabled,
+                steam_update_selected_branch=mutation_request.steam_update_selected_branch,
+                update_branch_id=mutation_request.update_branch_id,
             )
             return result.to_mapping()
 
@@ -3391,6 +3536,48 @@ class NodeApiService:
             )
             return result.to_mapping()
 
+        @nicegui_app.delete(f"{_NODE_API_PREFIX}/apps/{{app_name}}/saves/{{save_id:path}}")
+        async def _delete_save(
+            app_name: str,
+            save_id: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API save delete request: node=%s app=%s save=%s", self.node_name, app_name, save_id)
+            grant: NodeAccessGrant | None = self._require_access(
+                request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_WRITE,)
+            )
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.SAVES_WRITE,),
+                required_level=app.save_file_write_level,
+                verified_grant=grant,
+            )
+            actor_user_id: int = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.SAVES_WRITE,),
+                verified_grant=grant,
+            )
+            result: NodeSaveMutationResult = self.delete_save_file(
+                app=app,
+                save_id=save_id,
+                actor_user_id=actor_user_id,
+            )
+            audit_log(
+                "save.file_deleted",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                save_id=save_id,
+                required_level=app.save_file_write_level.name,
+            )
+            return result.to_mapping()
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/blueprints")
         async def _list_blueprints(
             app_name: str,
@@ -3638,6 +3825,52 @@ class NodeApiService:
             )
             return result.to_mapping()
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/console/stdout")
+        async def _read_console_stdout_route(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+            max_lines: int = 200,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API console stdout request: node=%s app=%s", self.node_name, app_name)
+            if max_lines < 1 or max_lines > 500:
+                raise _http_exception(400, "Console stdout line limit must be between 1 and 500.")
+            grant: NodeAccessGrant | None = self._require_access(
+                request, access_token, app_name=app_name, scopes=(NodeApiScope.APP_CONTROL,)
+            )
+            actor_user_id: int = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.APP_CONTROL,),
+                verified_grant=grant,
+            )
+            app = self._resolve_app(app_name)
+            result = await self.read_console_stdout(app=app, actor_user_id=actor_user_id, max_lines=max_lines)
+            return result.to_mapping()
+
+        @nicegui_app.websocket(f"{_NODE_API_PREFIX}/apps/{{app_name}}/console/stdout/stream")
+        async def _console_stdout_stream(
+            websocket: WebSocket,
+            app_name: str,
+            access_token: str | None = None,
+            max_lines: int = 200,
+        ) -> None:
+            traffic_log.info("Node API console stdout stream request: node=%s app=%s", self.node_name, app_name)
+            if max_lines < 1 or max_lines > 500:
+                raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid stdout line limit.")
+            self._require_websocket_token_access(
+                websocket=websocket,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.APP_CONTROL,),
+            )
+            try:
+                app = self._resolve_app(app_name)
+            except HTTPException as xcp:
+                raise self._websocket_exception_from_http(xcp) from xcp
+            await self._serve_console_stdout_stream(websocket=websocket, app=app, max_lines=max_lines)
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/{{missing_path:path}}")
         async def _missing_node_api_route(missing_path: str) -> dict[str, object]:
             if self._should_log_missing_route_warning(missing_path):
@@ -3659,43 +3892,67 @@ class NodeApiService:
                 player_count = player_snapshot.player_count
                 player_capacity = player_snapshot.player_capacity
                 connected_player_names = player_snapshot.connected_player_names
-            app_scope = getattr(app, "scope", None)
             entries.append(
-                NodeAppEntry(
-                    name=app.name,
-                    friendly=app.friendly,
-                    node=self.node_name,
-                    running=app.check_running(),
-                    enabled=app.cfg.enabled,
-                    supports_mods=app.mods is not None,
-                    supports_configs=app.supports_config_files,
-                    scope=app_scope if isinstance(app_scope, str) else app_scope_from_name(app.name),
+                self.build_app_entry(
+                    app,
                     transition_state=self._cached_app_transition_state(app.name),
                     player_count=player_count,
                     player_capacity=player_capacity,
                     connected_player_names=connected_player_names,
-                    supports_saves=app.supports_save_files,
-                    supports_save_uploads=app.supports_save_uploads,
-                    supports_save_rename=app.supports_save_rename,
-                    supports_blueprints=bool(getattr(app, "supports_blueprints", False)),
-                    supports_settings=app.supports_settings,
-                    supports_console_actions=bool(getattr(app, "supports_console_actions", False)),
-                    supports_chat=app.supports_chat_relay,
-                    runtime_fault=getattr(app, "runtime_fault", None),
-                    config_read_level=app.lowest_config_file_read_level,
-                    config_write_level=app.config_file_write_level,
-                    save_write_level=app.save_file_write_level,
-                    color_hex=self.app_color_hex(app.manage_embed_color),
-                    map_url=app.public_map_url,
-                    resource_points=self._app_resource_point_summary(app),
-                    title_font_preset=getattr(app.cfg, "title_font_preset", AppTitleFont.AUTO.value),
-                    notes=getattr(app.cfg, "notes", None),
-                    lifecycle_notice_started=getattr(app.cfg, "lifecycle_notice_started", True),
-                    lifecycle_notice_stopped=getattr(app.cfg, "lifecycle_notice_stopped", True),
-                    lifecycle_notice_crashed=getattr(app.cfg, "lifecycle_notice_crashed", True),
                 )
             )
         return tuple(entries)
+
+    def build_app_entry(
+        self,
+        app: App,
+        *,
+        transition_state: NodeAppTransitionState | None = None,
+        player_count: int | None = None,
+        player_capacity: int | None = None,
+        connected_player_names: tuple[str, ...] = (),
+    ) -> NodeAppEntry:
+        app_scope = getattr(app, "scope", None)
+        update_info = getattr(app, "update_info", None)
+        update_status = getattr(app, "update_status", None)
+        return NodeAppEntry(
+            name=app.name,
+            friendly=app.friendly,
+            node=self.node_name,
+            running=app.check_running(),
+            enabled=app.cfg.enabled,
+            supports_mods=app.mods is not None,
+            supports_configs=app.supports_config_files,
+            scope=app_scope if isinstance(app_scope, str) else app_scope_from_name(app.name),
+            transition_state=(
+                self._cached_app_transition_state(app.name) if transition_state is None else transition_state
+            ),
+            player_count=player_count,
+            player_capacity=player_capacity,
+            connected_player_names=connected_player_names,
+            supports_saves=app.supports_save_files,
+            supports_save_uploads=app.supports_save_uploads,
+            supports_save_rename=app.supports_save_rename,
+            supports_blueprints=bool(getattr(app, "supports_blueprints", False)),
+            supports_settings=app.supports_settings,
+            supports_console_actions=bool(getattr(app, "supports_console_actions", False)),
+            supports_chat=app.supports_chat_relay,
+            supports_updates=update_info is not None,
+            runtime_fault=getattr(app, "runtime_fault", None),
+            update_info=update_info,
+            update_status=update_status,
+            config_read_level=app.lowest_config_file_read_level,
+            config_write_level=app.config_file_write_level,
+            save_write_level=app.save_file_write_level,
+            color_hex=self.app_color_hex(app.manage_embed_color),
+            map_url=app.public_map_url,
+            resource_points=self._app_resource_point_summary(app),
+            title_font_preset=getattr(app.cfg, "title_font_preset", AppTitleFont.AUTO.value),
+            notes=getattr(app.cfg, "notes", None),
+            lifecycle_notice_started=getattr(app.cfg, "lifecycle_notice_started", True),
+            lifecycle_notice_stopped=getattr(app.cfg, "lifecycle_notice_stopped", True),
+            lifecycle_notice_crashed=getattr(app.cfg, "lifecycle_notice_crashed", True),
+        )
 
     def _cached_app_transition_state(self, app_name: str) -> NodeAppTransitionState:
         key = app_name.casefold()
@@ -4534,6 +4791,8 @@ class NodeApiService:
         self,
         app_name: str,
         callback: Callable[[NodeAppStateStreamEvent], None],
+        *,
+        include_update_state: bool = False,
     ) -> Callable[[], None]:
         if not app_name.strip():
             raise ValueError("App name is required for local runtime subscriptions.")
@@ -4545,7 +4804,10 @@ class NodeApiService:
             if state is None:
                 state = _NodeLocalAppRuntimeWatchState()
                 self._local_runtime_watchers[app_key] = state
-            state.callbacks[subscription_id] = callback
+            state.callbacks[subscription_id] = _NodeLocalAppRuntimeSubscription(
+                callback=callback,
+                include_update_state=include_update_state,
+            )
             if state.task is None or state.task.done():
                 state.task = loop.create_task(self._watch_local_app_runtime(app_name, app_key))
 
@@ -4600,15 +4862,23 @@ class NodeApiService:
         current_task = asyncio.current_task()
         last_summary: NodeAppRuntimeSummary | None = None
         has_summary = False
+        last_update_info: AppUpdateInfo | None = None
+        last_update_status: AppUpdateStatus | None = None
+        has_update_state = False
         try:
             while not self._shutting_down:
                 with self._local_runtime_watch_lock:
                     state = self._local_runtime_watchers.get(app_key)
                     if state is None or not state.callbacks:
                         return
-                    callbacks = tuple(state.callbacks.values())
+                    subscriptions = tuple(state.callbacks.values())
+                callbacks = tuple(subscription.callback for subscription in subscriptions)
+                include_update_state = any(subscription.include_update_state for subscription in subscriptions)
                 try:
-                    summary = await self.build_live_app_runtime_summary(self._resolve_app(app_name))
+                    app = self._resolve_app(app_name)
+                    summary = await self.build_live_app_runtime_summary(app)
+                    update_info = app.update_info if include_update_state else None
+                    update_status = app.update_status if include_update_state else None
                 except asyncio.CancelledError:
                     raise
                 except Exception as xcp:
@@ -4620,11 +4890,29 @@ class NodeApiService:
                     )
                     await asyncio.sleep(_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS)
                     continue
-                if (not has_summary) or summary != last_summary:
+                runtime_changed = (not has_summary) or summary != last_summary
+                update_changed = include_update_state and (
+                    (not has_update_state) or update_info != last_update_info or update_status != last_update_status
+                )
+                if (not has_summary) or runtime_changed or update_changed:
+                    event_update_info = update_info if update_changed or not has_summary else None
+                    event_update_status = update_status if update_changed or not has_summary else None
                     update = (
-                        NodeAppStateStreamEvent.initial(app_name=app_name, app_stats=summary)
+                        NodeAppStateStreamEvent.initial(
+                            app_name=app_name,
+                            app_stats=summary,
+                            update_info=event_update_info,
+                            update_status=event_update_status,
+                        )
                         if not has_summary
-                        else NodeAppStateStreamEvent.runtime(app_name=app_name, app_stats=summary)
+                        else NodeAppStateStreamEvent(
+                            app_name=app_name,
+                            runtime_changed=runtime_changed,
+                            update_changed=update_changed,
+                            app_stats=summary if runtime_changed else None,
+                            update_info=event_update_info if update_changed else None,
+                            update_status=event_update_status if update_changed else None,
+                        )
                     )
                     for callback in callbacks:
                         try:
@@ -4637,6 +4925,10 @@ class NodeApiService:
                             )
                     last_summary = summary
                     has_summary = True
+                    if include_update_state:
+                        last_update_info = update_info
+                        last_update_status = update_status
+                        has_update_state = True
                 await asyncio.sleep(_LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
@@ -4950,7 +5242,11 @@ class NodeApiService:
             except RuntimeError:
                 return
 
-        unsubscribe_runtime = self.subscribe_local_app_runtime(app.name, _enqueue_runtime_update)
+        unsubscribe_runtime = self.subscribe_local_app_runtime(
+            app.name,
+            _enqueue_runtime_update,
+            include_update_state=True,
+        )
         unsubscribe_node = self.subscribe_local_node_state(_enqueue_node_update)
 
         async def _wait_for_disconnect() -> None:
@@ -4969,6 +5265,8 @@ class NodeApiService:
                     app_name=app.name,
                     app_stats=await self.build_live_app_runtime_summary(app),
                     system_summary=self.build_system_summary(),
+                    update_info=app.update_info,
+                    update_status=app.update_status,
                 )
             )
             while True:
@@ -4994,6 +5292,53 @@ class NodeApiService:
                 await disconnect_task
             unsubscribe_runtime()
             unsubscribe_node()
+            await self._close_websocket_quietly(websocket)
+
+    async def _serve_console_stdout_stream(
+        self,
+        *,
+        websocket: WebSocket,
+        app: App,
+        max_lines: int,
+    ) -> None:
+        await websocket.accept()
+
+        async def _wait_for_disconnect() -> None:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+
+        async def _send_snapshot(snapshot: NodeConsoleStdoutSnapshot) -> None:
+            await websocket.send_json(snapshot.to_mapping())
+
+        disconnect_task = asyncio.create_task(_wait_for_disconnect())
+        previous_snapshot: NodeConsoleStdoutSnapshot | None = None
+        try:
+            initial_snapshot = self.build_console_stdout_snapshot(app=app, max_lines=max_lines)
+            await _send_snapshot(initial_snapshot)
+            previous_snapshot = initial_snapshot
+            while True:
+                interval_task = asyncio.create_task(asyncio.sleep(_LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS))
+                done, _pending = await asyncio.wait(
+                    {interval_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_task in done:
+                    interval_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await interval_task
+                    return
+                next_snapshot = self.build_console_stdout_snapshot(app=app, max_lines=max_lines)
+                if next_snapshot != previous_snapshot:
+                    await _send_snapshot(next_snapshot)
+                    previous_snapshot = next_snapshot
+        except WebSocketDisconnect:
+            return
+        finally:
+            disconnect_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await disconnect_task
             await self._close_websocket_quietly(websocket)
 
     @staticmethod
@@ -5029,8 +5374,17 @@ class NodeApiService:
             is_initial=first.is_initial or second.is_initial,
             runtime_changed=first.runtime_changed or second.runtime_changed,
             system_changed=first.system_changed or second.system_changed,
+            update_changed=first.update_changed or second.update_changed,
             app_stats=second.app_stats if second.app_stats is not None else first.app_stats,
             system_summary=second.system_summary if second.system_summary is not None else first.system_summary,
+            update_info=second.update_info
+            if second.update_info is not None or second.update_changed
+            else first.update_info,
+            update_status=(
+                second.update_status
+                if second.update_status is not None or second.update_changed
+                else first.update_status
+            ),
         )
 
     async def _app_player_snapshot(self, app: App) -> _NodeAppPlayerSnapshot | None:
@@ -5087,6 +5441,9 @@ class NodeApiService:
         running_ram_points: int | None = None,
         startup_cpu_points: int | None = None,
         startup_ram_points: int | None = None,
+        steam_update_enabled: bool | None = None,
+        steam_update_selected_branch: str | None = None,
+        update_branch_id: str | None = None,
     ) -> NodeAppMutationResult:
         await self._require_acl().perm_check(actor_user_id, required_app_mutation_level(action))
         manager: App_Manager = self._require_manager()
@@ -5158,9 +5515,49 @@ class NodeApiService:
                     running_ram_points=running_ram_points,
                     startup_cpu_points=startup_cpu_points,
                     startup_ram_points=startup_ram_points,
+                    steam_update_enabled=steam_update_enabled,
+                    steam_update_selected_branch=steam_update_selected_branch,
                 ),
             )
             message = f"Updated details for {app.friendly}."
+        elif action is NodeAppMutationAction.SELECT_UPDATE_BRANCH:
+            if app.updater is None:
+                raise ValueError(f"{app.friendly} does not support updates.")
+            if update_branch_id is None or not update_branch_id.strip():
+                raise ValueError("Update branch id must not be empty.")
+            log.info(
+                "Node API selecting update branch: node=%s app=%s branch=%s actor=%s",
+                self.node_name,
+                app.name,
+                update_branch_id,
+                actor_user_id,
+            )
+            update_info = app.updater.select_branch(update_branch_id)
+            message = f"Selected update branch {update_info.selected_branch_label} for {app.friendly}."
+        elif action is NodeAppMutationAction.UPDATE:
+            if app.updater is None:
+                raise ValueError(f"{app.friendly} does not support updates.")
+            log.info(
+                "Node API starting update: node=%s app=%s actor=%s branch=%s",
+                self.node_name,
+                app.name,
+                actor_user_id,
+                app.update_info.selected_branch_id if app.update_info is not None else None,
+            )
+            result = await app.updater.start_selected_update()
+            message = result.message
+        elif action is NodeAppMutationAction.VERIFY:
+            if app.updater is None:
+                raise ValueError(f"{app.friendly} does not support verification.")
+            log.info(
+                "Node API starting verify: node=%s app=%s actor=%s branch=%s",
+                self.node_name,
+                app.name,
+                actor_user_id,
+                app.update_info.selected_branch_id if app.update_info is not None else None,
+            )
+            result = await app.updater.start_selected_verify()
+            message = result.message
         else:
             raise ValueError(f"Unsupported app mutation action: {action}")
 
@@ -5393,6 +5790,7 @@ class NodeApiService:
 
     def build_save_list(self, app: App) -> NodeSaveList:
         saves: tuple[AppSaveEntry, ...] = app.list_save_files()
+        save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
         traffic_log.info("Node API built save list: node=%s app=%s saves=%s", self.node_name, app.name, len(saves))
         return NodeSaveList(
             app_name=app.name,
@@ -5401,7 +5799,7 @@ class NodeApiService:
             roots=tuple[NodeSaveRootEntry, ...](
                 NodeSaveRootEntry(id=root.id, label=root.label) for root in app.save_file_roots
             ),
-            saves=tuple[NodeSaveEntry, ...](self._save_entry(save) for save in saves),
+            saves=tuple[NodeSaveEntry, ...](self._save_entry(save, can_delete=save_can_delete) for save in saves),
         )
 
     async def build_save_download_response(self, *, app: App, save_id: str) -> FileResponse:
@@ -5472,6 +5870,7 @@ class NodeApiService:
     ) -> NodeSaveMutationResult:
         if not app.supports_save_uploads:
             raise _http_exception(409, f"{app.friendly} does not support save uploads.")
+        save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
         try:
             updated: AppSaveEntry = app.upload_save_file(
                 root_id=root_id, upload_name=upload_name, source_path=source_path
@@ -5498,7 +5897,7 @@ class NodeApiService:
             app_friendly=app.friendly,
             node=self.node_name,
             message=f"Uploaded save `{updated.label}` for {app.friendly}.",
-            save=self._save_entry(updated),
+            save=self._save_entry(updated, can_delete=save_can_delete),
         )
 
     async def upload_mod_file(
@@ -5579,6 +5978,7 @@ class NodeApiService:
     ) -> NodeSaveMutationResult:
         if not app.supports_save_rename:
             raise _http_exception(409, f"{app.friendly} does not support save renaming.")
+        save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
         resolved_name: str = new_name.strip()
         if not resolved_name:
             raise _http_exception(400, "Save name must not be empty.")
@@ -5617,7 +6017,41 @@ class NodeApiService:
             app_friendly=app.friendly,
             node=self.node_name,
             message=f"Renamed save to `{updated.label}` for {app.friendly}.",
-            save=self._save_entry(updated),
+            save=self._save_entry(updated, can_delete=save_can_delete),
+        )
+
+    def delete_save_file(
+        self,
+        *,
+        app: App,
+        save_id: str,
+        actor_user_id: int,
+    ) -> NodeSaveMutationResult:
+        if not app.supports_save_delete:
+            raise _http_exception(409, f"{app.friendly} does not support save deletion.")
+        save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
+        try:
+            deleted: AppSaveEntry = app.delete_save_file(file_id=save_id)
+        except FileNotFoundError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except Exception as xcp:
+            raise _http_exception(500, f"Save delete failed: {xcp}") from xcp
+
+        traffic_log.info(
+            "Node API save deleted: node=%s app=%s save=%s actor=%s",
+            self.node_name,
+            app.name,
+            save_id,
+            actor_user_id,
+        )
+        return NodeSaveMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            message=f"Deleted save `{deleted.label}` from {app.friendly}.",
+            save=self._save_entry(deleted, can_delete=save_can_delete),
         )
 
     def build_blueprint_list(self, app: App, *, actor_user_id: int) -> NodeBlueprintList:
@@ -5903,6 +6337,37 @@ class NodeApiService:
                 self._console_action_entry(action=action, actor_user_id=actor_user_id, acl=acl)
                 for action in app.console_actions
             ),
+        )
+
+    async def read_console_stdout(
+        self,
+        *,
+        app: App,
+        actor_user_id: int,
+        max_lines: int = 200,
+    ) -> NodeConsoleStdoutSnapshot:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.user)
+        return self.build_console_stdout_snapshot(app=app, max_lines=max_lines)
+
+    def build_console_stdout_snapshot(
+        self,
+        *,
+        app: App,
+        max_lines: int = 200,
+    ) -> NodeConsoleStdoutSnapshot:
+        try:
+            stdout_tail: AppStdoutTail = app.read_stdout_tail(max_lines=max_lines)
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except Exception as xcp:
+            raise _http_exception(500, f"Console stdout read failed: {xcp}") from xcp
+        return NodeConsoleStdoutSnapshot(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            lines=stdout_tail.lines,
+            truncated=stdout_tail.truncated,
+            running=app.check_running(),
         )
 
     async def execute_console_action(
@@ -6707,6 +7172,7 @@ class NodeApiService:
             permission_level_name=setting.power_level.name,
             default_text=self._setting_default_text(setting),
             description=setting.desc,
+            paragraph=setting.paragraph,
             is_sensitive=setting.is_sensitive,
             value_text=self._setting_value_text(
                 setting,
@@ -6783,7 +7249,7 @@ class NodeApiService:
         )
 
     @staticmethod
-    def _save_entry(save_file: AppSaveEntry) -> NodeSaveEntry:
+    def _save_entry(save_file: AppSaveEntry, *, can_delete: bool = False) -> NodeSaveEntry:
         size_bytes = save_file.size_bytes
         if save_file.kind is AppSaveEntryKind.DIRECTORY:
             size_text = "Directory"
@@ -6799,6 +7265,7 @@ class NodeApiService:
             size_bytes=size_bytes,
             size_text=size_text,
             modified_at=save_file.modified_at.isoformat(sep=" ", timespec="seconds"),
+            can_delete=can_delete,
         )
 
     def _blueprint_file_entry(

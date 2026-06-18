@@ -93,6 +93,9 @@ class EnvSettings(BaseSettings):
     public_base_url: str | None = None
     node_name: str | None = None
     node_api_token_secret: str | None = None
+    node_api_bind_host: str | None = None
+    node_api_port: str | None = None
+    node_api_public_base_url: str | None = None
     mod_web_bind_host: str | None = None
     mod_web_port: str | None = None
     mod_web_public_base_url: str | None = None
@@ -854,6 +857,7 @@ class BotConfiguration(BaseModel):
     node_capacity: NodeCapacityProfile = Field(default_factory=lambda: default_node_capacity_profile())
     node_font_sources: NodeFontSourceSettings = Field(default_factory=NodeFontSourceSettings)
     restart_state: PersistedRestartState = Field(default_factory=PersistedRestartState)
+    steamcmd_path: str = "steamcmd"
     voice_targets: dict[str, PersistedVoiceTarget] = Field(default_factory=dict)
     oauth: PersistedOAuthLinks = Field(default_factory=PersistedOAuthLinks, alias="OAuth")
     known_bots: dict[str, BotMetadataSnapshot] = Field(default_factory=dict, alias="KnownBots")
@@ -873,6 +877,25 @@ class BotConfiguration(BaseModel):
                 raise ValueError("KnownBots keys must match snapshot.profile.id.")
             normalised[bot_id_text] = snapshot
         return normalised
+
+    @field_validator("steamcmd_path", mode="before")
+    @classmethod
+    def _validate_steamcmd_path(cls, value: object) -> str:
+        if value is None:
+            return "steamcmd"
+        text = str(value).strip()
+        if not text:
+            return "steamcmd"
+        return text
+
+
+def steamcmd_command_prefix(command_path: str) -> tuple[str, ...]:
+    stripped = command_path.strip()
+    if not stripped:
+        raise ValueError("SteamCMD path must not be empty.")
+    if stripped.casefold().endswith(".sh"):
+        return ("bash", stripped)
+    return (stripped,)
 
 
 def load_bot_configuration(path: Path) -> BotConfiguration:
@@ -1032,6 +1055,7 @@ class BotService(enum.StrEnum):
 class BotProfileName(enum.StrEnum):
     YUKI = enum.auto()
     ERIN = enum.auto()
+    PORTAL = enum.auto()
 
 
 class DataAuthorityMode(enum.StrEnum):
@@ -1071,6 +1095,14 @@ class ModWebServerConfig:
     public_base_url: str
     node_api_base_url: str
     token_secret: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class NodeApiServerConfig:
+    host: str
+    port: int
+    public_base_url: str
+    node_api_base_url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1251,6 +1283,11 @@ BOT_PROFILES: dict[BotProfileName, BotProfileConfig] = {
             }
         ),
     ),
+    BotProfileName.PORTAL: BotProfileConfig(
+        name=BotProfileName.PORTAL,
+        command_groups=(),
+        services=frozenset(),
+    ),
 }
 
 
@@ -1412,6 +1449,15 @@ def _parsed_http_scheme(parsed: SplitResult) -> HttpScheme:
     return "http" if parsed.scheme == "http" else "https"
 
 
+def _default_public_http_scheme() -> HttpScheme:
+    return "http" if INDEV else "https"
+
+
+def _require_secure_public_http_scheme(scheme: HttpScheme, *, var_name: str) -> None:
+    if scheme == "http" and not INDEV:
+        raise ValueError(f"{var_name} must use https outside INDEV.")
+
+
 def _parse_http_reference(
     raw: str,
     *,
@@ -1473,6 +1519,13 @@ def _parse_bind_host(raw: str | None) -> str | None:
     if "://" in value or any(char in value for char in "/?#"):
         raise ValueError("DATA_AUTHORITY_BIND_HOST must be a plain host or interface without a scheme or path.")
     return value
+
+
+def _binding_hosts_overlap(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    wildcard_hosts = {"0.0.0.0", "::"}
+    return left in wildcard_hosts or right in wildcard_hosts
 
 
 ACTIVE_BOT_PROFILE = BOT_PROFILES[_parse_bot_profile(_env_settings.bot_profile)]
@@ -1686,12 +1739,19 @@ def _normalise_public_base_path(path: str) -> str:
 
 def resolve_public_base_url(raw: str | None) -> str:
     if raw is None:
-        return f"http://{public_ip()}"
+        return f"{_default_public_http_scheme()}://{public_ip()}"
 
-    parsed = _parse_http_reference(raw, var_name="PUBLIC_BASE_URL", default_scheme="https", allow_path=True)
+    parsed = _parse_http_reference(
+        raw,
+        var_name="PUBLIC_BASE_URL",
+        default_scheme=_default_public_http_scheme(),
+        allow_path=True,
+    )
+    scheme = _parsed_http_scheme(parsed)
+    _require_secure_public_http_scheme(scheme, var_name="PUBLIC_BASE_URL")
     return urlunsplit(
         (
-            parsed.scheme,
+            scheme,
             parsed.netloc,
             _normalise_public_base_path(parsed.path),
             "",
@@ -1714,12 +1774,13 @@ def resolve_mod_web_public_base_url(
 ) -> str:
     reference = raw if raw is not None else public_base_url
     source_name = "MOD_WEB_PUBLIC_BASE_URL" if raw is not None else "PUBLIC_BASE_URL"
-    default_scheme: HttpScheme = "http" if raw is not None and "://" not in reference else "https"
+    default_scheme = _default_public_http_scheme() if "://" not in reference else "https"
     parsed = _parse_http_reference(reference, var_name=source_name, default_scheme=default_scheme, allow_path=False)
     host = parsed.hostname
     if host is None:
         raise ValueError(f"{source_name} must include a host.")
     scheme = _parsed_http_scheme(parsed)
+    _require_secure_public_http_scheme(scheme, var_name=source_name)
     return urlunsplit(
         (
             scheme,
@@ -1731,10 +1792,35 @@ def resolve_mod_web_public_base_url(
     )
 
 
-def resolve_node_api_base_url(mod_web_public_base_url: str) -> str:
+def resolve_node_api_public_base_url(
+    raw: str | None,
+    *,
+    mod_web_public_base_url: str,
+) -> str:
+    reference = raw if raw is not None else mod_web_public_base_url
+    source_name = "NODE_API_PUBLIC_BASE_URL" if raw is not None else "MOD_WEB_PUBLIC_BASE_URL"
+    default_scheme = _default_public_http_scheme() if "://" not in reference else "https"
+    parsed = _parse_http_reference(reference, var_name=source_name, default_scheme=default_scheme, allow_path=False)
+    host = parsed.hostname
+    if host is None:
+        raise ValueError(f"{source_name} must include a host.")
+    scheme = _parsed_http_scheme(parsed)
+    _require_secure_public_http_scheme(scheme, var_name=source_name)
+    return urlunsplit(
+        (
+            scheme,
+            _format_http_netloc(host=host, scheme=scheme, port=parsed.port or _default_port_for_scheme(scheme)),
+            "",
+            "",
+            "",
+        )
+    )
+
+
+def resolve_node_api_base_url(public_base_url: str, *, source_name: str = "MOD_WEB_PUBLIC_BASE_URL") -> str:
     parsed = _parse_http_reference(
-        mod_web_public_base_url,
-        var_name="MOD_WEB_PUBLIC_BASE_URL",
+        public_base_url,
+        var_name=source_name,
         default_scheme="https",
         allow_path=False,
     )
@@ -1746,12 +1832,14 @@ def resolve_mod_web_auth_redirect_url(raw: str | None, *, mod_web_public_base_ur
         parsed = _parse_http_reference(
             raw,
             var_name="MOD_WEB_AUTH_REDIRECT_URL",
-            default_scheme="https",
+            default_scheme=_default_public_http_scheme(),
             allow_path=True,
         )
+        scheme = _parsed_http_scheme(parsed)
+        _require_secure_public_http_scheme(scheme, var_name="MOD_WEB_AUTH_REDIRECT_URL")
         if parsed.path in {"", "/"}:
             raise ValueError("MOD_WEB_AUTH_REDIRECT_URL must include the Discord OAuth callback path.")
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        return urlunsplit((scheme, parsed.netloc, parsed.path, "", ""))
 
     parsed = _parse_http_reference(
         mod_web_public_base_url,
@@ -1845,20 +1933,47 @@ PUBLIC_BASE_URL = resolve_public_base_url(RAW_PUBLIC_BASE_URL)
 PUBLIC_UPLOADS_BASE_URL = resolve_public_uploads_base_url(PUBLIC_BASE_URL)
 NODE_NAME = _env_settings.node_name or ACTIVE_BOT_PROFILE.name.value
 NODE_API_TOKEN_SECRET = _env_settings.node_api_token_secret or DATA_AUTHORITY_TOKEN
+NODE_API_BIND_HOST = _parse_bind_host(_env_settings.node_api_bind_host)
+NODE_API_PORT = _parse_optional_port(_env_settings.node_api_port, var_name="NODE_API_PORT")
 MOD_WEB_BIND_HOST = _parse_bind_host(_env_settings.mod_web_bind_host) or "0.0.0.0"
 MOD_WEB_PORT = _parse_optional_port(_env_settings.mod_web_port, var_name="MOD_WEB_PORT") or 3180
 MOD_WEB_PUBLIC_BASE_URL = resolve_mod_web_public_base_url(
     _env_settings.mod_web_public_base_url,
     public_base_url=PUBLIC_BASE_URL,
 )
+NODE_API_PUBLIC_BASE_URL = resolve_node_api_public_base_url(
+    _env_settings.node_api_public_base_url,
+    mod_web_public_base_url=MOD_WEB_PUBLIC_BASE_URL,
+)
+PUBLISHED_NODE_API_BASE_URL = (
+    resolve_node_api_base_url(NODE_API_PUBLIC_BASE_URL, source_name="NODE_API_PUBLIC_BASE_URL")
+    if NODE_API_PORT is not None
+    else resolve_node_api_base_url(MOD_WEB_PUBLIC_BASE_URL)
+)
 MOD_WEB_SERVER = ModWebServerConfig(
     node_name=NODE_NAME,
     host=MOD_WEB_BIND_HOST,
     port=MOD_WEB_PORT,
     public_base_url=MOD_WEB_PUBLIC_BASE_URL,
-    node_api_base_url=resolve_node_api_base_url(MOD_WEB_PUBLIC_BASE_URL),
+    node_api_base_url=PUBLISHED_NODE_API_BASE_URL,
     token_secret=NODE_API_TOKEN_SECRET,
 )
+NODE_API_SERVER = (
+    NodeApiServerConfig(
+        host=NODE_API_BIND_HOST or MOD_WEB_BIND_HOST,
+        port=NODE_API_PORT,
+        public_base_url=NODE_API_PUBLIC_BASE_URL,
+        node_api_base_url=PUBLISHED_NODE_API_BASE_URL,
+    )
+    if NODE_API_PORT is not None
+    else None
+)
+if (
+    NODE_API_SERVER is not None
+    and NODE_API_SERVER.port == MOD_WEB_PORT
+    and _binding_hosts_overlap(NODE_API_SERVER.host, MOD_WEB_BIND_HOST)
+):
+    raise ValueError("NODE_API_PORT must differ from MOD_WEB_PORT when using a dedicated node API server.")
 MOD_WEB_AUTH = ModWebAuthConfig(
     discord_client_id=_env_settings.mod_web_discord_client_id,
     discord_client_secret=_env_settings.mod_web_discord_client_secret,

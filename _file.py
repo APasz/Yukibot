@@ -1,11 +1,15 @@
 import asyncio
+import enum
+import importlib
+import importlib.util
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import zipfile
 from collections.abc import AsyncIterator, Collection
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 import aiofiles
@@ -16,7 +20,89 @@ import config
 log = logging.getLogger(__name__)
 
 
+class ArchiveKind(enum.StrEnum):
+    ZIP = "zip"
+    SEVEN_ZIP = "7z"
+
+
 class File_Utils:
+    @staticmethod
+    def _detect_archive_kind(archive_path: Path) -> ArchiveKind:
+        if zipfile.is_zipfile(archive_path):
+            return ArchiveKind.ZIP
+        if archive_path.suffix.casefold() == ".7z":
+            return ArchiveKind.SEVEN_ZIP
+        raise ValueError(f"Unsupported archive type: {archive_path.name}")
+
+    @staticmethod
+    def _normalise_archive_member_path(member_name: str) -> Path:
+        resolved = PurePosixPath(member_name)
+        if not member_name or resolved.is_absolute() or ".." in resolved.parts:
+            raise ValueError(f"Archive member path is invalid: {member_name}")
+        return Path(*resolved.parts)
+
+    @classmethod
+    def _extract_zip_archive(cls, archive_path: Path, staging_dir: Path) -> None:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            for member in archive.infolist():
+                member_name = member.filename
+                if not member_name:
+                    continue
+                relative_path = cls._normalise_archive_member_path(member_name)
+                target_path = staging_dir / relative_path
+                if member_name.endswith("/"):
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member, "r") as source, open(target_path, "wb") as target:
+                    target.write(source.read())
+
+    @staticmethod
+    def _extract_7z_archive(archive_path: Path, staging_dir: Path) -> None:
+        if importlib.util.find_spec("py7zr") is not None:
+            py7zr_module = importlib.import_module("py7zr")
+            seven_zip_file_cls = getattr(py7zr_module, "SevenZipFile")
+            with seven_zip_file_cls(archive_path, mode="r") as archive:
+                archive.extractall(path=staging_dir)
+            return
+
+        for executable_name in ("7zz", "7z", "7za"):
+            executable = shutil.which(executable_name)
+            if executable is None:
+                continue
+            result = subprocess.run(
+                [executable, "x", "-y", f"-o{staging_dir}", str(archive_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip() or f"{executable_name} exited {result.returncode}"
+                raise RuntimeError(f"7z extraction failed: {detail}")
+            return
+
+        raise ValueError("7z extraction requires py7zr or a 7z-compatible executable.")
+
+    @classmethod
+    def _extract_archive_to_directory(
+        cls,
+        archive_path: Path,
+        staging_dir: Path,
+        archive_kind: ArchiveKind,
+    ) -> None:
+        match archive_kind:
+            case ArchiveKind.ZIP:
+                cls._extract_zip_archive(archive_path, staging_dir)
+            case ArchiveKind.SEVEN_ZIP:
+                cls._extract_7z_archive(archive_path, staging_dir)
+
+    @staticmethod
+    def _resolved_archive_root(staging_dir: Path) -> Path:
+        entries = tuple(staging_dir.iterdir())
+        if len(entries) == 1 and entries[0].is_dir():
+            return entries[0]
+        return staging_dir
+
     @staticmethod
     def _symlink_target(src: Path, dst: Path) -> Path:
         if not src.is_absolute():
@@ -112,45 +198,27 @@ class File_Utils:
     @classmethod
     def extract(cls, src_file: Path, dst_dir: Path, overwrite: bool | None = True) -> Path:
         try:
-            zip_path = Path(src_file)
-            if not zipfile.is_zipfile(zip_path):
-                raise FileNotFoundError("not zipfile")
+            archive_path = Path(src_file)
+            archive_kind = cls._detect_archive_kind(archive_path)
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            extract_base = dst_dir / archive_path.stem
+            if overwrite:
+                cls.remove(extract_base, silent=True)
+            elif overwrite is None and extract_base.exists():
+                extract_base = cls.append_num(extract_base)
+            elif extract_base.exists():
+                raise FileExistsError(f"Can't extract to existing {extract_base=}")
 
-            with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                names = zip_ref.namelist()
-                non_dirs = [n for n in names if not n.endswith("/")]
-                split_names = [n.split("/", 1) for n in non_dirs if "/" in n]
-                top_levels = {parts[0] for parts in split_names}
-
-                if len(top_levels) == 1 and all(n.startswith(f"{list(top_levels)[0]}/") for n in non_dirs):
-                    prefix = next(iter(top_levels)) + "/"
-                else:
-                    prefix = ""
-
-                extract_base = dst_dir / zip_path.stem
-
-                for member in zip_ref.infolist():
-                    name = member.filename
-                    if not name or name.endswith("/"):
-                        continue
-
-                    rel_path = name[len(prefix) :] if prefix and name.startswith(prefix) else name
-                    if not rel_path:
-                        continue
-
-                    target = extract_base / rel_path
-
-                    if overwrite:
-                        cls.remove(target, silent=True)
-                    elif overwrite is None:
-                        target = cls.append_num(target)
-                    elif target.exists():
+            extract_base.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="yukibot-extract-") as temp_dir:
+                staging_dir = Path(temp_dir)
+                cls._extract_archive_to_directory(archive_path, staging_dir, archive_kind)
+                resolved_root = cls._resolved_archive_root(staging_dir)
+                for entry in resolved_root.iterdir():
+                    target = extract_base / entry.name
+                    if target.exists():
                         raise FileExistsError(f"Can't move to existing {target=}")
-
-                    target.parent.mkdir(parents=True, exist_ok=True)
-
-                    with zip_ref.open(member) as src, open(target, "wb") as dst:
-                        dst.write(src.read())
+                    shutil.move(str(entry), str(target))
 
         except Exception:
             log.exception(f"extraction failed: {overwrite=}\n{src_file}\n{dst_dir}")

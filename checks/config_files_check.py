@@ -146,7 +146,10 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual([(root.id, root.path.name) for root in beammp_roots], [("server", "ServerConfig.toml")])
         self.assertEqual([(root.id, root.path.name) for root in ets_roots], [("server", "server_config.sii")])
         self.assertEqual([(root.id, root.path.name) for root in factorio_roots], [("server", "server-settings.json")])
-        self.assertEqual([(root.id, root.path.name) for root in sevendays_roots], [("server", "serverconfig.xml")])
+        self.assertEqual(
+            [(root.id, root.path.name) for root in sevendays_roots],
+            [("server", "serverconfig.xml"), ("rwg-mixer", "rwgmixer.xml")],
+        )
 
 
 if __name__ == "__main__":

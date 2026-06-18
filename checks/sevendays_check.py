@@ -21,6 +21,8 @@ from apps.sevendays import (
     Receiver,
     SevenDays,
     SevenDaysAdminAddRequest,
+    _candidate_sevendays_logs,
+    _preferred_sevendays_runtime_log,
     detect_sevendays_version,
     parse_admin_add_value,
     parse_gamestat_value,
@@ -140,7 +142,56 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
 
             version = detect_sevendays_version(directory=root, server_log=log_path)
 
-        self.assertEqual(version, AppVersion(main="1.4b8"))
+        self.assertEqual(version, AppVersion(main="1.4", build=8))
+
+    def test_candidate_sevendays_logs_include_timestamped_output_logs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "7DaysToDieServer_Data"
+            log_dir.mkdir()
+            older = log_dir / "output_log__2026-06-17__02-27-35.txt"
+            newer = log_dir / "output_log__2026-06-17__03-27-35.txt"
+            older.write_text("older", encoding="utf-8")
+            newer.write_text("newer", encoding="utf-8")
+
+            candidates = _candidate_sevendays_logs(directory=root, server_log=None)
+
+        self.assertIn(newer, candidates)
+        self.assertIn(older, candidates)
+        self.assertLess(candidates.index(newer), candidates.index(older))
+
+    def test_detect_sevendays_version_from_timestamped_output_log(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "7DaysToDieServer_Data"
+            log_dir.mkdir()
+            log_path = log_dir / "output_log__2026-06-17__02-27-35.txt"
+            log_path.write_text(
+                "2026-06-17T02:27:35 0.030 INF Version: V 2.0 (b1) Compatibility Version: V 2.0\n",
+                encoding="utf-8",
+            )
+
+            version = detect_sevendays_version(directory=root, server_log=None)
+
+        self.assertEqual(version, AppVersion(main="2.0", build=1))
+
+    def test_preferred_sevendays_runtime_log_prefers_launch_created_timestamped_log(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "7DaysToDieServer_Data"
+            log_dir.mkdir()
+            older = log_dir / "output_log__2026-06-17__02-27-35.txt"
+            newer = log_dir / "output_log__2026-06-17__03-27-35.txt"
+            older.write_text("older", encoding="utf-8")
+            newer.write_text("newer", encoding="utf-8")
+
+            preferred = _preferred_sevendays_runtime_log(
+                directory=root,
+                server_log=None,
+                previous_timestamped_logs={older},
+            )
+
+        self.assertEqual(preferred, newer)
 
     def test_app_config_parses_save_file_write_level_override(self) -> None:
         cfg = App_Config(
@@ -199,6 +250,64 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             self.assertEqual(len(roots), 1)
             self.assertEqual(roots[0].path, userdata_dir / "Saves" / "Navezgane" / "AlphaWorld")
             self.assertTrue(app.supports_save_uploads)
+
+    def test_list_save_files_discovers_redirected_saves_without_current_game_selection(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            alpha_save_dir = userdata_dir / "Saves" / "Navezgane" / "AlphaWorld"
+            bravo_save_dir = userdata_dir / "Saves" / "Pregen10k" / "BravoWorld"
+            app_dir.mkdir()
+            alpha_save_dir.mkdir(parents=True)
+            bravo_save_dir.mkdir(parents=True)
+            (app_dir / "serverconfig.xml").write_text(
+                f"""<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+</ServerSettings>
+""",
+                encoding="utf-8",
+            )
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+
+            saves = app.list_save_files()
+
+            self.assertEqual(
+                tuple((save.root_label, save.label) for save in saves),
+                (("Navezgane", "AlphaWorld"), ("Pregen10k", "BravoWorld")),
+            )
+            self.assertTrue(app.supports_save_uploads)
+
+    def test_delete_save_file_removes_redirected_discovered_save_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            save_dir = userdata_dir / "Saves" / "Navezgane" / "AlphaWorld"
+            app_dir.mkdir()
+            save_dir.mkdir(parents=True)
+            (save_dir / "region.dat").write_text("save-data", encoding="utf-8")
+            (app_dir / "serverconfig.xml").write_text(
+                f"""<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+    <property name="GameWorld" value="Navezgane" />
+    <property name="GameName" value="AlphaWorld" />
+</ServerSettings>
+""",
+                encoding="utf-8",
+            )
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.check_running = lambda: False
+
+            save_id = next(save.id for save in app.list_save_files() if save.label == "AlphaWorld")
+            deleted = app.delete_save_file(file_id=save_id)
+
+            self.assertEqual(deleted.label, "AlphaWorld")
+            self.assertFalse(save_dir.exists())
 
     def test_parse_gamestat_value_returns_none_for_empty_value(self) -> None:
         self.assertIsNone(parse_gamestat_value(""))
@@ -407,6 +516,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_waits_for_ready_signal_before_marking_app_running(self) -> None:
         app = cast(Any, object.__new__(SevenDays))
         app.name = "sevendays_demo"
+        app.directory = Path("/tmp/sevendays_demo")
         app.server_log = None
         app.file_stdout = Path("/tmp/sevendays_stdout.log")
         app.process = SimpleNamespace(stdout=object())
@@ -451,6 +561,85 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         tailer_cls.assert_called_once()
         tailer_args = tailer_cls.call_args.args
         self.assertEqual(tailer_args[1:], (relay_reader, app.file_stdout))
+
+    async def test_start_prefers_launch_created_runtime_log_file_over_existing_timestamped_logs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "7DaysToDieServer_Data"
+            log_dir.mkdir(parents=True)
+            older_runtime_log = log_dir / "output_log__2026-06-17__02-27-35.txt"
+            older_runtime_log.write_text("old\n", encoding="utf-8")
+            runtime_log = log_dir / "output_log__2026-06-17__03-27-35.txt"
+            app = cast(Any, object.__new__(SevenDays))
+            app.name = "sevendays_demo"
+            app.directory = root
+            app.server_log = None
+            app.file_stdout = root / "stdout.log"
+            app.process = SimpleNamespace(stdout=object())
+            app._server_ready = asyncio.Event()
+            app._tail_matchers = set()
+            app._std_launch = AsyncMock(
+                side_effect=lambda: runtime_log.write_text("INF Version: V 2.0 (b1)\n", encoding="utf-8")
+            )
+            app.check_running = lambda: True
+            app._relay = SimpleNamespace(
+                setup=AsyncMock(return_value=object()),
+                connected_event=asyncio.Event(),
+            )
+            app.wait_for_ready_event = AsyncMock()
+            app._players = SimpleNamespace(start=AsyncMock())
+            app._activities = SimpleNamespace(start=AsyncMock())
+            app._running = False
+
+            tailer = SimpleNamespace(start=AsyncMock())
+            with (
+                patch("apps.sevendays.Tailer", return_value=tailer) as tailer_cls,
+                patch("apps.sevendays.File_Utils.link") as link_mock,
+            ):
+                result = await SevenDays.start(app)
+
+        self.assertTrue(result)
+        tailer_cls.assert_called_once()
+        self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
+        link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
+
+    async def test_start_falls_back_to_existing_runtime_log_when_no_new_log_is_discovered(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_log = root / "7DaysToDieServer_Data" / "output_log__2026-06-17__02-27-35.txt"
+            runtime_log.parent.mkdir(parents=True)
+            runtime_log.write_text("INF Version: V 2.0 (b1)\n", encoding="utf-8")
+            app = cast(Any, object.__new__(SevenDays))
+            app.name = "sevendays_demo"
+            app.directory = root
+            app.server_log = None
+            app.file_stdout = root / "stdout.log"
+            app.process = SimpleNamespace(stdout=object())
+            app._server_ready = asyncio.Event()
+            app._tail_matchers = set()
+            app._std_launch = AsyncMock()
+            app.check_running = lambda: True
+            app._relay = SimpleNamespace(
+                setup=AsyncMock(return_value=object()),
+                connected_event=asyncio.Event(),
+            )
+            app.wait_for_ready_event = AsyncMock()
+            app._players = SimpleNamespace(start=AsyncMock())
+            app._activities = SimpleNamespace(start=AsyncMock())
+            app._running = False
+
+            tailer = SimpleNamespace(start=AsyncMock())
+            with (
+                patch("apps.sevendays.Tailer", return_value=tailer) as tailer_cls,
+                patch("apps.sevendays.File_Utils.link") as link_mock,
+                patch("apps.sevendays._SEVENDAYS_RUNTIME_LOG_DISCOVERY_TIMEOUT_SECONDS", 0.0),
+            ):
+                result = await SevenDays.start(app)
+
+        self.assertTrue(result)
+        tailer_cls.assert_called_once()
+        self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
+        link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
 
 
 if __name__ == "__main__":

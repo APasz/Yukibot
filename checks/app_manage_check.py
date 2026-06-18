@@ -19,11 +19,11 @@ import config
 from _discord import App_Bound, DC_Relay
 from _editor_session import EditorSessionNamespace
 from _manager import (
-    AppStartBlockerKind,
     App_Manager,
     AppDetailsUpdate,
     AppInstanceCreateRequest,
     AppInstanceTemplate,
+    AppStartBlockerKind,
     Provider_Player,
     Provider_Process,
 )
@@ -32,8 +32,8 @@ from _security import Power_Level
 from apps._app import AM_Receiver, App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport, RelayAdvancementTerms
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
-    AppTitleFont,
     App_Config,
+    AppTitleFont,
     AppVersion,
     Mod_Config,
     ModDownloadBlockReason,
@@ -1040,6 +1040,17 @@ class AppManageTests(unittest.TestCase):
             (
                 "scope: dummy",
                 "version: 1.2.3",
+            ),
+        )
+
+    def test_app_status_lines_include_build_in_version_display(self) -> None:
+        app = _build_dummy_app(version=AppVersion(main="1.2.3", build=42))
+
+        self.assertEqual(
+            _app_status_lines(app),
+            (
+                "scope: dummy",
+                "version: 1.2.3:42",
             ),
         )
 
@@ -2856,6 +2867,34 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["beta"]["server_log_file"], "{WD}/logs/server.log")
             self.assertEqual(payload["beta"]["join_port"], 23456)
 
+    def test_create_instance_writes_builtin_steam_update_template_for_sevendays(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            scope_path = temp_path / "apps" / "sevendays"
+            scope_path.mkdir(parents=True)
+            instances_path = scope_path / "instances.json"
+            instances_path.write_text("{}", encoding="utf-8")
+
+            os.chdir(temp_path)
+            try:
+                instance_name = manager.create_instance(
+                    AppInstanceCreateRequest(
+                        scope="sevendays",
+                        instance_key="alpha",
+                        friendly_name="7D2D Alpha",
+                        subfolder="sevendays-alpha",
+                    )
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertEqual(instance_name, "sevendays_alpha")
+            self.assertEqual(payload["alpha"]["steam_update"]["app_id"], 294420)
+            self.assertEqual(payload["alpha"]["steam_update"]["selected_branch"], "latest_experimental")
+
     def test_create_instance_rejects_subfolder_escape(self) -> None:
         manager = object.__new__(App_Manager)
         original_cwd = Path.cwd()
@@ -3115,6 +3154,60 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
                     "startup": {"cpu_points": 3, "ram_points": 8},
                 },
             )
+
+    def test_update_app_details_can_enable_steam_update_from_scope_preset(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps({"alpha": {"friendly_name": "Dummy", "directory": "{APPS}/dummy"}}),
+                encoding="utf-8",
+            )
+            app = _build_dummy_app()
+            app.scope = "sevendays"
+            app.directory = temp_path / "dummy"
+            app.directory.mkdir()
+            app.dir_log = temp_path / "logs"
+            app.dir_log.mkdir()
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            app.cfg.scope = "sevendays"
+            app.cfg.directory = app.directory
+            app.cfg.steam_update = None
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+
+            os.chdir(temp_path)
+            try:
+                manager.update_app_details(
+                    app,
+                    AppDetailsUpdate(
+                        friendly_name="Dummy",
+                        notes=None,
+                        lifecycle_notice_started=True,
+                        lifecycle_notice_stopped=True,
+                        lifecycle_notice_crashed=True,
+                        running_cpu_points=3,
+                        running_ram_points=5,
+                        startup_cpu_points=None,
+                        startup_ram_points=None,
+                        steam_update_enabled=True,
+                        steam_update_selected_branch="public",
+                    ),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(app.cfg.steam_update)
+            assert app.cfg.steam_update is not None
+            self.assertEqual(app.cfg.steam_update.app_id, 294420)
+            self.assertEqual(app.cfg.steam_update.selected_branch, "public")
+            self.assertIsNotNone(app.updater)
+            self.assertEqual(payload["alpha"]["steam_update"]["app_id"], 294420)
+            self.assertEqual(payload["alpha"]["steam_update"]["selected_branch"], "public")
 
     def test_create_instance_requires_admin_password_for_satisfactory(self) -> None:
         manager = object.__new__(App_Manager)

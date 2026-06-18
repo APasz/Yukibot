@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from re import Match
 
@@ -68,7 +69,7 @@ class Mod_ETS(Mod):
 
 
 class ETS_Settings(App_Settings):
-    def __init__(self, pointer: Path) -> None:
+    def __init__(self, pointer: Path, *, version_getter: Callable[[], AppVersion | None] | None = None) -> None:
         options = [
             Setting[str](
                 StringSettingSpec(allow_blank=True),
@@ -83,6 +84,7 @@ class ETS_Settings(App_Settings):
                 "description",
                 [],
                 default="",
+                paragraph=True,
             ),
             Setting[str](
                 StringSettingSpec(allow_blank=True),
@@ -90,6 +92,7 @@ class ETS_Settings(App_Settings):
                 "welcome_message",
                 [],
                 default="",
+                paragraph=True,
             ),
             Setting[str](
                 StringSettingSpec(
@@ -112,7 +115,7 @@ class ETS_Settings(App_Settings):
                 power_level=Power_Level.sudo,
             ),
         ]
-        super().__init__(pointer, options)
+        super().__init__(pointer, options, version_getter=version_getter)
 
     def load(self):
         data = self.pointer.read_text(config.STR_ENCODE)
@@ -124,7 +127,7 @@ class ETS_Settings(App_Settings):
             for opt in self.options:
                 if line.strip().startswith(opt.key):
                     arg, val = [x.strip() for x in line.split(":", 1)]
-                    opt.update(val)
+                    opt.load_value(val)
 
     def save(self):
         data = self.pointer.read_text(config.STR_ENCODE)
@@ -156,7 +159,7 @@ class ETS(App):
         self.cmd_cwd = cfg.directory.absolute() / "bin" / "linux_x64"
 
         self.process = None
-        super().__init__(bot, am, cfg, ETS_Settings(file_settings))
+        super().__init__(bot, am, cfg, ETS_Settings(file_settings, version_getter=lambda: cfg.version))
         self.act_err_threshold = 100
         self.apply_version(
             detect_ets_version(directory=cfg.directory, server_log=cfg.server_log_file),

@@ -49,7 +49,9 @@ from nicegui.elements.column import Column
 from nicegui.elements.html import Html
 from nicegui.elements.input import Input
 from nicegui.elements.label import Label
+from nicegui.elements.scroll_area import ScrollArea
 from nicegui.elements.select import Select
+from nicegui.elements.textarea import Textarea
 from nicegui.elements.timer import Timer
 from nicegui.elements.tooltip import Tooltip
 from nicegui.elements.upload import Upload
@@ -59,11 +61,12 @@ from starlette.responses import Response as StarletteResponse
 import config
 from _authority import AuthorityResource, read_json_object
 from _discord import cached_member_role_color, color_int_to_hex
-from _manager import App_Manager, ManagedApp
+from _manager import App_Manager, ManagedApp, app_scope_from_name
 from _security import Access_Control, Power_Level
 from _utils import Utilities
 from apps._app import App, AppRuntimeFault
-from apps._config import AppTitleFont, ModType
+from apps._config import AppTitleFont, ModType, SteamUpdateBranch, SteamUpdatePreset, steam_update_preset_for_scope
+from apps._updater import AppUpdateInfo, AppUpdateOperationKind, AppUpdateState, AppUpdateStatus
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
     ChatAttachment,
@@ -85,9 +88,9 @@ from mod_web_theme import MOD_WEB_ACTION_BASE_CLASSES, BadgeTone, apply_mod_web_
 from node_api import (
     NodeApiService,
     NodeAppEntry,
-    NodeAppResourcePointSummary,
     NodeAppMutationAction,
     NodeAppMutationResult,
+    NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
@@ -95,17 +98,18 @@ from node_api import (
     NodeBlueprintFileEntry,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
+    NodeCapacityMutationResult,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
     NodeConfigContent,
     NodeConfigEntry,
     NodeConfigList,
-    NodeCapacityMutationResult,
     NodeConsoleActionEntry,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleActionParameter,
+    NodeConsoleStdoutSnapshot,
     NodeFontSourceSettingsMutationResult,
     NodeModEntry,
     NodeModList,
@@ -129,7 +133,6 @@ from node_api import (
 )
 from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
 
-
 __all__: tuple[str, ...] = (
     "AbstractEventLoop",
     "Access_Control",
@@ -138,6 +141,12 @@ __all__: tuple[str, ...] = (
     "App_Manager",
     "AppRuntimeFault",
     "AppTitleFont",
+    "SteamUpdateBranch",
+    "SteamUpdatePreset",
+    "AppUpdateInfo",
+    "AppUpdateOperationKind",
+    "AppUpdateState",
+    "AppUpdateStatus",
     "AuthorityEndpoint",
     "AuthorityResource",
     "Awaitable",
@@ -207,6 +216,7 @@ __all__: tuple[str, ...] = (
     "NodeConsoleActionExecutionResult",
     "NodeConsoleActionList",
     "NodeConsoleActionParameter",
+    "NodeConsoleStdoutSnapshot",
     "NodeFontSourceSettingsMutationResult",
     "NodeModEntry",
     "NodeModList",
@@ -235,8 +245,10 @@ __all__: tuple[str, ...] = (
     "RelayTTSQueue",
     "Request",
     "Response",
+    "ScrollArea",
     "Select",
     "StarletteResponse",
+    "Textarea",
     "TYPE_CHECKING",
     "Timer",
     "Tooltip",
@@ -246,6 +258,7 @@ __all__: tuple[str, ...] = (
     "Utilities",
     "aiohttp",
     "apply_mod_web_theme",
+    "app_scope_from_name",
     "assert_never",
     "asyncio",
     "base64",
@@ -273,6 +286,7 @@ __all__: tuple[str, ...] = (
     "requests",
     "required_app_mutation_level",
     "required_app_mutation_scope",
+    "steam_update_preset_for_scope",
     "tempfile",
     "threading",
     "time",

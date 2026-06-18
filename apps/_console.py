@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar, cast
 
 from _security import Power_Level
+from apps._config import AppVersion, normalise_app_version
 from apps._settings import ChoiceSpec
 
 T_co = TypeVar("T_co", covariant=True)
@@ -120,6 +121,35 @@ class ConsoleAction:
     execute: ConsoleExecutor
     parameter: ConsoleActionParameter[object] | None = None
     requires_running: bool = True
+    min_app_version: AppVersion | str | None = None
+    max_app_version: AppVersion | str | None = None
+
+    def __post_init__(self) -> None:
+        min_app_version = normalise_app_version(self.min_app_version)
+        max_app_version = normalise_app_version(self.max_app_version)
+        object.__setattr__(self, "min_app_version", min_app_version)
+        object.__setattr__(self, "max_app_version", max_app_version)
+        if (
+            min_app_version is not None
+            and max_app_version is not None
+            and min_app_version.compare_main_and_build(max_app_version) > 0
+        ):
+            raise ValueError("Console action minimum app version must not exceed maximum app version.")
+
+    def supports_app_version(self, app_version: AppVersion | None) -> bool:
+        if isinstance(self.min_app_version, str) or isinstance(self.max_app_version, str):
+            raise RuntimeError("Console action app version bounds must be normalised during initialisation.")
+        if self.min_app_version is None and self.max_app_version is None:
+            return True
+        if app_version is None:
+            return False
+        min_app_version = self.min_app_version
+        if min_app_version is not None and not app_version.is_at_least(min_app_version):
+            return False
+        max_app_version = self.max_app_version
+        if max_app_version is not None and not app_version.is_at_most(max_app_version):
+            return False
+        return True
 
 
 async def execute_console_action(

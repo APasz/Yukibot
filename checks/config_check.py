@@ -10,6 +10,7 @@ import hikari
 from hikari import applications
 
 import config
+from apps._config import AppVersion
 from restart_targets import RestartTarget
 
 
@@ -33,12 +34,38 @@ class ConfigLoggingTests(unittest.TestCase):
                 self.assertFalse(logger.propagate)
 
 
+class AppVersionTests(unittest.TestCase):
+    def test_display_value_includes_steam_manifest_metadata(self) -> None:
+        self.assertEqual(
+            AppVersion(
+                main="1.2.3",
+                build=42,
+                steam_branch="experimental",
+                steam_build=987654,
+            ).display_value,
+            "1.2.3:42 [Steam experimental build 987654]",
+        )
+
+
 class ConfigPublicUrlTests(unittest.TestCase):
     def test_resolve_public_base_url_adds_https_for_bare_host(self) -> None:
-        self.assertEqual(
-            config.resolve_public_base_url("wakusei.apasz.com"),
-            "https://wakusei.apasz.com",
-        )
+        with patch.object(config, "INDEV", False):
+            self.assertEqual(
+                config.resolve_public_base_url("wakusei.apasz.com"),
+                "https://wakusei.apasz.com",
+            )
+
+    def test_resolve_public_base_url_rejects_http_outside_indev(self) -> None:
+        with patch.object(config, "INDEV", False):
+            with self.assertRaisesRegex(ValueError, "PUBLIC_BASE_URL must use https outside INDEV."):
+                config.resolve_public_base_url("http://wakusei.apasz.com")
+
+    def test_resolve_public_base_url_allows_http_in_indev(self) -> None:
+        with patch.object(config, "INDEV", True):
+            self.assertEqual(
+                config.resolve_public_base_url("http://127.0.0.1:3180"),
+                "http://127.0.0.1:3180",
+            )
 
     def test_resolve_public_base_url_rejects_paths(self) -> None:
         with self.assertRaisesRegex(ValueError, "PUBLIC_BASE_URL must not include a path."):
@@ -60,28 +87,75 @@ class ConfigPublicUrlTests(unittest.TestCase):
         )
 
     def test_resolve_mod_web_public_base_url_preserves_explicit_url(self) -> None:
-        self.assertEqual(
-            config.resolve_mod_web_public_base_url(
+        with patch.object(config, "INDEV", True):
+            self.assertEqual(
+                config.resolve_mod_web_public_base_url(
+                    "http://mods.apasz.com:8088",
+                    public_base_url="https://wakusei.apasz.com",
+                ),
                 "http://mods.apasz.com:8088",
-                public_base_url="https://wakusei.apasz.com",
-            ),
-            "http://mods.apasz.com:8088",
-        )
+            )
 
-    def test_resolve_mod_web_public_base_url_defaults_bare_override_to_http(self) -> None:
-        self.assertEqual(
-            config.resolve_mod_web_public_base_url(
-                "10.0.0.173:3180",
-                public_base_url="https://wakusei.apasz.com",
-            ),
-            "http://10.0.0.173:3180",
-        )
+    def test_resolve_mod_web_public_base_url_rejects_http_outside_indev(self) -> None:
+        with patch.object(config, "INDEV", False):
+            with self.assertRaisesRegex(ValueError, "MOD_WEB_PUBLIC_BASE_URL must use https outside INDEV."):
+                config.resolve_mod_web_public_base_url(
+                    "http://mods.apasz.com:8088",
+                    public_base_url="https://wakusei.apasz.com",
+                )
+
+    def test_resolve_mod_web_public_base_url_defaults_bare_override_to_https(self) -> None:
+        with patch.object(config, "INDEV", False):
+            self.assertEqual(
+                config.resolve_mod_web_public_base_url(
+                    "10.0.0.173:3180",
+                    public_base_url="https://wakusei.apasz.com",
+                ),
+                "https://10.0.0.173:3180",
+            )
+
+    def test_resolve_mod_web_public_base_url_defaults_bare_override_to_http_in_indev(self) -> None:
+        with patch.object(config, "INDEV", True):
+            self.assertEqual(
+                config.resolve_mod_web_public_base_url(
+                    "10.0.0.173:3180",
+                    public_base_url="https://wakusei.apasz.com",
+                ),
+                "http://10.0.0.173:3180",
+            )
 
     def test_resolve_node_api_base_url_uses_mod_web_host(self) -> None:
         self.assertEqual(
             config.resolve_node_api_base_url("http://mods.apasz.com:8088"),
             "http://mods.apasz.com:8088/api/node",
         )
+
+    def test_resolve_node_api_public_base_url_defaults_to_mod_web_public_base_url(self) -> None:
+        self.assertEqual(
+            config.resolve_node_api_public_base_url(
+                None,
+                mod_web_public_base_url="https://mods.apasz.com",
+            ),
+            "https://mods.apasz.com",
+        )
+
+    def test_resolve_node_api_public_base_url_preserves_explicit_override(self) -> None:
+        with patch.object(config, "INDEV", True):
+            self.assertEqual(
+                config.resolve_node_api_public_base_url(
+                    "http://node-api.apasz.com:8089",
+                    mod_web_public_base_url="https://mods.apasz.com",
+                ),
+                "http://node-api.apasz.com:8089",
+            )
+
+    def test_resolve_node_api_public_base_url_rejects_http_outside_indev(self) -> None:
+        with patch.object(config, "INDEV", False):
+            with self.assertRaisesRegex(ValueError, "NODE_API_PUBLIC_BASE_URL must use https outside INDEV."):
+                config.resolve_node_api_public_base_url(
+                    "http://node-api.apasz.com:8089",
+                    mod_web_public_base_url="https://mods.apasz.com",
+                )
 
     def test_normalise_google_font_source_url_converts_specimen_page(self) -> None:
         self.assertEqual(
@@ -136,6 +210,17 @@ class ConfigPublicUrlTests(unittest.TestCase):
 class ConfigDataAuthorityTests(unittest.TestCase):
     def test_erin_profile_includes_activity_service(self) -> None:
         self.assertTrue(config.BOT_PROFILES[config.BotProfileName.ERIN].has_service(config.BotService.ACTIVITY))
+
+    def test_portal_profile_has_no_commands_or_services(self) -> None:
+        profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+
+        self.assertEqual(profile.command_groups, ())
+        self.assertEqual(profile.services, frozenset())
+
+    def test_portal_profile_uses_remote_data_authority_mode(self) -> None:
+        profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+
+        self.assertIs(config._data_authority_mode(profile), config.DataAuthorityMode.REMOTE)
 
     def test_resolve_data_authority_endpoint_defaults_to_https_for_bare_host_without_public_hint(self) -> None:
         endpoint = config.resolve_data_authority_endpoint(
@@ -464,6 +549,33 @@ class BotConfigurationTests(unittest.TestCase):
         self.assertIn('"system"', payload)
         self.assertIn('"hour": 2', payload)
         self.assertIn('"minute": 15', payload)
+
+    def test_save_bot_configuration_persists_steamcmd_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+
+            config.save_bot_configuration(
+                path,
+                config.BotConfiguration(steamcmd_path="bash ./steamcmd.sh"),
+            )
+
+            loaded = config.load_bot_configuration(path)
+            payload = path.read_text(encoding="utf-8")
+
+        self.assertEqual(loaded.steamcmd_path, "bash ./steamcmd.sh")
+        self.assertIn('"steamcmd_path": "bash ./steamcmd.sh"', payload)
+
+    def test_steamcmd_command_prefix_uses_bash_for_shell_script_paths(self) -> None:
+        self.assertEqual(
+            config.steamcmd_command_prefix("./steamcmd.sh"),
+            ("bash", "./steamcmd.sh"),
+        )
+
+    def test_steamcmd_command_prefix_keeps_binary_name_as_direct_command(self) -> None:
+        self.assertEqual(
+            config.steamcmd_command_prefix("steamcmd"),
+            ("steamcmd",),
+        )
 
     def test_build_local_bot_metadata_snapshot_uses_profile_and_oauth(self) -> None:
         snapshot = config.build_local_bot_metadata_snapshot(

@@ -13,6 +13,22 @@ from apps.factorio import Factorio, Matchers, Mod_Factorio, detect_factorio_vers
 
 
 class FactorioVersionDetectionTests(unittest.TestCase):
+    def test_delete_save_file_removes_save_archive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            saves_dir = root / "saves"
+            save_path = saves_dir / "alpha.zip"
+            saves_dir.mkdir()
+            save_path.write_bytes(b"save-data")
+            app = cast(Any, object.__new__(Factorio))
+            app.directory = root
+            app.check_running = lambda: False
+
+            deleted = app.delete_save_file(file_id="saves/alpha.zip")
+
+            self.assertEqual(deleted.id, "saves/alpha.zip")
+            self.assertFalse(save_path.exists())
+
     def test_detect_factorio_version_from_local_log(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

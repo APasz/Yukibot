@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from typing import BinaryIO
-
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, BinaryIO
 
 from .constants import (
     _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
@@ -20,6 +19,8 @@ from .nicegui_protocols import AsyncRefresh, ModWebUi, RefreshableValue
 from .runtime_imports import (
     App,
     App_Manager,
+    AppUpdateInfo,
+    AppUpdateStatus,
     AuthorityEndpoint,
     AuthorityResource,
     Awaitable,
@@ -32,7 +33,6 @@ from .runtime_imports import (
     Mapping,
     ModWebUser,
     NodeAccessGrant,
-    NodeApiService,
     NodeApiScope,
     NodeAppEntry,
     NodeAppResourcePointSummary,
@@ -44,6 +44,7 @@ from .runtime_imports import (
     NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
+    NodeConsoleStdoutSnapshot,
     NodeModList,
     NodeModUploadResult,
     NodeSaveList,
@@ -89,196 +90,216 @@ if TYPE_CHECKING:
     from nicegui.elements.upload_files import FileUpload
 
 
+@dataclass(frozen=True, slots=True)
+class _LocalAppPageData:
+    app: App
+    app_entry: NodeAppEntry
+    configs: NodeConfigList
+    saves: NodeSaveList | None
+    blueprints: NodeBlueprintList | None
+    settings: NodeSettingList | None
+    console_actions: NodeConsoleActionList | None
+    app_start_blocked: bool
+    mods: NodeModList | None
+    app_stats: NodeAppRuntimeSummary | None
+
+
 class ModWebModelsMixin(ModWebServiceSupport):
-    async def _build_page_model(self, app: App, *, user: ModWebUser) -> ModWebPageModel:
+    @staticmethod
+    def _portal_default_node_snapshot() -> config.BotMetadataSnapshot | None:
+        snapshots = ModWebModelsMixin._known_bot_snapshots()
+        for snapshot in snapshots:
+            if snapshot.profile.bot_profile is config.BotProfileName.YUKI and snapshot.features.mod_web is not None:
+                return snapshot
+        for snapshot in snapshots:
+            if snapshot.features.mod_web is not None:
+                return snapshot
+        return None
+
+    @classmethod
+    def _portal_default_node_name(cls) -> str | None:
+        snapshot = cls._portal_default_node_snapshot()
+        mod_web = None if snapshot is None else snapshot.features.mod_web
+        if mod_web is None:
+            return None
+        return mod_web.node_name
+
+    def _current_node_link(self) -> ModWebNodeLink:
+        return ModWebNodeLink(
+            node_name=config.MOD_WEB_SERVER.node_name,
+            label=self._current_node_label(),
+            url=self.index_path(),
+            api_base_url=_SAME_ORIGIN_NODE_API_BASE,
+            api_url=self._node_api.apps_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
+            is_current=True,
+            latency_probe_url=self._node_api.ping_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
+        )
+
+    @staticmethod
+    def _node_app_api_url(node: ModWebNodeLink, app_name: str) -> str:
+        return f"{node.api_url.rstrip('/')}/{quote(app_name, safe='')}"
+
+    async def _build_local_app_page_data(self, app: App, *, user: ModWebUser) -> _LocalAppPageData:
         can_manage_app: bool = self._user_has_level(user, Power_Level.user)
-        mods: NodeModList = await self._node_api.build_mod_list(app)
-        supports_configs: bool = app.supports_config_files
-        config_read_level: Power_Level = app.lowest_config_file_read_level
-        config_write_level: Power_Level = app.config_file_write_level
-        supports_save_uploads: bool = app.supports_save_uploads
-        supports_save_rename: bool = app.supports_save_rename
-        save_write_level: Power_Level = app.save_file_write_level
+        app_entry: NodeAppEntry = self._node_api.build_app_entry(app)
+        supports_configs: bool = app_entry.supports_configs
+        config_read_level: Power_Level = app_entry.config_read_level
         configs: NodeConfigList = (
             self._node_api.build_config_list(app, actor_user_id=user.discord_id)
             if supports_configs and self._user_has_level(user, config_read_level)
             else self._empty_config_list(
-                app_name=app.name, app_friendly=app.friendly, node_name=config.MOD_WEB_SERVER.node_name
+                app_name=app_entry.name,
+                app_friendly=app_entry.friendly,
+                node_name=app_entry.node,
             )
         )
         saves: NodeSaveList | None = (
-            self._node_api.build_save_list(app) if app.supports_save_files and can_manage_app else None
+            self._node_api.build_save_list(app) if app_entry.supports_saves and can_manage_app else None
         )
         blueprints: NodeBlueprintList | None = (
             self._node_api.build_blueprint_list(app, actor_user_id=user.discord_id)
-            if app.supports_blueprints and can_manage_app
+            if app_entry.supports_blueprints and can_manage_app
             else None
         )
         settings: NodeSettingList | None = (
             self._node_api.build_setting_list(app=app, actor_user_id=user.discord_id)
-            if app.supports_settings
+            if app_entry.supports_settings
             else None
             if can_manage_app
             else None
         )
         console_actions: NodeConsoleActionList | None = (
             self._node_api.build_console_action_list(app=app, actor_user_id=user.discord_id)
-            if app.supports_console_actions and can_manage_app
+            if app_entry.supports_console_actions and can_manage_app
             else None
         )
         app_start_blocked: bool = self._app_start_blocked_local(app)
+        if app_entry.supports_mods:
+            mods: NodeModList | None = await self._node_api.build_mod_list(app)
+            app_stats: NodeAppRuntimeSummary | None = mods.app_stats
+        else:
+            mods = None
+            app_stats = await self._node_api.build_app_runtime_summary(app)
+        return _LocalAppPageData(
+            app=app,
+            app_entry=app_entry,
+            configs=configs,
+            saves=saves,
+            blueprints=blueprints,
+            settings=settings,
+            console_actions=console_actions,
+            app_start_blocked=app_start_blocked,
+            mods=mods,
+            app_stats=app_stats,
+        )
+
+    def _page_model_from_local_page_data(
+        self,
+        page_data: _LocalAppPageData,
+        *,
+        can_manage_app: bool,
+    ) -> ModWebPageModel:
+        if page_data.mods is None:
+            raise ValueError(f"Local app page data for {page_data.app_entry.name!r} does not include mods.")
+        current_node: ModWebNodeLink = self._current_node_link()
+        mods: NodeModList = page_data.mods
         traffic_log.info(
             "Mod web page model built: app=%s mods=%s configs=%s saves=%s blueprints=%s settings=%s",
-            app.name,
+            page_data.app.name,
             mods.summary.total_count,
-            len(configs.configs),
-            len(saves.saves) if saves is not None else 0,
-            len(blueprints.blueprints) if blueprints is not None else 0,
-            len(settings.settings) if settings is not None else 0,
+            len(page_data.configs.configs),
+            len(page_data.saves.saves) if page_data.saves is not None else 0,
+            len(page_data.blueprints.blueprints) if page_data.blueprints is not None else 0,
+            len(page_data.settings.settings) if page_data.settings is not None else 0,
         )
-        return cast(
-            ModWebPageModel,
-            self._page_model_with_tabs(
-            ModWebPageModel(
-                node_name=config.MOD_WEB_SERVER.node_name,
-                app_name=app.name,
-                app_friendly=app.friendly,
-                app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
-                supports_configs=supports_configs,
-                config_read_level=config_read_level,
-                config_write_level=config_write_level,
-                supports_save_uploads=supports_save_uploads,
-                supports_save_rename=supports_save_rename,
-                save_write_level=save_write_level,
-                mods=mods,
-                configs=configs,
-                saves=saves,
-                app_stats=mods.app_stats,
-                app_start_blocked=app_start_blocked,
-                settings=settings,
-                app_title_font_preset=app.cfg.title_font_preset,
-                console_actions=console_actions,
-                blueprints=blueprints,
-                map_url=app.public_map_url,
-                map_api_url=(
-                    self._node_api.map_api_url(app.name, base_url=_SAME_ORIGIN_NODE_API_BASE)
-                    if app.supports_map
-                    else None
-                ),
-                can_write_map_annotations=app.supports_map and can_manage_app,
-                supports_chat=app.supports_chat_relay,
-                chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
-                resource_points=NodeApiService._app_resource_point_summary(app),
-                app_notes=app.cfg.notes,
-                lifecycle_notice_started=app.cfg.lifecycle_notice_started,
-                lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
-                lifecycle_notice_crashed=app.cfg.lifecycle_notice_crashed,
-                download_all_url=self._node_api.mod_download_url(
-                    app.name,
-                    enabled_only=False,
-                    base_url=_SAME_ORIGIN_NODE_API_BASE,
-                ),
-                download_enabled_url=self._node_api.mod_download_url(
-                    app.name,
-                    enabled_only=True,
-                    base_url=_SAME_ORIGIN_NODE_API_BASE,
-                ),
-                mod_download_urls={
-                    mod.name: self._node_api.single_mod_download_url(
-                        app.name,
-                        mod.name,
-                        base_url=_SAME_ORIGIN_NODE_API_BASE,
-                    )
-                    for mod in mods.mods
-                    if mod.downloadable
-                },
-            ),
+        return self._remote_page_model(
+            node=current_node,
+            mods=mods,
+            supports_configs=page_data.app_entry.supports_configs,
+            config_read_level=page_data.app_entry.config_read_level,
+            config_write_level=page_data.app_entry.config_write_level,
+            supports_save_uploads=page_data.app_entry.supports_save_uploads,
+            supports_save_rename=page_data.app_entry.supports_save_rename,
+            save_write_level=page_data.app_entry.save_write_level,
+            configs=page_data.configs,
+            saves=page_data.saves,
+            blueprints=page_data.blueprints,
+            settings=page_data.settings,
+            console_actions=page_data.console_actions,
+            map_url=page_data.app_entry.map_url,
+            can_write_map_annotations=page_data.app_entry.map_url is not None and can_manage_app,
+            supports_chat=page_data.app_entry.supports_chat,
+            supports_updates=page_data.app_entry.supports_updates,
+            chat_url=(self.app_chat_path(page_data.app_entry.name) if page_data.app_entry.supports_chat else None),
+            update_info=page_data.app_entry.update_info,
+            update_status=page_data.app_entry.update_status,
+            app_start_blocked=page_data.app_start_blocked,
+            app_color_hex=page_data.app_entry.color_hex,
+            resource_points=page_data.app_entry.resource_points,
+            app_title_font_preset=page_data.app_entry.title_font_preset,
+            app_notes=page_data.app_entry.notes,
+            lifecycle_notice_started=page_data.app_entry.lifecycle_notice_started,
+            lifecycle_notice_stopped=page_data.app_entry.lifecycle_notice_stopped,
+            lifecycle_notice_crashed=page_data.app_entry.lifecycle_notice_crashed,
         )
+
+    def _overview_model_from_local_page_data(
+        self, page_data: _LocalAppPageData, *, can_manage_app: bool
+    ) -> ModWebOverviewPageModel:
+        current_node: ModWebNodeLink = self._current_node_link()
+        traffic_log.info(
+            "Mod web overview model built: app=%s configs=%s saves=%s blueprints=%s settings=%s",
+            page_data.app.name,
+            len(page_data.configs.configs),
+            len(page_data.saves.saves) if page_data.saves is not None else 0,
+            len(page_data.blueprints.blueprints) if page_data.blueprints is not None else 0,
+            len(page_data.settings.settings) if page_data.settings is not None else 0,
+        )
+        return self._remote_overview_page_model(
+            node=current_node,
+            app_name=page_data.app_entry.name,
+            app_friendly=page_data.app_entry.friendly,
+            app_color_hex=page_data.app_entry.color_hex,
+            supports_configs=page_data.app_entry.supports_configs,
+            config_read_level=page_data.app_entry.config_read_level,
+            config_write_level=page_data.app_entry.config_write_level,
+            supports_save_uploads=page_data.app_entry.supports_save_uploads,
+            supports_save_rename=page_data.app_entry.supports_save_rename,
+            save_write_level=page_data.app_entry.save_write_level,
+            configs=page_data.configs,
+            saves=page_data.saves,
+            blueprints=page_data.blueprints,
+            settings=page_data.settings,
+            console_actions=page_data.console_actions,
+            map_url=page_data.app_entry.map_url,
+            can_write_map_annotations=page_data.app_entry.map_url is not None and can_manage_app,
+            supports_chat=page_data.app_entry.supports_chat,
+            supports_updates=page_data.app_entry.supports_updates,
+            chat_url=(self.app_chat_path(page_data.app_entry.name) if page_data.app_entry.supports_chat else None),
+            update_info=page_data.app_entry.update_info,
+            update_status=page_data.app_entry.update_status,
+            app_stats=page_data.app_stats,
+            app_start_blocked=page_data.app_start_blocked,
+            resource_points=page_data.app_entry.resource_points,
+            app_title_font_preset=page_data.app_entry.title_font_preset,
+            app_notes=page_data.app_entry.notes,
+            lifecycle_notice_started=page_data.app_entry.lifecycle_notice_started,
+            lifecycle_notice_stopped=page_data.app_entry.lifecycle_notice_stopped,
+            lifecycle_notice_crashed=page_data.app_entry.lifecycle_notice_crashed,
+        )
+
+    async def _build_page_model(self, app: App, *, user: ModWebUser) -> ModWebPageModel:
+        page_data = await self._build_local_app_page_data(app, user=user)
+        return self._page_model_from_local_page_data(
+            page_data,
+            can_manage_app=self._user_has_level(user, Power_Level.user),
         )
 
     async def _build_overview_page_model(self, app: App, *, user: ModWebUser) -> ModWebOverviewPageModel:
-        can_manage_app: bool = self._user_has_level(user, Power_Level.user)
-        supports_configs: bool = app.supports_config_files
-        config_read_level: Power_Level = app.lowest_config_file_read_level
-        config_write_level: Power_Level = app.config_file_write_level
-        supports_save_uploads: bool = app.supports_save_uploads
-        supports_save_rename: bool = app.supports_save_rename
-        save_write_level: Power_Level = app.save_file_write_level
-        configs: NodeConfigList = (
-            self._node_api.build_config_list(app, actor_user_id=user.discord_id)
-            if supports_configs and self._user_has_level(user, config_read_level)
-            else self._empty_config_list(
-                app_name=app.name, app_friendly=app.friendly, node_name=config.MOD_WEB_SERVER.node_name
-            )
-        )
-        saves: NodeSaveList | None = (
-            self._node_api.build_save_list(app) if app.supports_save_files and can_manage_app else None
-        )
-        blueprints: NodeBlueprintList | None = (
-            self._node_api.build_blueprint_list(app, actor_user_id=user.discord_id)
-            if app.supports_blueprints and can_manage_app
-            else None
-        )
-        settings: NodeSettingList | None = (
-            self._node_api.build_setting_list(app=app, actor_user_id=user.discord_id)
-            if app.supports_settings
-            else None
-            if can_manage_app
-            else None
-        )
-        console_actions: NodeConsoleActionList | None = (
-            self._node_api.build_console_action_list(app=app, actor_user_id=user.discord_id)
-            if app.supports_console_actions and can_manage_app
-            else None
-        )
-        app_stats: NodeAppRuntimeSummary = await self._node_api.build_app_runtime_summary(app)
-        app_start_blocked: bool = self._app_start_blocked_local(app)
-        traffic_log.info(
-            "Mod web overview model built: app=%s configs=%s saves=%s blueprints=%s settings=%s",
-            app.name,
-            len(configs.configs),
-            len(saves.saves) if saves is not None else 0,
-            len(blueprints.blueprints) if blueprints is not None else 0,
-            len(settings.settings) if settings is not None else 0,
-        )
-        return cast(
-            ModWebOverviewPageModel,
-            self._page_model_with_tabs(
-            ModWebOverviewPageModel(
-                node_name=config.MOD_WEB_SERVER.node_name,
-                app_name=app.name,
-                app_friendly=app.friendly,
-                app_color_hex=self._node_api.app_color_hex(app.manage_embed_color),
-                supports_configs=supports_configs,
-                config_read_level=config_read_level,
-                config_write_level=config_write_level,
-                supports_save_uploads=supports_save_uploads,
-                supports_save_rename=supports_save_rename,
-                save_write_level=save_write_level,
-                configs=configs,
-                saves=saves,
-                app_stats=app_stats,
-                app_start_blocked=app_start_blocked,
-                settings=settings,
-                app_title_font_preset=app.cfg.title_font_preset,
-                console_actions=console_actions,
-                blueprints=blueprints,
-                map_url=app.public_map_url,
-                map_api_url=(
-                    self._node_api.map_api_url(app.name, base_url=_SAME_ORIGIN_NODE_API_BASE)
-                    if app.supports_map
-                    else None
-                ),
-                can_write_map_annotations=app.supports_map and can_manage_app,
-                supports_chat=app.supports_chat_relay,
-                chat_url=self.app_chat_path(app.name) if app.supports_chat_relay else None,
-                resource_points=NodeApiService._app_resource_point_summary(app),
-                app_notes=app.cfg.notes,
-                lifecycle_notice_started=app.cfg.lifecycle_notice_started,
-                lifecycle_notice_stopped=app.cfg.lifecycle_notice_stopped,
-                lifecycle_notice_crashed=app.cfg.lifecycle_notice_crashed,
-            ),
-        )
+        page_data = await self._build_local_app_page_data(app, user=user)
+        return self._overview_model_from_local_page_data(
+            page_data,
+            can_manage_app=self._user_has_level(user, Power_Level.user),
         )
 
     def _remote_page_model(
@@ -300,7 +321,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
         map_url: str | None,
         can_write_map_annotations: bool,
         supports_chat: bool,
+        supports_updates: bool,
         chat_url: str | None,
+        update_info: AppUpdateInfo | None,
+        update_status: AppUpdateStatus | None,
         app_start_blocked: bool,
         app_color_hex: str | None,
         resource_points: NodeAppResourcePointSummary | None,
@@ -310,50 +334,52 @@ class ModWebModelsMixin(ModWebServiceSupport):
         lifecycle_notice_stopped: bool,
         lifecycle_notice_crashed: bool,
     ) -> ModWebPageModel:
-        node_path: str = f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node.node_name, safe='')}"
-        app_path: str = f"{node_path}/apps/{quote(mods.app_name, safe='')}"
+        app_api_url: str = self._node_app_api_url(node, mods.app_name)
         return cast(
             ModWebPageModel,
             self._page_model_with_tabs(
-            ModWebPageModel(
-                node_name=node.node_name,
-                app_name=mods.app_name,
-                app_friendly=mods.app_friendly,
-                app_color_hex=app_color_hex,
-                supports_configs=supports_configs,
-                config_read_level=config_read_level,
-                config_write_level=config_write_level,
-                supports_save_uploads=supports_save_uploads,
-                supports_save_rename=supports_save_rename,
-                save_write_level=save_write_level,
-                mods=mods,
-                configs=configs,
-                saves=saves,
-                app_stats=mods.app_stats,
-                app_start_blocked=app_start_blocked,
-                settings=settings,
-                app_title_font_preset=app_title_font_preset,
-                console_actions=console_actions,
-                blueprints=blueprints,
-                map_url=map_url,
-                map_api_url=f"{app_path}/map" if map_url is not None else None,
-                can_write_map_annotations=map_url is not None and can_write_map_annotations,
-                supports_chat=supports_chat,
-                chat_url=chat_url,
-                resource_points=resource_points,
-                app_notes=app_notes,
-                lifecycle_notice_started=lifecycle_notice_started,
-                lifecycle_notice_stopped=lifecycle_notice_stopped,
-                lifecycle_notice_crashed=lifecycle_notice_crashed,
-                download_all_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'false'})}",
-                download_enabled_url=f"{app_path}/mods/download?{urlencode({'enabled_only': 'true'})}",
-                mod_download_urls={
-                    mod.name: f"{app_path}/mods/{quote(mod.name, safe='')}/download"
-                    for mod in mods.mods
-                    if mod.downloadable
-                },
+                ModWebPageModel(
+                    node_name=node.node_name,
+                    app_name=mods.app_name,
+                    app_friendly=mods.app_friendly,
+                    app_color_hex=app_color_hex,
+                    supports_configs=supports_configs,
+                    config_read_level=config_read_level,
+                    config_write_level=config_write_level,
+                    supports_save_uploads=supports_save_uploads,
+                    supports_save_rename=supports_save_rename,
+                    save_write_level=save_write_level,
+                    mods=mods,
+                    configs=configs,
+                    saves=saves,
+                    app_stats=mods.app_stats,
+                    app_start_blocked=app_start_blocked,
+                    settings=settings,
+                    app_title_font_preset=app_title_font_preset,
+                    console_actions=console_actions,
+                    blueprints=blueprints,
+                    map_url=map_url,
+                    can_write_map_annotations=map_url is not None and can_write_map_annotations,
+                    supports_chat=supports_chat,
+                    supports_updates=supports_updates,
+                    chat_url=chat_url,
+                    update_info=update_info,
+                    update_status=update_status,
+                    resource_points=resource_points,
+                    app_notes=app_notes,
+                    lifecycle_notice_started=lifecycle_notice_started,
+                    lifecycle_notice_stopped=lifecycle_notice_stopped,
+                    lifecycle_notice_crashed=lifecycle_notice_crashed,
+                    download_all_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'false'})}",
+                    download_enabled_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'true'})}",
+                    mod_download_urls={
+                        mod.name: f"{app_api_url}/mods/{quote(mod.name, safe='')}/download"
+                        for mod in mods.mods
+                        if mod.downloadable
+                    },
+                    map_api_url=f"{app_api_url}/map" if map_url is not None else None,
+                ),
             ),
-        )
         )
 
     def _remote_overview_page_model(
@@ -377,7 +403,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
         map_url: str | None,
         can_write_map_annotations: bool,
         supports_chat: bool,
+        supports_updates: bool,
         chat_url: str | None,
+        update_info: AppUpdateInfo | None,
+        update_status: AppUpdateStatus | None,
         app_stats: NodeAppRuntimeSummary | None,
         app_start_blocked: bool,
         resource_points: NodeAppResourcePointSummary | None,
@@ -387,55 +416,51 @@ class ModWebModelsMixin(ModWebServiceSupport):
         lifecycle_notice_stopped: bool,
         lifecycle_notice_crashed: bool,
     ) -> ModWebOverviewPageModel:
-        app_path: str = f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node.node_name, safe='')}/apps/{quote(app_name, safe='')}"
+        app_api_url: str = self._node_app_api_url(node, app_name)
         return cast(
             ModWebOverviewPageModel,
             self._page_model_with_tabs(
-            ModWebOverviewPageModel(
-                node_name=node.node_name,
-                app_name=app_name,
-                app_friendly=app_friendly,
-                app_color_hex=app_color_hex,
-                supports_configs=supports_configs,
-                config_read_level=config_read_level,
-                config_write_level=config_write_level,
-                supports_save_uploads=supports_save_uploads,
-                supports_save_rename=supports_save_rename,
-                save_write_level=save_write_level,
-                configs=configs,
-                saves=saves,
-                app_stats=app_stats,
-                app_start_blocked=app_start_blocked,
-                settings=settings,
-                app_title_font_preset=app_title_font_preset,
-                console_actions=console_actions,
-                blueprints=blueprints,
-                map_url=map_url,
-                map_api_url=f"{app_path}/map" if map_url is not None else None,
-                can_write_map_annotations=map_url is not None and can_write_map_annotations,
-                supports_chat=supports_chat,
-                chat_url=chat_url,
-                resource_points=resource_points,
-                app_notes=app_notes,
-                lifecycle_notice_started=lifecycle_notice_started,
-                lifecycle_notice_stopped=lifecycle_notice_stopped,
-                lifecycle_notice_crashed=lifecycle_notice_crashed,
+                ModWebOverviewPageModel(
+                    node_name=node.node_name,
+                    app_name=app_name,
+                    app_friendly=app_friendly,
+                    app_color_hex=app_color_hex,
+                    supports_configs=supports_configs,
+                    config_read_level=config_read_level,
+                    config_write_level=config_write_level,
+                    supports_save_uploads=supports_save_uploads,
+                    supports_save_rename=supports_save_rename,
+                    save_write_level=save_write_level,
+                    configs=configs,
+                    saves=saves,
+                    app_stats=app_stats,
+                    app_start_blocked=app_start_blocked,
+                    settings=settings,
+                    app_title_font_preset=app_title_font_preset,
+                    console_actions=console_actions,
+                    blueprints=blueprints,
+                    map_url=map_url,
+                    map_api_url=f"{app_api_url}/map" if map_url is not None else None,
+                    can_write_map_annotations=map_url is not None and can_write_map_annotations,
+                    supports_chat=supports_chat,
+                    supports_updates=supports_updates,
+                    chat_url=chat_url,
+                    update_info=update_info,
+                    update_status=update_status,
+                    resource_points=resource_points,
+                    app_notes=app_notes,
+                    lifecycle_notice_started=lifecycle_notice_started,
+                    lifecycle_notice_stopped=lifecycle_notice_stopped,
+                    lifecycle_notice_crashed=lifecycle_notice_crashed,
+                ),
             ),
-        )
         )
 
     def _node_links(self) -> tuple[ModWebNodeLink, ...]:
         links: dict[str, ModWebNodeLink] = {}
-        current: ModWebNodeLink = ModWebNodeLink(
-            node_name=config.MOD_WEB_SERVER.node_name,
-            label=self._current_node_label(),
-            url=self.index_path(),
-            api_base_url=_SAME_ORIGIN_NODE_API_BASE,
-            api_url=self._node_api.apps_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
-            is_current=True,
-            latency_probe_url=self._node_api.ping_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
-        )
-        links[current.node_name.casefold()] = current
+        if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
+            current = self._current_node_link()
+            links[current.node_name.casefold()] = current
 
         for snapshot in self._known_bot_snapshots():
             mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
@@ -465,6 +490,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 continue
             if snapshot.profile.label:
                 return snapshot.profile.label
+        if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
+            return "Portal"
         if key == config.ACTIVE_BOT_PROFILE.name.value.casefold():
             return config.ACTIVE_BOT_PROFILE.name.value.title()
         return node_name
@@ -703,6 +730,23 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSaveMutationResult.from_mapping(payload)
 
+    def _remote_save_delete(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        save_id: str,
+        user: ModWebUser,
+    ) -> NodeSaveMutationResult:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}",
+            scopes=(NodeApiScope.SAVES_WRITE,),
+            user=user,
+            method="DELETE",
+        )
+        return NodeSaveMutationResult.from_mapping(payload)
+
     def _remote_blueprint_delete(
         self,
         node: ModWebNodeLink,
@@ -897,6 +941,24 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeConsoleActionList.from_mapping(payload)
 
+    def _remote_console_stdout(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        *,
+        max_lines: int,
+        user: ModWebUser,
+    ) -> NodeConsoleStdoutSnapshot:
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/console/stdout?max_lines={max_lines}",
+            scopes=(NodeApiScope.APP_CONTROL,),
+            user=user,
+            timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+        )
+        return NodeConsoleStdoutSnapshot.from_mapping(payload)
+
     def _remote_execute_console_action(
         self,
         node: ModWebNodeLink,
@@ -948,6 +1010,12 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 response: Response = requests.post(
                     url,
                     json=_json_request_object(json_payload),
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=timeout,
+                )
+            elif method == "DELETE":
+                response = requests.delete(
+                    url,
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=timeout,
                 )
@@ -1162,30 +1230,48 @@ class ModWebModelsMixin(ModWebServiceSupport):
         if request.method not in {"GET", "HEAD"}:
             return None
 
-        target_path: str | None = self._remote_portal_path(request.url.path)
+        if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
+            target_node_name = self._portal_default_node_name()
+            if target_node_name is None:
+                return None
+            target_path = self._remote_portal_path(request.url.path, target_node_name=target_node_name)
+            if target_path is None:
+                return None
+            query: str = request.url.query
+            if query and "?" in target_path:
+                suffix = f"&{query}"
+            elif query:
+                suffix = f"?{query}"
+            else:
+                suffix = ""
+            return RedirectResponse(f"{target_path}{suffix}", status_code=302)
+
+        target_path = self._remote_portal_path(request.url.path, target_node_name=config.MOD_WEB_SERVER.node_name)
         if target_path is None:
             return None
         base_url: str | None = self._yuki_portal_base_url()
         if base_url is None:
             log.warning("Remote mod web redirect skipped because Yuki mod web URL is unknown.")
             return None
-        query: str = request.url.query
+        query = request.url.query
         if query and "?" in target_path:
             suffix = f"&{query}"
         elif query:
-            suffix: str = f"?{query}"
+            suffix = f"?{query}"
         else:
             suffix = ""
         return RedirectResponse(f"{base_url.rstrip('/')}{target_path}{suffix}", status_code=302)
 
-    def _remote_portal_path(self, path: str) -> str | None:
+    def _remote_portal_path(self, path: str, *, target_node_name: str) -> str | None:
         if path.startswith("/api/node"):
             return None
         if path.startswith("/_nicegui") or path.startswith("/static"):
             return None
 
-        node_path: str = f"/mod-web/nodes/{quote(config.MOD_WEB_SERVER.node_name, safe='')}"
+        node_path: str = f"/mod-web/nodes/{quote(target_node_name, safe='')}"
         if path in {"", "/", "/mod-web"}:
+            if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
+                return None
             return node_path
 
         chat_app_name: str | None = self._chat_app_name_from_remote_ui_path(path)

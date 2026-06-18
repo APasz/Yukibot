@@ -129,6 +129,8 @@ class ModWebTabsMixin(ModWebServiceSupport):
 
     def _built_in_page_tab_definitions(self, model: ModWebBasePageModel) -> tuple[ModWebAppTabDefinition, ...]:
         definitions: list[ModWebAppTabDefinition] = []
+        if model.supports_updates:
+            definitions.append(self._builtin_tab_definition(ModWebAppSectionKind.UPDATE))
         if isinstance(model, ModWebPageModel):
             definitions.append(self._builtin_tab_definition(ModWebAppSectionKind.MODS))
         if model.supports_configs:
@@ -145,6 +147,8 @@ class ModWebTabsMixin(ModWebServiceSupport):
 
     def _built_in_app_link_tab_definitions(self, app: ModWebAppLink) -> tuple[ModWebAppTabDefinition, ...]:
         definitions: list[ModWebAppTabDefinition] = []
+        if app.supports_updates:
+            definitions.append(self._builtin_tab_definition(ModWebAppSectionKind.UPDATE))
         if app.supports_saves:
             definitions.append(self._builtin_tab_definition(ModWebAppSectionKind.SAVES))
         if app.supports_configs:
@@ -161,6 +165,13 @@ class ModWebTabsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _builtin_tab_definition(section_kind: ModWebAppSectionKind) -> ModWebAppTabDefinition:
+        if section_kind is ModWebAppSectionKind.UPDATE:
+            return ModWebAppTabDefinition.builtin(
+                builtin_kind=section_kind,
+                page_order=150,
+                app_card_order=350,
+                app_card_tone="black",
+            )
         if section_kind is ModWebAppSectionKind.MODS:
             return ModWebAppTabDefinition.builtin(
                 builtin_kind=section_kind,

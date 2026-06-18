@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+from .constants import (
+    _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
+    _REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
+    _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS,
+    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    log,
+)
+from .json_helpers import _json_object_from_text
 from .runtime_imports import (
     App,
+    AppUpdateInfo,
+    AppUpdateStatus,
     Callable,
     ModWebUser,
     NodeApiScope,
     NodeAppEntry,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
+    NodeConsoleStdoutSnapshot,
     NodeStateStreamEvent,
     NodeSystemSummary,
     aiohttp,
@@ -17,17 +28,11 @@ from .runtime_imports import (
     urlsplit,
     urlunsplit,
 )
-from .constants import (
-    _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
-    _REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
-    _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS,
-    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-    log,
-)
-from .json_helpers import _json_object_from_text
+from .service_base import ModWebServiceSupport
 from .types import ModWebNodeLink
 
-from .service_base import ModWebServiceSupport
+_LOCAL_CONSOLE_STDOUT_SUBSCRIPTION_INTERVAL_SECONDS = 0.5
+
 
 class ModWebStreamsMixin(ModWebServiceSupport):
     @staticmethod
@@ -43,6 +48,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         unsubscribe_runtime = self._node_api.subscribe_local_app_runtime(
             app.name,
             lambda event: on_update(event) if not event.is_initial else None,
+            include_update_state=True,
         )
         unsubscribe_node = self._node_api.subscribe_local_node_state(
             lambda event: (
@@ -90,6 +96,50 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         stream_task = asyncio.create_task(
             self._remote_node_state_stream_listener(
                 node=node,
+                user=user,
+                on_update=on_update,
+            )
+        )
+
+        def _unsubscribe() -> None:
+            stream_task.cancel()
+
+        return _unsubscribe
+
+    def _subscribe_local_app_console_stdout(
+        self,
+        *,
+        app: App,
+        max_lines: int,
+        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+    ) -> Callable[[], None]:
+        stream_task = asyncio.create_task(
+            self._local_app_console_stdout_listener(
+                app=app,
+                max_lines=max_lines,
+                on_update=on_update,
+            )
+        )
+
+        def _unsubscribe() -> None:
+            stream_task.cancel()
+
+        return _unsubscribe
+
+    def _create_remote_console_stdout_subscription(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        max_lines: int,
+        user: ModWebUser,
+        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+    ) -> Callable[[], None]:
+        stream_task = asyncio.create_task(
+            self._remote_console_stdout_stream_listener(
+                node=node,
+                app_name=app_name,
+                max_lines=max_lines,
                 user=user,
                 on_update=on_update,
             )
@@ -174,6 +224,130 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                 )
             await asyncio.sleep(_REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS)
 
+    async def _local_app_console_stdout_listener(
+        self,
+        *,
+        app: App,
+        max_lines: int,
+        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+    ) -> None:
+        previous_snapshot: NodeConsoleStdoutSnapshot | None = None
+        while True:
+            next_snapshot = self._node_api.build_console_stdout_snapshot(app=app, max_lines=max_lines)
+            if next_snapshot != previous_snapshot:
+                on_update(next_snapshot)
+                previous_snapshot = next_snapshot
+            await asyncio.sleep(_LOCAL_CONSOLE_STDOUT_SUBSCRIPTION_INTERVAL_SECONDS)
+
+    async def _remote_console_stdout_stream_listener(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        max_lines: int,
+        user: ModWebUser,
+        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+    ) -> None:
+        while True:
+            try:
+                token = self._remote_token(
+                    node=node,
+                    app_name=app_name,
+                    scopes=(NodeApiScope.APP_CONTROL,),
+                    user=user,
+                )
+                timeout = aiohttp.ClientTimeout(
+                    total=None,
+                    connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+                    sock_connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+                )
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.ws_connect(
+                        self._remote_console_stdout_stream_url(node=node, app_name=app_name, max_lines=max_lines),
+                        headers={"Authorization": f"Bearer {token}"},
+                        heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
+                    ) as websocket:
+                        async for message in websocket:
+                            if message.type == aiohttp.WSMsgType.TEXT:
+                                payload_text: object = cast(object, message.data)
+                                payload = _json_object_from_text(
+                                    payload_text,
+                                    context="Remote console stdout stream message",
+                                )
+                                snapshot = NodeConsoleStdoutSnapshot.from_mapping(payload)
+                                if snapshot.app_name.casefold() != app_name.casefold():
+                                    raise RuntimeError(
+                                        "Remote console stdout stream app mismatch: "
+                                        f"expected={app_name!r} got={snapshot.app_name!r}"
+                                    )
+                                on_update(snapshot)
+                                continue
+                            if message.type in {
+                                aiohttp.WSMsgType.CLOSE,
+                                aiohttp.WSMsgType.CLOSED,
+                                aiohttp.WSMsgType.CLOSING,
+                            }:
+                                break
+                            if message.type == aiohttp.WSMsgType.ERROR:
+                                raise RuntimeError(f"Remote console stdout websocket error: {websocket.exception()}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as xcp:
+                if self._remote_websocket_stream_is_unsupported(xcp):
+                    log.warning(
+                        "Remote console stdout websocket unsupported: node=%s app=%s status=%s; falling back to polling",
+                        node.node_name,
+                        app_name,
+                        getattr(xcp, "status", None),
+                    )
+                    return await self._remote_console_stdout_polling_listener(
+                        node=node,
+                        app_name=app_name,
+                        max_lines=max_lines,
+                        user=user,
+                        on_update=on_update,
+                    )
+                log.warning(
+                    "Remote console stdout stream failed: node=%s app=%s error=%s",
+                    node.node_name,
+                    app_name,
+                    xcp,
+                )
+            await asyncio.sleep(_REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS)
+
+    async def _remote_console_stdout_polling_listener(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        max_lines: int,
+        user: ModWebUser,
+        on_update: Callable[[NodeConsoleStdoutSnapshot], None],
+    ) -> None:
+        previous_snapshot: NodeConsoleStdoutSnapshot | None = None
+        while True:
+            try:
+                next_snapshot = await asyncio.to_thread(
+                    self._remote_console_stdout,
+                    node,
+                    app_name,
+                    max_lines=max_lines,
+                    user=user,
+                )
+                if next_snapshot != previous_snapshot:
+                    on_update(next_snapshot)
+                    previous_snapshot = next_snapshot
+            except asyncio.CancelledError:
+                raise
+            except Exception as xcp:
+                log.warning(
+                    "Remote console stdout polling failed: node=%s app=%s error=%s",
+                    node.node_name,
+                    app_name,
+                    xcp,
+                )
+            await asyncio.sleep(_APP_RUNTIME_REFRESH_INTERVAL_SECONDS)
+
     async def _remote_app_state_polling_listener(
         self,
         *,
@@ -184,9 +358,12 @@ class ModWebStreamsMixin(ModWebServiceSupport):
     ) -> None:
         previous_app_stats: NodeAppRuntimeSummary | None = None
         previous_system_summary: NodeSystemSummary | None = None
+        previous_update_info: AppUpdateInfo | None = None
+        previous_update_status: AppUpdateStatus | None = None
         while True:
             try:
-                app_stats, system_summary = await asyncio.gather(
+                app_entry, app_stats, system_summary = await asyncio.gather(
+                    self._remote_app_entry_async(node, app_name, user),
                     self._remote_app_runtime_summary_async(node, app_name, user),
                     self._remote_node_system_summary_or_none_async(
                         node,
@@ -200,10 +377,16 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     system_summary=system_summary,
                     previous_app_stats=previous_app_stats,
                     previous_system_summary=previous_system_summary,
+                    update_info=app_entry.update_info,
+                    update_status=app_entry.update_status,
+                    previous_update_info=previous_update_info,
+                    previous_update_status=previous_update_status,
                 )
                 previous_app_stats = app_stats
                 if system_summary is not None:
                     previous_system_summary = system_summary
+                previous_update_info = app_entry.update_info
+                previous_update_status = app_entry.update_status
                 if event is not None:
                     on_update(event)
             except asyncio.CancelledError:
@@ -336,20 +519,26 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         system_summary: NodeSystemSummary | None,
         previous_app_stats: NodeAppRuntimeSummary | None,
         previous_system_summary: NodeSystemSummary | None,
+        update_info: AppUpdateInfo | None,
+        update_status: AppUpdateStatus | None,
+        previous_update_info: AppUpdateInfo | None,
+        previous_update_status: AppUpdateStatus | None,
     ) -> NodeAppStateStreamEvent | None:
         runtime_changed = previous_app_stats != app_stats
         system_changed = system_summary is not None and previous_system_summary != system_summary
-        if runtime_changed and system_summary is not None and system_changed:
-            return NodeAppStateStreamEvent.both(
-                app_name=app_name,
-                app_stats=app_stats,
-                system_summary=system_summary,
-            )
-        if runtime_changed:
-            return NodeAppStateStreamEvent.runtime(app_name=app_name, app_stats=app_stats)
-        if system_summary is not None and system_changed:
-            return NodeAppStateStreamEvent.system(app_name=app_name, system_summary=system_summary)
-        return None
+        update_changed = previous_update_info != update_info or previous_update_status != update_status
+        if not runtime_changed and not system_changed and not update_changed:
+            return None
+        return NodeAppStateStreamEvent(
+            app_name=app_name,
+            runtime_changed=runtime_changed,
+            system_changed=system_changed,
+            update_changed=update_changed,
+            app_stats=app_stats if runtime_changed else None,
+            system_summary=system_summary if system_changed else None,
+            update_info=update_info if update_changed else None,
+            update_status=update_status if update_changed else None,
+        )
 
     @staticmethod
     def _remote_polled_node_state_event(
@@ -383,6 +572,13 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         return ModWebStreamsMixin._remote_websocket_url(
             node=node,
             path=f"/apps/{quote(app_name, safe='')}/state/stream",
+        )
+
+    @staticmethod
+    def _remote_console_stdout_stream_url(*, node: ModWebNodeLink, app_name: str, max_lines: int) -> str:
+        return ModWebStreamsMixin._remote_websocket_url(
+            node=node,
+            path=f"/apps/{quote(app_name, safe='')}/console/stdout/stream?max_lines={max_lines}",
         )
 
     @staticmethod

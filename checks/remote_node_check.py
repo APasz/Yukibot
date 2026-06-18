@@ -130,7 +130,8 @@ def test_load_remote_node_specs_reads_json_file() -> None:
             encoding="utf-8",
         )
 
-        nodes = config.load_remote_node_specs(path)
+        with patch.object(config, "INDEV", True):
+            nodes = config.load_remote_node_specs(path)
 
     assert len(nodes) == 1
     assert nodes[0].node_name == "erin"
@@ -157,7 +158,8 @@ def test_load_remote_node_specs_resolves_bot_token_env() -> None:
         )
 
         with patch("config.env_opt", return_value="resolved-token"):
-            nodes = config.load_remote_node_specs(path)
+            with patch.object(config, "INDEV", True):
+                nodes = config.load_remote_node_specs(path)
 
     assert len(nodes) == 1
     assert nodes[0].bot_token == "resolved-token"

@@ -1387,7 +1387,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
 
 
 class Minecraft_Settings(App_Settings):
-    def __init__(self, pointer: Path) -> None:
+    def __init__(self, pointer: Path, *, version_getter: Callable[[], AppVersion | None] | None = None) -> None:
         options = [
             Setting[int](
                 IntSettingSpec(),
@@ -1453,6 +1453,7 @@ class Minecraft_Settings(App_Settings):
                 "motd",
                 [],
                 default="A Minecraft Server",
+                paragraph=True,
             ),
             Setting[bool](
                 BoolSettingSpec(),
@@ -1500,7 +1501,7 @@ class Minecraft_Settings(App_Settings):
                 default="easy",
             ),
         ]
-        super().__init__(pointer, options)
+        super().__init__(pointer, options, version_getter=version_getter)
 
     def load(self) -> None:
         data: str = self.pointer.read_text(config.STR_ENCODE)
@@ -1512,7 +1513,7 @@ class Minecraft_Settings(App_Settings):
             for opt in self.options:
                 if line.startswith(opt.key):
                     arg, val = [x.strip() for x in line.split("=", 1)]
-                    opt.update(val)
+                    opt.load_value(val)
 
     def save(self) -> str:
         data: str = self.pointer.read_text(config.STR_ENCODE)
@@ -1551,6 +1552,7 @@ class Minecraft_Config(App_Config):
             loader = MinecraftLoader(loader).value
         return AppVersion(
             main=main,
+            build=version.build,
             framework=_normalise_optional_text(version.framework),
             loader=loader,
         )
@@ -1568,7 +1570,7 @@ class Minecraft(App[Minecraft_Config]):
         file_settings: Path = cfg.directory.absolute() / "server.properties"
         self.cmd_start = cfg.cmd_start or ["bash", "run.sh"]
         self.process = None
-        super().__init__(bot, am, cfg, Minecraft_Settings(file_settings), Mod_MC)
+        super().__init__(bot, am, cfg, Minecraft_Settings(file_settings, version_getter=lambda: cfg.version), Mod_MC)
 
         self._file_settings: Path = file_settings
         self._server_properties: MinecraftServerPropertiesSnapshot | None = _load_server_properties_snapshot(
@@ -1612,7 +1614,7 @@ class Minecraft(App[Minecraft_Config]):
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
-        return _MINECRAFT_CONSOLE_ACTIONS
+        return self.available_console_actions(_MINECRAFT_CONSOLE_ACTIONS)
 
     @property
     def config_file_roots(self) -> tuple[AppConfigFileRoot, ...]:
@@ -1657,6 +1659,10 @@ class Minecraft(App[Minecraft_Config]):
     def supports_save_uploads(self) -> bool:
         return True
 
+    @property
+    def supports_save_delete(self) -> bool:
+        return True
+
     def upload_save_file(self, *, root_id: str, upload_name: str, source_path: Path) -> AppSaveEntry:
         root = get_app_save_root(self.save_file_roots, root_id)
         if Path(upload_name).suffix.casefold() != ".zip":
@@ -1670,6 +1676,17 @@ class Minecraft(App[Minecraft_Config]):
             File_Utils.remove(destination, silent=True, resolve=False)
             File_Utils.move(extracted_path, destination, overwrite=False)
         return describe_app_save_path(root=root, path=destination, relative_path=destination.name)
+
+    def delete_save_file(self, *, file_id: str) -> AppSaveEntry:
+        if self.check_running():
+            raise ValueError("Stop the server before deleting its current world.")
+        try:
+            current_save = next(save for save in self.list_save_files() if save.id == file_id)
+        except StopIteration as xcp:
+            raise FileNotFoundError(f"Unknown save file: {file_id}") from xcp
+        save_path = self.resolve_save_file(file_id)
+        File_Utils.remove(save_path, silent=False, resolve=False)
+        return current_save
 
     def _world_directory_name(self) -> str:
         root_name = "world"
@@ -2433,7 +2450,7 @@ class Activities:
 class Provider_Day(config.Activity_Provider):
     def __init__(self, app: Minecraft):
         self.app = app
-        self.activity_scope_name = app.name
+        self.activity_scope_name = getattr(app, "name", None)
         self._timedelta = None
         self._count = 0
         self.task_funcs = [self._get_time]

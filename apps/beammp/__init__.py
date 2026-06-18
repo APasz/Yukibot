@@ -3,6 +3,7 @@ import logging
 import re
 import tomllib
 import zipfile
+from collections.abc import Callable
 from logging import Logger
 from pathlib import Path
 from re import Match
@@ -23,7 +24,7 @@ from _discord import (
 )
 from _security import Power_Level
 from apps._app import App
-from apps._config import App_Config, Mod_Config
+from apps._config import App_Config, AppVersion, Mod_Config
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._mod import Mod
 from apps._settings import (
@@ -56,7 +57,7 @@ class Mod_BeamMP(Mod):
 
 
 class BeamMP_Settings(App_Settings):
-    def __init__(self, pointer: Path) -> None:
+    def __init__(self, pointer: Path, *, version_getter: Callable[[], AppVersion | None] | None = None) -> None:
         builtin_maps: set[str] = {
             "levels/gridmap_v2/info.json",
             "levels/johnson_valley/info.json",
@@ -129,6 +130,7 @@ class BeamMP_Settings(App_Settings):
                 "Description",
                 ["General"],
                 default="",
+                paragraph=True,
             ),
             Setting[int](
                 IntSettingSpec(),
@@ -168,7 +170,7 @@ class BeamMP_Settings(App_Settings):
                 power_level=Power_Level.guest,
             ),
         ]
-        super().__init__(pointer, options)
+        super().__init__(pointer, options, version_getter=version_getter)
 
     def load(self) -> None:
         data: dict[str, object] = tomllib.loads(self.pointer.read_text(config.STR_ENCODE))
@@ -198,7 +200,7 @@ class BeamMP(App[App_Config]):
             "./BeamMP-Server",
         ]
         file_settings: Path = cfg.directory.absolute() / "ServerConfig.toml"
-        super().__init__(bot, am, cfg, BeamMP_Settings(file_settings), Mod_BeamMP)
+        super().__init__(bot, am, cfg, BeamMP_Settings(file_settings, version_getter=lambda: cfg.version), Mod_BeamMP)
         self.act_err_threshold = 100
 
         self.cur_player: int = 0

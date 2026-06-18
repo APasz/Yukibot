@@ -8,16 +8,16 @@ from .nicegui_protocols import ModWebUi
 from .runtime_imports import (
     Callable,
     ModWebUser,
+    NodeAppRuntimeSummary,
+    NodeAppStateStreamEvent,
     NodeBlueprintList,
     NodeConfigList,
     NodeConsoleActionList,
     NodeModList,
-    NodeAppRuntimeSummary,
-    NodeAppStateStreamEvent,
     NodeSaveList,
     NodeSettingList,
-    NodeSystemSummary,
     NodeStateStreamEvent,
+    NodeSystemSummary,
     Power_Level,
     Request,
     asyncio,
@@ -158,8 +158,12 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             self._render_error_page(ui=ui, title="Page unavailable", detail=str(xcp), app_name=app_name)
             return
         try:
-            if app.mods is not None:
-                model = await self._build_page_model(app, user=user)
+            page_data = await self._build_local_app_page_data(app, user=user)
+            if page_data.app_entry.supports_mods:
+                model = self._page_model_from_local_page_data(
+                    page_data,
+                    can_manage_app=self._user_has_level(user, Power_Level.user),
+                )
                 chat_surface = (
                     await self._local_chat_surface_config(
                         app=app,
@@ -195,7 +199,10 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     chat_surface=chat_surface,
                 )
             else:
-                model = await self._build_overview_page_model(app, user=user)
+                model = self._overview_model_from_local_page_data(
+                    page_data,
+                    can_manage_app=self._user_has_level(user, Power_Level.user),
+                )
                 chat_surface = (
                     await self._local_chat_surface_config(
                         app=app,
@@ -358,9 +365,12 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     map_url=app_entry.map_url,
                     can_write_map_annotations=can_manage_app and app_entry.map_url is not None,
                     supports_chat=app_entry.supports_chat,
+                    supports_updates=app_entry.supports_updates,
                     chat_url=(
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),
+                    update_info=app_entry.update_info,
+                    update_status=app_entry.update_status,
                     app_color_hex=app_entry.color_hex,
                     resource_points=app_entry.resource_points,
                     app_title_font_preset=app_entry.title_font_preset,
@@ -475,9 +485,12 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     map_url=app_entry.map_url,
                     can_write_map_annotations=can_manage_app and app_entry.map_url is not None,
                     supports_chat=app_entry.supports_chat,
+                    supports_updates=app_entry.supports_updates,
                     chat_url=(
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),
+                    update_info=app_entry.update_info,
+                    update_status=app_entry.update_status,
                     app_stats=app_stats,
                     resource_points=app_entry.resource_points,
                     app_title_font_preset=app_entry.title_font_preset,

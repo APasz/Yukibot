@@ -32,6 +32,7 @@ from .runtime_imports import (
     Callable,
     CodeMirror,
     GatewayBot,
+    Html,
     Input,
     Label,
     Literal,
@@ -52,6 +53,7 @@ from .runtime_imports import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleActionParameter,
+    NodeConsoleStdoutSnapshot,
     NodeModEntry,
     NodeModUploadResult,
     NodeSaveEntry,
@@ -68,6 +70,7 @@ from .runtime_imports import (
     Protocol,
     PurePosixPath,
     Select,
+    Textarea,
     Timer,
     asyncio,
     cached_member_role_color,
@@ -77,6 +80,7 @@ from .runtime_imports import (
     escape,
     hashlib,
     hikari,
+    json,
     quote,
 )
 from .service_base import ModWebServiceSupport
@@ -99,6 +103,23 @@ if TYPE_CHECKING:
     from nicegui.elements.upload_files import FileUpload
     from nicegui.events import MultiUploadEventArguments, UploadEventArguments
 
+_SEVENDAYS_TRADER_BIOME_SETTING_KEYS: frozenset[str] = frozenset(
+    {
+        "TraderRektBiome",
+        "TraderJenBiome",
+        "TraderBobBiome",
+        "TraderHughBiome",
+        "TraderJoelBiome",
+    }
+)
+_CONSOLE_STDOUT_MAX_LINES = 200
+_CONSOLE_STDOUT_HEIGHT_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("18rem", "Compact"),
+    ("26rem", "Default"),
+    ("36rem", "Tall"),
+    ("48rem", "XL"),
+)
+
 
 class _ModWebSelectOptionsControl(Protocol):
     def set_options(self, options: dict[str, str], *, value: str | None = None) -> None: ...
@@ -114,27 +135,230 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     ) -> Callable[[ModWebBasePageModel], None] | None:
         if model.console_actions is None:
             return None
-        if not model.console_actions.actions:
-            self._render_flat_tab_empty_state(
-                ui=ui,
-                title="Console",
-                description="No curated console actions are currently exposed for this app.",
-                detail_text="Add or enable console actions in the app definition to populate this tab.",
-            )
-            return None
 
         current_model: ModWebBasePageModel = model
         current_console_actions: NodeConsoleActionList = model.console_actions
-        selected_action_key: str = current_console_actions.actions[0].key
+        selected_action_key: str | None = (
+            current_console_actions.actions[0].key if current_console_actions.actions else None
+        )
         draft_values: dict[str, str] = {}
         last_result: NodeConsoleActionExecutionResult | None = None
         last_result_action_key: str | None = None
         action_in_flight = False
         open_console_popup_count = 0
         queued_console_refresh = False
+        stdout_snapshot: NodeConsoleStdoutSnapshot | None = None
+        stdout_feed_id = (
+            f"mod-console-stdout-{hashlib.sha1(f'{model.node_name}:{model.app_name}'.encode('utf-8')).hexdigest()[:12]}"
+        )
+        stdout_height_value: str = "26rem"
+        stdout_feed: Html | None = None
+        console_actions_available: bool = bool(current_console_actions.actions)
 
-        def selected_action() -> NodeConsoleActionEntry:
+        def _ensure_console_stdout_client_script() -> None:
+            ui.add_head_html(
+                """
+                <script>
+                window.modWebConsoleFeed = (() => {
+                    const bindVersion = '2026-06-17-atomic-stdout';
+                    const bottomThresholdPx = 24;
+                    const scheduledById = new Map();
+                    const programmaticScrollIds = new Set();
+                    const resizeBoundIds = new Set();
+                    const get = (elementId) => document.getElementById(elementId);
+                    const clampScrollTop = (element, value) =>
+                      Math.max(0, Math.min(Math.max(0, element.scrollHeight - element.clientHeight), value));
+                    const clearScheduled = (elementId) => {
+                      const state = scheduledById.get(elementId);
+                      if (!state) {
+                        return;
+                      }
+                      for (const frameId of state.frameIds) {
+                        cancelAnimationFrame(frameId);
+                      }
+                      for (const timeoutId of state.timeoutIds) {
+                        clearTimeout(timeoutId);
+                      }
+                      scheduledById.delete(elementId);
+                    };
+                    const setScrollTop = (elementId, element, value) => {
+                      programmaticScrollIds.add(elementId);
+                      element.scrollTop = clampScrollTop(element, value);
+                      sync(elementId);
+                      requestAnimationFrame(() => programmaticScrollIds.delete(elementId));
+                    };
+                    const schedule = (elementId, task) => {
+                      clearScheduled(elementId);
+                      const frameIds = [];
+                      const timeoutIds = [];
+                      task();
+                      frameIds.push(requestAnimationFrame(task));
+                      frameIds.push(requestAnimationFrame(() => requestAnimationFrame(task)));
+                      timeoutIds.push(setTimeout(task, 0));
+                      timeoutIds.push(setTimeout(task, 120));
+                      timeoutIds.push(setTimeout(task, 320));
+                      scheduledById.set(elementId, { frameIds, timeoutIds });
+                    };
+                    const sync = (elementId) => {
+                      const element = get(elementId);
+                      if (!element) {
+                        return false;
+                      }
+                      const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
+                      const pinned = remaining <= bottomThresholdPx;
+                      element.dataset.modConsolePinned = pinned ? '1' : '0';
+                      return pinned;
+                    };
+                    const captureState = (elementId) => {
+                      const element = get(elementId);
+                      if (!element) {
+                        return null;
+                      }
+                      const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
+                      return {
+                        wasPinned: remaining <= bottomThresholdPx,
+                        scrollTop: element.scrollTop,
+                      };
+                    };
+                    const settleBottom = (elementId) => {
+                      const element = get(elementId);
+                      if (!element) {
+                        return;
+                      }
+                      setScrollTop(elementId, element, element.scrollHeight);
+                    };
+                    const jump = (elementId) => {
+                      schedule(elementId, () => settleBottom(elementId));
+                    };
+                    const restore = (elementId, previousState) => {
+                      schedule(elementId, () => {
+                        const element = get(elementId);
+                        if (!element) {
+                          return;
+                        }
+                        setScrollTop(elementId, element, previousState.scrollTop);
+                      });
+                    };
+                    const setHeight = (elementId, heightValue) => {
+                      const element = get(elementId);
+                      if (!element) {
+                        return;
+                      }
+                      element.style.height = heightValue;
+                      element.style.maxHeight = heightValue;
+                      jump(elementId);
+                    };
+                    const bind = (elementId) => {
+                      const element = get(elementId);
+                      if (!element) {
+                        return;
+                      }
+                      if (element.dataset.modConsoleBound !== bindVersion) {
+                        element.dataset.modConsoleBound = bindVersion;
+                        element.addEventListener('scroll', () => {
+                          if (!programmaticScrollIds.has(elementId)) {
+                            clearScheduled(elementId);
+                          }
+                          sync(elementId);
+                        }, { passive: true });
+                      }
+                      if (!resizeBoundIds.has(elementId)) {
+                        resizeBoundIds.add(elementId);
+                        window.addEventListener(
+                          'resize',
+                          () => {
+                            const currentElement = get(elementId);
+                            if (!currentElement) {
+                              return;
+                            }
+                            if (currentElement.dataset.modConsolePinned !== '0') {
+                              jump(elementId);
+                            } else {
+                              sync(elementId);
+                            }
+                          },
+                          { passive: true },
+                        );
+                      }
+                      sync(elementId);
+                    };
+                    const update = (elementId, text, forceScroll) => {
+                      bind(elementId);
+                      const element = get(elementId);
+                      if (!element) {
+                        return;
+                      }
+                      const previousState = captureState(elementId);
+                      const code = element.querySelector('code') || element;
+                      code.textContent = text;
+                      if (forceScroll || previousState?.wasPinned) {
+                        jump(elementId);
+                        return;
+                      }
+                      if (previousState) {
+                        restore(elementId, previousState);
+                      }
+                      sync(elementId);
+                    };
+                    return { bind, jump, setHeight, update };
+                })();
+                </script>
+                """
+            )
+
+        def _console_stdout_text(snapshot: NodeConsoleStdoutSnapshot | None) -> str:
+            if snapshot is None:
+                return "Connecting..."
+            if not snapshot.lines:
+                return "Waiting for output..." if snapshot.running else "No output yet."
+            return "\n".join(snapshot.lines)
+
+        def _console_stdout_markup(snapshot: NodeConsoleStdoutSnapshot | None) -> str:
+            content = _console_stdout_text(snapshot)
+            return (
+                f'<pre id="{stdout_feed_id}" class="mod-chat-code-block" '
+                f'style="height: {stdout_height_value}; max-height: {stdout_height_value}; overflow: auto;"><code>'
+                f"{escape(content)}"
+                "</code></pre>"
+            )
+
+        def _run_stdout_feed_javascript(code: str) -> None:
+            target = stdout_feed
+            if target is None:
+                return
+            try:
+                target.client.run_javascript(code, timeout=0.1)
+            except RuntimeError:
+                return
+
+        def _bind_stdout_feed() -> None:
+            _run_stdout_feed_javascript(f"window.modWebConsoleFeed?.bind({stdout_feed_id!r});")
+
+        def _jump_stdout_feed_to_bottom() -> None:
+            _run_stdout_feed_javascript(f"window.modWebConsoleFeed?.jump({stdout_feed_id!r});")
+
+        def _set_stdout_feed_height(height_value: str) -> None:
+            _run_stdout_feed_javascript(f"window.modWebConsoleFeed?.setHeight({stdout_feed_id!r}, {height_value!r});")
+
+        def _update_stdout_feed_text(text: str, *, force_scroll: bool) -> None:
+            _run_stdout_feed_javascript(
+                (
+                    "window.modWebConsoleFeed?.update("
+                    f"{stdout_feed_id!r}, {json.dumps(text)}, {str(force_scroll).lower()}"
+                    ");"
+                )
+            )
+
+        def _apply_stdout_snapshot(snapshot: NodeConsoleStdoutSnapshot) -> None:
+            nonlocal stdout_snapshot
+            stdout_snapshot = snapshot
+            if stdout_feed is not None:
+                _update_stdout_feed_text(_console_stdout_text(snapshot), force_scroll=False)
+
+        def selected_action() -> NodeConsoleActionEntry | None:
             nonlocal selected_action_key
+            if not current_console_actions.actions or selected_action_key is None:
+                return None
             action_by_key: dict[str, NodeConsoleActionEntry] = {
                 action.key: action for action in current_console_actions.actions
             }
@@ -147,6 +371,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
         def refresh_console_body(*, force: bool = False) -> None:
             nonlocal queued_console_refresh
+            if not console_actions_available:
+                return
             if not force and open_console_popup_count > 0:
                 queued_console_refresh = True
                 return
@@ -177,11 +403,22 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             selected_action_key = next_action_key
             refresh_console_body(force=True)
 
+        def select_stdout_height(event: ModWebValueContainer) -> None:
+            nonlocal stdout_height_value
+            next_height_value: str = _value_as_text(event).strip()
+            valid_height_values: set[str] = {value for value, _label in _CONSOLE_STDOUT_HEIGHT_OPTIONS}
+            if next_height_value not in valid_height_values:
+                return
+            stdout_height_value = next_height_value
+            _set_stdout_feed_height(next_height_value)
+
         async def run_selected_action() -> None:
             nonlocal action_in_flight, current_console_actions, last_result, last_result_action_key
             if action_in_flight:
                 return
-            action: NodeConsoleActionEntry = selected_action()
+            action = selected_action()
+            if action is None:
+                return
             if not self._console_action_can_execute(action=action, app_stats=current_model.app_stats):
                 ui.notify(
                     self._console_action_status_text(
@@ -237,190 +474,284 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 action_in_flight = False
                 refresh_console_body(force=True)
 
-        with ui.card().classes(self._flat_tab_card_classes()):
-            with ui.column().classes(self._tab_section_body_classes()):
-                self._render_flat_tab_header(
-                    ui=ui,
-                    title="Console",
-                    description=self._console_card_description(action_count=len(current_console_actions.actions)),
-                )
+        with ui.column().classes("w-full gap-3"):
+            _ensure_console_stdout_client_script()
+            if console_actions_available:
+                with ui.card().classes(self._flat_tab_card_classes()):
+                    with ui.column().classes(self._tab_section_body_classes()):
+                        self._render_flat_tab_header(
+                            ui=ui,
+                            title="Console",
+                            description=self._console_card_description(
+                                action_count=len(current_console_actions.actions)
+                            ),
+                        )
 
-                @ui.refreshable
-                def _console_card_body() -> None:
-                    action: NodeConsoleActionEntry = selected_action()
-                    action_can_execute = self._console_action_can_execute(
-                        action=action, app_stats=current_model.app_stats
-                    )
-                    action_result: NodeConsoleActionExecutionResult | None = self._console_action_result_for_selection(
-                        selected_action_key=action.key,
-                        last_result_action_key=last_result_action_key,
-                        last_result=last_result,
-                    )
-                    runtime_badge: _ModWebBadgeSpec | None = self._console_action_runtime_badge(
-                        action=action, app_stats=current_model.app_stats
-                    )
-                    parameter: NodeConsoleActionParameter | None = action.parameter
-                    current_value: str = draft_values.get(action.key, "")
-                    with ui.column().classes("w-full gap-3"):
-                        with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
-                            action_select: Select = bind_console_popup_refresh_lock(
-                                ui.select(
-                                    {entry.key: entry.label for entry in current_console_actions.actions},
-                                    value=action.key,
-                                    on_change=select_action,
-                                )
-                                .props(self._setting_choice_select_props())
-                                .classes("mod-config-select mod-console-action-select")
+                        @ui.refreshable
+                        def _console_card_body() -> None:
+                            action = selected_action()
+                            if action is None:
+                                return
+                            action_can_execute = self._console_action_can_execute(
+                                action=action, app_stats=current_model.app_stats
                             )
-                            if len(current_console_actions.actions) == 1 or action_in_flight:
-                                action_select.disable()
-                            with ui.row().classes("mod-tab-toolbar-actions"):
-                                run_button: Button = ui.button("Run Action", on_click=run_selected_action).classes(
-                                    "mod-list-button"
+                            action_result: NodeConsoleActionExecutionResult | None = (
+                                self._console_action_result_for_selection(
+                                    selected_action_key=action.key,
+                                    last_result_action_key=last_result_action_key,
+                                    last_result=last_result,
                                 )
-                                if action_in_flight:
-                                    run_button.set_text("Running...")
-                                    run_button.disable()
-                                elif not action_can_execute:
-                                    run_button.disable()
-
-                        with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
-                            with ui.column().classes("gap-1"):
-                                ui.label(action.label).classes("text-base font-black mod-title-small")
-                                ui.label(action.description).classes("mod-subtitle text-sm")
-                            with ui.row().classes("gap-2 flex-wrap"):
-                                self._badge(
-                                    ui=ui,
-                                    text=action.power_level_label,
-                                    tone=self._console_action_permission_badge_tone(action),
-                                )
-                                if runtime_badge is not None:
-                                    self._badge(ui=ui, text=runtime_badge.text, tone=runtime_badge.tone)
-                                if parameter is not None:
-                                    self._badge(ui=ui, text=parameter.value_type_name, tone="purple")
-
-                        if parameter is not None:
-                            value_input: Input | None = None
-                            with ui.column().classes(self._setting_control_surface_classes(can_edit=action.can_run)):
-                                if parameter.choices:
-
-                                    def apply_choice(event: ModWebValueContainer) -> None:
-                                        next_value: str = _value_as_text(event)
-                                        draft_values[action.key] = next_value
-                                        if value_input is not None:
-                                            value_input.set_value(next_value)
-                                        else:
-                                            _console_card_body.refresh()
-
-                                    choice_select: Select = bind_console_popup_refresh_lock(
-                                        ui.select(
-                                            {choice.raw_value: choice.label for choice in parameter.choices},
-                                            value=(
-                                                current_value
-                                                if current_value in {choice.raw_value for choice in parameter.choices}
-                                                else None
-                                            ),
-                                            on_change=apply_choice if action.can_run else None,
-                                        )
-                                        .props(
-                                            self._console_action_select_props(
-                                                prefix="",
-                                                clearable=parameter.allows_text_input,
-                                            )
-                                        )
-                                        .classes(
-                                            "mod-setting-field mod-setting-field-secondary"
-                                            if parameter.allows_text_input
-                                            else "mod-setting-field mod-setting-field-primary"
-                                        )
-                                    )
-                                    if not action.can_run:
-                                        choice_select.disable()
-                                    if action_in_flight:
-                                        choice_select.disable()
-
-                                if parameter.allows_text_input:
-
-                                    def sync_input_value(_event: object | None = None) -> None:
-                                        if value_input is None:
-                                            raise ValueError("Console action input is not available.")
-                                        draft_values[action.key] = _value_as_text(value_input)
-
-                                    value_input = (
-                                        ui.input(
-                                            value=current_value,
-                                            placeholder=f"Enter {parameter.label}" if action.can_run else "Restricted",
-                                            on_change=(sync_input_value if action.can_run else None),
-                                        )
-                                        .props(self._console_action_input_props(parameter))
-                                        .classes("mod-setting-field mod-setting-field-primary")
-                                    )
-                                    if not action.can_run:
-                                        value_input.disable()
-                                    else:
-                                        value_input.on("update:model-value", sync_input_value)
-                                        sync_input_value()
-                                    if action_in_flight:
-                                        value_input.disable()
-
-                                if parameter.recent_inputs:
-
-                                    def apply_recent_input(event: ModWebValueContainer) -> None:
-                                        next_value: str = _value_as_text(event)
-                                        draft_values[action.key] = next_value
-                                        if value_input is not None:
-                                            value_input.set_value(next_value)
-                                        else:
-                                            _console_card_body.refresh()
-
-                                    recent_select: Select = bind_console_popup_refresh_lock(
-                                        ui.select(
-                                            {recent_value: recent_value for recent_value in parameter.recent_inputs},
-                                            value=None,
-                                            on_change=apply_recent_input if action.can_run else None,
-                                        )
-                                        .props(self._console_action_select_props(prefix="Recent", clearable=True))
-                                        .classes("mod-setting-field mod-setting-field-secondary")
-                                    )
-                                    if not action.can_run:
-                                        recent_select.disable()
-                                    if action_in_flight:
-                                        recent_select.disable()
-
-                            if parameter.description:
-                                ui.label(parameter.description).classes("mod-subtitle text-sm break-all")
-                        else:
-                            ui.label("This action does not require any input.").classes("mod-subtitle text-sm")
-
-                        ui.label(
-                            self._console_action_status_text(
+                            )
+                            action_status_text: str = self._console_action_status_text(
                                 action=action,
                                 app_friendly=current_model.app_friendly,
                                 app_stats=current_model.app_stats,
                             )
-                        ).classes("mod-subtitle text-sm")
-
-                        if action_result is not None:
-                            with ui.column().classes("w-full gap-2"):
-                                with ui.row().classes("gap-2 flex-wrap"):
-                                    self._badge(
-                                        ui=ui,
-                                        text="Success" if action_result.success else "Error",
-                                        tone=self._console_action_result_badge_tone(action_result),
-                                    )
-                                    if action_result.source.value != "none":
-                                        self._badge(
-                                            ui=ui,
-                                            text=action_result.source.value.upper(),
-                                            tone=self._console_action_source_badge_tone(action_result),
+                            runtime_badge: _ModWebBadgeSpec | None = self._console_action_runtime_badge(
+                                action=action, app_stats=current_model.app_stats
+                            )
+                            parameter: NodeConsoleActionParameter | None = action.parameter
+                            current_value: str = draft_values.get(action.key, "")
+                            with ui.column().classes("w-full gap-3"):
+                                with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
+                                    action_select: Select = bind_console_popup_refresh_lock(
+                                        ui.select(
+                                            {entry.key: entry.label for entry in current_console_actions.actions},
+                                            value=action.key,
+                                            on_change=select_action,
                                         )
-                                ui.label(action_result.summary).classes("mod-subtitle text-sm break-all")
-                                if action_result.text:
-                                    ui.html(
-                                        f'<pre class="mod-chat-code-block"><code>{escape(action_result.text)}</code></pre>'
+                                        .props(self._setting_choice_select_props())
+                                        .classes("mod-console-select mod-console-select-action")
                                     )
+                                    if len(current_console_actions.actions) == 1 or action_in_flight:
+                                        action_select.disable()
+                                    with ui.row().classes("mod-tab-toolbar-actions"):
+                                        run_button: Button = ui.button("Run", on_click=run_selected_action).classes(
+                                            "mod-list-button"
+                                        )
+                                        if action_in_flight:
+                                            run_button.set_text("Running")
+                                            run_button.disable()
+                                        elif not action_can_execute:
+                                            run_button.disable()
 
-                _console_card_body()
+                                with ui.column().classes("w-full gap-3 mod-tab-toolbar-surface"):
+                                    with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
+                                        with ui.column().classes("gap-1 min-w-0 flex-1"):
+                                            ui.label(action.label).classes("text-base font-black mod-title-small")
+                                            ui.label(action.description).classes("mod-subtitle text-sm")
+                                        with ui.row().classes("gap-2 flex-wrap"):
+                                            self._badge(
+                                                ui=ui,
+                                                text=action.power_level_label,
+                                                tone=self._console_action_permission_badge_tone(action),
+                                            )
+                                            if runtime_badge is not None:
+                                                self._badge(ui=ui, text=runtime_badge.text, tone=runtime_badge.tone)
+
+                                    if parameter is not None:
+                                        value_input: Input | None = None
+                                        with ui.column().classes("w-full gap-2"):
+                                            ui.label(parameter.label).classes(
+                                                "text-[0.68rem] uppercase tracking-[0.18em] mod-subtitle"
+                                            )
+                                            with ui.column().classes(
+                                                self._setting_control_surface_classes(can_edit=action.can_run)
+                                            ):
+                                                if parameter.choices:
+
+                                                    def apply_choice(event: ModWebValueContainer) -> None:
+                                                        next_value: str = _value_as_text(event)
+                                                        draft_values[action.key] = next_value
+                                                        if value_input is not None:
+                                                            value_input.set_value(next_value)
+                                                        else:
+                                                            _console_card_body.refresh()
+
+                                                    choice_select: Select = bind_console_popup_refresh_lock(
+                                                        ui.select(
+                                                            {
+                                                                choice.raw_value: choice.label
+                                                                for choice in parameter.choices
+                                                            },
+                                                            value=(
+                                                                current_value
+                                                                if current_value
+                                                                in {choice.raw_value for choice in parameter.choices}
+                                                                else None
+                                                            ),
+                                                            on_change=apply_choice if action.can_run else None,
+                                                        )
+                                                        .props(
+                                                            self._console_action_select_props(
+                                                                prefix="",
+                                                                clearable=parameter.allows_text_input,
+                                                            )
+                                                        )
+                                                        .classes(
+                                                            "mod-setting-field mod-setting-field-secondary"
+                                                            if parameter.allows_text_input
+                                                            else "mod-setting-field mod-setting-field-primary"
+                                                        )
+                                                    )
+                                                    if not action.can_run:
+                                                        choice_select.disable()
+                                                    if action_in_flight:
+                                                        choice_select.disable()
+
+                                                if parameter.allows_text_input:
+
+                                                    def sync_input_value(_event: object | None = None) -> None:
+                                                        if value_input is None:
+                                                            raise ValueError("Console action input is not available.")
+                                                        draft_values[action.key] = _value_as_text(value_input)
+
+                                                    value_input = (
+                                                        ui.input(
+                                                            value=current_value,
+                                                            placeholder=(
+                                                                f"Enter {parameter.label}"
+                                                                if action.can_run
+                                                                else "Restricted"
+                                                            ),
+                                                            on_change=(sync_input_value if action.can_run else None),
+                                                        )
+                                                        .props(self._console_action_input_props(parameter))
+                                                        .classes("mod-setting-field mod-setting-field-primary")
+                                                    )
+                                                    if not action.can_run:
+                                                        value_input.disable()
+                                                    else:
+                                                        value_input.on("update:model-value", sync_input_value)
+                                                        sync_input_value()
+                                                    if action_in_flight:
+                                                        value_input.disable()
+
+                                                if parameter.recent_inputs:
+
+                                                    def apply_recent_input(event: ModWebValueContainer) -> None:
+                                                        next_value: str = _value_as_text(event)
+                                                        draft_values[action.key] = next_value
+                                                        if value_input is not None:
+                                                            value_input.set_value(next_value)
+                                                        else:
+                                                            _console_card_body.refresh()
+
+                                                    recent_select: Select = bind_console_popup_refresh_lock(
+                                                        ui.select(
+                                                            {
+                                                                recent_value: recent_value
+                                                                for recent_value in parameter.recent_inputs
+                                                            },
+                                                            value=None,
+                                                            on_change=apply_recent_input if action.can_run else None,
+                                                        )
+                                                        .props(
+                                                            self._console_action_select_props(
+                                                                prefix="Recent",
+                                                                clearable=True,
+                                                            )
+                                                        )
+                                                        .classes("mod-setting-field mod-setting-field-secondary")
+                                                    )
+                                                    if not action.can_run:
+                                                        recent_select.disable()
+                                                    if action_in_flight:
+                                                        recent_select.disable()
+
+                                            if parameter.description:
+                                                ui.label(parameter.description).classes(
+                                                    "mod-subtitle text-xs break-all"
+                                                )
+
+                                    if action_status_text != "Ready.":
+                                        ui.label(action_status_text).classes("mod-subtitle text-sm")
+
+                                if action_result is not None:
+                                    with ui.column().classes("w-full gap-2 mod-tab-toolbar-surface"):
+                                        with ui.row().classes("gap-2 flex-wrap"):
+                                            self._badge(
+                                                ui=ui,
+                                                text="Success" if action_result.success else "Error",
+                                                tone=self._console_action_result_badge_tone(action_result),
+                                            )
+                                            if action_result.source.value != "none":
+                                                self._badge(
+                                                    ui=ui,
+                                                    text=action_result.source.value.upper(),
+                                                    tone=self._console_action_source_badge_tone(action_result),
+                                                )
+                                        ui.label(action_result.summary).classes("mod-subtitle text-sm break-all")
+                                        if action_result.text:
+                                            ui.html(
+                                                f'<pre class="mod-chat-code-block"><code>{escape(action_result.text)}</code></pre>'
+                                            )
+
+                        _console_card_body()
+            else:
+                with ui.card().classes(self._flat_tab_card_classes()):
+                    with ui.column().classes(self._tab_section_body_classes()):
+                        self._render_flat_tab_header(
+                            ui=ui,
+                            title="Console",
+                            description="No console actions available for this app.",
+                            secondary_description="Stdout is still available below.",
+                        )
+
+            with ui.card().classes(self._flat_tab_card_classes()):
+                with ui.column().classes(self._tab_section_body_classes()):
+                    with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
+                        with ui.column().classes("flex-1 min-w-0 gap-0.5"):
+                            ui.label("Live stdout tail.").classes("mod-subtitle text-sm w-full")
+                            ui.label(f"Latest {_CONSOLE_STDOUT_MAX_LINES} lines.").classes(
+                                "mod-subtitle text-xs w-full"
+                            )
+                        (
+                            ui.select(
+                                {value: label for value, label in _CONSOLE_STDOUT_HEIGHT_OPTIONS},
+                                value=stdout_height_value,
+                                on_change=select_stdout_height,
+                            )
+                            .props(
+                                "filled square dense hide-bottom-space color=accent "
+                                "options-dense popup-content-class=mod-console-select-menu"
+                            )
+                            .classes("mod-console-select mod-console-select-compact mod-console-select-black")
+                        )
+                    stdout_feed = cast(Html, ui.html(_console_stdout_markup(stdout_snapshot)).classes("w-full"))
+                    _bind_stdout_feed()
+                    _set_stdout_feed_height(stdout_height_value)
+                    _jump_stdout_feed_to_bottom()
+
+        loop = asyncio.get_running_loop()
+
+        def _queue_stdout_snapshot(snapshot: NodeConsoleStdoutSnapshot) -> None:
+            try:
+                loop.call_soon_threadsafe(lambda: _apply_stdout_snapshot(snapshot))
+            except RuntimeError:
+                return
+
+        try:
+            if model.node_name == config.MOD_WEB_SERVER.node_name:
+                local_app = self._resolve_app(model.app_name)
+                unsubscribe_stdout = self._subscribe_local_app_console_stdout(
+                    app=local_app,
+                    max_lines=_CONSOLE_STDOUT_MAX_LINES,
+                    on_update=_queue_stdout_snapshot,
+                )
+            else:
+                node = self._remote_node_link(model.node_name)
+                unsubscribe_stdout = self._create_remote_console_stdout_subscription(
+                    node=node,
+                    app_name=model.app_name,
+                    max_lines=_CONSOLE_STDOUT_MAX_LINES,
+                    user=user,
+                    on_update=_queue_stdout_snapshot,
+                )
+        except Exception as xcp:
+            _update_stdout_feed_text(f"Stdout stream unavailable: {xcp}", force_scroll=True)
+        else:
+            self._register_client_cleanup(ui=ui, cleanup=unsubscribe_stdout)
 
         def apply_runtime_model(runtime_model: ModWebBasePageModel) -> None:
             nonlocal current_model
@@ -819,6 +1150,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         detail_path_text: str | None = self._save_detail_path_text(save=save, root_count=root_count)
         rename_dialog: Dialog | None = None
         rename_input: Input | None = None
+        delete_dialog: Dialog | None = None
 
         async def rename_selected() -> None:
             if rename_input is None:
@@ -838,6 +1170,21 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
+        async def delete_selected() -> None:
+            try:
+                result: NodeSaveMutationResult = await self._delete_save(
+                    model=model,
+                    save_id=save.id,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Save delete failed: {xcp}", type="negative")
+                return
+            if delete_dialog is not None:
+                delete_dialog.close()
+            ui.notify(result.message, type="positive")
+            ui.navigate.reload()
+
         with ui.card().classes("mod-save-card"):
             with ui.column().classes("w-full gap-3 p-4"):
                 with ui.column().classes("gap-1 w-full"):
@@ -851,9 +1198,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     if self._save_shows_size_badge(save):
                         self._badge(ui=ui, text=save.size_text, tone="black")
                     self._badge(ui=ui, text=f"Modified {save.modified_at}", tone="purple")
+                action_count = 1 + int(model.supports_save_rename) + int(save.can_delete)
                 action_classes = (
                     "mod-save-card-actions mod-save-card-actions-split"
-                    if model.supports_save_rename
+                    if action_count > 1
                     else "mod-save-card-actions mod-save-card-actions-single"
                 )
 
@@ -893,6 +1241,26 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         )
                         if not can_write:
                             rename_button.disable()
+                    if save.can_delete:
+                        with ui.dialog().classes("mod-dialog-card") as delete_dialog:
+                            delete_dialog_ref: Dialog = delete_dialog
+                            with ui.card().classes("mod-card w-full"):
+                                with ui.column().classes("w-full gap-4 p-5"):
+                                    with ui.column().classes("gap-1"):
+                                        ui.label("Delete Save").classes("text-xl font-black mod-title-small")
+                                        ui.label(f"Delete {save.label} from {model.app_friendly}?").classes(
+                                            "mod-subtitle text-sm"
+                                        )
+                                    with ui.row().classes("w-full justify-end gap-2"):
+                                        ui.button("Cancel", on_click=delete_dialog_ref.close).classes(
+                                            "mod-list-button secondary"
+                                        )
+                                        ui.button("Delete", on_click=delete_selected).classes("mod-list-button danger")
+                        delete_button = ui.button("Delete", on_click=delete_dialog_ref.open).classes(
+                            "mod-list-button danger mod-save-card-button"
+                        )
+                        if not can_write:
+                            delete_button.disable()
 
     def _render_settings_editor(self, *, ui: ModWebUi, model: ModWebBasePageModel, user: ModWebUser) -> None:
         settings: NodeSettingList | None = model.settings
@@ -912,6 +1280,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         invalid_setting_keys: set[str] = set[str]()
         save_button: Button | None = None
         reload_button: Button | None = None
+        search_query_text: str = ""
         required_save_level: Power_Level = (
             Access_Control.parse_level(settings.required_save_level_name) or Power_Level.user
         )
@@ -944,11 +1313,23 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             save_button.disable()
 
         def set_draft_value(setting: NodeSettingEntry, value: bool | str, force_draft: bool = False) -> None:
-            current_value: bool | str = self._setting_current_control_value(setting)
-            if not force_draft and value == current_value:
-                draft_values.pop(setting.key, None)
-            else:
-                draft_values[setting.key] = value
+            previous_value: bool | str = self._setting_effective_control_value(
+                setting=setting, draft_values=draft_values
+            )
+            self._set_setting_draft_value(
+                setting=setting,
+                value=value,
+                draft_values=draft_values,
+                force_draft=force_draft,
+            )
+            if self._apply_linked_setting_drafts(
+                settings=settings.settings,
+                setting=setting,
+                previous_value=previous_value,
+                next_value=value,
+                draft_values=draft_values,
+            ):
+                _setting_card_list.refresh(search_query_text)
             refresh_save_button()
 
         def set_setting_validity(setting: NodeSettingEntry, is_valid: bool) -> None:
@@ -1020,6 +1401,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         ui=ui,
                         setting=setting,
                         draft_value=draft_values.get(setting.key, self._setting_current_control_value(setting)),
+                        draft_values=draft_values,
                         set_draft_value=set_draft_value,
                         set_setting_validity=set_setting_validity,
                     )
@@ -1038,7 +1420,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         .classes("mod-config-search mod-settings-search")
                     )
                     def _refresh_setting_cards(event: ModWebEventArgumentsContainer) -> None:
-                        _setting_card_list.refresh(_event_args_as_text(event))
+                        nonlocal search_query_text
+                        search_query_text = _event_args_as_text(event)
+                        _setting_card_list.refresh(search_query_text)
 
                     search_input.on("update:model-value", _refresh_setting_cards)
                     with ui.row().classes("mod-tab-toolbar-actions"):
@@ -1056,21 +1440,28 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         ui: ModWebUi,
         setting: NodeSettingEntry,
         draft_value: bool | str,
+        draft_values: Mapping[str, bool | str],
         set_draft_value: Callable[[NodeSettingEntry, bool | str, bool], None],
         set_setting_validity: Callable[[NodeSettingEntry, bool], None],
     ) -> None:
         control_kind: ModWebSettingControlKind = self._setting_control_kind(setting)
         choice_select: Select | None = None
-        value_input: Input | None = None
+        value_input: Input | Textarea | None = None
         invalid_feedback: Label | None = None
 
         card_classes = "mod-setting-card w-full"
         if not setting.can_edit:
             card_classes: LiteralString = f"{card_classes} locked"
 
+        control_classes = "mod-setting-control gap-1"
+        control_surface_classes = self._setting_control_surface_classes(can_edit=setting.can_edit)
+        if setting.paragraph:
+            control_classes = f"{control_classes} mod-setting-control-paragraph"
+            control_surface_classes = f"{control_surface_classes} mod-setting-control-surface-paragraph"
+
         with ui.card().classes(card_classes):
             with ui.row().classes("mod-setting-shell w-full"):
-                with ui.column().classes("mod-setting-control gap-1"):
+                with ui.column().classes(control_classes):
                     if control_kind is ModWebSettingControlKind.BOOLEAN_SWITCH:
                         if not isinstance(draft_value, bool):
                             raise TypeError(f"Boolean setting {setting.key!r} requires a bool draft value.")
@@ -1098,7 +1489,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             set_draft_value(setting, _value_as_text(event), setting.value_is_hidden)
                             set_setting_validity(setting, True)
 
-                        with ui.column().classes(self._setting_control_surface_classes(can_edit=setting.can_edit)):
+                        with ui.column().classes(control_surface_classes):
                             choice_select = (
                                 ui.select(
                                     {choice.label: choice.label for choice in setting.choices},
@@ -1114,12 +1505,22 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         if not isinstance(draft_value, str):
                             raise TypeError(f"Text setting {setting.key!r} requires a string draft value.")
 
-                        def sync_input_value(force_draft: bool = False) -> None:
+                        def sync_input_value(
+                            force_draft: bool = False,
+                            event: ModWebValueContainer | None = None,
+                        ) -> None:
                             if value_input is None:
                                 raise ValueError("Text setting input control is not available.")
-                            next_value: str = _value_as_text(value_input)
+                            next_value: str = self._setting_text_input_value(
+                                input_control=value_input,
+                                event=event,
+                            )
                             set_draft_value(setting, next_value, force_draft)
-                            validation_message: str | None = self._setting_text_validation_message(setting, next_value)
+                            validation_message: str | None = self._setting_text_draft_validation_message(
+                                setting=setting,
+                                value=next_value,
+                                draft_values=draft_values,
+                            )
                             set_setting_validity(setting, validation_message is None)
                             self._update_setting_text_input_feedback(
                                 input_control=value_input,
@@ -1127,20 +1528,31 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                 message=validation_message,
                             )
 
-                        def _sync_hidden_input(_event: object) -> None:
+                        def _sync_hidden_input(_event: object | None = None) -> None:
                             sync_input_value(setting.value_is_hidden)
 
-                        with ui.column().classes(self._setting_control_surface_classes(can_edit=setting.can_edit)):
-                            value_input = (
-                                ui.input(
-                                    value=draft_value,
-                                    placeholder=f"Enter {setting.label}" if setting.can_edit else "Restricted",
-                                    on_change=(_sync_hidden_input if setting.can_edit else None),
+                        with ui.column().classes(control_surface_classes):
+                            if setting.paragraph:
+                                value_input = (
+                                    ui.textarea(
+                                        value=draft_value,
+                                        placeholder=f"Enter {setting.label}" if setting.can_edit else "Restricted",
+                                        on_change=(_sync_hidden_input if setting.can_edit else None),
+                                    )
+                                    .props(self._setting_paragraph_props(setting))
+                                    .classes("mod-setting-field mod-setting-field-primary mod-setting-field-paragraph")
                                 )
-                                .props(self._setting_text_input_props(setting))
-                                .classes("mod-setting-field mod-setting-field-primary")
-                            )
-                            value_input_control: Input = value_input
+                            else:
+                                value_input = (
+                                    ui.input(
+                                        value=draft_value,
+                                        placeholder=f"Enter {setting.label}" if setting.can_edit else "Restricted",
+                                        on_change=(_sync_hidden_input if setting.can_edit else None),
+                                    )
+                                    .props(self._setting_text_input_props(setting))
+                                    .classes("mod-setting-field mod-setting-field-primary")
+                                )
+                            value_input_control: Input | Textarea = value_input
                             if not setting.can_edit:
                                 value_input_control.disable()
                                 set_setting_validity(setting, True)
@@ -1689,6 +2101,27 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_save_rename, node, model.app_name, save_id, new_name, user)
+
+    async def _delete_save(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        save_id: str,
+        user: ModWebUser,
+    ) -> NodeSaveMutationResult:
+        if not self._user_has_level(user, model.save_write_level):
+            raise PermissionError(
+                f"{model.save_write_level.name.title()} access is required to delete saves for {model.app_friendly}."
+            )
+        if model.node_name == config.MOD_WEB_SERVER.node_name:
+            app = self._resolve_app(model.app_name)
+            return self._node_api.delete_save_file(
+                app=app,
+                save_id=save_id,
+                actor_user_id=user.discord_id,
+            )
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        return await asyncio.to_thread(self._remote_save_delete, node, model.app_name, save_id, user)
 
     async def _write_setting_value(
         self,
@@ -2312,19 +2745,19 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         app_stats: NodeAppRuntimeSummary | None,
     ) -> str:
         if not action.can_run:
-            return f"{action.power_level_label} access is required to run this action."
+            return f"Requires {action.power_level_label} access."
         if not action.requires_running:
-            return "Run the action against the selected app instance."
+            return "Ready."
         if app_stats is None:
-            return "App runtime status is unavailable. Refresh and try again."
+            return "Runtime status unavailable. Refresh and try again."
         if app_stats.transition_state is NodeAppTransitionState.STARTING:
-            return f"{app_friendly} is starting. Wait until it is running before using this action."
+            return f"{app_friendly} is starting."
         if app_stats.transition_state is NodeAppTransitionState.STOPPING:
-            return f"{app_friendly} is stopping. Wait until it settles before using this action."
+            return f"{app_friendly} is stopping."
         if app_stats.running:
-            return "Run the action against the selected app instance."
+            return "Ready."
         if not app_stats.enabled:
-            return f"{app_friendly} is disabled. Enable and start it before using this action."
+            return f"{app_friendly} is disabled."
         if app_stats.runtime_fault is not None:
             return f"{app_friendly} crashed. Restart it before using this action."
         return f"{app_friendly} must be running before this action can be used."
@@ -2382,6 +2815,20 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if setting.value_is_hidden:
             return "filled square dense clearable hide-bottom-space color=accent type=password autocomplete=off"
         return "filled square dense clearable hide-bottom-space color=accent"
+
+    @staticmethod
+    def _setting_paragraph_props(setting: NodeSettingEntry) -> str:
+        if setting.value_is_hidden:
+            return (
+                "filled square hide-bottom-space color=accent "
+                "type=password autocomplete=off spellcheck=false autocorrect=off autocapitalize=off "
+                "rows=2 input-style=height:100%;min-height:100%;max-height:100%;resize:none"
+            )
+        return (
+            "filled square hide-bottom-space color=accent "
+            "spellcheck=false autocorrect=off autocapitalize=off "
+            "rows=2 input-style=height:100%;min-height:100%;max-height:100%;resize:none"
+        )
 
     @staticmethod
     def _should_initialise_text_setting_draft(setting: NodeSettingEntry) -> bool:
@@ -2531,6 +2978,84 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             except ValueError:
                 return "Enter a whole number."
         return None
+
+    @classmethod
+    def _setting_text_draft_validation_message(
+        cls,
+        *,
+        setting: NodeSettingEntry,
+        value: str,
+        draft_values: Mapping[str, bool | str],
+    ) -> str | None:
+        if setting.key not in draft_values:
+            return None
+        return cls._setting_text_validation_message(setting, value)
+
+    @staticmethod
+    def _setting_text_input_value(
+        *,
+        input_control: ModWebValueContainer,
+        event: ModWebValueContainer | None = None,
+    ) -> str:
+        if event is not None:
+            return _value_as_text(event)
+        return _value_as_text(input_control)
+
+    @staticmethod
+    def _setting_effective_control_value(
+        *,
+        setting: NodeSettingEntry,
+        draft_values: Mapping[str, bool | str],
+    ) -> bool | str:
+        return draft_values.get(setting.key, ModWebEditorsMixin._setting_current_control_value(setting))
+
+    @classmethod
+    def _set_setting_draft_value(
+        cls,
+        *,
+        setting: NodeSettingEntry,
+        value: bool | str,
+        draft_values: dict[str, bool | str],
+        force_draft: bool = False,
+    ) -> None:
+        current_value: bool | str = cls._setting_current_control_value(setting)
+        if not force_draft and value == current_value:
+            draft_values.pop(setting.key, None)
+            return
+        draft_values[setting.key] = value
+
+    @classmethod
+    def _apply_linked_setting_drafts(
+        cls,
+        *,
+        settings: tuple[NodeSettingEntry, ...],
+        setting: NodeSettingEntry,
+        previous_value: bool | str,
+        next_value: bool | str,
+        draft_values: dict[str, bool | str],
+    ) -> bool:
+        if (
+            setting.key not in _SEVENDAYS_TRADER_BIOME_SETTING_KEYS
+            or not isinstance(previous_value, str)
+            or not isinstance(next_value, str)
+        ):
+            return False
+        for other_setting in settings:
+            if other_setting.key == setting.key or other_setting.key not in _SEVENDAYS_TRADER_BIOME_SETTING_KEYS:
+                continue
+            other_value: bool | str = cls._setting_effective_control_value(
+                setting=other_setting, draft_values=draft_values
+            )
+            if other_value != next_value:
+                continue
+            cls._set_setting_draft_value(
+                setting=other_setting,
+                value=previous_value,
+                draft_values=draft_values,
+                force_draft=other_setting.value_is_hidden,
+            )
+            return True
+        return False
 
     @staticmethod
     def _setting_permission_badge_tone(setting: NodeSettingEntry) -> BadgeTone:
@@ -2737,7 +3262,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     @staticmethod
     def _update_setting_text_input_feedback(
         *,
-        input_control: Input,
+        input_control: Input | Textarea,
         feedback_label: Label | None,
         message: str | None,
     ) -> None:

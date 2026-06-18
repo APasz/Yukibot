@@ -1070,7 +1070,19 @@ class ModWebTheme:
                     flex: 1 1 26rem;
                     min-width: 18rem;
                 }}
-                .mod-console-action-select .q-field__control {{
+                .mod-console-select {{
+                    flex: 1 1 18rem;
+                    min-width: 12rem;
+                }}
+                .mod-console-select-action {{
+                    flex: 999 1 26rem;
+                    min-width: 18rem;
+                }}
+                .mod-console-select-compact {{
+                    flex: 0 0 10rem;
+                    min-width: 10rem;
+                }}
+                .mod-console-select .q-field__control {{
                     min-height: 3rem !important;
                     padding: 0 0.42rem !important;
                     border: 1px solid rgba(82, 82, 91, 0.9) !important;
@@ -1083,8 +1095,8 @@ class ModWebTheme:
                         inset 0 -1px 0 rgba(124, 58, 237, 0.14),
                         0 10px 24px rgba(0, 0, 0, 0.2) !important;
                 }}
-                .mod-console-action-select:hover .q-field__control,
-                .mod-console-action-select .q-field--focused .q-field__control {{
+                .mod-console-select:hover .q-field__control,
+                .mod-console-select .q-field--focused .q-field__control {{
                     border-color: rgba(139, 92, 246, 0.62) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.05),
@@ -1092,19 +1104,40 @@ class ModWebTheme:
                         0 0 0 1px rgba(139, 92, 246, 0.14),
                         0 12px 26px rgba(0, 0, 0, 0.26) !important;
                 }}
-                .mod-console-action-select .q-field--filled .q-field__control::before {{
+                .mod-console-select .q-field--filled .q-field__control::before {{
                     border-bottom: 1px solid rgba(139, 92, 246, 0.26) !important;
                 }}
-                .mod-console-action-select .q-field--filled .q-field__control::after {{
+                .mod-console-select .q-field--filled .q-field__control::after {{
                     border-bottom: 2px solid rgba(196, 181, 253, 0.88) !important;
                 }}
-                .mod-console-action-select .q-field__native,
-                .mod-console-action-select .q-field__input,
-                .mod-console-action-select .q-field__append,
-                .mod-console-action-select .q-field__prepend,
-                .mod-console-action-select .q-field__marginal,
-                .mod-console-action-select .q-icon {{
+                .mod-console-select .q-field__native,
+                .mod-console-select .q-field__input,
+                .mod-console-select .q-field__append,
+                .mod-console-select .q-field__prepend,
+                .mod-console-select .q-field__marginal,
+                .mod-console-select .q-icon {{
                     color: #f5f3ff !important;
+                }}
+                .mod-console-select.mod-console-select-black .q-field__control,
+                .mod-console-select.mod-console-select-black:hover .q-field__control,
+                .mod-console-select.mod-console-select-black .q-field--focused .q-field__control {{
+                    background: rgba(6, 6, 10, 0.98) !important;
+                    background-image: none !important;
+                }}
+                .mod-console-select-menu {{
+                    background: rgba(6, 6, 10, 0.98) !important;
+                    color: #f5f3ff !important;
+                    border: 1px solid rgba(82, 82, 91, 0.9) !important;
+                }}
+                .mod-console-select-menu .q-item,
+                .mod-console-select-menu .q-item__label,
+                .mod-console-select-menu .q-icon {{
+                    color: #f5f3ff !important;
+                }}
+                .mod-console-select-menu .q-item--active,
+                .mod-console-select-menu .q-item.q-manual-focusable--focused,
+                .mod-console-select-menu .q-item[aria-selected="true"] {{
+                    background: rgba(36, 17, 58, 0.92) !important;
                 }}
                 .mod-config-search {{
                     flex: 0 1 18rem;
@@ -1225,6 +1258,10 @@ class ModWebTheme:
                     justify-content: center;
                     padding-right: 0.35rem;
                 }}
+                .mod-setting-control-paragraph {{
+                    position: relative;
+                    justify-content: flex-start;
+                }}
                 .mod-setting-control-surface {{
                     width: 100%;
                     min-width: 0;
@@ -1238,6 +1275,15 @@ class ModWebTheme:
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.025),
                         inset 0 -1px 0 rgba(139, 92, 246, 0.14) !important;
+                }}
+                .mod-setting-control-surface-paragraph {{
+                    position: absolute;
+                    top: -0.34rem;
+                    bottom: -0.34rem;
+                    left: 0;
+                    right: -0.08rem;
+                    overflow: hidden;
+                    z-index: 1;
                 }}
                 .mod-setting-control-surface.locked {{
                     background:
@@ -1309,7 +1355,7 @@ class ModWebTheme:
                     height: 100%;
                 }}
                 .mod-setting-field .q-field__control {{
-                    min-height: 2.06rem !important;
+                    min-height: 2.18rem !important;
                     border: 0 !important;
                     border-radius: 0 !important;
                     background: transparent !important;
@@ -1354,10 +1400,45 @@ class ModWebTheme:
                 }}
                 .mod-setting-field .q-field__native,
                 .mod-setting-field .q-field__input {{
-                    font-size: 0.79rem !important;
+                    font-size: 0.82rem !important;
                     font-weight: 850 !important;
                     letter-spacing: 0.02em;
                     line-height: 1.2 !important;
+                }}
+                .mod-setting-field-paragraph {{
+                    width: 100%;
+                    margin-right: 0 !important;
+                    z-index: 1;
+                }}
+                .mod-setting-field-paragraph .q-field__control {{
+                    height: 100% !important;
+                    min-height: 100% !important;
+                    max-height: 100% !important;
+                    align-items: stretch !important;
+                    padding-top: 0.08rem !important;
+                    padding-bottom: 0 !important;
+                    padding-right: 0 !important;
+                }}
+                .mod-setting-field-paragraph .q-field__control-container {{
+                    height: 100% !important;
+                    min-height: 100% !important;
+                    display: flex !important;
+                    align-items: stretch !important;
+                }}
+                .mod-setting-field-paragraph .q-field__native,
+                .mod-setting-field-paragraph textarea.q-field__native {{
+                    box-sizing: border-box !important;
+                    height: 100% !important;
+                    min-height: 100% !important;
+                    max-height: 100% !important;
+                    align-self: stretch !important;
+                    line-height: 1.38 !important;
+                    overflow-x: hidden !important;
+                    overflow-y: auto !important;
+                    padding-right: 0 !important;
+                    padding-bottom: 0.04rem !important;
+                    resize: none !important;
+                    scrollbar-gutter: stable;
                 }}
                 .mod-setting-field-secondary .q-field__native,
                 .mod-setting-field-secondary .q-field__input {{
@@ -2767,7 +2848,8 @@ class ModWebTheme:
                     align-items: flex-end;
                 }}
                 .mod-chat-header-main {{
-                    flex: 1 1 24rem;
+                    flex: 0 1 auto;
+                    min-width: max-content !important;
                     max-width: min(100%, 42rem);
                 }}
                 .mod-chat-title {{
@@ -2775,6 +2857,10 @@ class ModWebTheme:
                     font-size: clamp(1.35rem, 2vw, 2rem) !important;
                     font-weight: 950 !important;
                     line-height: 1.05 !important;
+                    hyphens: none !important;
+                    overflow-wrap: normal !important;
+                    white-space: nowrap !important;
+                    word-break: normal !important;
                 }}
                 .mod-chat-subtitle {{
                     max-width: 34rem;
@@ -2823,17 +2909,28 @@ class ModWebTheme:
                     min-height: clamp(20rem, 46vh, 34rem);
                     overflow: hidden;
                 }}
-                .mod-chat-timeline {{
-                    gap: 0;
+                .mod-chat-scroll-area {{
+                    height: min(60vh, 40rem);
                     min-height: clamp(18rem, 40vh, 28rem);
                     max-height: min(60vh, 40rem);
-                    overflow-y: auto;
-                    padding: 0.08rem 0 0.18rem 0;
+                    width: 100%;
+                    flex: 1 1 auto;
                     scroll-behavior: auto;
                     scrollbar-color: #52525b transparent;
                     scrollbar-width: thin;
                     scrollbar-gutter: stable;
                     overscroll-behavior: contain;
+                }}
+                .mod-chat-scroll-area .q-scrollarea__content {{
+                    width: 100%;
+                    padding: 0 !important;
+                }}
+                .mod-chat-timeline {{
+                    gap: 0;
+                    min-height: 100%;
+                    overflow: visible;
+                    overflow-anchor: none;
+                    padding: 0.08rem 0 0.18rem 0;
                 }}
                 .mod-chat-empty {{
                     min-height: 16rem;
@@ -2845,6 +2942,8 @@ class ModWebTheme:
                         linear-gradient(180deg, rgba(10, 10, 14, 0.94), rgba(10, 10, 14, 0.72));
                 }}
                 .mod-chat-message {{
+                    --mod-chat-source-rail: #52525b;
+                    --mod-chat-source-glow: rgba(82, 82, 91, 0.12);
                     display: flex;
                     flex-direction: column;
                     gap: 0;
@@ -2853,13 +2952,17 @@ class ModWebTheme:
                     border-radius: 0 !important;
                     background: rgba(0, 0, 0, 0) !important;
                     border: 0 !important;
-                    border-left: 3px solid #52525b !important;
+                    border-left: 3px solid var(--mod-chat-source-rail) !important;
                     box-shadow: none !important;
                     color: var(--mod-text) !important;
                     transition: background 140ms ease;
                 }}
                 .mod-chat-message:hover {{
-                    background: linear-gradient(90deg, rgba(139, 92, 246, 0.08), rgba(139, 92, 246, 0) 42%) !important;
+                    background: linear-gradient(
+                        90deg,
+                        var(--mod-chat-source-glow),
+                        rgba(139, 92, 246, 0) 44%
+                    ) !important;
                 }}
                 .mod-chat-message::before {{
                     content: "";
@@ -2883,36 +2986,52 @@ class ModWebTheme:
                     padding: 0 !important;
                 }}
                 .mod-chat-message-inner {{
-                    gap: 0.28rem !important;
+                    gap: 0.06rem !important;
                     padding: 0 !important;
                 }}
                 .mod-chat-message-head {{
                     min-height: 0 !important;
                     align-items: flex-start !important;
+                    gap: 0.16rem !important;
                 }}
                 .mod-chat-head-meta {{
                     margin-left: auto;
                     justify-content: flex-end;
                     align-items: flex-start;
                     min-width: 0;
-                    gap: 0.35rem;
+                    gap: 0.14rem !important;
+                    margin-top: -0.03rem;
                 }}
                 .mod-chat-badge-row {{
                     justify-content: flex-end;
-                    gap: 0.28rem;
+                    gap: 0.12rem !important;
                 }}
-                .mod-chat-message.game {{ border-left-color: #8b5cf6 !important; }}
-                .mod-chat-message.discord {{ border-left-color: #f87171 !important; }}
-                .mod-chat-message.web {{ border-left-color: #a1a1aa !important; }}
-                .mod-chat-message.system {{ border-left-color: #f59e0b !important; }}
+                .mod-chat-message.game {{
+                    --mod-chat-source-rail: #7c3aed;
+                    --mod-chat-source-glow: rgba(124, 58, 237, 0.14);
+                }}
+                .mod-chat-message.discord {{
+                    --mod-chat-source-rail: #52525b;
+                    --mod-chat-source-glow: rgba(82, 82, 91, 0.16);
+                }}
+                .mod-chat-message.web {{
+                    --mod-chat-source-rail: #3f3f46;
+                    --mod-chat-source-glow: rgba(63, 63, 70, 0.14);
+                }}
+                .mod-chat-message.system,
+                .mod-chat-message.unknown {{
+                    --mod-chat-source-rail: #7f1d1d;
+                    --mod-chat-source-glow: rgba(127, 29, 29, 0.16);
+                }}
                 .mod-chat-author {{
                     color: var(--mod-text) !important;
-                    font-size: 0.9rem !important;
+                    font-size: 0.86rem !important;
                     font-weight: 950 !important;
-                    line-height: 1.05 !important;
+                    line-height: 1 !important;
                 }}
                 .mod-chat-author-row {{
                     min-width: 0;
+                    gap: 0.34rem !important;
                 }}
                 .mod-chat-author-avatar {{
                     width: 1.35rem;
@@ -2926,7 +3045,7 @@ class ModWebTheme:
                     box-shadow: inset 0 0 0 1px rgba(5, 5, 7, 0.75);
                 }}
                 .mod-chat-source-badge {{
-                    padding: 0.14rem 0.38rem !important;
+                    padding: 0.12rem 0.34rem !important;
                     font-size: 0.56rem !important;
                     line-height: 1 !important;
                     letter-spacing: 0.07em;
@@ -2934,7 +3053,7 @@ class ModWebTheme:
                 .mod-chat-content {{
                     color: #e4e4e7 !important;
                     font-size: 0.93rem !important;
-                    line-height: 1.38 !important;
+                    line-height: 1.34 !important;
                 }}
                 .mod-chat-markup,
                 .mod-chat-markup > .nicegui-content {{
@@ -3037,6 +3156,7 @@ class ModWebTheme:
                     font-family: "IBM Plex Mono", "Fira Code", monospace;
                     font-size: 0.81em;
                     line-height: 1.42;
+                    overflow-anchor: none;
                     white-space: pre-wrap;
                     overflow-wrap: anywhere;
                     word-break: break-word;
@@ -3072,30 +3192,35 @@ class ModWebTheme:
                     outline: none;
                 }}
                 .mod-chat-entry-list {{
-                    gap: 0.34rem !important;
+                    gap: 0 !important;
                     padding-left: 0 !important;
                 }}
                 .mod-chat-entry {{
                     align-items: flex-start;
+                    gap: 0.32rem !important;
+                    margin-top: -0.03rem;
                     min-width: 0;
                 }}
+                .mod-chat-entry + .mod-chat-entry {{
+                    margin-top: -0.08rem;
+                }}
                 .mod-chat-entry-main {{
-                    gap: 0.24rem !important;
+                    gap: 0.04rem !important;
                     min-width: 0;
                 }}
                 .mod-chat-entry-meta {{
                     flex: 0 0 auto;
                     align-items: flex-start;
-                    margin-left: auto;
+                    margin-left: 0.18rem;
                     min-width: 0;
                 }}
                 .mod-chat-entry-time {{
                     color: rgba(161, 161, 170, 0.74) !important;
-                    font-size: 0.61rem !important;
+                    font-size: 0.56rem !important;
                     font-weight: 900 !important;
-                    letter-spacing: 0.06em;
-                    line-height: 1.5 !important;
-                    padding-top: 0.02rem;
+                    letter-spacing: 0.04em;
+                    line-height: 1.05 !important;
+                    padding-top: 0;
                     text-align: right;
                     white-space: nowrap;
                     text-transform: uppercase;
@@ -3470,12 +3595,17 @@ class ModWebTheme:
                     .mod-chat-timeline-shell {{
                         min-height: 16rem;
                     }}
-                    .mod-chat-timeline {{
+                    .mod-chat-scroll-area {{
+                        height: min(54vh, 32rem);
                         min-height: 14rem;
                     }}
                     .mod-setting-shell {{
                         grid-template-columns: 1fr;
                         padding-right: 0;
+                    }}
+                    .mod-setting-field-paragraph {{
+                        width: 100%;
+                        margin-right: 0 !important;
                     }}
                     .mod-setting-meta {{
                         align-items: flex-start;
@@ -3561,7 +3691,7 @@ class ModWebTheme:
                     .mod-fake-chat-send-target {{
                         min-width: 100%;
                     }}
-                    .mod-chat-timeline {{ max-height: min(54vh, 32rem); }}
+                    .mod-chat-timeline {{ max-height: none; }}
                     .mod-chat-input {{ flex-basis: 100%; min-width: 0; }}
                     .mod-chat-send {{ width: 100%; }}
                 }}

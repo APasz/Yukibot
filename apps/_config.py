@@ -6,7 +6,9 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import zip_longest
 from pathlib import Path
+from re import Pattern
 
 import hikari
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -66,6 +68,25 @@ def normalise_optional_text(raw: object) -> str | None:
     return text or None
 
 
+def normalise_optional_build(raw: object) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise TypeError("build must be an integer")
+    if isinstance(raw, int):
+        build = raw
+    else:
+        text = normalise_optional_text(raw)
+        if text is None:
+            return None
+        if not text.isdigit():
+            raise ValueError("build must be an integer")
+        build = int(text)
+    if build < 0:
+        raise ValueError("build must be non-negative")
+    return build
+
+
 APP_FRIENDLY_NAME_MAX_LENGTH = 80
 
 
@@ -91,6 +112,165 @@ def normalise_optional_power_level(raw: object) -> Power_Level | None:
             raise ValueError(f"invalid power level {raw!r}")
         return parsed
     raise TypeError("power level must be a string or integer")
+
+
+def _normalise_required_text(raw: object, *, field_name: str) -> str:
+    text = normalise_optional_text(raw)
+    if text is None:
+        raise ValueError(f"{field_name} must not be empty")
+    return text
+
+
+class SteamUpdateLogin(BaseModel):
+    username: str = "anonymous"
+    password: str | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def validate_username(cls, raw: object) -> str:
+        return _normalise_required_text(raw, field_name="steam username")
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def validate_password(cls, raw: object) -> str | None:
+        return normalise_optional_text(raw)
+
+
+class SteamUpdateBranch(BaseModel):
+    branch_id: str
+    label: str | None = None
+    beta_password: str | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("branch_id", mode="before")
+    @classmethod
+    def validate_branch_id(cls, raw: object) -> str:
+        return _normalise_required_text(raw, field_name="steam branch id")
+
+    @field_validator("label", "beta_password", mode="before")
+    @classmethod
+    def validate_optional_text(cls, raw: object) -> str | None:
+        return normalise_optional_text(raw)
+
+    @property
+    def display_label(self) -> str:
+        return self.label or self.branch_id
+
+
+class SteamUpdateConfig(BaseModel):
+    app_id: int
+    steamcmd_executable: str = "steamcmd"
+    login: SteamUpdateLogin = Field(default_factory=SteamUpdateLogin)
+    branches: tuple[SteamUpdateBranch, ...] = Field(
+        default_factory=lambda: (SteamUpdateBranch(branch_id="public", label="Public"),)
+    )
+    selected_branch: str = "public"
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("app_id", mode="before")
+    @classmethod
+    def validate_app_id(cls, raw: object) -> int:
+        if isinstance(raw, bool):
+            raise TypeError("steam app id must be an integer")
+        if isinstance(raw, int):
+            app_id = raw
+        else:
+            text = _normalise_required_text(raw, field_name="steam app id")
+            if not text.isdecimal():
+                raise ValueError("steam app id must be numeric")
+            app_id = int(text)
+        if app_id <= 0:
+            raise ValueError("steam app id must be positive")
+        return app_id
+
+    @field_validator("steamcmd_executable", mode="before")
+    @classmethod
+    def validate_steamcmd_executable(cls, raw: object) -> str:
+        return _normalise_required_text(raw, field_name="steamcmd executable")
+
+    @field_validator("selected_branch", mode="before")
+    @classmethod
+    def validate_selected_branch(cls, raw: object) -> str:
+        return _normalise_required_text(raw, field_name="selected steam branch")
+
+    @model_validator(mode="after")
+    def validate_branches(self) -> "SteamUpdateConfig":
+        branch_ids: list[str] = []
+        seen_branch_keys: set[str] = set()
+        for branch in self.branches:
+            branch_key = branch.branch_id.casefold()
+            if branch_key in seen_branch_keys:
+                raise ValueError(f"duplicate steam branch id: {branch.branch_id}")
+            seen_branch_keys.add(branch_key)
+            branch_ids.append(branch.branch_id)
+        if self.selected_branch.casefold() not in seen_branch_keys:
+            raise ValueError(
+                f"selected steam branch {self.selected_branch!r} must match one of: {', '.join(branch_ids)}"
+            )
+        return self
+
+    def branch(self, branch_id: str) -> SteamUpdateBranch:
+        branch_key = branch_id.strip().casefold()
+        for branch in self.branches:
+            if branch.branch_id.casefold() == branch_key:
+                return branch
+        raise ValueError(f"Unknown Steam branch: {branch_id}")
+
+    @property
+    def selected_branch_config(self) -> SteamUpdateBranch:
+        return self.branch(self.selected_branch)
+
+
+@dataclass(frozen=True, slots=True)
+class SteamUpdatePreset:
+    app_id: int
+    branches: tuple[SteamUpdateBranch, ...]
+    default_selected_branch: str = "public"
+
+    def build_config(self, *, selected_branch: str | None = None) -> SteamUpdateConfig:
+        resolved_selected_branch = (
+            self.default_selected_branch
+            if selected_branch is None or not selected_branch.strip()
+            else selected_branch.strip()
+        )
+        return SteamUpdateConfig(
+            app_id=self.app_id,
+            branches=tuple(branch.model_copy(deep=True) for branch in self.branches),
+            selected_branch=resolved_selected_branch,
+        )
+
+
+_STEAM_UPDATE_PRESETS: dict[str, SteamUpdatePreset] = {
+    "satisfactory": SteamUpdatePreset(
+        app_id=1690800,
+        branches=(
+            SteamUpdateBranch(branch_id="public", label="Stable"),
+            SteamUpdateBranch(branch_id="experimental", label="Experimental"),
+        ),
+        default_selected_branch="public",
+    ),
+    "sevendays": SteamUpdatePreset(
+        app_id=294420,
+        branches=(
+            SteamUpdateBranch(branch_id="public", label="Stable"),
+            SteamUpdateBranch(branch_id="latest_experimental", label="Experimental"),
+        ),
+        default_selected_branch="latest_experimental",
+    ),
+}
+
+
+def steam_update_preset_for_scope(scope: str | None) -> SteamUpdatePreset | None:
+    if scope is None:
+        return None
+    scope_key = scope.strip().casefold()
+    if not scope_key:
+        return None
+    return _STEAM_UPDATE_PRESETS.get(scope_key)
 
 
 class RelayChannelSource(enum.StrEnum):
@@ -416,40 +596,104 @@ class ModType(enum.StrEnum):
                 return "Client"
 
 
-_VERSION_LOADER_RE = re.compile(r"[a-z0-9_]+")
+_VERSION_LOADER_RE: Pattern[str] = re.compile(r"[a-z0-9_]+")
+_APP_VERSION_MAIN_TOKEN_RE: Pattern[str] = re.compile(r"\d+|[a-z]+", re.IGNORECASE)
 
 
 def normalise_version_loader(raw: object) -> str | None:
-    text = normalise_optional_text(raw)
+    text: str | None = normalise_optional_text(raw)
     if text is None:
         return None
-    normalised = text.casefold().replace("-", "_").replace(" ", "_")
+    normalised: str = text.casefold().replace("-", "_").replace(" ", "_")
     if _VERSION_LOADER_RE.fullmatch(normalised) is None:
         raise ValueError(f"invalid version loader {text!r}")
     return normalised
 
 
+def _app_version_main_tokens(raw_main: str) -> tuple[int | str, ...]:
+    tokens = [
+        int(token) if token.isdigit() else token.casefold() for token in _APP_VERSION_MAIN_TOKEN_RE.findall(raw_main)
+    ]
+    if tokens:
+        return tuple(tokens)
+    return (raw_main.casefold(),)
+
+
+def _compare_app_version_main(left_main: str, right_main: str) -> int:
+    missing = object()
+    left_tokens = _app_version_main_tokens(left_main)
+    right_tokens = _app_version_main_tokens(right_main)
+    for left_token, right_token in zip_longest(left_tokens, right_tokens, fillvalue=missing):
+        if left_token is missing:
+            return -1
+        if right_token is missing:
+            return 1
+        if left_token == right_token:
+            continue
+        if isinstance(left_token, int) and isinstance(right_token, int):
+            return -1 if left_token < right_token else 1
+        if isinstance(left_token, str) and isinstance(right_token, str):
+            return -1 if left_token < right_token else 1
+        return -1 if isinstance(left_token, int) else 1
+    return 0
+
+
 class AppVersion(BaseModel):
     main: str
+    build: int | None = None
     framework: str | None = None
     loader: str | None = None
+    steam_build: int | None = None
+    steam_branch: str | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
     @property
     def display_value(self) -> str:
+        main_value = self.main if self.build is None else f"{self.main}:{self.build}"
+        extra_parts: list[str] = []
         if self.loader is not None and self.framework is not None:
-            return f"{self.main} [{self.loader} {self.framework}]"
-        if self.loader is not None:
-            return f"{self.main} [{self.loader}]"
-        if self.framework is not None:
-            return f"{self.main} [{self.framework}]"
-        return self.main
+            extra_parts.append(f"{self.loader} {self.framework}")
+        elif self.loader is not None:
+            extra_parts.append(self.loader)
+        elif self.framework is not None:
+            extra_parts.append(self.framework)
+        if self.steam_build is not None or self.steam_branch is not None:
+            steam_parts = ["Steam"]
+            if self.steam_branch is not None:
+                steam_parts.append(self.steam_branch)
+            if self.steam_build is not None:
+                steam_parts.extend(("build", str(self.steam_build)))
+            extra_parts.append(" ".join(steam_parts))
+        if not extra_parts:
+            return main_value
+        return f"{main_value} {' '.join(f'[{part}]' for part in extra_parts)}"
 
-    @field_validator("main", "framework", mode="before")
+    def compare_main_and_build(self, other: "AppVersion") -> int:
+        main_cmp = _compare_app_version_main(self.main, other.main)
+        if main_cmp != 0:
+            return main_cmp
+        left_build = -1 if self.build is None else self.build
+        right_build = -1 if other.build is None else other.build
+        if left_build == right_build:
+            return 0
+        return -1 if left_build < right_build else 1
+
+    def is_at_least(self, minimum: "AppVersion") -> bool:
+        return self.compare_main_and_build(minimum) >= 0
+
+    def is_at_most(self, maximum: "AppVersion") -> bool:
+        return self.compare_main_and_build(maximum) <= 0
+
+    @field_validator("main", "framework", "steam_branch", mode="before")
     @classmethod
     def validate_text_fields(cls, raw: object) -> str | None:
         return normalise_optional_text(raw)
+
+    @field_validator("build", "steam_build", mode="before")
+    @classmethod
+    def validate_build(cls, raw: object) -> int | None:
+        return normalise_optional_build(raw)
 
     @field_validator("loader", mode="before")
     @classmethod
@@ -463,7 +707,7 @@ def normalise_app_version(raw: object) -> AppVersion | None:
     if isinstance(raw, AppVersion):
         return raw
     if isinstance(raw, str):
-        main = normalise_optional_text(raw)
+        main: str | None = normalise_optional_text(raw)
         if main is None:
             return None
         return AppVersion(main=main)
@@ -512,6 +756,7 @@ class App_Config(BaseModel):
     cmd_start: list[str] = Field(default_factory=list)
     provider_alt_text: str | None = None
     version: AppVersion | None = None
+    steam_update: SteamUpdateConfig | None = None
     resource_points: AppResourcePointProfile = Field(default_factory=AppResourcePointProfile)
     config_file_read_level_override: Power_Level | None = None
     config_file_write_level_override: Power_Level | None = None
@@ -538,16 +783,16 @@ class App_Config(BaseModel):
 
     @property
     def join_address(self) -> str | None:
-        host = self.join_host.strip()
+        host: str = self.join_host.strip()
         if not host:
             return None
         return _format_host_port(host=host, port=self.join_port)
 
     @property
     def join_direct_ip_address(self) -> str | None:
-        host = self.join_host.strip()
-        public_addr = config.PUBLIC_ADDR.strip()
-        public_ip = config.PUBLIC_IP.strip()
+        host: str = self.join_host.strip()
+        public_addr: str = config.PUBLIC_ADDR.strip()
+        public_ip: str = config.PUBLIC_IP.strip()
         if not host or not public_ip:
             return None
         if host.casefold() != public_addr.casefold():
@@ -558,20 +803,20 @@ class App_Config(BaseModel):
 
     @property
     def join_display_address(self) -> str | None:
-        address = self.join_address
+        address: str | None = self.join_address
         if address is None:
             return None
-        direct_ip_address = self.join_direct_ip_address
+        direct_ip_address: str | None = self.join_direct_ip_address
         if direct_ip_address is None:
             return address
         return f"{address} [{direct_ip_address}]"
 
     @property
     def effective_api_host(self) -> str | None:
-        api_host = self.api_host
+        api_host: str | None = self.api_host
         if api_host is not None and api_host.strip():
             return api_host.strip()
-        join_host = self.join_host.strip()
+        join_host: str = self.join_host.strip()
         return join_host or None
 
     @property
@@ -591,21 +836,21 @@ class App_Config(BaseModel):
         return payload
 
     @field_validator("directory", "mods_dir", "settings_pointer", "server_log_file", mode="before")
-    def resolve_dir(cls, raw: str | Path | None, info):
+    def resolve_dir(cls, raw: str | Path | None, info) -> Path | None:
         return resolve_config_path(raw, directory=info.data.get("directory", ""))
 
     @field_validator("join_host", mode="before")
     def validate_join_host(cls, raw: object) -> str:
         if raw is None:
             return config.PUBLIC_ADDR
-        text = str(raw).strip()
+        text: str = str(raw).strip()
         return text or config.PUBLIC_ADDR
 
     @field_validator("api_host", mode="before")
     def validate_api_host(cls, raw: object) -> str | None:
         if raw is None:
             return None
-        text = str(raw).strip()
+        text: str = str(raw).strip()
         return text or None
 
     @field_validator("chat_channel", "chat_channel_override", mode="before")
@@ -619,6 +864,16 @@ class App_Config(BaseModel):
     @field_validator("version", mode="before")
     def validate_version(cls, raw: object) -> AppVersion | None:
         return normalise_app_version(raw)
+
+    @field_validator("steam_update", mode="before")
+    def validate_steam_update(cls, raw: object) -> SteamUpdateConfig | None:
+        if raw is None:
+            return None
+        if isinstance(raw, SteamUpdateConfig):
+            return raw
+        if not isinstance(raw, dict):
+            raise TypeError("steam_update must be a mapping")
+        return SteamUpdateConfig.model_validate(raw)
 
     @field_validator(
         "config_file_read_level_override",
@@ -636,9 +891,9 @@ class App_Config(BaseModel):
         if isinstance(raw, bool):
             raise TypeError("port must be an integer")
         if isinstance(raw, int):
-            port = raw
+            port: int = raw
         elif isinstance(raw, str):
-            value = raw.strip()
+            value: str = raw.strip()
             if not value:
                 return None
             if not value.isdecimal():

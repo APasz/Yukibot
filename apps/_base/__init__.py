@@ -1,11 +1,12 @@
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import hikari
 
 from apps._app import App
-from apps._config import App_Config, Mod_Config
+from apps._config import App_Config, AppVersion, Mod_Config
 from apps._mod import Mod
 from apps._settings import App_Settings, Setting, StringSettingSpec
 from config import Activity_Manager
@@ -22,9 +23,9 @@ class Mod_Base(Mod):
 
 
 class Base_Settings(App_Settings):
-    def __init__(self, pointer: Path) -> None:
+    def __init__(self, pointer: Path, *, version_getter: Callable[[], AppVersion | None] | None = None) -> None:
         options = [Setting(StringSettingSpec(allow_blank=True), "", "", [], default="")]
-        super().__init__(pointer, options)
+        super().__init__(pointer, options, version_getter=version_getter)
 
     def load(self):
         return None
@@ -45,7 +46,7 @@ class Base(App):
         ]
 
         self.process = None
-        super().__init__(bot, am, cfg, Base_Settings(Path()), Mod_Base)
+        super().__init__(bot, am, cfg, Base_Settings(Path(), version_getter=lambda: cfg.version), Mod_Base)
         self.act_err_threshold = 100
 
     async def start(self) -> bool:

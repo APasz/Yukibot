@@ -3,8 +3,10 @@ from __future__ import annotations
 from mod_web_theme import BadgeTone
 
 from .runtime_imports import (
-    AppTitleFont,
     AppRuntimeFault,
+    AppTitleFont,
+    AppUpdateInfo,
+    AppUpdateStatus,
     Awaitable,
     Button,
     Callable,
@@ -127,6 +129,7 @@ class _ModWebAppHeroCornerBindings:
 class _ModWebModToolbarBindings:
     selection_button: Button | None
     download_button: Button | None
+    delete_button: Button | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,7 +294,9 @@ class ModWebAppLink:
     supports_blueprints: bool = field(default=False, kw_only=True)
     supports_console_actions: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
+    supports_updates: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
+    update_status: AppUpdateStatus | None = field(default=None, kw_only=True)
     runtime_changed: bool = field(default=False, kw_only=True)
     tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
 
@@ -347,7 +352,10 @@ class ModWebBasePageModel:
     map_api_url: str | None = field(default=None, kw_only=True)
     can_write_map_annotations: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
+    supports_updates: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
+    update_info: AppUpdateInfo | None = field(default=None, kw_only=True)
+    update_status: AppUpdateStatus | None = field(default=None, kw_only=True)
     resource_points: NodeAppResourcePointSummary | None = field(default=None, kw_only=True)
     app_notes: str | None = field(default=None, kw_only=True)
     lifecycle_notice_started: bool = field(default=True, kw_only=True)
@@ -391,6 +399,7 @@ class ModWebSearchOption:
 
 
 class ModWebAppSectionKind(Enum):
+    UPDATE = "update"
     MODS = "mods"
     CONFIGS = "configs"
     SETTINGS = "settings"
@@ -400,6 +409,8 @@ class ModWebAppSectionKind(Enum):
 
     @property
     def label(self) -> str:
+        if self is ModWebAppSectionKind.UPDATE:
+            return "Update"
         if self is ModWebAppSectionKind.MODS:
             return "Mods"
         if self is ModWebAppSectionKind.CONFIGS:

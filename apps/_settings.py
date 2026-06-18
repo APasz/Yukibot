@@ -8,12 +8,13 @@ from typing import Any, Generic, TypeAlias, TypeVar, cast
 
 import hikari
 
-from _security import Power_Level
 from _audit import audit_log
-from apps._config import App_Config
+from _security import Power_Level
+from apps._config import App_Config, AppVersion, normalise_app_version
 
 log: Logger = logging.getLogger(__name__)
 HideRevealLevel: TypeAlias = Power_Level | None
+DraftSettingValue: TypeAlias = object | hikari.UndefinedType
 
 
 class Setting_Label(StrEnum):
@@ -133,7 +134,7 @@ class SettingSpec(Generic[T]):
             return ()
         return self.choice_spec.choice_items()
 
-    def parse_input(self, raw_value: str) -> T:
+    def _parse_input(self, raw_value: str, *, clamp_loaded_range: bool = False) -> T:
         value = self.normalise_input(raw_value)
         if value == "" and self.allow_blank:
             return self.blank_value()
@@ -142,8 +143,16 @@ class SettingSpec(Generic[T]):
         if self.choice_spec is not None and self.choice_spec.strict and value not in self.choice_spec.raw_values():
             raise IndexError(f"{value} must match provided choices")
         parsed = self.parse(value)
+        if clamp_loaded_range:
+            parsed = self.coerce_loaded_value(parsed)
         self.validate_value(parsed)
         return parsed
+
+    def parse_input(self, raw_value: str) -> T:
+        return self._parse_input(raw_value)
+
+    def parse_loaded_input(self, raw_value: str) -> T:
+        return self._parse_input(raw_value, clamp_loaded_range=True)
 
     def choice_label_for_value(self, value: T | hikari.UndefinedType) -> str | None:
         if self.choice_spec is None or isinstance(value, hikari.UndefinedType):
@@ -180,6 +189,9 @@ class SettingSpec(Generic[T]):
 
     def validate_value(self, value: T) -> None:
         del value
+
+    def coerce_loaded_value(self, value: T) -> T:
+        return value
 
 
 class StringSettingSpec(SettingSpec[str]):
@@ -267,6 +279,13 @@ class IntSettingSpec(SettingSpec[int]):
     def parse(self, raw_value: str) -> int:
         return int(raw_value)
 
+    def coerce_loaded_value(self, value: int) -> int:
+        if self.min_value is not None and value < self.min_value:
+            return self.min_value
+        if self.max_value is not None and value > self.max_value:
+            return self.max_value
+        return value
+
     def validate_value(self, value: int) -> None:
         if self.min_value is not None and value < self.min_value:
             raise ValueError(f"{value} must be at least {self.min_value}")
@@ -316,6 +335,9 @@ class Setting(Generic[T]):
     default: T
     power_level: Power_Level
     desc: str | None
+    paragraph: bool
+    min_app_version: AppVersion | None
+    max_app_version: AppVersion | None
     _recent_inputs: list[str]
 
     def __init__(
@@ -329,6 +351,9 @@ class Setting(Generic[T]):
         value: T | hikari.UndefinedType = hikari.UNDEFINED,
         power_level: Power_Level = Power_Level.admin,
         desc: str | None = None,
+        paragraph: bool = False,
+        min_app_version: AppVersion | str | None = None,
+        max_app_version: AppVersion | str | None = None,
     ) -> None:
         self.spec = value_type
         self.path = tuple(path)
@@ -343,6 +368,15 @@ class Setting(Generic[T]):
         self.label = label.title()
         self.power_level = power_level
         self.desc = desc
+        self.paragraph = paragraph
+        self.min_app_version = normalise_app_version(min_app_version)
+        self.max_app_version = normalise_app_version(max_app_version)
+        if (
+            self.min_app_version is not None
+            and self.max_app_version is not None
+            and self.min_app_version.compare_main_and_build(self.max_app_version) > 0
+        ):
+            raise ValueError("Setting minimum app version must not exceed maximum app version.")
         self._recent_inputs = []
 
     @property
@@ -366,7 +400,7 @@ class Setting(Generic[T]):
             self.value = self.default
             return self.default
         try:
-            value = self._normalise_value(cast(T, raw_value))
+            value = self.spec.parse_loaded_input(self.spec.serialise_value(cast(T, raw_value)))
         except Exception as xcp:
             log.exception("Loading setting value failed: %s > %s", type(raw_value), self.type_name)
             raise ValueError(f"Invalid stored value for {self.label}: {xcp}") from xcp
@@ -432,6 +466,17 @@ class Setting(Generic[T]):
     def type_name(self) -> str:
         return self.spec.type_name
 
+    def supports_app_version(self, app_version: AppVersion | None) -> bool:
+        if self.min_app_version is None and self.max_app_version is None:
+            return True
+        if app_version is None:
+            return False
+        if self.min_app_version is not None and not app_version.is_at_least(self.min_app_version):
+            return False
+        if self.max_app_version is not None and not app_version.is_at_most(self.max_app_version):
+            return False
+        return True
+
     def _remember_input(self, value: str) -> None:
         if not self.supports_recent_inputs:
             return
@@ -450,6 +495,13 @@ class Setting(Generic[T]):
             raise ValueError(f"Invalid value for {self.label}: {xcp}")
         if remember_input:
             self._remember_input(self.serialise_value())
+
+    def load_value(self, value: str) -> None:
+        try:
+            self.value = self.spec.parse_loaded_input(value)
+        except Exception as xcp:
+            log.exception("Loading stored setting value failed: %s > %s", type(value), self.type_name)
+            raise ValueError(f"Invalid stored value for {self.label}: {xcp}") from xcp
 
     def __str__(self) -> str:
         return self.label
@@ -475,17 +527,43 @@ class Setting(Generic[T]):
 class App_Settings:
     _lookup: dict[str, Setting[Any]]
 
-    def __init__(self, pointer: Path, options: list[Setting[Any]]) -> None:
+    def __init__(
+        self,
+        pointer: Path,
+        options: list[Setting[Any]],
+        *,
+        version_getter: Callable[[], AppVersion | None] | None = None,
+    ) -> None:
         self.pointer = pointer
         if not pointer.exists():
             raise FileNotFoundError("App_Settings file missing")
         self._lookup = {}
+        self._version_getter = version_getter
 
-        self.options: list[Setting[Any]] = sorted(options)
-        for setting in options:
-            self._lookup[setting.label.lower()] = setting
+        self._options: list[Setting[Any]] = sorted(options)
+        for setting in self._options:
+            self._lookup.setdefault(setting.label.lower(), setting)
+        for setting in self._options:
             self._lookup[setting.key.lower()] = setting
         self.load()
+
+    def set_version_getter(self, version_getter: Callable[[], AppVersion | None] | None) -> None:
+        self._version_getter = version_getter
+
+    @property
+    def has_version_getter(self) -> bool:
+        return self._version_getter is not None
+
+    @property
+    def app_version(self) -> AppVersion | None:
+        if self._version_getter is None:
+            return None
+        return self._version_getter()
+
+    @property
+    def options(self) -> list[Setting[Any]]:
+        app_version = self.app_version
+        return [setting for setting in self._options if setting.supports_app_version(app_version)]
 
     def load(self):
         raise NotImplementedError
@@ -493,15 +571,28 @@ class App_Settings:
     def save(self):
         raise NotImplementedError
 
+    def apply_draft_update(
+        self,
+        *,
+        setting: Setting[Any],
+        value: object,
+        drafts: dict[str, DraftSettingValue],
+    ) -> None:
+        if value == setting.value:
+            drafts.pop(setting.key, None)
+            return
+        drafts[setting.key] = value
+
     @property
     def friendly_options(self) -> list[str]:
         return [s.label for s in self.options]
 
     def get_setting(self, ident: str) -> Setting[Any] | None:
         ident = ident.lower()
-        if ident not in self._lookup:
+        setting = self._lookup.get(ident)
+        if setting is None or not setting.supports_app_version(self.app_version):
             return None
-        return self._lookup[ident]
+        return setting
 
     @property
     def max_player(self) -> int | None:
@@ -523,6 +614,20 @@ class Settings_Manager:
         self.config = config
         self.app = settings
         self._drafts: dict[int, dict[str, object | hikari.UndefinedType]] = {}
+        had_version_getter = self.app.has_version_getter
+        self.app.set_version_getter(lambda: self.config.version)
+        if not had_version_getter:
+            self.app.load()
+
+    def _prune_unsupported_drafts(self) -> None:
+        supported_keys = {setting.key for setting in self.app.options}
+        for actor_key, drafts in tuple(self._drafts.items()):
+            for setting_key in tuple(drafts):
+                if setting_key in supported_keys:
+                    continue
+                drafts.pop(setting_key, None)
+            if not drafts:
+                self._drafts.pop(actor_key, None)
 
     def _actor_key(self, actor_user_id: int) -> int:
         return int(actor_user_id)
@@ -537,6 +642,7 @@ class Settings_Manager:
             self._drafts.pop(actor_key, None)
 
     def _prune_redundant_drafts(self) -> None:
+        self._prune_unsupported_drafts()
         for actor_key, drafts in tuple(self._drafts.items()):
             for setting in self.app.options:
                 draft_value = drafts.get(setting.key, hikari.UNDEFINED)
@@ -548,15 +654,19 @@ class Settings_Manager:
                 self._drafts.pop(actor_key, None)
 
     def has_pending_changes(self, actor_user_id: int) -> bool:
+        self._prune_unsupported_drafts()
         return bool(self._drafts.get(self._actor_key(actor_user_id)))
 
     def pending_change_count(self, actor_user_id: int) -> int:
+        self._prune_unsupported_drafts()
         return len(self._drafts.get(self._actor_key(actor_user_id), {}))
 
     def has_pending_value(self, actor_user_id: int, setting: Setting[Any]) -> bool:
+        self._prune_unsupported_drafts()
         return setting.key in self._drafts.get(self._actor_key(actor_user_id), {})
 
     def pending_change_level(self, actor_user_id: int) -> Power_Level | None:
+        self._prune_unsupported_drafts()
         drafts = self._drafts.get(self._actor_key(actor_user_id), {})
         if not drafts:
             return None
@@ -575,6 +685,7 @@ class Settings_Manager:
         return self.pending_change_level(actor_user_id) or Power_Level.user
 
     def value_for(self, setting: Setting[T], actor_user_id: int) -> T | hikari.UndefinedType:
+        self._prune_unsupported_drafts()
         drafts = self._drafts.get(self._actor_key(actor_user_id), {})
         draft_value = drafts.get(setting.key, hikari.UNDEFINED)
         if isinstance(draft_value, hikari.UndefinedType):
@@ -608,17 +719,15 @@ class Settings_Manager:
         *,
         remember_input: bool = False,
     ) -> None:
+        self._prune_unsupported_drafts()
         try:
             parsed_value = setting.spec.parse_input(value)
         except Exception as xcp:
             log.exception(f"Casting Setting value Failed: {type(value)} > {setting.type_name}")
             raise ValueError(f"Invalid value for {setting.label}: {xcp}")
         draft_bucket = self._draft_bucket(actor_user_id)
-        if parsed_value == setting.value:
-            draft_bucket.pop(setting.key, None)
-            self._delete_empty_bucket(actor_user_id)
-        else:
-            draft_bucket[setting.key] = parsed_value
+        self.app.apply_draft_update(setting=setting, value=parsed_value, drafts=draft_bucket)
+        self._delete_empty_bucket(actor_user_id)
         if remember_input:
             setting._remember_input(setting.spec.serialise_value(parsed_value))
         audit_log(
@@ -648,6 +757,7 @@ class Settings_Manager:
         )
 
     def save(self, actor_user_id: int) -> None:
+        self._prune_unsupported_drafts()
         actor_key = self._actor_key(actor_user_id)
         drafts = dict(self._drafts.get(actor_key, {}))
         for setting in self.app.options:

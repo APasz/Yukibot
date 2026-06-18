@@ -17,8 +17,8 @@ from apps._config import AppVersion
 from apps._settings import Setting
 from apps.satisfactory import (
     Satisfactory,
-    SatisfactoryBlueprintOwnershipStore,
     Satisfactory_Config,
+    SatisfactoryBlueprintOwnershipStore,
     SatisfactoryNetworkQuality,
     SatisfactoryServerState,
     SatisfactorySettings,
@@ -256,7 +256,7 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
 
         version = detect_satisfactory_version(directory=self.temp_path / "server", server_log=None)
 
-        self.assertEqual(version, AppVersion(main="1.1.0", framework="3.0.0", loader="sml"))
+        self.assertEqual(version, AppVersion(main="1.1.0", build=463028, framework="3.0.0", loader="sml"))
 
     def test_blueprint_upload_and_delete_tracks_owner_permissions(self) -> None:
         app = self._blueprint_app()
@@ -452,6 +452,27 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         stderr_task = app._stderr_task
         self.assertIsNotNone(stderr_task)
         self.assertTrue(stderr_task.cancelled())
+
+    async def test_shared_terminate_handles_process_cleared_during_wait(self) -> None:
+        class _ClearingProcess(_DummyProcess):
+            def __init__(self, app: _DummyApp) -> None:
+                super().__init__()
+                self._app = app
+
+            def wait(self, timeout: float | None = None) -> int:
+                self._app.process = None
+                return super().wait(timeout)
+
+        app = object.__new__(_DummyApp)
+        app.name = "dummy"
+        app.proc_name = ""
+        app.proc_cmd = []
+        app.process = cast(subprocess.Popen[str], _ClearingProcess(app))
+        app._stderr_task = None
+
+        await app._terminate()
+
+        self.assertIsNone(app.process)
 
     async def test_shared_terminate_cancels_cross_loop_stderr_task(self) -> None:
         task_ready = threading.Event()

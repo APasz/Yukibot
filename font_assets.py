@@ -3,15 +3,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from os import PathLike
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol
 from urllib.parse import parse_qsl, quote, urlsplit
 
 import requests
 
 log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from fontTools.ttLib import TTFont as _FontToolsTTFont
 
 FontFlavor = Literal["woff", "woff2"]
 
@@ -38,26 +42,40 @@ class FontAssetRefreshResult:
     converted_count: int
 
 
-class _FontNameRecord(Protocol):
-    def toUnicode(self) -> str: ...
-
-
-class _FontNameTable(Protocol):
-    names: tuple[_FontNameRecord, ...] | list[_FontNameRecord]
-
-    def getBestFullName(self) -> str | None: ...
-
-    def getBestFamilyName(self) -> str | None: ...
-
-
 class _TTFontLike(Protocol):
-    flavor: str | None
+    @property
+    def flavor(self) -> str | None: ...
 
-    def __getitem__(self, key: str) -> _FontNameTable: ...
+    @flavor.setter
+    def flavor(self, value: str | None) -> None: ...
 
-    def save(self, target_path: Path) -> None: ...
+    def __getitem__(self, key: str) -> object: ...
+
+    def save(self, file: str | PathLike[str] | BinaryIO, reorderTables: bool | None = True) -> None: ...
 
     def close(self) -> None: ...
+
+
+class _TTFontAdapter:
+    def __init__(self, font: _FontToolsTTFont) -> None:
+        self._font = font
+
+    @property
+    def flavor(self) -> str | None:
+        return self._font.flavor
+
+    @flavor.setter
+    def flavor(self, value: str | None) -> None:
+        self._font.flavor = value
+
+    def __getitem__(self, key: str) -> object:
+        return self._font[key]
+
+    def save(self, file: str | PathLike[str] | BinaryIO, reorderTables: bool | None = True) -> None:
+        self._font.save(file, reorderTables=reorderTables)
+
+    def close(self) -> None:
+        self._font.close()
 
 
 class FontAssetRegistry:
@@ -264,15 +282,18 @@ class FontAssetRegistry:
         font = _load_ttfont(source_path)
         try:
             name_table = font["name"]
+            if not hasattr(name_table, "names"):
+                raise ValueError(f"Font name table is missing for {source_path}")
+            typed_name_table = name_table
             for attribute_name in ("getBestFullName", "getBestFamilyName"):
-                method = getattr(name_table, attribute_name, None)
+                method = getattr(typed_name_table, attribute_name, None)
                 if callable(method):
                     raw_name = method()
                     if isinstance(raw_name, str):
                         cleaned_name = raw_name.strip()
                         if cleaned_name:
                             return cleaned_name
-            for record in getattr(name_table, "names", ()):
+            for record in getattr(typed_name_table, "names", ()):
                 try:
                     raw_name = record.toUnicode()
                 except Exception:
@@ -354,4 +375,4 @@ def _load_ttfont(source_path: Path) -> _TTFontLike:
         from fontTools.ttLib import TTFont
     except ModuleNotFoundError as xcp:
         raise RuntimeError("Font conversion requires the `fonttools` package to be installed.") from xcp
-    return TTFont(source_path)
+    return _TTFontAdapter(TTFont(source_path))

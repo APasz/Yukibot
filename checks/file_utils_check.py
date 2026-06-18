@@ -39,6 +39,43 @@ class FileUtilsTests(unittest.TestCase):
 
             self.assertEqual(File_Utils.pointer_size(pointer), 0)
 
+    def test_extract_7z_uses_archive_stem_and_unwraps_single_root_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "No Blood Moon Limit.7z"
+            archive_path.write_bytes(b"7z-data")
+            mods_dir = root / "Mods"
+            mods_dir.mkdir()
+
+            def fake_extract(archive: Path, staging_dir: Path) -> None:
+                self.assertEqual(archive, archive_path)
+                mod_root = staging_dir / "Inner Mod Name"
+                mod_root.mkdir()
+                (mod_root / "ModInfo.xml").write_text("<mod />", encoding="utf-8")
+
+            with patch.object(File_Utils, "_extract_7z_archive", side_effect=fake_extract):
+                extracted_path = File_Utils.extract(archive_path, mods_dir, overwrite=True)
+
+            self.assertEqual(extracted_path, mods_dir / "No Blood Moon Limit")
+            self.assertTrue((extracted_path / "ModInfo.xml").exists())
+
+    def test_extract_7z_without_backend_raises_clear_error(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "ExampleMod.7z"
+            archive_path.write_bytes(b"7z-data")
+            staging_dir = root / "staging"
+            staging_dir.mkdir()
+
+            with (
+                patch("_file.importlib.util.find_spec", return_value=None),
+                patch("_file.shutil.which", return_value=None),
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    File_Utils._extract_7z_archive(archive_path, staging_dir)
+
+        self.assertIn("py7zr", str(raised.exception))
+
 
 class FileUtilsAsyncTests(unittest.IsolatedAsyncioTestCase):
     class _AttachmentStream:
