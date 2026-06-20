@@ -34,6 +34,7 @@ from .runtime_imports import (
     ModWebUser,
     NodeAccessGrant,
     NodeApiScope,
+    NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
@@ -46,7 +47,7 @@ from .runtime_imports import (
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
     NodeModList,
-    NodeModUploadResult,
+    NodeModUploadBatchResult,
     NodeSaveList,
     NodeSaveMutationResult,
     NodeSettingList,
@@ -241,6 +242,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
             lifecycle_notice_started=page_data.app_entry.lifecycle_notice_started,
             lifecycle_notice_stopped=page_data.app_entry.lifecycle_notice_stopped,
             lifecycle_notice_crashed=page_data.app_entry.lifecycle_notice_crashed,
+            relay_notice_player_session=page_data.app_entry.relay_notice_player_session,
+            relay_notice_player_death=page_data.app_entry.relay_notice_player_death,
+            relay_notice_progress=page_data.app_entry.relay_notice_progress,
+            relay_notice_progress_label=page_data.app_entry.relay_notice_progress_label,
+            relay_advancements_enabled=page_data.app_entry.relay_advancements_enabled,
+            relay_advancement_term=page_data.app_entry.relay_advancement_term,
+            activity_providers=page_data.app_entry.activity_providers,
         )
 
     def _overview_model_from_local_page_data(
@@ -286,6 +294,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
             lifecycle_notice_started=page_data.app_entry.lifecycle_notice_started,
             lifecycle_notice_stopped=page_data.app_entry.lifecycle_notice_stopped,
             lifecycle_notice_crashed=page_data.app_entry.lifecycle_notice_crashed,
+            relay_notice_player_session=page_data.app_entry.relay_notice_player_session,
+            relay_notice_player_death=page_data.app_entry.relay_notice_player_death,
+            relay_notice_progress=page_data.app_entry.relay_notice_progress,
+            relay_notice_progress_label=page_data.app_entry.relay_notice_progress_label,
+            relay_advancements_enabled=page_data.app_entry.relay_advancements_enabled,
+            relay_advancement_term=page_data.app_entry.relay_advancement_term,
+            activity_providers=page_data.app_entry.activity_providers,
         )
 
     async def _build_page_model(self, app: App, *, user: ModWebUser) -> ModWebPageModel:
@@ -333,6 +348,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         lifecycle_notice_started: bool,
         lifecycle_notice_stopped: bool,
         lifecycle_notice_crashed: bool,
+        relay_notice_player_session: bool | None = None,
+        relay_notice_player_death: bool | None = None,
+        relay_notice_progress: bool | None = None,
+        relay_notice_progress_label: str | None = None,
+        relay_advancements_enabled: bool | None = None,
+        relay_advancement_term: str | None = None,
+        activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
     ) -> ModWebPageModel:
         app_api_url: str = self._node_app_api_url(node, mods.app_name)
         return cast(
@@ -370,6 +392,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     lifecycle_notice_started=lifecycle_notice_started,
                     lifecycle_notice_stopped=lifecycle_notice_stopped,
                     lifecycle_notice_crashed=lifecycle_notice_crashed,
+                    relay_notice_player_session=relay_notice_player_session,
+                    relay_notice_player_death=relay_notice_player_death,
+                    relay_notice_progress=relay_notice_progress,
+                    relay_notice_progress_label=relay_notice_progress_label,
+                    relay_advancements_enabled=relay_advancements_enabled,
+                    relay_advancement_term=relay_advancement_term,
+                    activity_providers=activity_providers,
                     download_all_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'false'})}",
                     download_enabled_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'true'})}",
                     mod_download_urls={
@@ -415,6 +444,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         lifecycle_notice_started: bool,
         lifecycle_notice_stopped: bool,
         lifecycle_notice_crashed: bool,
+        relay_notice_player_session: bool | None = None,
+        relay_notice_player_death: bool | None = None,
+        relay_notice_progress: bool | None = None,
+        relay_notice_progress_label: str | None = None,
+        relay_advancements_enabled: bool | None = None,
+        relay_advancement_term: str | None = None,
+        activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
     ) -> ModWebOverviewPageModel:
         app_api_url: str = self._node_app_api_url(node, app_name)
         return cast(
@@ -452,6 +488,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     lifecycle_notice_started=lifecycle_notice_started,
                     lifecycle_notice_stopped=lifecycle_notice_stopped,
                     lifecycle_notice_crashed=lifecycle_notice_crashed,
+                    relay_notice_player_session=relay_notice_player_session,
+                    relay_notice_player_death=relay_notice_player_death,
+                    relay_notice_progress=relay_notice_progress,
+                    relay_notice_progress_label=relay_notice_progress_label,
+                    relay_advancements_enabled=relay_advancements_enabled,
+                    relay_advancement_term=relay_advancement_term,
+                    activity_providers=activity_providers,
                 ),
             ),
         )
@@ -561,14 +604,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeModList.from_mapping(payload)
 
-    def _remote_mod_upload(
+    def _remote_mod_uploads(
         self,
         node: ModWebNodeLink,
         app_name: str,
-        upload_path: Path,
-        upload_name: str,
+        upload_files: tuple[tuple[str, Path], ...],
         user: ModWebUser,
-    ) -> NodeModUploadResult:
+    ) -> NodeModUploadBatchResult:
         token: str = self._remote_token(
             node=node,
             app_name=app_name,
@@ -576,17 +618,27 @@ class ModWebModelsMixin(ModWebServiceSupport):
             user=user,
         )
         url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/upload"
+        opened_handles: list[BinaryIO] = []
         try:
-            with upload_path.open("rb") as handle:
-                response: Response = requests.post(
-                    url,
-                    data={"filename": upload_name},
-                    files={"upload": (upload_name, handle, "application/octet-stream")},
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                )
+            request_files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
+            request_data: list[tuple[str, str]] = []
+            for upload_name, upload_path in upload_files:
+                handle = upload_path.open("rb")
+                opened_handles.append(handle)
+                request_data.append(("filename", upload_name))
+                request_files.append(("upload", (upload_name, handle, "application/octet-stream")))
+            response: Response = requests.post(
+                url,
+                data=request_data,
+                files=request_files,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+            )
         except requests.RequestException as xcp:
             raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        finally:
+            for handle in opened_handles:
+                handle.close()
         if response.status_code >= 400:
             raise RuntimeError(
                 f"Remote node rejected the request: url={url} status={response.status_code} "
@@ -596,7 +648,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             payload: object = cast(object, response.json())
         except ValueError as xcp:
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
-        return NodeModUploadResult.from_mapping(_json_object(payload, context="Remote node response"))
+        return NodeModUploadBatchResult.from_mapping(_json_object(payload, context="Remote node response"))
 
     def _remote_config_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeConfigList:
         payload: dict[str, object] = self._remote_json(

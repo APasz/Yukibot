@@ -22,6 +22,7 @@ from apps.sevendays import (
     SevenDays,
     SevenDaysAdminAddRequest,
     _candidate_sevendays_logs,
+    _discover_sevendays_runtime_log,
     _preferred_sevendays_runtime_log,
     detect_sevendays_version,
     parse_admin_add_value,
@@ -603,43 +604,47 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
         link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
 
-    async def test_start_falls_back_to_existing_runtime_log_when_no_new_log_is_discovered(self) -> None:
+    async def test_discover_runtime_log_waits_for_delayed_timestamped_log(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "7DaysToDieServer_Data"
+            log_dir.mkdir(parents=True)
+            older_runtime_log = log_dir / "output_log__2026-06-17__02-27-35.txt"
+            older_runtime_log.write_text("old\n", encoding="utf-8")
+            runtime_log = log_dir / "output_log__2026-06-17__03-27-35.txt"
+
+            async def create_runtime_log(_seconds: float) -> None:
+                runtime_log.write_text("INF Version: V 2.0 (b1)\n", encoding="utf-8")
+
+            with patch("apps.sevendays.asyncio.sleep", new=AsyncMock(side_effect=create_runtime_log)):
+                discovered = await _discover_sevendays_runtime_log(
+                    directory=root,
+                    server_log=None,
+                    previous_timestamped_logs={older_runtime_log},
+                    check_running=lambda: True,
+                    timeout_seconds=1.0,
+                    poll_seconds=0.0,
+                )
+
+        self.assertEqual(discovered, runtime_log)
+
+    async def test_discover_runtime_log_does_not_reuse_previous_timestamped_log(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime_log = root / "7DaysToDieServer_Data" / "output_log__2026-06-17__02-27-35.txt"
             runtime_log.parent.mkdir(parents=True)
             runtime_log.write_text("INF Version: V 2.0 (b1)\n", encoding="utf-8")
-            app = cast(Any, object.__new__(SevenDays))
-            app.name = "sevendays_demo"
-            app.directory = root
-            app.server_log = None
-            app.file_stdout = root / "stdout.log"
-            app.process = SimpleNamespace(stdout=object())
-            app._server_ready = asyncio.Event()
-            app._tail_matchers = set()
-            app._std_launch = AsyncMock()
-            app.check_running = lambda: True
-            app._relay = SimpleNamespace(
-                setup=AsyncMock(return_value=object()),
-                connected_event=asyncio.Event(),
+
+            discovered = await _discover_sevendays_runtime_log(
+                directory=root,
+                server_log=None,
+                previous_timestamped_logs={runtime_log},
+                check_running=lambda: True,
+                timeout_seconds=0.0,
+                poll_seconds=0.0,
             )
-            app.wait_for_ready_event = AsyncMock()
-            app._players = SimpleNamespace(start=AsyncMock())
-            app._activities = SimpleNamespace(start=AsyncMock())
-            app._running = False
 
-            tailer = SimpleNamespace(start=AsyncMock())
-            with (
-                patch("apps.sevendays.Tailer", return_value=tailer) as tailer_cls,
-                patch("apps.sevendays.File_Utils.link") as link_mock,
-                patch("apps.sevendays._SEVENDAYS_RUNTIME_LOG_DISCOVERY_TIMEOUT_SECONDS", 0.0),
-            ):
-                result = await SevenDays.start(app)
-
-        self.assertTrue(result)
-        tailer_cls.assert_called_once()
-        self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
-        link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
+        self.assertIsNone(discovered)
 
 
 if __name__ == "__main__":

@@ -190,6 +190,7 @@ class BeamMP_Settings(App_Settings):
 class BeamMP(App[App_Config]):
     _instance: None = None
     chat_relay_outbound = True
+    relay_notice_player_session_supported = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = 0xF97316
@@ -298,8 +299,16 @@ class Matchers:
         if match:
             player: str = match.group(1)
             action: str = match.group(2).lower()
+            if "synced" in action:
+                if self.app.relay_notice_player_joined_enabled is False:
+                    return
+                notice_action = PlayerSessionAction.JOINED
+            else:
+                if self.app.relay_notice_player_left_enabled is False:
+                    return
+                notice_action = PlayerSessionAction.LEFT
             notice = PlayerSessionNotice(
-                action=PlayerSessionAction.JOINED if "synced" in action else PlayerSessionAction.LEFT,
+                action=notice_action,
                 source=RelayNoticeSource.APP_LOG,
             )
             app_friendly = getattr(self.app, "friendly", self.app.name)

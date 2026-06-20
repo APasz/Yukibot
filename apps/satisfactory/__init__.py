@@ -10,6 +10,7 @@ import signal
 import ssl
 from asyncio.events import AbstractEventLoop
 from asyncio.locks import Lock
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from satisfactory_api_client.data.response import Response as SatisfactoryAPIRes
 from satisfactory_api_client.data.server_options import ServerOptions
 
 import config
+from _discord import DC_Bound, DC_Relay
 from _file import File_Utils
 from _security import Power_Level
 from apps._app import App
@@ -60,6 +62,7 @@ from apps._settings import (
 from apps._tailer import Tailer
 from apps._updater import SteamCmd_Update_Manager
 from config import Activity_Manager
+from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource, render_notice_text
 
 log: Logger = logging.getLogger(__name__)
 
@@ -80,6 +83,23 @@ _SATISFACTORY_BUILD_RE: Pattern[str] = re.compile(
     r"LogInit:\s+Build:\s+\+\+FactoryGame\+rel-main-(?P<version>\d+\.\d+\.\d+)-CL-(?P<build>\d+)",
     re.IGNORECASE,
 )
+_SATISFACTORY_LOGIN_RE: Pattern[str] = re.compile(
+    r"LogNet:\s+Login request: .*?\?Name=(?P<player>[^?\s]+)\s+userId:\s+(?P<identity>.+?)\s+platform:",
+    re.IGNORECASE,
+)
+_SATISFACTORY_JOIN_SUCCEEDED_RE: Pattern[str] = re.compile(
+    r"LogNet:\s+Join succeeded:\s+(?P<player>\S+)",
+    re.IGNORECASE,
+)
+_SATISFACTORY_CONNECTION_CLOSE_RE: Pattern[str] = re.compile(
+    r"LogNet:\s+UNetConnection::Close:\s+.*?UniqueId:\s+(?P<identity>.+?)(?:,\s+Channels:|$)",
+    re.IGNORECASE,
+)
+_SATISFACTORY_CONNECTION_REMOVED_RE: Pattern[str] = re.compile(
+    r"LogNet:\s+UNetDriver::RemoveClientConnection\s+-\s+Removed address .*?UniqueId:\s+(?P<identity>.+)$",
+    re.IGNORECASE,
+)
+_SATISFACTORY_FOREIGN_ID_RE: Pattern[str] = re.compile(r"RepData=\[(?P<foreign_id>[^\]]+)\]", re.IGNORECASE)
 _SML_UPLUGIN_FILES: tuple[Path, Path] = (
     Path("FactoryGame") / "Mods" / "SML" / "SML.uplugin",
     Path("Mods") / "SML" / "SML.uplugin",
@@ -92,6 +112,34 @@ class SatisfactoryNetworkQuality(enum.IntEnum):
     MEDIUM = 1
     HIGH = 2
     ULTRA = 3
+
+
+@dataclass(frozen=True, slots=True)
+class SatisfactoryPlayerIdentity:
+    player_name: str
+    session_key: str
+
+
+def _normalise_satisfactory_player_name(raw: str) -> str:
+    player_name: str = raw.strip()
+    if not player_name:
+        raise ValueError("Satisfactory player name must not be empty.")
+    return player_name
+
+
+def _satisfactory_player_key(player_name: str) -> str:
+    return _normalise_satisfactory_player_name(player_name).casefold()
+
+
+def _satisfactory_session_key(identity_text: str) -> str:
+    raw_identity: str = identity_text.strip()
+    if not raw_identity:
+        raise ValueError("Satisfactory player identity must not be empty.")
+    if foreign_id_match := _SATISFACTORY_FOREIGN_ID_RE.search(raw_identity):
+        foreign_id: str = foreign_id_match.group("foreign_id").strip()
+        if foreign_id:
+            return foreign_id.casefold()
+    return raw_identity.casefold()
 
 
 def _validated_blueprint_session_name_or_none(raw: str | None) -> str | None:
@@ -816,8 +864,113 @@ class SatisfactoryPlayers:
         return (state.num_connected_players, state.player_limit)
 
 
+class SatisfactoryPlayerSessionMatcher:
+    def __init__(self, app: "Satisfactory") -> None:
+        self.app: Satisfactory = app
+        self._pending_by_player: dict[str, deque[SatisfactoryPlayerIdentity]] = defaultdict(deque)
+        self._active_by_session: dict[str, SatisfactoryPlayerIdentity] = {}
+
+    def reset(self) -> None:
+        self._pending_by_player.clear()
+        self._active_by_session.clear()
+
+    async def match(self, line: str) -> None:
+        if identity := self._match_login(line):
+            self._note_login(identity)
+            return
+        if player_name := self._match_join(line):
+            self._note_join(player_name)
+            return
+        if session_key := self._match_leave(line):
+            self._note_leave(session_key)
+
+    @staticmethod
+    def _match_login(line: str) -> SatisfactoryPlayerIdentity | None:
+        if match := _SATISFACTORY_LOGIN_RE.search(line):
+            return SatisfactoryPlayerIdentity(
+                player_name=_normalise_satisfactory_player_name(match.group("player")),
+                session_key=_satisfactory_session_key(match.group("identity")),
+            )
+        return None
+
+    @staticmethod
+    def _match_join(line: str) -> str | None:
+        if match := _SATISFACTORY_JOIN_SUCCEEDED_RE.search(line):
+            return _normalise_satisfactory_player_name(match.group("player"))
+        return None
+
+    @staticmethod
+    def _match_leave(line: str) -> str | None:
+        close_match: re.Match[str] | None = _SATISFACTORY_CONNECTION_CLOSE_RE.search(line)
+        if close_match is None:
+            close_match = _SATISFACTORY_CONNECTION_REMOVED_RE.search(line)
+        if close_match is None:
+            return None
+        return _satisfactory_session_key(close_match.group("identity"))
+
+    def _note_login(self, identity: SatisfactoryPlayerIdentity) -> None:
+        session_key: str = identity.session_key
+        if session_key in self._active_by_session:
+            return
+        pending_logins = self._pending_by_player[_satisfactory_player_key(identity.player_name)]
+        if any(candidate.session_key == session_key for candidate in pending_logins):
+            return
+        pending_logins.append(identity)
+
+    def _note_join(self, player_name: str) -> None:
+        player_key: str = _satisfactory_player_key(player_name)
+        pending_logins = self._pending_by_player.get(player_key)
+        if not pending_logins:
+            return
+        identity: SatisfactoryPlayerIdentity = pending_logins.popleft()
+        if not pending_logins:
+            self._pending_by_player.pop(player_key, None)
+        if identity.session_key in self._active_by_session:
+            return
+        self._active_by_session[identity.session_key] = identity
+        self._emit_notice(player_name=identity.player_name, action=PlayerSessionAction.JOINED)
+
+    def _note_leave(self, session_key: str) -> None:
+        identity: SatisfactoryPlayerIdentity | None = self._active_by_session.pop(session_key, None)
+        if identity is None:
+            return
+        self._remove_pending_session(session_key=session_key, player_name=identity.player_name)
+        self._emit_notice(player_name=identity.player_name, action=PlayerSessionAction.LEFT)
+
+    def _remove_pending_session(self, *, session_key: str, player_name: str) -> None:
+        player_key: str = _satisfactory_player_key(player_name)
+        pending_logins = self._pending_by_player.get(player_key)
+        if not pending_logins:
+            return
+        remaining_logins = deque(
+            candidate for candidate in pending_logins if candidate.session_key != session_key
+        )
+        if remaining_logins:
+            self._pending_by_player[player_key] = remaining_logins
+            return
+        self._pending_by_player.pop(player_key, None)
+
+    def _emit_notice(self, *, player_name: str, action: PlayerSessionAction) -> None:
+        if action is PlayerSessionAction.JOINED:
+            if self.app.relay_notice_player_joined_enabled is False:
+                return
+        elif action is PlayerSessionAction.LEFT and self.app.relay_notice_player_left_enabled is False:
+            return
+        notice = PlayerSessionNotice(action=action, source=RelayNoticeSource.APP_LOG)
+        app_friendly: str = getattr(self.app, "friendly", self.app.name)
+        DC_Relay.add(
+            DC_Bound(
+                self.app,
+                render_notice_text(notice, author_name=player_name, app_name=app_friendly),
+                player_name,
+                notice=notice,
+            )
+        )
+
+
 class Satisfactory(App[Satisfactory_Config]):
     cfg_cls: type[Satisfactory_Config] = Satisfactory_Config
+    relay_notice_player_session_supported = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: Satisfactory_Config):
         self.manage_embed_color = 0xF59E0B
@@ -867,6 +1020,8 @@ class Satisfactory(App[Satisfactory_Config]):
         self._tail: Tailer | None = None
         self._tail_matchers: set[Callable[[str], Awaitable[None]]] = set()
         self._tail_matchers.add(self._match_version)
+        self._player_session_matcher: SatisfactoryPlayerSessionMatcher = SatisfactoryPlayerSessionMatcher(self)
+        self._tail_matchers.add(self._player_session_matcher.match)
         self._players: SatisfactoryPlayers = SatisfactoryPlayers(self)
 
     def detect_installed_version(self) -> AppVersion | None:
@@ -1070,6 +1225,7 @@ class Satisfactory(App[Satisfactory_Config]):
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
+        self._player_session_matcher.reset()
         await self._std_launch()
         while not self.check_running():
             await asyncio.sleep(1)
@@ -1149,6 +1305,7 @@ class Satisfactory(App[Satisfactory_Config]):
             await self._terminate()
         else:
             self.process = None
+        self._player_session_matcher.reset()
         return True
 
     async def kill(self) -> bool:
@@ -1158,6 +1315,7 @@ class Satisfactory(App[Satisfactory_Config]):
         if self._tail:
             await self._tail.stop()
         await self._terminate()
+        self._player_session_matcher.reset()
         return True
 
     async def player_count(self) -> tuple[int, int] | None:

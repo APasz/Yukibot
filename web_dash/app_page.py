@@ -54,7 +54,7 @@ from .runtime_imports import (
     NodeConsoleActionList,
     NodeModMutationAction,
     NodeModSummary,
-    NodeModUploadResult,
+    NodeModUploadBatchResult,
     NodeSaveList,
     NodeSettingList,
     NodeSystemSummary,
@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     from nicegui.elements.dialog import Dialog
     from nicegui.elements.tabs import Tab
     from nicegui.elements.tooltip import Tooltip
-    from nicegui.events import UploadEventArguments
+    from nicegui.events import MultiUploadEventArguments
 
 
 _LEAFLET_VENDOR_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "vendor" / "leaflet"
@@ -173,6 +173,62 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             footprint_bytes=updated.footprint_bytes
             if updated.footprint_bytes is not None
             else previous.footprint_bytes,
+        )
+
+    @classmethod
+    def _ensure_mod_list_dropzone_style(cls, *, ui: ModWebUi) -> None:
+        ui.add_head_html(
+            """
+            <style>
+            .mod-mod-list-dropzone {
+              position: relative;
+              width: 100%;
+              max-height: none !important;
+              border: none !important;
+              background: transparent !important;
+              box-shadow: none !important;
+            }
+            .mod-mod-list-dropzone.q-uploader {
+              width: 100% !important;
+              max-height: none !important;
+            }
+            .mod-mod-list-dropzone .q-uploader__header {
+              display: none !important;
+            }
+            .mod-mod-list-dropzone .q-uploader__list {
+              padding: 0 !important;
+              min-height: 0 !important;
+              max-height: none !important;
+              overflow: visible !important;
+              flex: 0 0 auto !important;
+            }
+            .mod-mod-list-dropzone .mod-mod-list-drop-shell {
+              position: relative;
+              min-height: 0;
+            }
+            .mod-mod-list-dropzone .mod-mod-list-drop-overlay {
+              position: absolute;
+              inset: 0;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              border-radius: 1.25rem;
+              background: rgba(15, 23, 42, 0.78);
+              border: 2px dashed rgba(255, 255, 255, 0.32);
+              color: #ffffff;
+              font-weight: 700;
+              letter-spacing: 0.08em;
+              text-transform: uppercase;
+              opacity: 0;
+              pointer-events: none;
+              transition: opacity 120ms ease;
+              z-index: 10;
+            }
+            .mod-mod-list-dropzone.q-uploader--dnd .mod-mod-list-drop-overlay {
+              opacity: 1;
+            }
+            </style>
+            """
         )
 
     def _render_page(
@@ -3990,12 +4046,15 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 query: str = urlencode({"selected_only": "true", "mod_name": list(mod_names)}, doseq=True)
                 await self._start_download(
                     ui=ui,
+                    user=user,
+                    model=model,
                     url=f"{self._download_base_url(model)}?{query}",
                     message=self._download_feedback_message(
                         kind=ModDownloadKind.SELECTED,
                         app_friendly=model.app_friendly,
                         selected_count=len(mod_names),
                     ),
+                    filenames=(f"{model.app_name}-selected-mods.zip",),
                 )
                 return
             if selected_mod_names:
@@ -4003,11 +4062,14 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 return
             await self._start_download(
                 ui=ui,
+                user=user,
+                model=model,
                 url=model.download_all_url,
                 message=self._download_feedback_message(
                     kind=ModDownloadKind.ALL,
                     app_friendly=model.app_friendly,
                 ),
+                filenames=(f"{model.app_name}-mods.zip",),
             )
 
         async def delete_selected() -> None:
@@ -4031,43 +4093,30 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             ui.notify(f"Deleted {len(mod_names)} {mod_label}.", type="positive")
             ui.navigate.reload()
 
-        async def upload_mod(event: "UploadEventArguments") -> None:
-            if upload_status_label is not None:
-                upload_status_label.set_text(f"Installing {event.file.name}...")
-            if upload_control is not None:
-                upload_control.disable()
-            ui.notify(f"Uploading {event.file.name} to {model.app_friendly}.", type="info")
+        inline_upload_control: Upload | None = None
+
+        async def upload_mods(event: "MultiUploadEventArguments") -> None:
+            upload_names: tuple[str, ...] = tuple(upload_file.name for upload_file in event.files)
+            if not upload_names:
+                ui.notify("Choose at least one mod file to upload.", type="warning")
+                return
+            upload_label: str = upload_names[0] if len(upload_names) == 1 else f"{len(upload_names)} files"
+            if inline_upload_control is not None:
+                inline_upload_control.disable()
+            ui.notify(f"Uploading {upload_label} to {model.app_friendly}.", type="info")
             try:
-                result: NodeModUploadResult = await self._upload_mod(model=model, upload_file=event.file, user=user)
+                result: NodeModUploadBatchResult = await self._upload_mods(
+                    model=model,
+                    upload_files=tuple(event.files),
+                    user=user,
+                )
             except Exception as xcp:
-                if upload_status_label is not None:
-                    upload_status_label.set_text("Upload failed. Choose a file to try again.")
-                if upload_control is not None:
-                    upload_control.enable()
+                if inline_upload_control is not None:
+                    inline_upload_control.enable()
                 ui.notify(f"Mod upload failed: {xcp}", type="negative")
                 return
-            upload_dialog.close()
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
-
-        upload_control: Upload | None = None
-        upload_status_label: Label | None = None
-        with ui.dialog() as upload_dialog:
-            with ui.card().classes("mod-card mod-dialog-card"):
-                with ui.column().classes("w-full gap-4 p-5"):
-                    with ui.column().classes("gap-0"):
-                        ui.label("Upload Mod").classes("text-xl font-black mod-title-small")
-                        ui.label(f"Install a mod file for {model.app_friendly}.").classes("mod-subtitle text-sm")
-                    upload_control = ui.upload(
-                        label="Choose Mod File",
-                        auto_upload=True,
-                        on_upload=upload_mod,
-                    ).classes("mod-list-button")
-                    upload_status_label = ui.label(
-                        "The app must be stopped before mods can be changed."
-                    ).classes("mod-subtitle text-sm")
-                    with ui.row().classes("w-full justify-end"):
-                        ui.button("Close", on_click=upload_dialog.close).classes("mod-list-button secondary")
 
         with ui.dialog() as delete_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -4089,22 +4138,23 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     title="Mods",
                     description=self._mods_card_description(model.mods.summary),
                 )
-                if not model.mods.mods:
-                    ui.label("No mods are currently indexed for this app.").classes(
-                        "mod-subtitle text-sm mod-tab-empty-detail"
-                    )
-                    if can_upload_mod:
-                        ui.label("Upload a mod to seed this app.").classes("mod-subtitle text-sm mod-tab-empty-detail")
-                    return
+                if can_upload_mod:
+                    def open_upload_picker() -> None:
+                        return None
 
                 @ui.refreshable
                 def _mod_download_rows(search_query: str) -> None:
+                    checkboxes.clear()
+                    if not model.mods.mods:
+                        with ui.card().classes("mod-setting-card locked w-full"):
+                            ui.label("No mods are currently indexed for this app.").classes("mod-subtitle text-sm")
+                        return
+
                     filtered_mods = self._filter_mod_entries(
                         mods=model.mods.mods,
                         options=mod_options,
                         search_query=search_query,
                     )
-                    checkboxes.clear()
                     if not filtered_mods:
                         with ui.card().classes("mod-setting-card locked w-full"):
                             ui.label("No mods match that search.").classes("mod-subtitle text-sm")
@@ -4143,7 +4193,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     toggle_selection=toggle_selection,
                     download_selected=download_selected,
                     delete_selected=delete_dialog.open,
-                    upload_mod=upload_dialog.open,
+                    upload_mod=open_upload_picker if can_upload_mod else None,
                     show_search=show_search,
                     on_search=_refresh_mod_rows if show_search else None,
                 )
@@ -4152,7 +4202,23 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 delete_button: Button | None = toolbar_bindings.delete_button
                 update_count()
 
-                _mod_download_rows("")
+                if can_upload_mod:
+                    self._ensure_mod_list_dropzone_style(ui=ui)
+                    inline_upload_control = ui.upload(
+                        label="",
+                        auto_upload=True,
+                        multiple=True,
+                        on_multi_upload=upload_mods,
+                    ).classes("mod-mod-list-dropzone w-full")
+                    if inline_upload_control is None:
+                        raise RuntimeError("Inline mod upload control is not available.")
+                    with inline_upload_control.add_slot("list"):
+                        with ui.element("div").classes("mod-mod-list-drop-shell w-full"):
+                            _mod_download_rows("")
+                            with ui.element("div").classes("mod-mod-list-drop-overlay"):
+                                ui.label("Drop mod files to upload").classes("text-sm")
+                else:
+                    _mod_download_rows("")
         return
 
     def _render_global_app_toolbar(
@@ -4193,6 +4259,11 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         lifecycle_started_checkbox: Checkbox | None = None
         lifecycle_stopped_checkbox: Checkbox | None = None
         lifecycle_crashed_checkbox: Checkbox | None = None
+        relay_notice_player_session_checkbox: Checkbox | None = None
+        relay_notice_player_death_checkbox: Checkbox | None = None
+        relay_notice_progress_checkbox: Checkbox | None = None
+        relay_advancements_checkbox: Checkbox | None = None
+        activity_provider_checkboxes: list[tuple[str, Checkbox]] = []
         current_runtime_model: ModWebBasePageModel = model
         start_stop_control_state: _ModWebStartStopControlState | None = None
         kill_control_state: _ModWebKillControlState | None = None
@@ -4334,6 +4405,14 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 return
             steam_update_branch_select.disable()
 
+        def _details_toggle_checkbox(
+            *,
+            label: str,
+            value: bool,
+            on_change: Callable[[object], object] | None = None,
+        ) -> Checkbox:
+            return ui.checkbox(label, value=value, on_change=on_change).props("dense").classes("mod-app-details-toggle")
+
         async def _handle_details_submit(_: object | None = None) -> None:
             if (
                 friendly_name_input is None
@@ -4386,6 +4465,11 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 return
             next_steam_update_enabled: bool | None = None
             next_steam_update_selected_branch: str | None = None
+            disabled_activity_provider_ids = tuple(
+                provider_id
+                for provider_id, checkbox in activity_provider_checkboxes
+                if not bool(_value_as_object(checkbox))
+            )
             if steam_update_preset is not None:
                 if steam_update_enabled_checkbox is None or steam_update_branch_select is None:
                     ui.notify("Steam update controls are unavailable.", type="negative")
@@ -4407,6 +4491,27 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     lifecycle_notice_started=bool(_value_as_object(lifecycle_started_checkbox)),
                     lifecycle_notice_stopped=bool(_value_as_object(lifecycle_stopped_checkbox)),
                     lifecycle_notice_crashed=bool(_value_as_object(lifecycle_crashed_checkbox)),
+                    relay_notice_player_session=(
+                        None
+                        if relay_notice_player_session_checkbox is None
+                        else bool(_value_as_object(relay_notice_player_session_checkbox))
+                    ),
+                    relay_notice_player_death=(
+                        None
+                        if relay_notice_player_death_checkbox is None
+                        else bool(_value_as_object(relay_notice_player_death_checkbox))
+                    ),
+                    relay_notice_progress=(
+                        None
+                        if relay_notice_progress_checkbox is None
+                        else bool(_value_as_object(relay_notice_progress_checkbox))
+                    ),
+                    relay_advancements_enabled=(
+                        None
+                        if relay_advancements_checkbox is None
+                        else bool(_value_as_object(relay_advancements_checkbox))
+                    ),
+                    disabled_activity_provider_ids=disabled_activity_provider_ids,
                     running_cpu_points=next_running_cpu_points,
                     running_ram_points=next_running_ram_points,
                     startup_cpu_points=next_startup_cpu_points,
@@ -4493,14 +4598,10 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                                         ui.label(
                                             "Enable or repair the default Steam updater block for this instance."
                                         ).classes("mod-subtitle text-xs")
-                                        steam_update_enabled_checkbox = (
-                                            ui.checkbox(
-                                                "Enable Steam updates",
-                                                value=model.update_info is not None,
-                                                on_change=lambda _: _sync_details_steam_update_controls(),
-                                            )
-                                            .props("dense")
-                                            .classes("mod-app-details-toggle")
+                                        steam_update_enabled_checkbox = _details_toggle_checkbox(
+                                            label="Enable Steam updates",
+                                            value=model.update_info is not None,
+                                            on_change=lambda _: _sync_details_steam_update_controls(),
                                         )
                                         if steam_update_app_id is not None:
                                             ui.label(f"Steam App ID: {steam_update_app_id}").classes(
@@ -4556,31 +4657,50 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                                             .classes("mod-app-details-field mod-app-details-point-field")
                                         )
                                 with ui.column().classes("mod-app-details-subsection"):
-                                    ui.label("Lifecycle Notices").classes("mod-stat-label")
-                                    lifecycle_started_checkbox = (
-                                        ui.checkbox(
-                                            "Started notices",
-                                            value=model.lifecycle_notice_started,
-                                        )
-                                        .props("dense")
-                                        .classes("mod-app-details-toggle")
+                                    ui.label("Relay Notices").classes("mod-stat-label")
+                                    lifecycle_started_checkbox = _details_toggle_checkbox(
+                                        label="Started",
+                                        value=model.lifecycle_notice_started,
                                     )
-                                    lifecycle_stopped_checkbox = (
-                                        ui.checkbox(
-                                            "Stopped notices",
-                                            value=model.lifecycle_notice_stopped,
-                                        )
-                                        .props("dense")
-                                        .classes("mod-app-details-toggle")
+                                    lifecycle_stopped_checkbox = _details_toggle_checkbox(
+                                        label="Stopped",
+                                        value=model.lifecycle_notice_stopped,
                                     )
-                                    lifecycle_crashed_checkbox = (
-                                        ui.checkbox(
-                                            "Crash notices",
-                                            value=model.lifecycle_notice_crashed,
-                                        )
-                                        .props("dense")
-                                        .classes("mod-app-details-toggle")
+                                    lifecycle_crashed_checkbox = _details_toggle_checkbox(
+                                        label="Crash",
+                                        value=model.lifecycle_notice_crashed,
                                     )
+                                    if model.relay_notice_player_session is not None:
+                                        relay_notice_player_session_checkbox = _details_toggle_checkbox(
+                                            label="Player Join/Leave",
+                                            value=model.relay_notice_player_session,
+                                        )
+                                    if model.relay_notice_player_death is not None:
+                                        relay_notice_player_death_checkbox = _details_toggle_checkbox(
+                                            label="Death",
+                                            value=model.relay_notice_player_death,
+                                        )
+                                    if model.relay_notice_progress is not None:
+                                        relay_notice_progress_label = model.relay_notice_progress_label or "Progress"
+                                        relay_notice_progress_checkbox = _details_toggle_checkbox(
+                                            label=f"{relay_notice_progress_label}",
+                                            value=model.relay_notice_progress,
+                                        )
+                                    if model.relay_advancements_enabled is not None:
+                                        relay_advancement_term = model.relay_advancement_term or "Advancement"
+                                        relay_advancements_checkbox = _details_toggle_checkbox(
+                                            label=f"{relay_advancement_term}",
+                                            value=model.relay_advancements_enabled,
+                                        )
+                                if model.activity_providers:
+                                    with ui.column().classes("mod-app-details-subsection"):
+                                        ui.label("Activity Providers").classes("mod-stat-label")
+                                        for provider in model.activity_providers:
+                                            checkbox = _details_toggle_checkbox(
+                                                label=provider.label,
+                                                value=provider.enabled,
+                                            )
+                                            activity_provider_checkboxes.append((provider.provider_id, checkbox))
                         if can_manage_app_state:
                             with ui.column().classes("mod-app-details-section"):
                                 ui.label("Instance State").classes("mod-stat-label")
@@ -4621,7 +4741,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         _apply_runtime_control_model(model, force=True)
                     if can_open_details_dialog and details_dialog is not None:
                         ui.button(
-                            "Details",
+                            "Properties",
                             on_click=details_dialog.open,
                         ).classes("mod-list-button secondary mod-toolbar-button")
         if (can_control_app_runtime or can_kill_app_runtime) and refresh_async_runtime_model is not None:
@@ -4683,8 +4803,14 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 search_input.on("update:model-value", on_search)
             with ui.row().classes("mod-tab-toolbar-actions mod-mods-toolbar-actions"):
                 if can_upload_mod:
-                    ui.button("Upload Mod", on_click=upload_mod).classes(
+                    upload_button = ui.button("Upload", on_click=upload_mod).classes(
                         "mod-list-button mod-toolbar-button mod-toolbar-button-fill"
+                    )
+                    upload_button.on(
+                        "click",
+                        js_handler=(
+                            "(event) => document.querySelector('.mod-mod-list-dropzone input[type=\"file\"]')?.click()"
+                        ),
                     )
                 if show_bulk_mod_actions:
                     selection_button = ui.button("", on_click=toggle_selection).classes(

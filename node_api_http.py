@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -71,13 +73,13 @@ class NodeApiHttpService:
             if server_config is None:
                 return
 
-            app = FastAPI()
-
-            @app.on_event("startup")
-            async def _on_startup() -> None:
+            @asynccontextmanager
+            async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
                 self._startup_signal.set()
                 log.info("Node API startup event received")
+                yield
 
+            app = FastAPI(lifespan=_lifespan)
             self._node_api.register_routes(app)
             uvicorn_config = uvicorn.Config(
                 app,

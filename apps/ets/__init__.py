@@ -149,6 +149,7 @@ class ETS_Settings(App_Settings):
 class ETS(App):
     _instance: None = None
     chat_relay_outbound = True
+    relay_notice_player_session_supported = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = 0x2563EB
@@ -263,8 +264,16 @@ class Matchers:
         if match:
             player: str = str(match.group(1))
             action: str = str(match.group(2)).lower()
+            if "disconnected" in action:
+                if self.app.relay_notice_player_left_enabled is False:
+                    return
+                notice_action = PlayerSessionAction.LEFT
+            else:
+                if self.app.relay_notice_player_joined_enabled is False:
+                    return
+                notice_action = PlayerSessionAction.JOINED
             notice = PlayerSessionNotice(
-                action=PlayerSessionAction.LEFT if "disconnected" in action else PlayerSessionAction.JOINED,
+                action=notice_action,
                 source=RelayNoticeSource.APP_LOG,
             )
             app_friendly = getattr(self.app, "friendly", self.app.name)

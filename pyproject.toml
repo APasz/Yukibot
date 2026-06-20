@@ -38,6 +38,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "basedpyright",
+    "playwright",
 ]
 
 [tool.uv]

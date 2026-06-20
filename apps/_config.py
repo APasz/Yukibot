@@ -68,6 +68,26 @@ def normalise_optional_text(raw: object) -> str | None:
     return text or None
 
 
+def normalise_activity_provider_ids(raw: object) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list | tuple | set | frozenset):
+        raise TypeError("activity provider ids must be a sequence of strings")
+
+    provider_ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        provider_id = normalise_optional_text(item)
+        if provider_id is None:
+            continue
+        provider_key = provider_id.casefold()
+        if provider_key in seen:
+            continue
+        provider_ids.append(provider_id)
+        seen.add(provider_key)
+    return tuple(provider_ids)
+
+
 def normalise_optional_build(raw: object) -> int | None:
     if raw is None:
         return None
@@ -753,6 +773,10 @@ class App_Config(BaseModel):
     lifecycle_notice_started: bool = True
     lifecycle_notice_stopped: bool = True
     lifecycle_notice_crashed: bool = True
+    relay_notice_player_session: bool = True
+    relay_notice_player_death: bool = True
+    relay_notice_progress: bool = True
+    disabled_activity_provider_ids: tuple[str, ...] = Field(default_factory=tuple)
     cmd_start: list[str] = Field(default_factory=list)
     provider_alt_text: str | None = None
     version: AppVersion | None = None
@@ -772,10 +796,32 @@ class App_Config(BaseModel):
     def validate_optional_text_fields(cls, raw: object) -> str | None:
         return normalise_optional_text(raw)
 
+    @field_validator("disabled_activity_provider_ids", mode="before")
+    @classmethod
+    def validate_disabled_activity_provider_ids(cls, raw: object) -> tuple[str, ...]:
+        return normalise_activity_provider_ids(raw)
+
     @field_validator("title_font_preset", mode="before")
     @classmethod
     def validate_title_font_preset(cls, raw: object) -> str:
         return normalise_app_title_font(raw)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_relay_notice_player_session(cls, raw: object) -> object:
+        if not isinstance(raw, dict):
+            return raw
+        if "relay_notice_player_session" in raw:
+            return raw
+        joined = raw.get("relay_notice_player_joined")
+        left = raw.get("relay_notice_player_left")
+        if isinstance(joined, bool) and isinstance(left, bool):
+            raw["relay_notice_player_session"] = joined and left
+        elif isinstance(joined, bool):
+            raw["relay_notice_player_session"] = joined
+        elif isinstance(left, bool):
+            raw["relay_notice_player_session"] = left
+        return raw
 
     @property
     def enabled_txt(self) -> str:

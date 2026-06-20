@@ -588,6 +588,9 @@ class Factorio(App[App_Config]):
     _instance = None
     chat_relay_outbound = True
     relay_advancement_terms = RelayAdvancementTerms("Research", "Research")
+    relay_notice_player_session_supported = True
+    relay_notice_player_death_supported = True
+    relay_notice_progress_supported = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = 0xDC6B0F
@@ -935,6 +938,8 @@ class Matchers:
                 DC_Relay.add(DC_Bound(self.app, msg, player))
 
     async def match_death(self, line: str):
+        if self.app.relay_notice_player_death_enabled is False:
+            return
         match: Match[str] | None = re.search(r"\[DIED\]\s+(\w+):(\S+)\s+(.+)", line, re.IGNORECASE)
         if not config.SILENT_DEBUG:
             log.debug(f"Match_Death: {line=} | {match=}")
@@ -967,6 +972,8 @@ class Matchers:
             )
 
     async def match_research(self, line: str) -> None:
+        if self.app.relay_notice_progress_enabled is False:
+            return
         if match := _FACTORIO_RESEARCH_FINISHED_RE.search(line):
             research_name: str = _render_factorio_research_name(match.group("research"))
             research_label = self.app.relay_advancement_term
@@ -1074,29 +1081,31 @@ class Players:
                 joins, leaves = is_join(players)
 
                 for player in leaves:
-                    notice = PlayerSessionNotice(action=PlayerSessionAction.LEFT, source=RelayNoticeSource.APP_POLL)
-                    app_friendly = getattr(self.app, "friendly", self.app.name)
-                    DC_Relay.add(
-                        DC_Bound(
-                            self.app,
-                            render_notice_text(notice, author_name=player, app_name=app_friendly),
-                            player,
-                            notice=notice,
+                    if self.app.relay_notice_player_left_enabled is not False:
+                        notice = PlayerSessionNotice(action=PlayerSessionAction.LEFT, source=RelayNoticeSource.APP_POLL)
+                        app_friendly = getattr(self.app, "friendly", self.app.name)
+                        DC_Relay.add(
+                            DC_Bound(
+                                self.app,
+                                render_notice_text(notice, author_name=player, app_name=app_friendly),
+                                player,
+                                notice=notice,
+                            )
                         )
-                    )
                     self._players.discard(player)
                     log.debug(f"Players.discard.{self._players=}")
                 for player in joins:
-                    notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=RelayNoticeSource.APP_POLL)
-                    app_friendly = getattr(self.app, "friendly", self.app.name)
-                    DC_Relay.add(
-                        DC_Bound(
-                            self.app,
-                            render_notice_text(notice, author_name=player, app_name=app_friendly),
-                            player,
-                            notice=notice,
+                    if self.app.relay_notice_player_joined_enabled is not False:
+                        notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=RelayNoticeSource.APP_POLL)
+                        app_friendly = getattr(self.app, "friendly", self.app.name)
+                        DC_Relay.add(
+                            DC_Bound(
+                                self.app,
+                                render_notice_text(notice, author_name=player, app_name=app_friendly),
+                                player,
+                                notice=notice,
+                            )
                         )
-                    )
                     self._players.add(player)
                     log.debug(f"Players.add.{self._players=}")
 

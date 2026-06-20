@@ -10,11 +10,11 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import IO, Any, Callable, Generic, Protocol, TypeVar, cast
+from typing import IO, Any, Callable, ClassVar, Generic, Protocol, TypeVar, cast
 
 import hikari
 import psutil
@@ -139,6 +139,61 @@ class AppStdoutTail:
     truncated: bool
 
 
+@dataclass(frozen=True, slots=True)
+class AppActivityProviderMetadata:
+    provider_id: str
+    label: str
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ValueError("App activity provider id must not be empty.")
+        if not self.label.strip():
+            raise ValueError("App activity provider label must not be empty.")
+
+
+class AppActivityProvider:
+    metadata: ClassVar[AppActivityProviderMetadata]
+    silent: bool = config.SILENT_DEBUG
+    prio: int = 50
+    activity_field: config.DiscordActivityField | None = None
+    activity_scope_name: str | None = None
+    task_funcs: tuple[Callable[[], Awaitable[None]], ...]
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls is AppActivityProvider:
+            return
+        metadata = getattr(cls, "metadata", None)
+        if not isinstance(metadata, AppActivityProviderMetadata):
+            raise TypeError(f"{cls.__name__} must define AppActivityProviderMetadata in metadata.")
+
+    def __init__(self, app: "App[Any]") -> None:
+        self.app = app
+        self.activity_scope_name = getattr(app, "name", None)
+        self.task_funcs = tuple(getattr(self, "task_funcs", ()))
+
+    @property
+    def provider_id(self) -> str:
+        return self.metadata.provider_id
+
+    @property
+    def label(self) -> str:
+        return self.metadata.label
+
+
+@dataclass(frozen=True, slots=True)
+class AppActivityProviderEntry:
+    provider_id: str
+    label: str
+    enabled: bool
+
+    def __post_init__(self) -> None:
+        if not self.provider_id.strip():
+            raise ValueError("App activity provider id must not be empty.")
+        if not self.label.strip():
+            raise ValueError("App activity provider label must not be empty.")
+
+
 class App(Generic[ConfigT], ABC):
     cfg_cls: type[ConfigT] = cast(type[ConfigT], App_Config)
     bot: hikari.GatewayBot
@@ -175,9 +230,12 @@ class App(Generic[ConfigT], ABC):
     chat_channel_overrides: tuple[hikari.Snowflake, ...] = ()
     chat_channel_source: RelayChannelSource = RelayChannelSource.NONE
     activity_manager: Activity_Manager
-    providers: list[config.Activity_Provider]
+    providers: list[AppActivityProvider]
     manage_embed_color: int = 0x96212B
     relay_advancement_terms: RelayAdvancementTerms = RelayAdvancementTerms()
+    relay_notice_player_session_supported: bool = False
+    relay_notice_player_death_supported: bool = False
+    relay_notice_progress_supported: bool = False
     _instance_config_change_handler: Callable[["App"], None] | None = None
     lifecycle_started_at: datetime | None = None
     runtime_fault: AppRuntimeFault | None = None
@@ -303,6 +361,16 @@ class App(Generic[ConfigT], ABC):
             overrides["lifecycle_notice_stopped"] = self.cfg.lifecycle_notice_stopped
         if not self.cfg.lifecycle_notice_crashed:
             overrides["lifecycle_notice_crashed"] = self.cfg.lifecycle_notice_crashed
+        if self.relay_notice_player_session_enabled is False:
+            overrides["relay_notice_player_session"] = False
+        if self.relay_notice_player_death_enabled is False:
+            overrides["relay_notice_player_death"] = False
+        if self.relay_notice_progress_enabled is False:
+            overrides["relay_notice_progress"] = False
+        if self.relay_advancements_enabled is False:
+            overrides["relay_advancements"] = False
+        if self.cfg.disabled_activity_provider_ids:
+            overrides["disabled_activity_provider_ids"] = list(self.cfg.disabled_activity_provider_ids)
         if self.cfg.version is not None:
             overrides["version"] = self.cfg.version.model_dump(mode="json", exclude_none=True)
         if self.cfg.steam_update is not None:
@@ -351,6 +419,73 @@ class App(Generic[ConfigT], ABC):
             return
         self._instance_config_change_handler(self)
 
+    def set_activity_providers(self, providers: Sequence[AppActivityProvider]) -> None:
+        self.providers = list(providers)
+
+    @property
+    def activity_providers(self) -> tuple[AppActivityProvider, ...]:
+        app_providers = getattr(self, "providers", None)
+        if isinstance(app_providers, list | tuple):
+            return tuple(cast(AppActivityProvider, provider) for provider in app_providers)
+        return ()
+
+    @classmethod
+    def activity_provider_id(cls, provider: AppActivityProvider) -> str:
+        return provider.provider_id
+
+    @classmethod
+    def activity_provider_label(cls, provider: AppActivityProvider) -> str:
+        return provider.label
+
+    @property
+    def disabled_activity_provider_ids(self) -> tuple[str, ...]:
+        configured_ids = getattr(self.cfg, "disabled_activity_provider_ids", ())
+        known_ids = {self.activity_provider_id(provider).casefold() for provider in self.activity_providers}
+        return tuple(
+            provider_id
+            for provider_id in configured_ids
+            if isinstance(provider_id, str) and provider_id.casefold() in known_ids
+        )
+
+    def activity_provider_enabled(self, provider: AppActivityProvider) -> bool:
+        provider_id = self.activity_provider_id(provider)
+        return provider_id.casefold() not in {item.casefold() for item in self.disabled_activity_provider_ids}
+
+    @property
+    def activity_provider_entries(self) -> tuple[AppActivityProviderEntry, ...]:
+        return tuple(
+            AppActivityProviderEntry(
+                provider_id=self.activity_provider_id(provider),
+                label=self.activity_provider_label(provider),
+                enabled=self.activity_provider_enabled(provider),
+            )
+            for provider in self.activity_providers
+        )
+
+    def register_enabled_activity_providers(self) -> None:
+        for provider in self.activity_providers:
+            if self.activity_provider_enabled(provider):
+                self.activity_manager.register(provider)
+            else:
+                self.activity_manager.deregister(provider)
+
+    def deregister_activity_providers(self) -> None:
+        for provider in self.activity_providers:
+            self.activity_manager.deregister(provider)
+
+    def apply_disabled_activity_provider_ids(self, provider_ids: tuple[str, ...]) -> None:
+        next_disabled_ids = tuple(provider_ids)
+        current_entries = {entry.provider_id.casefold(): entry for entry in self.activity_provider_entries}
+        unknown_provider_ids = [
+            provider_id for provider_id in next_disabled_ids if provider_id.casefold() not in current_entries
+        ]
+        if unknown_provider_ids:
+            raise ValueError(f"Unknown app activity providers: {', '.join(unknown_provider_ids)}.")
+        self.cfg.disabled_activity_provider_ids = next_disabled_ids
+        if not self.check_running():
+            return
+        self.register_enabled_activity_providers()
+
     @property
     def relay_advancements_enabled(self) -> bool | None:
         return None
@@ -361,6 +496,66 @@ class App(Generic[ConfigT], ABC):
 
     def apply_relay_advancements_enabled(self, enabled: bool) -> None:
         raise ValueError(f"{self.friendly} does not support {self.relay_advancement_term.lower()} relay.")
+
+    @property
+    def relay_notice_player_session_enabled(self) -> bool | None:
+        if not self.relay_notice_player_session_supported:
+            return None
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return True
+        return cfg.relay_notice_player_session
+
+    def apply_relay_notice_player_session_enabled(self, enabled: bool) -> None:
+        if not self.relay_notice_player_session_supported:
+            raise ValueError(f"{self.friendly} does not support player session notices.")
+        self.cfg.relay_notice_player_session = enabled
+
+    @property
+    def relay_notice_player_joined_enabled(self) -> bool | None:
+        return self.relay_notice_player_session_enabled
+
+    def apply_relay_notice_player_joined_enabled(self, enabled: bool) -> None:
+        self.apply_relay_notice_player_session_enabled(enabled)
+
+    @property
+    def relay_notice_player_left_enabled(self) -> bool | None:
+        return self.relay_notice_player_session_enabled
+
+    def apply_relay_notice_player_left_enabled(self, enabled: bool) -> None:
+        self.apply_relay_notice_player_session_enabled(enabled)
+
+    @property
+    def relay_notice_player_death_enabled(self) -> bool | None:
+        if not self.relay_notice_player_death_supported:
+            return None
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return True
+        return cfg.relay_notice_player_death
+
+    def apply_relay_notice_player_death_enabled(self, enabled: bool) -> None:
+        if not self.relay_notice_player_death_supported:
+            raise ValueError(f"{self.friendly} does not support death notices.")
+        self.cfg.relay_notice_player_death = enabled
+
+    @property
+    def relay_notice_progress_enabled(self) -> bool | None:
+        if not self.relay_notice_progress_supported:
+            return None
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return True
+        return cfg.relay_notice_progress
+
+    def apply_relay_notice_progress_enabled(self, enabled: bool) -> None:
+        if not self.relay_notice_progress_supported:
+            raise ValueError(f"{self.friendly} does not support {self.relay_progress_notice_term.lower()} notices.")
+        self.cfg.relay_notice_progress = enabled
+
+    @property
+    def relay_progress_notice_term(self) -> str:
+        return self.relay_advancement_term
 
     def clear_runtime_fault(self) -> bool:
         if getattr(self, "runtime_fault", None) is None:

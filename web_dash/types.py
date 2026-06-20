@@ -17,6 +17,7 @@ from .runtime_imports import (
     Enum,
     Literal,
     NodeAppMutationAction,
+    NodeAppActivityProviderEntry,
     NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
@@ -57,6 +58,51 @@ class _ModWebBadgeSpec:
     tone: BadgeTone
     icon: str | None = None
     tooltip_text: str | None = None
+
+
+class ModWebNotificationTrayItemKind(Enum):
+    GENERIC = "generic"
+    UPLOAD = "upload"
+    DOWNLOAD = "download"
+
+
+class ModWebNotificationTrayItemState(Enum):
+    IDLE = "idle"
+    ACTIVE = "active"
+    SUCCESS = "success"
+    WARNING = "warning"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebNotificationTrayItem:
+    kind: ModWebNotificationTrayItemKind
+    state: ModWebNotificationTrayItemState
+    label: str
+    detail_text: str | None = None
+    progress_percent: float | None = None
+    node_color_hex: str | None = None
+    app_color_hex: str | None = None
+    blink: bool = False
+
+    def __post_init__(self) -> None:
+        label: str = self.label.strip()
+        if not label:
+            raise ValueError("Notification tray items require a label.")
+        object.__setattr__(self, "label", label)
+        if self.detail_text is not None:
+            detail_text: str = self.detail_text.strip()
+            object.__setattr__(self, "detail_text", detail_text or None)
+        if self.node_color_hex is not None:
+            node_color_hex: str = self.node_color_hex.strip()
+            object.__setattr__(self, "node_color_hex", node_color_hex or None)
+        if self.app_color_hex is not None:
+            app_color_hex: str = self.app_color_hex.strip()
+            object.__setattr__(self, "app_color_hex", app_color_hex or None)
+        if self.progress_percent is None:
+            return
+        if not 0.0 <= self.progress_percent <= 100.0:
+            raise ValueError("Notification tray progress must be between 0 and 100.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +407,13 @@ class ModWebBasePageModel:
     lifecycle_notice_started: bool = field(default=True, kw_only=True)
     lifecycle_notice_stopped: bool = field(default=True, kw_only=True)
     lifecycle_notice_crashed: bool = field(default=True, kw_only=True)
+    relay_notice_player_session: bool | None = field(default=None, kw_only=True)
+    relay_notice_player_death: bool | None = field(default=None, kw_only=True)
+    relay_notice_progress: bool | None = field(default=None, kw_only=True)
+    relay_notice_progress_label: str | None = field(default=None, kw_only=True)
+    relay_advancements_enabled: bool | None = field(default=None, kw_only=True)
+    relay_advancement_term: str | None = field(default=None, kw_only=True)
+    activity_providers: tuple[NodeAppActivityProviderEntry, ...] = field(default=(), kw_only=True)
     tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
 
 
@@ -695,6 +748,8 @@ __all__: tuple[str, ...] = (
     "ModWebConfigEditorLayout",
     "ModWebConfigEditorShape",
     "ModWebHomeNodeSummary",
+    "ModWebNotificationTrayItemKind",
+    "ModWebNotificationTrayItemState",
     "ModWebNodeAppSection",
     "ModWebNodeLink",
     "ModWebNodeStatus",
@@ -720,6 +775,7 @@ __all__: tuple[str, ...] = (
     "_ModWebKillControlState",
     "_ModWebLinkSpec",
     "_ModWebModToolbarBindings",
+    "_ModWebNotificationTrayItem",
     "_ModWebRuntimeToolbarBindings",
     "_ModWebStartStopControlState",
     "_ModWebStatusPageConfig",

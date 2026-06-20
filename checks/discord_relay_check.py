@@ -611,6 +611,41 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
             [(42, "Tester", "factorio", 100)],
         )
 
+    async def test_send_chat_event_to_app_uses_scoped_relay_name_for_sevendays(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay).bot = cast(hikari.GatewayBot, object())
+        cast(Any, relay).names = _NamesStub(relay_display_name="SevenAlice")
+        receiver = _RecordingReceiver()
+        app = SimpleNamespace(
+            _running=True,
+            am_receiver=receiver,
+            friendly="7D2D Alpha",
+            name_cache=SimpleNamespace(get_game_alias=Mock(return_value=None)),
+            scope="sevendays",
+        )
+        event = ChatEvent(
+            room_id="sevendays_alpha",
+            source=ChatEndpointId.discord_channel("321"),
+            author=ChatAuthor(
+                kind=ChatAuthorKind.DISCORD_USER,
+                display_name="Tester",
+                discord_user_id=42,
+            ),
+            content="hello",
+            source_guild_id=100,
+        )
+
+        await relay._send_chat_event_to_app(event, cast(Any, app))
+
+        payload = receiver.payload
+        self.assertIsNotNone(payload)
+        self.assertEqual(getattr(payload, "player"), "SevenAlice")
+        self.assertEqual(getattr(payload, "content"), "hello")
+        self.assertEqual(
+            cast(_NamesStub, cast(Any, relay).names).relay_display_name_calls,
+            [(42, "Tester", "sevendays", 100)],
+        )
+
     async def test_send_chat_event_to_app_keeps_parsed_links_when_event_links_are_empty(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay).bot = cast(hikari.GatewayBot, object())
@@ -709,6 +744,45 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(getattr(payload, "content"), "Tester joined Minecraft Alpha")
+        self.assertIs(getattr(payload, "notice"), notice)
+
+    async def test_send_chat_event_to_app_renders_typed_notice_content_with_scoped_relay_name(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay).bot = cast(hikari.GatewayBot, object())
+        cast(Any, relay).names = _NamesStub(relay_display_name="FactorioAlice")
+        receiver = _RecordingReceiver()
+        app = SimpleNamespace(
+            _running=True,
+            am_receiver=receiver,
+            friendly="Factorio Lab",
+            name_cache=SimpleNamespace(get_game_alias=Mock(return_value=None)),
+            scope="factorio",
+        )
+        notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=RelayNoticeSource.WEB)
+        event = ChatEvent(
+            room_id="factorio_lab",
+            source=ChatEndpointId.discord_channel("321"),
+            author=ChatAuthor(
+                kind=ChatAuthorKind.DISCORD_USER,
+                display_name="Tester",
+                discord_user_id=42,
+            ),
+            content="placeholder",
+            notice=notice,
+            source_guild_id=100,
+        )
+
+        await relay._send_chat_event_to_app(event, cast(Any, app))
+
+        payload = receiver.payload
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(getattr(payload, "player"), "FactorioAlice")
+        self.assertEqual(getattr(payload, "content"), "FactorioAlice joined Factorio Lab")
+        self.assertEqual(
+            cast(_NamesStub, cast(Any, relay).names).relay_display_name_calls,
+            [(42, "Tester", "factorio", 100)],
+        )
         self.assertIs(getattr(payload, "notice"), notice)
 
 

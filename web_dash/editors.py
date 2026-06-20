@@ -55,7 +55,8 @@ from .runtime_imports import (
     NodeConsoleActionParameter,
     NodeConsoleStdoutSnapshot,
     NodeModEntry,
-    NodeModUploadResult,
+    NodeModUploadBatchResult,
+    NodeModUploadSource,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -82,6 +83,7 @@ from .runtime_imports import (
     hikari,
     json,
     quote,
+    tempfile,
 )
 from .service_base import ModWebServiceSupport
 from .types import (
@@ -119,6 +121,10 @@ _CONSOLE_STDOUT_HEIGHT_OPTIONS: tuple[tuple[str, str], ...] = (
     ("36rem", "Tall"),
     ("48rem", "XL"),
 )
+_UPLOAD_PROGRESS_CHUNK_BYTES = 1024 * 1024
+_UPLOAD_RECEIVE_PROGRESS_PERCENT = 72.0
+_UPLOAD_APPLY_PROGRESS_PERCENT = 92.0
+_TRANSFER_CAPACITY_WAIT_SECONDS = 0.2
 
 
 class _ModWebSelectOptionsControl(Protocol):
@@ -1745,8 +1751,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return
             await self._start_download(
                 ui=ui,
+                user=user,
+                model=model,
                 url=self._config_root_download_url(model=model, root_id=root_id, user=user),
                 message=f"Preparing download for config root {root_entries[0].root_label} from {model.app_friendly}.",
+                filenames=(f"{root_entries[0].root_label}.zip",),
             )
 
         def config_file_options(root_id: str) -> tuple[ModWebSearchOption, ...]:
@@ -1938,9 +1947,137 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     ) -> None:
         await self._start_download(
             ui=ui,
+            user=user,
+            model=model,
             url=self._save_download_url(model=model, save=save, user=user),
             message=f"Preparing download for save {save.label} from {model.app_friendly}.",
+            filenames=(save.label,),
         )
+
+    async def _persist_uploaded_file_for_transfer(
+        self,
+        *,
+        upload_file: "FileUpload",
+        transfer_id: int,
+        active_detail_text: str,
+        max_progress_percent: float = _UPLOAD_RECEIVE_PROGRESS_PERCENT,
+    ) -> Path:
+        suffix: str = Path(upload_file.name).suffix
+        with tempfile.NamedTemporaryFile(prefix="yukibot-save-web-", suffix=suffix, delete=False) as handle:
+            temp_path: Path = Path(handle.name)
+        total_size_bytes: int = max(upload_file.size(), 1)
+        written_bytes: int = 0
+        try:
+            with temp_path.open("wb") as output_handle:
+                async for chunk in upload_file.iterate(chunk_size=_UPLOAD_PROGRESS_CHUNK_BYTES):
+                    output_handle.write(chunk)
+                    written_bytes += len(chunk)
+                    progress_percent: float = min(
+                        max_progress_percent,
+                        (written_bytes / total_size_bytes) * max_progress_percent,
+                    )
+                    self._backend.update_transfer_progress(
+                        transfer_id=transfer_id,
+                        progress_percent=progress_percent,
+                        detail_text=active_detail_text,
+                    )
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        return temp_path
+
+    def _mark_transfers_applying(
+        self,
+        *,
+        transfer_ids: tuple[int, ...],
+        detail_text: str,
+        progress_percent: float = _UPLOAD_APPLY_PROGRESS_PERCENT,
+    ) -> None:
+        for transfer_id in transfer_ids:
+            self._backend.update_transfer_progress(
+                transfer_id=transfer_id,
+                progress_percent=progress_percent,
+                detail_text=detail_text,
+            )
+
+    async def _wait_for_upload_transfer_capacity(
+        self,
+        *,
+        user_id: int,
+        requested_slots: int,
+    ) -> int:
+        transfer_limit: int = self._backend.transfer_limit()
+        if requested_slots <= 0:
+            raise ValueError("requested_slots must be positive.")
+        allowed_slots: int = min(requested_slots, transfer_limit)
+        while True:
+            active_slots: int = self._backend.user_active_transfer_slots(user_id=user_id)
+            available_slots: int = max(0, transfer_limit - active_slots)
+            if available_slots > 0:
+                return min(allowed_slots, available_slots)
+            await asyncio.sleep(_TRANSFER_CAPACITY_WAIT_SECONDS)
+
+    async def _upload_mod_batch(
+        self,
+        *,
+        model: ModWebPageModel,
+        upload_files: tuple["FileUpload", ...],
+        user: ModWebUser,
+    ) -> NodeModUploadBatchResult:
+        transfer_ids = self._backend.start_upload_transfers(
+            user_id=user.discord_id,
+            filenames=tuple(upload_file.name for upload_file in upload_files),
+            detail_text=f"Staging mods for {model.app_friendly}.",
+            node_color_hex=self._node_role_color_hex(node_name=model.node_name),
+            app_color_hex=model.app_color_hex,
+        )
+        resolved_uploads: list[tuple[str, Path]] = []
+        try:
+            for upload_file, transfer_id in zip(upload_files, transfer_ids, strict=True):
+                resolved_uploads.append(
+                    (
+                        upload_file.name,
+                        await self._persist_uploaded_file_for_transfer(
+                            upload_file=upload_file,
+                            transfer_id=transfer_id,
+                            active_detail_text=f"Receiving mods for {model.app_friendly}.",
+                        ),
+                    )
+                )
+            self._mark_transfers_applying(
+                transfer_ids=transfer_ids,
+                detail_text=f"Installing mods for {model.app_friendly}.",
+            )
+            if model.node_name == config.MOD_WEB_SERVER.node_name:
+                app = self._resolve_app(model.app_name)
+                result = await self._node_api.upload_mod_paths(
+                    app=app,
+                    upload_sources=tuple(
+                        NodeModUploadSource(source_path=source_path, upload_name=upload_name)
+                        for upload_name, source_path in resolved_uploads
+                    ),
+                    actor_user_id=user.discord_id,
+                )
+            else:
+                node = self._remote_node_link(model.node_name)
+                result = await asyncio.to_thread(
+                    self._remote_mod_uploads,
+                    node,
+                    model.app_name,
+                    tuple(resolved_uploads),
+                    user,
+                )
+        except Exception as xcp:
+            for transfer_id in transfer_ids:
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Mod upload failed: {xcp}")
+            raise
+        else:
+            for transfer_id in transfer_ids:
+                self._backend.complete_transfer(transfer_id=transfer_id, detail_text=f"Installed for {model.app_friendly}.")
+            return result
+        finally:
+            for _, temp_path in resolved_uploads:
+                temp_path.unlink(missing_ok=True)
 
     async def _upload_save(
         self,
@@ -1954,27 +2091,51 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             raise PermissionError(
                 f"{model.save_write_level.name.title()} access is required to upload saves for {model.app_friendly}."
             )
-        temp_path: Path = await self._persist_uploaded_file(upload_file)
+        transfer_ids = self._backend.start_upload_transfers(
+            user_id=user.discord_id,
+            filenames=(upload_file.name,),
+            detail_text=f"Staging save for {model.app_friendly}.",
+            node_color_hex=self._node_role_color_hex(node_name=model.node_name),
+            app_color_hex=model.app_color_hex,
+        )
+        temp_path: Path = await self._persist_uploaded_file_for_transfer(
+            upload_file=upload_file,
+            transfer_id=transfer_ids[0],
+            active_detail_text=f"Receiving save for {model.app_friendly}.",
+        )
         try:
+            self._mark_transfers_applying(
+                transfer_ids=transfer_ids,
+                detail_text=f"Applying save to {model.app_friendly}.",
+            )
             if model.node_name == config.MOD_WEB_SERVER.node_name:
                 app = self._resolve_app(model.app_name)
-                return self._node_api.upload_save_path(
+                result = self._node_api.upload_save_path(
                     app=app,
                     root_id=root_id,
                     source_path=temp_path,
                     upload_name=upload_file.name,
                     actor_user_id=user.discord_id,
                 )
-            node = self._remote_node_link(model.node_name)
-            return await asyncio.to_thread(
-                self._remote_save_upload,
-                node,
-                model.app_name,
-                root_id,
-                temp_path,
-                upload_file.name,
-                user,
-            )
+            else:
+                node = self._remote_node_link(model.node_name)
+                result = await asyncio.to_thread(
+                    self._remote_save_upload,
+                    node,
+                    model.app_name,
+                    root_id,
+                    temp_path,
+                    upload_file.name,
+                    user,
+                )
+        except Exception as xcp:
+            for transfer_id in transfer_ids:
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Save upload failed: {xcp}")
+            raise
+        else:
+            for transfer_id in transfer_ids:
+                self._backend.complete_transfer(transfer_id=transfer_id, detail_text=f"Saved to {model.app_friendly}.")
+            return result
         finally:
             temp_path.unlink(missing_ok=True)
 
@@ -1988,19 +2149,34 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     ) -> NodeBlueprintMutationResult:
         if not self._user_has_level(user, Power_Level.user):
             raise PermissionError(f"User access is required to upload blueprints for {model.app_friendly}.")
+        transfer_ids = self._backend.start_upload_transfers(
+            user_id=user.discord_id,
+            filenames=tuple(upload_file.name for upload_file in upload_files),
+            detail_text=f"Staging blueprint files for {model.app_friendly}.",
+            node_color_hex=self._node_role_color_hex(node_name=model.node_name),
+            app_color_hex=model.app_color_hex,
+        )
         upload_pair: BlueprintUploadPair = classify_blueprint_upload_filenames(
             [upload_file.name for upload_file in upload_files]
         )
         temp_paths: dict[str, Path] = {}
         try:
-            for upload_file in upload_files:
-                temp_paths[upload_file.name] = await self._persist_uploaded_file(upload_file)
+            for upload_file, transfer_id in zip(upload_files, transfer_ids, strict=True):
+                temp_paths[upload_file.name] = await self._persist_uploaded_file_for_transfer(
+                    upload_file=upload_file,
+                    transfer_id=transfer_id,
+                    active_detail_text=f"Receiving blueprint files for {model.app_friendly}.",
+                )
             config_source_path: Path | None = None
             if upload_pair.config_filename is not None:
                 config_source_path = temp_paths[upload_pair.config_filename]
+            self._mark_transfers_applying(
+                transfer_ids=transfer_ids,
+                detail_text=f"Applying blueprint files to {model.app_friendly}.",
+            )
             if model.node_name == config.MOD_WEB_SERVER.node_name:
                 app = self._resolve_app(model.app_name)
-                return self._node_api.upload_blueprint_path(
+                result = self._node_api.upload_blueprint_path(
                     app=app,
                     session_name=session_name,
                     source_path=temp_paths[upload_pair.module_filename],
@@ -2009,22 +2185,34 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     config_source_path=config_source_path,
                     config_upload_name=upload_pair.config_filename,
                 )
-            node = self._remote_node_link(model.node_name)
-            return await asyncio.to_thread(
-                self._remote_blueprint_upload,
-                node,
-                model.app_name,
-                session_name,
-                tuple[tuple[str, Path], ...](
-                    (filename, temp_paths[filename])
-                    for filename in (
-                        (upload_pair.module_filename,)
-                        if upload_pair.config_filename is None
-                        else (upload_pair.module_filename, upload_pair.config_filename)
-                    )
-                ),
-                user,
-            )
+            else:
+                node = self._remote_node_link(model.node_name)
+                result = await asyncio.to_thread(
+                    self._remote_blueprint_upload,
+                    node,
+                    model.app_name,
+                    session_name,
+                    tuple[tuple[str, Path], ...](
+                        (filename, temp_paths[filename])
+                        for filename in (
+                            (upload_pair.module_filename,)
+                            if upload_pair.config_filename is None
+                            else (upload_pair.module_filename, upload_pair.config_filename)
+                        )
+                    ),
+                    user,
+                )
+        except Exception as xcp:
+            for transfer_id in transfer_ids:
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Blueprint upload failed: {xcp}")
+            raise
+        else:
+            for transfer_id in transfer_ids:
+                self._backend.complete_transfer(
+                    transfer_id=transfer_id,
+                    detail_text=f"Uploaded to {model.app_friendly}.",
+                )
+            return result
         finally:
             for temp_path in temp_paths.values():
                 temp_path.unlink(missing_ok=True)
@@ -2048,36 +2236,54 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_blueprint_delete, node, model.app_name, blueprint_id, user)
 
-    async def _upload_mod(
+    async def _upload_mods(
         self,
         *,
         model: ModWebPageModel,
-        upload_file: "FileUpload",
+        upload_files: tuple["FileUpload", ...],
         user: ModWebUser,
-    ) -> NodeModUploadResult:
+    ) -> NodeModUploadBatchResult:
         if not self._user_has_level(user, Power_Level.user):
             raise PermissionError(f"User access is required to upload mods for {model.app_friendly}.")
-        temp_path: Path = await self._persist_uploaded_file(upload_file)
-        try:
-            if model.node_name == config.MOD_WEB_SERVER.node_name:
-                app = self._resolve_app(model.app_name)
-                return await self._node_api.upload_mod_path(
-                    app=app,
-                    source_path=temp_path,
-                    upload_name=upload_file.name,
-                    actor_user_id=user.discord_id,
-                )
-            node = self._remote_node_link(model.node_name)
-            return await asyncio.to_thread(
-                self._remote_mod_upload,
-                node,
-                model.app_name,
-                temp_path,
-                upload_file.name,
-                user,
+        if not upload_files:
+            raise ValueError("At least one mod file is required.")
+        pending_uploads: list["FileUpload"] = list(upload_files)
+        batch_results: list[NodeModUploadBatchResult] = []
+        while pending_uploads:
+            batch_size = await self._wait_for_upload_transfer_capacity(
+                user_id=user.discord_id,
+                requested_slots=len(pending_uploads),
             )
-        finally:
-            temp_path.unlink(missing_ok=True)
+            current_batch: tuple["FileUpload", ...] = tuple(pending_uploads[:batch_size])
+            try:
+                batch_result = await self._upload_mod_batch(model=model, upload_files=current_batch, user=user)
+            except RuntimeError as xcp:
+                if "Transfer limit reached" in str(xcp):
+                    await asyncio.sleep(_TRANSFER_CAPACITY_WAIT_SECONDS)
+                    continue
+                raise
+            del pending_uploads[:batch_size]
+            batch_results.append(batch_result)
+
+        uploaded_mods: tuple[NodeModEntry, ...] = tuple(
+            mod
+            for batch_result in batch_results
+            for mod in batch_result.mods
+        )
+        if not uploaded_mods:
+            raise RuntimeError("Mod upload completed without uploaded mods.")
+        message = (
+            batch_results[0].message
+            if len(uploaded_mods) == 1
+            else f"Uploaded {len(uploaded_mods)} mods for {model.app_friendly}."
+        )
+        return NodeModUploadBatchResult(
+            app_name=model.app_name,
+            app_friendly=model.app_friendly,
+            node=batch_results[-1].node,
+            message=message,
+            mods=uploaded_mods,
+        )
 
     async def _rename_save(
         self,

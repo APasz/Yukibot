@@ -35,7 +35,7 @@ from _discord import (
 from _file import File_Utils
 from _minecraft_heads import minecraft_avatar_uri
 from _security import Power_Level
-from apps._app import AM_Receiver, App, AppRuntimeFaultKind, RelayAdvancementTerms
+from apps._app import AM_Receiver, App, AppActivityProvider, AppActivityProviderMetadata, AppRuntimeFaultKind, RelayAdvancementTerms
 from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType, normalise_app_version
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
@@ -1562,6 +1562,8 @@ class Minecraft(App[Minecraft_Config]):
     cfg_cls: type[Minecraft_Config] = Minecraft_Config
     chat_relay_outbound = True
     relay_advancement_terms = RelayAdvancementTerms("Advancement", "Advancements")
+    relay_notice_player_session_supported = True
+    relay_notice_player_death_supported = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: Minecraft_Config):
         self.manage_embed_color = 0x22C55E
@@ -2150,6 +2152,8 @@ class Matchers:
             )
 
     async def match_death(self, line: str):
+        if self.app.relay_notice_player_death_enabled is False:
+            return
         if match := DEATH_RE.match(line):
             player, content = match.groups()
             content = _resolve_minecraft_death_mentions(content, app=self.app)
@@ -2340,6 +2344,8 @@ class Players:
         if player in self._players:
             return
         self._players.add(player)
+        if self.app.relay_notice_player_joined_enabled is False:
+            return
         relay_player_id = _resolve_minecraft_player_user_id(player, app=self.app)
         notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=source)
         app_friendly = getattr(self.app, "friendly", self.app.name)
@@ -2359,6 +2365,8 @@ class Players:
             return
         relay_player_id = _resolve_minecraft_player_user_id(player, app=self.app)
         self._players.discard(player)
+        if self.app.relay_notice_player_left_enabled is False:
+            return
         notice = PlayerSessionNotice(action=PlayerSessionAction.LEFT, source=source)
         app_friendly = getattr(self.app, "friendly", self.app.name)
         DC_Relay.add(
@@ -2426,6 +2434,11 @@ class Activities:
         self._time_task: asyncio.Task[None] | None = None
         self._running = False
         self.providers = [Provider_Day(app)]
+        set_activity_providers = getattr(self.app, "set_activity_providers", None)
+        if callable(set_activity_providers):
+            set_activity_providers(self.providers)
+        else:
+            self.app.providers = self.providers
         self.tasks: set[asyncio.Task[None]] = set()
 
     async def start(self):
@@ -2433,28 +2446,37 @@ class Activities:
         if self.tasks:
             return
         self._running = True
+        register_enabled_activity_providers = getattr(self.app, "register_enabled_activity_providers", None)
+        if callable(register_enabled_activity_providers):
+            register_enabled_activity_providers()
+        else:
+            for provider in self.providers:
+                self.app.activity_manager.register(provider)
         for prov in self.providers:
-            self.app.activity_manager.register(prov)
             self.tasks.update(asyncio.create_task(func()) for func in prov.task_funcs)
 
     async def stop(self):
         self._running = False
-        for prov in self.providers:
-            self.app.activity_manager.deregister(prov)
+        deregister_activity_providers = getattr(self.app, "deregister_activity_providers", None)
+        if callable(deregister_activity_providers):
+            deregister_activity_providers()
+        else:
+            for provider in self.providers:
+                self.app.activity_manager.deregister(provider)
         tasks = tuple(self.tasks)
         self.tasks.clear()
         for task in tasks:
             await self.app._cancel_background_task(task, label="activity task")
 
 
-class Provider_Day(config.Activity_Provider):
+class Provider_Day(AppActivityProvider):
+    metadata = AppActivityProviderMetadata(provider_id="day", label="Day Counter")
+
     def __init__(self, app: Minecraft):
-        self.app = app
-        self.activity_scope_name = getattr(app, "name", None)
+        super().__init__(app)
         self._timedelta = None
         self._count = 0
-        self.task_funcs = [self._get_time]
-        super().__init__()
+        self.task_funcs = (self._get_time,)
 
     async def get(self) -> str | None:
         return f"D{self._timedelta.days}" if self._timedelta else None

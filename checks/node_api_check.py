@@ -20,7 +20,7 @@ from fastapi import HTTPException, Request, WebSocketDisconnect
 import config
 from _manager import AppStartBlocker, AppStartBlockerKind
 from _security import Access_Control, Power_Level
-from apps._app import App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
+from apps._app import App, AppActivityProvider, AppActivityProviderMetadata, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
 from apps._config import App_Config, AppTitleFont, AppVersion, Mod_Config, ModDownloadBlockReason, ModType
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
@@ -72,7 +72,9 @@ from node_api import (
     NodeFontSourceSettingsMutationResult,
     NodeModMutationAction,
     NodeModMutationResult,
+    NodeModUploadBatchResult,
     NodeModUploadResult,
+    NodeModUploadSource,
     NodeRelayTTSRequest,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -1590,6 +1592,54 @@ class NodeApiTests(unittest.TestCase):
         manager.reload_mods.assert_awaited_once()
         manager.add.assert_awaited_once()
 
+    def test_upload_mod_paths_supports_multiple_files(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_source = root / "node-upload-1.tmp"
+            second_source = root / "node-upload-2.tmp"
+            first_source.write_bytes(b"mod-data-1")
+            second_source.write_bytes(b"mod-data-2")
+            mods_dir = root / "mods"
+            mods_dir.mkdir()
+            first_installed_path = mods_dir / "CoolMod.jar"
+            second_installed_path = mods_dir / "AddonPack.zip"
+            first_installed_path.write_bytes(b"mod-data-1")
+            second_installed_path.write_bytes(b"mod-data-2")
+            installed_mods = {
+                "CoolMod.jar": _TestMod(Mod_Config(name=first_installed_path.name, directory=mods_dir)),
+                "AddonPack.zip": _TestMod(Mod_Config(name=second_installed_path.name, directory=mods_dir)),
+            }
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            added_names: list[str] = []
+
+            async def add_mod(path: Path, *, atomic: bool = True) -> Mod:
+                self.assertTrue(atomic)
+                self.assertTrue(path.exists())
+                added_names.append(path.name)
+                return installed_mods[path.name]
+
+            manager.add = AsyncMock(side_effect=add_mod)
+            app = _build_app(manager)
+
+            result = asyncio.run(
+                NodeApiService().upload_mod_paths(
+                    app=app,
+                    upload_sources=(
+                        NodeModUploadSource(source_path=first_source, upload_name="CoolMod.jar"),
+                        NodeModUploadSource(source_path=second_source, upload_name="AddonPack.zip"),
+                    ),
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertIsInstance(result, NodeModUploadBatchResult)
+        self.assertEqual(tuple(mod.name for mod in result.mods), ("CoolMod.jar", "AddonPack.zip"))
+        self.assertIn("Uploaded 2 mods", result.message)
+        self.assertEqual(added_names, ["CoolMod.jar", "AddonPack.zip"])
+        manager.reload_mods.assert_awaited_once()
+        self.assertEqual(manager.add.await_count, 2)
+
     def test_upload_mod_path_rejects_directory_filename(self) -> None:
         with TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "node-upload.tmp"
@@ -1987,9 +2037,82 @@ class NodeApiTests(unittest.TestCase):
         self.assertFalse(entry.lifecycle_notice_started)
         self.assertTrue(entry.lifecycle_notice_stopped)
         self.assertFalse(entry.lifecycle_notice_crashed)
+        self.assertIsNone(entry.relay_notice_player_session)
+        self.assertIsNone(entry.relay_notice_player_death)
+        self.assertIsNone(entry.relay_notice_progress)
+        self.assertIsNone(entry.relay_notice_progress_label)
+        self.assertIsNone(entry.relay_advancements_enabled)
+        self.assertIsNone(entry.relay_advancement_term)
         self.assertIsNotNone(entry.resource_points)
         self.assertEqual(entry.resource_points.cpu_points_running if entry.resource_points is not None else None, 3)
         self.assertEqual(entry.resource_points.cpu_points_startup if entry.resource_points is not None else None, 5)
+
+    def test_build_app_entry_captures_relay_advancement_metadata(self) -> None:
+        class _RelayApp(_DummyApp):
+            @property
+            def relay_advancements_enabled(self) -> bool | None:
+                return bool(getattr(self, "_relay_advancements_enabled_state", False))
+
+            @property
+            def relay_advancement_term(self) -> str:
+                return "Advancement"
+
+        app = _build_app(Mock())
+        app.__class__ = _RelayApp
+        app._relay_advancements_enabled_state = False
+
+        entry = NodeApiService().build_app_entry(app)
+
+        self.assertFalse(entry.relay_advancements_enabled)
+        self.assertEqual(entry.relay_advancement_term, "Advancement")
+
+    def test_build_app_entry_captures_activity_provider_metadata(self) -> None:
+        class _ActivityProvider(AppActivityProvider):
+            metadata = AppActivityProviderMetadata(provider_id="day", label="Day Counter")
+
+            async def get(self) -> str | None:
+                return None
+
+        app = _build_app(Mock())
+        app.set_activity_providers((_ActivityProvider(app),))
+        app.cfg.disabled_activity_provider_ids = ("day",)
+
+        entry = NodeApiService().build_app_entry(app)
+
+        self.assertEqual(len(entry.activity_providers), 1)
+        self.assertEqual(entry.activity_providers[0].provider_id, "day")
+        self.assertEqual(entry.activity_providers[0].label, "Day Counter")
+        self.assertFalse(entry.activity_providers[0].enabled)
+
+    def test_app_activity_provider_requires_explicit_metadata(self) -> None:
+        with self.assertRaises(TypeError):
+
+            class _InvalidActivityProvider(AppActivityProvider):
+                async def get(self) -> str | None:
+                    return None
+
+    def test_build_app_entry_captures_generic_relay_notice_metadata(self) -> None:
+        class _RelayNoticeApp(_DummyApp):
+            relay_notice_player_session_supported = True
+            relay_notice_player_death_supported = True
+            relay_notice_progress_supported = True
+
+            @property
+            def relay_progress_notice_term(self) -> str:
+                return "Research"
+
+        app = _build_app(Mock())
+        app.__class__ = _RelayNoticeApp
+        app.cfg.relay_notice_player_session = False
+        app.cfg.relay_notice_player_death = False
+        app.cfg.relay_notice_progress = False
+
+        entry = NodeApiService().build_app_entry(app)
+
+        self.assertFalse(entry.relay_notice_player_session)
+        self.assertFalse(entry.relay_notice_player_death)
+        self.assertFalse(entry.relay_notice_progress)
+        self.assertEqual(entry.relay_notice_progress_label, "Research")
 
     def test_build_map_manifest_uses_squaremap_settings_and_initial_world(self) -> None:
         class _MappedApp(_DummyApp):
@@ -2686,6 +2809,7 @@ class NodeApiTests(unittest.TestCase):
                     lifecycle_notice_started=False,
                     lifecycle_notice_stopped=True,
                     lifecycle_notice_crashed=False,
+                    disabled_activity_provider_ids=("day",),
                     running_cpu_points=3,
                     running_ram_points=7,
                     startup_cpu_points=None,
@@ -2702,11 +2826,140 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(details.running_ram_points, 7)
         self.assertIsNone(details.startup_cpu_points)
         self.assertIsNone(details.startup_ram_points)
+        self.assertEqual(details.disabled_activity_provider_ids, ("day",))
         self.assertTrue(details.steam_update_enabled)
         self.assertEqual(details.steam_update_selected_branch, "latest_experimental")
         self.assertEqual(result.action, NodeAppMutationAction.UPDATE_DETAILS)
         self.assertEqual(result.app_friendly, "Demo Alpha")
         self.assertEqual(result.message, "Updated details for Demo Alpha.")
+
+    def test_mutate_app_update_details_passes_relay_advancement_toggle(self) -> None:
+        class _RelayApp(_DummyApp):
+            @property
+            def relay_advancements_enabled(self) -> bool | None:
+                return bool(getattr(self, "_relay_advancements_enabled_state", False))
+
+            @property
+            def relay_advancement_term(self) -> str:
+                return "Advancement"
+
+            def apply_relay_advancements_enabled(self, enabled: bool) -> None:
+                self._relay_advancements_enabled_state = enabled
+
+        app = _build_app(Mock())
+        app.__class__ = _RelayApp
+        app._relay_advancements_enabled_state = True
+        manager = Mock()
+        manager.start_blocker = Mock(return_value=None)
+        manager.update_app_details = Mock(return_value="Demo Alpha")
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch.object(
+            service,
+            "build_app_runtime_summary",
+            new=AsyncMock(
+                return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=app.chat_relay_support,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )
+            ),
+        ):
+            asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.UPDATE_DETAILS,
+                    actor_user_id=42,
+                    friendly_name="Demo Alpha",
+                    notes="Main shard",
+                    lifecycle_notice_started=False,
+                    lifecycle_notice_stopped=True,
+                    lifecycle_notice_crashed=False,
+                    relay_advancements_enabled=False,
+                    running_cpu_points=3,
+                    running_ram_points=7,
+                    startup_cpu_points=None,
+                    startup_ram_points=None,
+                )
+            )
+
+        manager.update_app_details.assert_called_once()
+        details = manager.update_app_details.call_args.args[1]
+        self.assertFalse(details.relay_advancements_enabled)
+
+    def test_mutate_app_update_details_passes_generic_relay_notice_toggles(self) -> None:
+        class _RelayNoticeApp(_DummyApp):
+            relay_notice_player_session_supported = True
+            relay_notice_player_death_supported = True
+            relay_notice_progress_supported = True
+
+            @property
+            def relay_progress_notice_term(self) -> str:
+                return "Research"
+
+        app = _build_app(Mock())
+        app.__class__ = _RelayNoticeApp
+        manager = Mock()
+        manager.start_blocker = Mock(return_value=None)
+        manager.update_app_details = Mock(return_value="Demo Alpha")
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with patch.object(
+            service,
+            "build_app_runtime_summary",
+            new=AsyncMock(
+                return_value=NodeAppRuntimeSummary(
+                    running=False,
+                    enabled=True,
+                    version=None,
+                    player_count=None,
+                    player_capacity=None,
+                    relay_support=app.chat_relay_support,
+                    storage_percent=None,
+                    storage_free_bytes=None,
+                    storage_total_bytes=None,
+                )
+            ),
+        ):
+            asyncio.run(
+                service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.UPDATE_DETAILS,
+                    actor_user_id=42,
+                    friendly_name="Demo Alpha",
+                    notes="Main shard",
+                    lifecycle_notice_started=False,
+                    lifecycle_notice_stopped=True,
+                    lifecycle_notice_crashed=False,
+                    relay_notice_player_session=False,
+                    relay_notice_player_death=False,
+                    relay_notice_progress=False,
+                    running_cpu_points=3,
+                    running_ram_points=7,
+                    startup_cpu_points=None,
+                    startup_ram_points=None,
+                )
+            )
+
+        manager.update_app_details.assert_called_once()
+        details = manager.update_app_details.call_args.args[1]
+        self.assertFalse(details.relay_notice_player_session)
+        self.assertFalse(details.relay_notice_player_death)
+        self.assertFalse(details.relay_notice_progress)
 
     def test_mutate_app_update_details_allows_single_resource_startup_override(self) -> None:
         app = _build_app(Mock())

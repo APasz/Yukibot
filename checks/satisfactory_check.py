@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -20,12 +21,14 @@ from apps.satisfactory import (
     Satisfactory_Config,
     SatisfactoryBlueprintOwnershipStore,
     SatisfactoryNetworkQuality,
+    SatisfactoryPlayerSessionMatcher,
     SatisfactoryServerState,
     SatisfactorySettings,
     SatisfactorySettingsSnapshot,
     _parse_api_endpoint,
     detect_satisfactory_version,
 )
+from relay_notices import PlayerSessionAction
 
 
 class _FakeBridge:
@@ -160,6 +163,14 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         app._blueprint_ownership_store = SatisfactoryBlueprintOwnershipStore(
             app.dir_log / "satisfactory-blueprints.json"
         )
+        return app
+
+    @staticmethod
+    def _player_session_app() -> Satisfactory:
+        app = object.__new__(Satisfactory)
+        app.name = "satisfactory_alpha"
+        app.friendly = "Satisfactory"
+        app.scope = "satisfactory"
         return app
 
     def test_loads_cached_settings_as_typed_values(self) -> None:
@@ -378,6 +389,101 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(deleted.relative_path, "Session Legacy/Legacy .sbp")
         self.assertFalse(blueprint_path.exists())
+
+    async def test_player_session_matcher_emits_join_and_leave_notices(self) -> None:
+        matcher = SatisfactoryPlayerSessionMatcher(self._player_session_app())
+        login_line = (
+            "[2026.06.18-07.58.00:510][638]LogNet: Login request: "
+            "?Name=asdblackmea userId: Steam:2 "
+            "(ForeignId=[Type=6 Handle=1 RepData=[C92A592D01001001]) platform: NULL"
+        )
+        join_line = "[2026.06.18-07.58.03:710][719]LogNet: Join succeeded: asdblackmea"
+        close_line = (
+            "[2026.06.18-08.11.05:233][ 61]LogNet: UNetConnection::Close: "
+            "[UNetConnection] RemoteAddr: 124.187.226.10:55421, Name: IpConnection_2147397955, "
+            "Driver: Name:GameNetDriver Def:GameNetDriver FGDSIpNetDriver_2147482163, IsServer: YES, "
+            "PC: BP_PlayerController_C_2147397296, Owner: BP_PlayerController_C_2147397296, "
+            "UniqueId: Steam:2 (ForeignId=[Type=6 Handle=1 RepData=[C92A592D01001001]), "
+            "Channels: 352, Time: 2026.06.18-08.11.05"
+        )
+
+        with patch("apps.satisfactory.DC_Relay.add") as add_mock:
+            await matcher.match(login_line)
+            await matcher.match(join_line)
+
+            self.assertEqual(add_mock.call_count, 1)
+            join_message = add_mock.call_args_list[0].args[0]
+            self.assertEqual(join_message.player, "asdblackmea")
+            self.assertEqual(join_message.content, "asdblackmea joined Satisfactory")
+            self.assertIsNotNone(join_message.notice)
+            self.assertEqual(join_message.notice.action, PlayerSessionAction.JOINED)
+
+            await matcher.match(close_line)
+
+            self.assertEqual(add_mock.call_count, 2)
+            leave_message = add_mock.call_args_list[1].args[0]
+            self.assertEqual(leave_message.player, "asdblackmea")
+            self.assertEqual(leave_message.content, "asdblackmea left Satisfactory")
+            self.assertIsNotNone(leave_message.notice)
+            self.assertEqual(leave_message.notice.action, PlayerSessionAction.LEFT)
+
+    async def test_player_session_matcher_deduplicates_connection_close_lines(self) -> None:
+        matcher = SatisfactoryPlayerSessionMatcher(self._player_session_app())
+        login_line = (
+            "[2026.06.18-07.58.00:510][638]LogNet: Login request: "
+            "?Name=asdblackmea userId: Steam:2 "
+            "(ForeignId=[Type=6 Handle=1 RepData=[C92A592D01001001]) platform: NULL"
+        )
+        join_line = "[2026.06.18-07.58.03:710][719]LogNet: Join succeeded: asdblackmea"
+        close_line = (
+            "[2026.06.18-08.11.05:233][ 61]LogNet: UNetConnection::Close: "
+            "[UNetConnection] RemoteAddr: 124.187.226.10:55421, Name: IpConnection_2147397955, "
+            "Driver: Name:GameNetDriver Def:GameNetDriver FGDSIpNetDriver_2147482163, IsServer: YES, "
+            "PC: BP_PlayerController_C_2147397296, Owner: BP_PlayerController_C_2147397296, "
+            "UniqueId: Steam:2 (ForeignId=[Type=6 Handle=1 RepData=[C92A592D01001001]), "
+            "Channels: 352, Time: 2026.06.18-08.11.05"
+        )
+        remove_line = (
+            "[2026.06.18-08.11.05:266][ 62]LogNet: UNetDriver::RemoveClientConnection - "
+            "Removed address 124.187.226.10:55421 from MappedClientConnections for: [UNetConnection] "
+            "RemoteAddr: 124.187.226.10:55421, Name: IpConnection_2147397955, Driver: "
+            "Name:GameNetDriver Def:GameNetDriver FGDSIpNetDriver_2147482163, IsServer: YES, "
+            "PC: BP_PlayerController_C_2147397296, Owner: BP_PlayerController_C_2147397296, "
+            "UniqueId: Steam:2 (ForeignId=[Type=6 Handle=1 RepData=[C92A592D01001001])"
+        )
+
+        with patch("apps.satisfactory.DC_Relay.add") as add_mock:
+            await matcher.match(login_line)
+            await matcher.match(join_line)
+            await matcher.match(close_line)
+            await matcher.match(remove_line)
+
+            self.assertEqual(add_mock.call_count, 2)
+            leave_message = add_mock.call_args_list[1].args[0]
+            self.assertIsNotNone(leave_message.notice)
+            self.assertEqual(leave_message.notice.action, PlayerSessionAction.LEFT)
+
+    async def test_player_session_matcher_ignores_close_without_join(self) -> None:
+        matcher = SatisfactoryPlayerSessionMatcher(self._player_session_app())
+        login_line = (
+            "[2026.06.18-07.58.00:510][638]LogNet: Login request: "
+            "?Name=asdblackmea userId: Steam:2 "
+            "(ForeignId=[Type=6 Handle=1 RepData=[C92A592D01001001]) platform: NULL"
+        )
+        close_line = (
+            "[2026.06.18-08.11.05:233][ 61]LogNet: UNetConnection::Close: "
+            "[UNetConnection] RemoteAddr: 124.187.226.10:55421, Name: IpConnection_2147397955, "
+            "Driver: Name:GameNetDriver Def:GameNetDriver FGDSIpNetDriver_2147482163, IsServer: YES, "
+            "PC: BP_PlayerController_C_2147397296, Owner: BP_PlayerController_C_2147397296, "
+            "UniqueId: Steam:2 (ForeignId=[Type=6 Handle=1 RepData=[C92A592D01001001]), "
+            "Channels: 352, Time: 2026.06.18-08.11.05"
+        )
+
+        with patch("apps.satisfactory.DC_Relay.add") as add_mock:
+            await matcher.match(login_line)
+            await matcher.match(close_line)
+
+            add_mock.assert_not_called()
 
     async def test_save_persists_cache_without_bridge_when_stopped(self) -> None:
         self._setting("FG.AutosaveInterval").update("900")

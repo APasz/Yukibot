@@ -2812,9 +2812,10 @@ class DC_Relay(metaclass=Singleton):
         channel = hikari.TextableChannel(app=self.bot, id=channel_id, name=channel_name, type=1)
         author = self._app_author_display_name(event, app)
         notice = event.resolved_notice()
+        rendered_content = event.render_content(player_name=author, app_name=app_friendly)
         payload = App_Bound(
             channel,
-            event.render_content(app_name=app_friendly),
+            rendered_content,
             author,
             files=[_fileish(attachment) for attachment in event.attachments],
             enrich=not event.links,

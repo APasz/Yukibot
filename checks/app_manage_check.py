@@ -29,7 +29,16 @@ from _manager import (
 )
 from _relay_embeds import build_app_lifecycle_embed
 from _security import Power_Level
-from apps._app import AM_Receiver, App, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport, RelayAdvancementTerms
+from apps._app import (
+    AM_Receiver,
+    App,
+    AppActivityProvider,
+    AppActivityProviderMetadata,
+    AppRuntimeFault,
+    AppRuntimeFaultKind,
+    ChatRelaySupport,
+    RelayAdvancementTerms,
+)
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
     App_Config,
@@ -3107,6 +3116,203 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(payload["alpha"]["lifecycle_notice_stopped"])
             self.assertFalse(payload["alpha"]["lifecycle_notice_crashed"])
             self.assertEqual(payload["alpha"]["resource_points"], {"running": {"cpu_points": 3, "ram_points": 5}})
+
+    def test_update_app_details_persists_relay_advancement_toggle_for_supported_apps(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps(
+                    {
+                        "alpha": {
+                            "friendly_name": "Minecraft Alpha",
+                            "directory": "{APPS}/minecraft",
+                            "relay_advancements": True,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app = _build_minecraft_app(relay_advancements=True)
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+
+            os.chdir(temp_path)
+            try:
+                manager.update_app_details(
+                    app,
+                    AppDetailsUpdate(
+                        friendly_name="Minecraft Alpha",
+                        notes=None,
+                        lifecycle_notice_started=True,
+                        lifecycle_notice_stopped=True,
+                        lifecycle_notice_crashed=True,
+                        running_cpu_points=3,
+                        running_ram_points=5,
+                        startup_cpu_points=None,
+                        startup_ram_points=None,
+                        relay_advancements_enabled=False,
+                    ),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertFalse(app.relay_advancements_enabled)
+            self.assertFalse(payload["alpha"]["relay_advancements"])
+
+    def test_update_app_details_persists_disabled_activity_provider_ids(self) -> None:
+        class _ActivityProvider(AppActivityProvider):
+            metadata = AppActivityProviderMetadata(provider_id="clock", label="Clock")
+
+            async def get(self) -> str | None:
+                return None
+
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps({"alpha": {"friendly_name": "Dummy", "directory": "{APPS}/dummy"}}),
+                encoding="utf-8",
+            )
+            app = _build_dummy_app()
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            app.set_activity_providers((_ActivityProvider(app),))
+            app.check_running = Mock(return_value=False)  # type: ignore[method-assign]
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+
+            os.chdir(temp_path)
+            try:
+                manager.update_app_details(
+                    app,
+                    AppDetailsUpdate(
+                        friendly_name="Dummy",
+                        notes=None,
+                        lifecycle_notice_started=True,
+                        lifecycle_notice_stopped=True,
+                        lifecycle_notice_crashed=True,
+                        running_cpu_points=3,
+                        running_ram_points=5,
+                        startup_cpu_points=None,
+                        startup_ram_points=None,
+                        disabled_activity_provider_ids=("clock",),
+                    ),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertEqual(app.cfg.disabled_activity_provider_ids, ("clock",))
+            self.assertEqual(payload["alpha"]["disabled_activity_provider_ids"], ["clock"])
+
+
+    def test_update_app_details_syncs_activity_provider_registration_while_running(self) -> None:
+        class _ActivityProvider(AppActivityProvider):
+            metadata = AppActivityProviderMetadata(provider_id="clock", label="Clock")
+
+            async def get(self) -> str | None:
+                return None
+
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps({"alpha": {"friendly_name": "Dummy", "directory": "{APPS}/dummy"}}),
+                encoding="utf-8",
+            )
+            app = _build_dummy_app()
+            provider = _ActivityProvider(app)
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            app.set_activity_providers((provider,))
+            app.activity_manager = Mock()
+            app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+
+            os.chdir(temp_path)
+            try:
+                manager.update_app_details(
+                    app,
+                    AppDetailsUpdate(
+                        friendly_name="Dummy",
+                        notes=None,
+                        lifecycle_notice_started=True,
+                        lifecycle_notice_stopped=True,
+                        lifecycle_notice_crashed=True,
+                        running_cpu_points=3,
+                        running_ram_points=5,
+                        startup_cpu_points=None,
+                        startup_ram_points=None,
+                        disabled_activity_provider_ids=("clock",),
+                    ),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            app.activity_manager.deregister.assert_called_once_with(provider)
+
+    def test_update_app_details_persists_generic_relay_notice_toggles_for_supported_apps(self) -> None:
+        class _RelayNoticeApp(_DummyApp):
+            relay_notice_player_session_supported = True
+            relay_notice_player_death_supported = True
+            relay_notice_progress_supported = True
+
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps({"alpha": {"friendly_name": "Dummy", "directory": "{APPS}/dummy"}}),
+                encoding="utf-8",
+            )
+            app = _build_dummy_app()
+            app.__class__ = _RelayNoticeApp
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+
+            os.chdir(temp_path)
+            try:
+                manager.update_app_details(
+                    app,
+                    AppDetailsUpdate(
+                        friendly_name="Dummy",
+                        notes=None,
+                        lifecycle_notice_started=True,
+                        lifecycle_notice_stopped=True,
+                        lifecycle_notice_crashed=True,
+                        running_cpu_points=3,
+                        running_ram_points=5,
+                        startup_cpu_points=None,
+                        startup_ram_points=None,
+                        relay_notice_player_session=False,
+                        relay_notice_player_death=False,
+                        relay_notice_progress=False,
+                    ),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertFalse(app.relay_notice_player_session_enabled)
+            self.assertFalse(app.relay_notice_player_death_enabled)
+            self.assertFalse(app.relay_notice_progress_enabled)
+            self.assertFalse(payload["alpha"]["relay_notice_player_session"])
+            self.assertFalse(payload["alpha"]["relay_notice_player_death"])
+            self.assertFalse(payload["alpha"]["relay_notice_progress"])
 
     def test_update_app_details_allows_single_resource_startup_override(self) -> None:
         manager = object.__new__(App_Manager)

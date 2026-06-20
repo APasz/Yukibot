@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+
 from .constants import log
 from .nicegui_protocols import ModWebFastApiApp, WebChatRelayPublisher
 from .runtime_imports import (
@@ -11,7 +16,31 @@ from .runtime_imports import (
     Power_Level,
     RelayTTSQueue,
 )
+from .types import (
+    ModWebNotificationTrayItemKind,
+    ModWebNotificationTrayItemState,
+    _ModWebNotificationTrayItem,
+)
 from .utils import _http_exception
+
+_USER_TRANSFER_LIMIT = 3
+_DOWNLOAD_TRANSFER_ACTIVE_SECONDS = 8.0
+_TRANSFER_DISPLAY_SECONDS = 10.0
+
+
+@dataclass(slots=True)
+class _TransferRecord:
+    transfer_id: int
+    user_id: int
+    item: _ModWebNotificationTrayItem
+    reserved_slots: int
+    created_at: float
+    active_until: float | None = None
+    display_until: float | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.display_until is None
 
 
 class ModWebDashboardBackend:
@@ -26,6 +55,13 @@ class ModWebDashboardBackend:
         self._auth: ModWebAuthService = auth or ModWebAuthService()
         self._node_api: NodeApiService = node_api or NodeApiService()
         self._chat_relay: WebChatRelayPublisher | None = None
+        self._transfer_lock = threading.Lock()
+        self._transfer_records: dict[int, _TransferRecord] = {}
+        self._transfer_auto_complete_timers: dict[int, threading.Timer] = {}
+        self._transfer_expiry_timers: dict[int, threading.Timer] = {}
+        self._transfer_subscribers: dict[int, dict[int, Callable[[], None]]] = {}
+        self._next_transfer_id = 1
+        self._next_transfer_subscription_id = 1
         self._node_api.set_web_auth(self._auth)
 
     @property
@@ -107,6 +143,329 @@ class ModWebDashboardBackend:
         if self._acl is None:
             return Power_Level.guest
         return self._acl.level_of(user_id)
+
+    def start_transfers(
+        self,
+        *,
+        user_id: int,
+        kind: ModWebNotificationTrayItemKind,
+        filenames: tuple[str, ...],
+        detail_text: str,
+        initial_progress_percent: float,
+        node_color_hex: str | None = None,
+        app_color_hex: str | None = None,
+        auto_complete_after_seconds: float | None = None,
+    ) -> tuple[int, ...]:
+        if not filenames:
+            raise ValueError("At least one transfer filename is required.")
+        now = time.monotonic()
+        scheduled_auto_complete_ids: list[int] = []
+        with self._transfer_lock:
+            self._cleanup_transfer_records(now=now)
+            required_slots: int = len(filenames)
+            if self._active_transfer_slots_locked(user_id=user_id) + required_slots > _USER_TRANSFER_LIMIT:
+                raise RuntimeError(
+                    f"Transfer limit reached. You can run at most {_USER_TRANSFER_LIMIT} uploads/downloads at once."
+                )
+            transfer_ids: list[int] = []
+            for filename in filenames:
+                transfer_id = self._next_transfer_id
+                self._next_transfer_id += 1
+                self._transfer_records[transfer_id] = _TransferRecord(
+                    transfer_id=transfer_id,
+                    user_id=user_id,
+                    item=_ModWebNotificationTrayItem(
+                        kind=kind,
+                        state=ModWebNotificationTrayItemState.ACTIVE,
+                        label=filename,
+                        detail_text=detail_text,
+                        progress_percent=initial_progress_percent,
+                        node_color_hex=node_color_hex,
+                        app_color_hex=app_color_hex,
+                        blink=True,
+                    ),
+                    reserved_slots=1,
+                    created_at=now,
+                    active_until=None if auto_complete_after_seconds is None else now + auto_complete_after_seconds,
+                )
+                if auto_complete_after_seconds is not None:
+                    scheduled_auto_complete_ids.append(transfer_id)
+                transfer_ids.append(transfer_id)
+        if auto_complete_after_seconds is not None:
+            for transfer_id in scheduled_auto_complete_ids:
+                self._schedule_transfer_auto_complete(
+                    transfer_id=transfer_id,
+                    delay_seconds=auto_complete_after_seconds,
+                )
+        self._notify_transfer_subscribers(user_id=user_id)
+        return tuple(transfer_ids)
+
+    def start_download_transfers(
+        self,
+        *,
+        user_id: int,
+        filenames: tuple[str, ...],
+        detail_text: str,
+        node_color_hex: str | None = None,
+        app_color_hex: str | None = None,
+    ) -> tuple[int, ...]:
+        return self.start_transfers(
+            user_id=user_id,
+            kind=ModWebNotificationTrayItemKind.DOWNLOAD,
+            filenames=filenames,
+            detail_text=detail_text,
+            initial_progress_percent=4.0,
+            node_color_hex=node_color_hex,
+            app_color_hex=app_color_hex,
+            auto_complete_after_seconds=_DOWNLOAD_TRANSFER_ACTIVE_SECONDS,
+        )
+
+    def start_upload_transfers(
+        self,
+        *,
+        user_id: int,
+        filenames: tuple[str, ...],
+        detail_text: str,
+        node_color_hex: str | None = None,
+        app_color_hex: str | None = None,
+    ) -> tuple[int, ...]:
+        return self.start_transfers(
+            user_id=user_id,
+            kind=ModWebNotificationTrayItemKind.UPLOAD,
+            filenames=filenames,
+            detail_text=detail_text,
+            initial_progress_percent=6.0,
+            node_color_hex=node_color_hex,
+            app_color_hex=app_color_hex,
+            auto_complete_after_seconds=None,
+        )
+
+    def start_simulated_transfer(
+        self,
+        *,
+        user_id: int,
+        kind: ModWebNotificationTrayItemKind,
+        filename: str,
+        detail_text: str,
+        duration_seconds: float,
+        node_color_hex: str | None = None,
+        app_color_hex: str | None = None,
+    ) -> int:
+        initial_progress_percent: float = 4.0 if kind is ModWebNotificationTrayItemKind.DOWNLOAD else 8.0
+        transfer_ids = self.start_transfers(
+            user_id=user_id,
+            kind=kind,
+            filenames=(filename,),
+            detail_text=detail_text,
+            initial_progress_percent=initial_progress_percent,
+            node_color_hex=node_color_hex,
+            app_color_hex=app_color_hex,
+            auto_complete_after_seconds=duration_seconds,
+        )
+        return transfer_ids[0]
+
+    def complete_transfer(self, *, transfer_id: int, detail_text: str | None = None) -> None:
+        self._finish_transfer(
+            transfer_id=transfer_id,
+            state=ModWebNotificationTrayItemState.SUCCESS,
+            detail_text=detail_text,
+            progress_percent=100.0,
+        )
+
+    def fail_transfer(self, *, transfer_id: int, detail_text: str) -> None:
+        self._finish_transfer(
+            transfer_id=transfer_id,
+            state=ModWebNotificationTrayItemState.ERROR,
+            detail_text=detail_text,
+            progress_percent=100.0,
+        )
+
+    def update_transfer_progress(
+        self,
+        *,
+        transfer_id: int,
+        progress_percent: float,
+        detail_text: str | None = None,
+        blink: bool | None = None,
+    ) -> None:
+        now = time.monotonic()
+        target_user_id: int | None = None
+        with self._transfer_lock:
+            self._cleanup_transfer_records(now=now)
+            record = self._transfer_records.get(transfer_id)
+            if record is None or not record.active:
+                return
+            target_user_id = record.user_id
+            record.item = replace(
+                record.item,
+                detail_text=record.item.detail_text if detail_text is None else detail_text,
+                progress_percent=progress_percent,
+                blink=record.item.blink if blink is None else blink,
+            )
+        if target_user_id is not None:
+            self._notify_transfer_subscribers(user_id=target_user_id)
+
+    def user_transfer_items(self, *, user_id: int) -> tuple[_ModWebNotificationTrayItem, ...]:
+        now = time.monotonic()
+        with self._transfer_lock:
+            self._cleanup_transfer_records(now=now)
+            records = tuple(record for record in self._transfer_records.values() if record.user_id == user_id)
+        ordered_records = sorted(records, key=lambda record: (-int(record.active), -record.created_at, -record.transfer_id))
+        return tuple(self._record_item(record, now=now) for record in ordered_records)
+
+    def user_active_transfer_slots(self, *, user_id: int) -> int:
+        now = time.monotonic()
+        with self._transfer_lock:
+            self._cleanup_transfer_records(now=now)
+            return self._active_transfer_slots_locked(user_id=user_id)
+
+    def clear_user_transfers(self, *, user_id: int) -> None:
+        with self._transfer_lock:
+            transfer_ids = tuple(
+                transfer_id
+                for transfer_id, record in self._transfer_records.items()
+                if record.user_id == user_id
+            )
+            for transfer_id in transfer_ids:
+                self._cancel_transfer_timers_locked(transfer_id=transfer_id)
+                self._transfer_records.pop(transfer_id, None)
+        if transfer_ids:
+            self._notify_transfer_subscribers(user_id=user_id)
+
+    @staticmethod
+    def transfer_limit() -> int:
+        return _USER_TRANSFER_LIMIT
+
+    def subscribe_user_transfers(self, *, user_id: int, subscriber: Callable[[], None]) -> Callable[[], None]:
+        with self._transfer_lock:
+            subscription_id = self._next_transfer_subscription_id
+            self._next_transfer_subscription_id += 1
+            self._transfer_subscribers.setdefault(user_id, {})[subscription_id] = subscriber
+
+        def _unsubscribe() -> None:
+            with self._transfer_lock:
+                subscribers = self._transfer_subscribers.get(user_id)
+                if subscribers is None:
+                    return
+                subscribers.pop(subscription_id, None)
+                if not subscribers:
+                    self._transfer_subscribers.pop(user_id, None)
+
+        return _unsubscribe
+
+    def _finish_transfer(
+        self,
+        *,
+        transfer_id: int,
+        state: ModWebNotificationTrayItemState,
+        detail_text: str | None,
+        progress_percent: float,
+    ) -> None:
+        now = time.monotonic()
+        target_user_id: int | None = None
+        with self._transfer_lock:
+            self._cleanup_transfer_records(now=now)
+            record = self._transfer_records.get(transfer_id)
+            if record is None:
+                return
+            target_user_id = record.user_id
+            record.item = replace(
+                record.item,
+                state=state,
+                detail_text=record.item.detail_text if detail_text is None else detail_text,
+                progress_percent=progress_percent,
+                blink=False,
+            )
+            record.active_until = None
+            record.display_until = now + _TRANSFER_DISPLAY_SECONDS
+            self._cancel_transfer_auto_complete_timer_locked(transfer_id=transfer_id)
+            self._schedule_transfer_expiry_locked(transfer_id=transfer_id, delay_seconds=_TRANSFER_DISPLAY_SECONDS)
+        if target_user_id is not None:
+            self._notify_transfer_subscribers(user_id=target_user_id)
+
+    def _cleanup_transfer_records(self, *, now: float) -> None:
+        expired_transfer_ids: list[int] = []
+        for transfer_id, record in self._transfer_records.items():
+            if record.display_until is not None and now >= record.display_until:
+                expired_transfer_ids.append(transfer_id)
+        for transfer_id in expired_transfer_ids:
+            self._cancel_transfer_timers_locked(transfer_id=transfer_id)
+            self._transfer_records.pop(transfer_id, None)
+
+    def _active_transfer_slots_locked(self, *, user_id: int) -> int:
+        return sum(
+            record.reserved_slots
+            for record in self._transfer_records.values()
+            if record.user_id == user_id and record.active
+        )
+
+    @staticmethod
+    def _record_item(record: _TransferRecord, *, now: float) -> _ModWebNotificationTrayItem:
+        if record.item.state is not ModWebNotificationTrayItemState.ACTIVE or record.active_until is None:
+            return record.item
+        duration_seconds: float = max(record.active_until - record.created_at, 0.001)
+        elapsed_seconds: float = max(0.0, min(now - record.created_at, duration_seconds))
+        progress_percent: float = min(
+            92.0,
+            max(record.item.progress_percent or 0.0, (elapsed_seconds / duration_seconds) * 92.0),
+        )
+        return replace(record.item, progress_percent=progress_percent)
+
+    def _auto_complete_transfer(self, *, transfer_id: int) -> None:
+        self.complete_transfer(transfer_id=transfer_id, detail_text="Browser-managed download started.")
+
+    def _expire_transfer(self, *, transfer_id: int) -> None:
+        target_user_id: int | None = None
+        with self._transfer_lock:
+            record = self._transfer_records.get(transfer_id)
+            if record is None:
+                return
+            target_user_id = record.user_id
+            self._cancel_transfer_timers_locked(transfer_id=transfer_id)
+            self._transfer_records.pop(transfer_id, None)
+        if target_user_id is not None:
+            self._notify_transfer_subscribers(user_id=target_user_id)
+
+    def _schedule_transfer_auto_complete(self, *, transfer_id: int, delay_seconds: float) -> None:
+        with self._transfer_lock:
+            self._schedule_transfer_auto_complete_locked(transfer_id=transfer_id, delay_seconds=delay_seconds)
+
+    def _schedule_transfer_auto_complete_locked(self, *, transfer_id: int, delay_seconds: float) -> None:
+        self._cancel_transfer_auto_complete_timer_locked(transfer_id=transfer_id)
+        timer = threading.Timer(delay_seconds, lambda: self._auto_complete_transfer(transfer_id=transfer_id))
+        timer.daemon = True
+        self._transfer_auto_complete_timers[transfer_id] = timer
+        timer.start()
+
+    def _schedule_transfer_expiry_locked(self, *, transfer_id: int, delay_seconds: float) -> None:
+        self._cancel_transfer_expiry_timer_locked(transfer_id=transfer_id)
+        timer = threading.Timer(delay_seconds, lambda: self._expire_transfer(transfer_id=transfer_id))
+        timer.daemon = True
+        self._transfer_expiry_timers[transfer_id] = timer
+        timer.start()
+
+    def _cancel_transfer_timers_locked(self, *, transfer_id: int) -> None:
+        self._cancel_transfer_auto_complete_timer_locked(transfer_id=transfer_id)
+        self._cancel_transfer_expiry_timer_locked(transfer_id=transfer_id)
+
+    def _cancel_transfer_auto_complete_timer_locked(self, *, transfer_id: int) -> None:
+        timer = self._transfer_auto_complete_timers.pop(transfer_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _cancel_transfer_expiry_timer_locked(self, *, transfer_id: int) -> None:
+        timer = self._transfer_expiry_timers.pop(transfer_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _notify_transfer_subscribers(self, *, user_id: int) -> None:
+        with self._transfer_lock:
+            subscribers = tuple(self._transfer_subscribers.get(user_id, {}).values())
+        for subscriber in subscribers:
+            try:
+                subscriber()
+            except Exception:
+                log.exception("Transfer subscriber callback failed: user_id=%s", user_id)
 
 
 __all__: tuple[str, ...] = ("ModWebDashboardBackend",)

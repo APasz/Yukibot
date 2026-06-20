@@ -24,7 +24,7 @@ from _discord import (
 )
 from _file import File_Utils
 from _security import Power_Level
-from apps._app import AM_Receiver, App
+from apps._app import AM_Receiver, App, AppActivityProvider, AppActivityProviderMetadata
 from apps._config import App_Config, AppVersion, Mod_Config, ModType
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult
@@ -131,6 +131,53 @@ def _preferred_sevendays_runtime_log(
     if legacy_output_log.exists():
         return legacy_output_log
     return None
+
+
+def _stable_sevendays_runtime_log(*, directory: Path, server_log: Path | None) -> Path | None:
+    candidates: tuple[Path | None, ...] = (
+        server_log,
+        directory / "server_stdout.log",
+        directory / "7DaysToDieServer_Data" / "output_log.txt",
+    )
+    for pointer in candidates:
+        if pointer is not None and pointer.exists():
+            return pointer
+    return None
+
+
+def _launch_created_sevendays_runtime_log(
+    *,
+    directory: Path,
+    previous_timestamped_logs: Collection[Path] | None = None,
+) -> Path | None:
+    previous_log_set = frozenset(previous_timestamped_logs or ())
+    for pointer in _timestamped_sevendays_output_logs(directory=directory):
+        if pointer not in previous_log_set:
+            return pointer
+    return None
+
+
+async def _discover_sevendays_runtime_log(
+    *,
+    directory: Path,
+    server_log: Path | None,
+    previous_timestamped_logs: Collection[Path] | None = None,
+    check_running: Callable[[], bool],
+    timeout_seconds: float = _SEVENDAYS_RUNTIME_LOG_DISCOVERY_TIMEOUT_SECONDS,
+    poll_seconds: float = _SEVENDAYS_RUNTIME_LOG_DISCOVERY_POLL_SECONDS,
+) -> Path | None:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        if runtime_log := _stable_sevendays_runtime_log(directory=directory, server_log=server_log):
+            return runtime_log
+        if runtime_log := _launch_created_sevendays_runtime_log(
+            directory=directory,
+            previous_timestamped_logs=previous_timestamped_logs,
+        ):
+            return runtime_log
+        if not check_running() or asyncio.get_running_loop().time() >= deadline:
+            return None
+        await asyncio.sleep(poll_seconds)
 
 
 def _candidate_sevendays_logs(*, directory: Path, server_log: Path | None) -> tuple[Path, ...]:
@@ -1399,6 +1446,8 @@ class SevenDays_Settings(App_Settings):
 
 class SevenDays(App[App_Config]):
     chat_relay_outbound = True
+    relay_notice_player_session_supported = True
+    relay_notice_player_death_supported = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = 0xB91C1C
@@ -1589,22 +1638,6 @@ class SevenDays(App[App_Config]):
         )
         await self._std_launch()
 
-        runtime_log = _preferred_sevendays_runtime_log(
-            directory=self.directory,
-            server_log=self.server_log,
-            previous_timestamped_logs=previous_timestamped_logs,
-        )
-        runtime_log_deadline = asyncio.get_running_loop().time() + _SEVENDAYS_RUNTIME_LOG_DISCOVERY_TIMEOUT_SECONDS
-        while runtime_log is None and self.check_running() and asyncio.get_running_loop().time() < runtime_log_deadline:
-            await asyncio.sleep(_SEVENDAYS_RUNTIME_LOG_DISCOVERY_POLL_SECONDS)
-            runtime_log = _preferred_sevendays_runtime_log(
-                directory=self.directory,
-                server_log=self.server_log,
-                previous_timestamped_logs=previous_timestamped_logs,
-            )
-        if runtime_log is not None and runtime_log.exists():
-            File_Utils.link(runtime_log, self.file_stdout.with_name(runtime_log.name))
-
         while not self.check_running():
             log.debug(f"Waiting for {self.name}.check_running...")
             await asyncio.sleep(5)
@@ -1612,18 +1645,14 @@ class SevenDays(App[App_Config]):
         log.debug(f"{self.name}.running...")
         reader = await self._relay.setup()
 
-        count = 0
-        while count < 25 and (not self.process or (self.process and not self.process.stdout)):
-            log.debug(f"Waiting for {self.name}.process... proc_stdout={self.process.stdout if self.process else None}")
-            await asyncio.sleep(1)
-            count += 1
-
-        runtime_log = _preferred_sevendays_runtime_log(
+        runtime_log = await _discover_sevendays_runtime_log(
             directory=self.directory,
             server_log=self.server_log,
             previous_timestamped_logs=previous_timestamped_logs,
+            check_running=self.check_running,
         )
         if runtime_log is not None:
+            File_Utils.link(runtime_log, self.file_stdout.with_name(runtime_log.name))
             self._tail = Tailer(self.check_running, runtime_log, self.file_stdout)
         else:
             self._tail = Tailer(lambda: self._relay.connected_event, reader, self.file_stdout)  # type: ignore[arg-type]
@@ -1717,8 +1746,16 @@ class Matchers:
         if match := _SEVENDAYS_TRANSIENT_RE.search(line):
             player = match.group(1)
             action = str(match.group(2)).lower()
+            if "join" in action:
+                if self.app.relay_notice_player_joined_enabled is False:
+                    return
+                notice_action = PlayerSessionAction.JOINED
+            else:
+                if self.app.relay_notice_player_left_enabled is False:
+                    return
+                notice_action = PlayerSessionAction.LEFT
             notice = PlayerSessionNotice(
-                action=PlayerSessionAction.JOINED if "join" in action else PlayerSessionAction.LEFT,
+                action=notice_action,
                 source=RelayNoticeSource.APP_LOG,
             )
             app_friendly = getattr(self.app, "friendly", self.app.name)
@@ -1741,6 +1778,8 @@ class Matchers:
                 DC_Relay.add(DC_Bound(self.app, msg, player or hikari.UNDEFINED))
 
     async def match_death(self, line: str) -> None:
+        if self.app.relay_notice_player_death_enabled is False:
+            return
         if match := _SEVENDAYS_DEATH_RE.search(line):
             player = match.group("player")
             notice = GameDeathNotice(
@@ -1833,6 +1872,11 @@ class Activities:
         self._time_task: asyncio.Task[None] | None = None
         self._running = False
         self.providers = [Provider_Time(app)]
+        set_activity_providers = getattr(self.app, "set_activity_providers", None)
+        if callable(set_activity_providers):
+            set_activity_providers(self.providers)
+        else:
+            self.app.providers = self.providers
         self.tasks: set[asyncio.Task[None]] = set()
 
     async def start(self):
@@ -1840,14 +1884,23 @@ class Activities:
         if self.tasks:
             return
         self._running = True
+        register_enabled_activity_providers = getattr(self.app, "register_enabled_activity_providers", None)
+        if callable(register_enabled_activity_providers):
+            register_enabled_activity_providers()
+        else:
+            for provider in self.providers:
+                self.app.activity_manager.register(provider)
         for prov in self.providers:
-            self.app.activity_manager.register(prov)
             self.tasks.update(asyncio.create_task(func()) for func in prov.task_funcs)
 
     async def stop(self):
         self._running = False
-        for prov in self.providers:
-            self.app.activity_manager.deregister(prov)
+        deregister_activity_providers = getattr(self.app, "deregister_activity_providers", None)
+        if callable(deregister_activity_providers):
+            deregister_activity_providers()
+        else:
+            for provider in self.providers:
+                self.app.activity_manager.deregister(provider)
         tasks = tuple(self.tasks)
         self.tasks.clear()
         for task in tasks:
@@ -1858,17 +1911,17 @@ class Activities:
                 pass
 
 
-class Provider_Time(config.Activity_Provider):
+class Provider_Time(AppActivityProvider):
+    metadata = AppActivityProviderMetadata(provider_id="time", label="Game Time")
+
     def __init__(self, app: SevenDays):
-        self.app = app
-        self.activity_scope_name = getattr(app, "name", None)
+        super().__init__(app)
         self._time = None
         self._count = 0
         self.stats: dict[str, GameStatValue] = {}
         app._tail_matchers.add(self.match_time)
         app._tail_matchers.add(self.match_stats)
-        self.task_funcs = [self._get_time, self._getgamestats]
-        super().__init__()
+        self.task_funcs = (self._get_time, self._getgamestats)
 
     async def get(self) -> str | None:
         if not self._time:

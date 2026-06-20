@@ -20,6 +20,7 @@ from apps._config import (
     App_Config,
     RelayChannelSource,
     SteamUpdateConfig,
+    normalise_activity_provider_ids,
     normalise_app_title_font,
     normalise_optional_channel_id,
     normalise_optional_channel_ids,
@@ -85,6 +86,11 @@ class AppDetailsUpdate:
     running_ram_points: int
     startup_cpu_points: int | None
     startup_ram_points: int | None
+    relay_notice_player_session: bool | None = None
+    relay_notice_player_death: bool | None = None
+    relay_notice_progress: bool | None = None
+    relay_advancements_enabled: bool | None = None
+    disabled_activity_provider_ids: tuple[str, ...] | None = None
     title_font_preset: str | None = None
     steam_update_enabled: bool | None = None
     steam_update_selected_branch: str | None = None
@@ -723,6 +729,11 @@ class App_Manager(metaclass=config.Singleton):
         app = name if isinstance(name, App) else self.get(name)
         previous_friendly_name: str = app.friendly
         previous_steam_update = app.cfg.steam_update
+        previous_relay_advancements = app.relay_advancements_enabled
+        previous_player_session_notice = app.relay_notice_player_session_enabled
+        previous_player_death_notice = app.relay_notice_player_death_enabled
+        previous_progress_notice = app.relay_notice_progress_enabled
+        previous_disabled_activity_provider_ids = app.disabled_activity_provider_ids
         next_friendly_name = _validate_required_friendly_name(details.friendly_name)
         next_title_font_preset = (
             app.cfg.title_font_preset
@@ -731,6 +742,11 @@ class App_Manager(metaclass=config.Singleton):
         )
         next_notes: str | None = normalise_optional_text(details.notes)
         next_steam_update = self._resolve_next_steam_update_config(app=app, details=details)
+        next_relay_advancements = self._resolve_next_relay_advancements_enabled(app=app, details=details)
+        next_player_session_notice = self._resolve_next_relay_notice_player_session(app=app, details=details)
+        next_player_death_notice = self._resolve_next_relay_notice_player_death(app=app, details=details)
+        next_progress_notice = self._resolve_next_relay_notice_progress(app=app, details=details)
+        next_disabled_activity_provider_ids = self._resolve_next_disabled_activity_provider_ids(app=app, details=details)
         self._validate_steam_update_change_allowed(
             app=app,
             previous_steam_update=previous_steam_update,
@@ -765,6 +781,11 @@ class App_Manager(metaclass=config.Singleton):
             and app.cfg.title_font_preset == next_title_font_preset
             and app.cfg.notes == next_notes
             and previous_steam_update == next_steam_update
+            and previous_relay_advancements == next_relay_advancements
+            and previous_player_session_notice == next_player_session_notice
+            and previous_player_death_notice == next_player_death_notice
+            and previous_progress_notice == next_progress_notice
+            and previous_disabled_activity_provider_ids == next_disabled_activity_provider_ids
         ):
             if (
                 app.cfg.lifecycle_notice_started is details.lifecycle_notice_started
@@ -791,6 +812,20 @@ class App_Manager(metaclass=config.Singleton):
         next_payload["lifecycle_notice_started"] = details.lifecycle_notice_started
         next_payload["lifecycle_notice_stopped"] = details.lifecycle_notice_stopped
         next_payload["lifecycle_notice_crashed"] = details.lifecycle_notice_crashed
+        if next_player_session_notice is not None:
+            next_payload["relay_notice_player_session"] = next_player_session_notice
+        next_payload.pop("relay_notice_player_joined", None)
+        next_payload.pop("relay_notice_player_left", None)
+        if next_player_death_notice is not None:
+            next_payload["relay_notice_player_death"] = next_player_death_notice
+        if next_progress_notice is not None:
+            next_payload["relay_notice_progress"] = next_progress_notice
+        if next_relay_advancements is not None:
+            next_payload["relay_advancements"] = next_relay_advancements
+        if next_disabled_activity_provider_ids:
+            next_payload["disabled_activity_provider_ids"] = list(next_disabled_activity_provider_ids)
+        else:
+            next_payload.pop("disabled_activity_provider_ids", None)
         next_resource_points_payload: dict[str, object] = {"running": running_points.model_dump(mode="json")}
         if startup_points is not None:
             next_resource_points_payload["startup"] = startup_points.model_dump(mode="json")
@@ -810,6 +845,15 @@ class App_Manager(metaclass=config.Singleton):
         app.cfg.resource_points.running = running_points
         app.cfg.resource_points.startup = startup_points
         app.cfg.steam_update = next_steam_update
+        app.apply_disabled_activity_provider_ids(next_disabled_activity_provider_ids)
+        if next_player_session_notice is not None:
+            app.apply_relay_notice_player_session_enabled(next_player_session_notice)
+        if next_player_death_notice is not None:
+            app.apply_relay_notice_player_death_enabled(next_player_death_notice)
+        if next_progress_notice is not None:
+            app.apply_relay_notice_progress_enabled(next_progress_notice)
+        if next_relay_advancements is not None:
+            app.apply_relay_advancements_enabled(next_relay_advancements)
         app.friendly = next_friendly_name
         self._sync_app_steam_updater(
             app=app,
@@ -827,6 +871,19 @@ class App_Manager(metaclass=config.Singleton):
         return next_friendly_name
 
     @staticmethod
+    def _resolve_next_disabled_activity_provider_ids(*, app: ManagedApp, details: AppDetailsUpdate) -> tuple[str, ...]:
+        if details.disabled_activity_provider_ids is None:
+            return app.disabled_activity_provider_ids
+        requested_provider_ids = normalise_activity_provider_ids(details.disabled_activity_provider_ids)
+        known_provider_ids = {entry.provider_id.casefold(): entry.provider_id for entry in app.activity_provider_entries}
+        unknown_provider_ids = [
+            provider_id for provider_id in requested_provider_ids if provider_id.casefold() not in known_provider_ids
+        ]
+        if unknown_provider_ids:
+            raise ValueError(f"Unknown app activity providers: {', '.join(unknown_provider_ids)}.")
+        return tuple(known_provider_ids[provider_id.casefold()] for provider_id in requested_provider_ids)
+
+    @staticmethod
     def _resolve_next_steam_update_config(*, app: ManagedApp, details: AppDetailsUpdate) -> SteamUpdateConfig | None:
         current_steam_update = app.cfg.steam_update
         if details.steam_update_enabled is None:
@@ -842,6 +899,42 @@ class App_Manager(metaclass=config.Singleton):
         if preset is None:
             raise ValueError(f"{app.friendly} does not support Steam update configuration.")
         return preset.build_config(selected_branch=selected_branch)
+
+    @staticmethod
+    def _resolve_next_relay_advancements_enabled(*, app: ManagedApp, details: AppDetailsUpdate) -> bool | None:
+        current_relay_advancements = app.relay_advancements_enabled
+        if details.relay_advancements_enabled is None:
+            return current_relay_advancements
+        if not app.supports_relay_advancements:
+            raise ValueError(f"{app.friendly} does not support {app.relay_advancement_term.lower()} relay.")
+        return details.relay_advancements_enabled
+
+    @staticmethod
+    def _resolve_next_relay_notice_player_session(*, app: ManagedApp, details: AppDetailsUpdate) -> bool | None:
+        current_notice = app.relay_notice_player_session_enabled
+        if details.relay_notice_player_session is None:
+            return current_notice
+        if current_notice is None:
+            raise ValueError(f"{app.friendly} does not support player session notices.")
+        return details.relay_notice_player_session
+
+    @staticmethod
+    def _resolve_next_relay_notice_player_death(*, app: ManagedApp, details: AppDetailsUpdate) -> bool | None:
+        current_notice = app.relay_notice_player_death_enabled
+        if details.relay_notice_player_death is None:
+            return current_notice
+        if current_notice is None:
+            raise ValueError(f"{app.friendly} does not support death notices.")
+        return details.relay_notice_player_death
+
+    @staticmethod
+    def _resolve_next_relay_notice_progress(*, app: ManagedApp, details: AppDetailsUpdate) -> bool | None:
+        current_notice = app.relay_notice_progress_enabled
+        if details.relay_notice_progress is None:
+            return current_notice
+        if current_notice is None:
+            raise ValueError(f"{app.friendly} does not support {app.relay_progress_notice_term.lower()} notices.")
+        return details.relay_notice_progress
 
     @staticmethod
     def _steam_update_runtime_rebuild_required(

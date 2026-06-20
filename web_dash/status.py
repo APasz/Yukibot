@@ -33,6 +33,7 @@ from .nicegui_protocols import (
     _value_as_text,
 )
 from .runtime_imports import (
+    BadgeTone,
     MOD_WEB_ACTION_BASE_CLASSES,
     Awaitable,
     Button,
@@ -64,15 +65,23 @@ from .runtime_imports import (
 )
 from .service_base import ModWebServiceSupport
 from .types import (
+    ModWebNotificationTrayItemKind,
+    ModWebNotificationTrayItemState,
     ModWebNodeStatus,
     _ModWebChatEventGroup,
     _ModWebFakeChatMessageMode,
     _ModWebFakeChatPreviewState,
     _ModWebLinkSpec,
+    _ModWebNotificationTrayItem,
     _ModWebStatusPageConfig,
 )
 
 _STATUS_SVG_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "svg" / "web_dash"
+_USER_HEADER_SURFACE_MIN_HEIGHT_REM = 4.9
+_USER_HEADER_TRAY_CARD_HEIGHT_REM = 4.35
+_USER_HEADER_SURFACE_ASPECT_RATIO = "4 / 1"
+_USER_HEADER_STACK_WIDTH_REM = 10.5
+_USER_HEADER_ICON_BUTTON_CLASSES = "mod-list-button secondary grow basis-0 min-h-[2.2rem] min-w-0 px-3 py-2"
 
 class ModWebStatusMixin(ModWebServiceSupport):
     @staticmethod
@@ -506,18 +515,264 @@ class ModWebStatusMixin(ModWebServiceSupport):
     def _render_user_header(self, *, ui: ModWebUi, user: ModWebUser) -> None:
         display_name: str = self._web_display_name(user)
         avatar_uri: str = self._user_avatar_uri(user)
-        with ui.row().classes("w-full items-center justify-between gap-3 flex-wrap"):
-            with ui.row().classes("items-center gap-3 flex-wrap min-w-0"):
-                ui.html(self._user_avatar_markup(avatar_uri=avatar_uri, display_name=display_name))
-                ui.label(f"{display_name}").classes("text-sm mod-subtitle break-all")
-                self._badge(ui=ui, text=self._user_level_label(user), tone=self._user_level_tone(user))
-            with ui.row().classes("items-center gap-2 flex-wrap"):
-                self._action_link(ui=ui, label="Home", url=self.index_path(), compact=True)
-                if self._user_can_manage_discord_settings(user):
-                    self._render_discord_settings_control(ui=ui, user=user)
-                if self._user_can_use_fake_chat_preview(user):
-                    self._render_fake_chat_preview_control(ui=ui)
-                self._action_link(ui=ui, label="Log out", url="/auth/logout", compact=True)
+        with ui.row().classes("w-full min-w-0 items-start gap-4 flex-wrap lg:flex-nowrap"):
+            with ui.element("div").classes("shrink-0 mod-user-header-surface").style(self._user_header_surface_style()):
+                with ui.column().classes("w-full h-full justify-between gap-2"):
+                    with ui.row().classes("items-center gap-2 no-wrap min-w-0"):
+                        ui.html(self._user_avatar_markup(avatar_uri=avatar_uri, display_name=display_name))
+                        with ui.column().classes("gap-1 min-w-0"):
+                            ui.label(f"{display_name}").classes("text-sm text-white break-all leading-none")
+                            self._badge(ui=ui, text=self._user_level_label(user), tone=self._user_level_tone(user))
+                    with ui.row().classes("w-full items-stretch gap-2"):
+                        self._render_user_home_button(ui=ui)
+                        self._render_user_utility_launcher(ui=ui, user=user)
+            with ui.element("div").classes("min-w-0 grow w-full mod-user-header-tray-shell").style(self._user_header_tray_style()):
+                self._render_user_notification_tray(ui=ui, user=user)
+
+    def _render_user_home_button(self, *, ui: ModWebUi) -> None:
+        ui.button("", on_click=lambda _: ui.navigate.to(self.index_path())).props(
+            "icon=home flat aria-label=Home"
+        ).classes(
+            f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-home-button"
+        )
+
+    def _render_user_utility_launcher(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+        open_discord_settings = (
+            self._build_discord_settings_panel(ui=ui, user=user) if self._user_can_manage_discord_settings(user) else None
+        )
+        open_fake_chat_preview = (
+            self._build_fake_chat_preview_panel(ui=ui) if self._user_can_use_fake_chat_preview(user) else None
+        )
+
+        def _simulate(kind: ModWebNotificationTrayItemKind) -> None:
+            current_count: int = len(self._backend.user_transfer_items(user_id=user.discord_id))
+            filename = (
+                f"sim-upload-{current_count + 1:02d}.jar"
+                if kind is ModWebNotificationTrayItemKind.UPLOAD
+                else f"sim-download-{current_count + 1:02d}.zip"
+            )
+            detail_text = (
+                "Simulated upload transfer."
+                if kind is ModWebNotificationTrayItemKind.UPLOAD
+                else "Simulated download transfer."
+            )
+            try:
+                self._backend.start_simulated_transfer(
+                    user_id=user.discord_id,
+                    kind=kind,
+                    filename=filename,
+                    detail_text=detail_text,
+                    duration_seconds=6.0,
+                    node_color_hex=self._primary_guild_bot_role_color_hex(),
+                    app_color_hex=None,
+                )
+            except RuntimeError as xcp:
+                ui.notify(str(xcp), type="warning")
+
+        def _clear_transfers() -> None:
+            self._backend.clear_user_transfers(user_id=user.discord_id)
+
+        action_specs: list[tuple[str, object]] = []
+        if config.INDEV:
+            action_specs.extend(
+                (
+                    ("Sim Upload", lambda: _simulate(ModWebNotificationTrayItemKind.UPLOAD)),
+                    ("Sim Download", lambda: _simulate(ModWebNotificationTrayItemKind.DOWNLOAD)),
+                    ("Clear Transfers", _clear_transfers),
+                )
+            )
+        if open_discord_settings is not None:
+            action_specs.append(("Discord", open_discord_settings))
+        if open_fake_chat_preview is not None:
+            action_specs.append(("Fake Chat", open_fake_chat_preview))
+        action_specs.append(("Log out", lambda: ui.navigate.to("/auth/logout")))
+
+        menu_factory = getattr(ui, "menu", None)
+        if callable(menu_factory):
+            with ui.button("").props("icon=menu flat aria-label=Utilities").classes(
+                f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-menu-button"
+            ):
+                with menu_factory().classes("mod-chat-entry-menu min-w-[12rem]"):
+                    for label, action in action_specs:
+                        ui.menu_item(label, on_click=lambda _, action=action: action()).classes("mod-chat-entry-menu-item")
+            return
+
+        with ui.dialog() as utility_dialog:
+            with ui.card().classes("mod-card mod-dialog-card"):
+                with ui.column().classes("w-full gap-2 p-4"):
+                    ui.label("Tray Tools").classes("text-lg font-black mod-title-small")
+                    for label, action in action_specs:
+                        ui.button(label, on_click=lambda _, action=action: (action(), utility_dialog.close())).classes(
+                            "mod-list-button secondary w-full"
+                        )
+
+        ui.button("", on_click=utility_dialog.open).props("icon=menu flat aria-label=Utilities").classes(
+            f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-menu-button"
+        )
+
+    def _render_user_notification_tray(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+        def _render_items(items: tuple[_ModWebNotificationTrayItem, ...]) -> None:
+            if not items:
+                return
+            with ui.row().classes("w-full items-stretch justify-start content-start gap-2 flex-wrap min-w-0 mod-user-header-tray"):
+                for item in items:
+                    card_classes: str = "shrink-0 overflow-hidden mod-transfer-card"
+                    if item.blink:
+                        card_classes = f"{card_classes} animate-pulse"
+                    with ui.element("div").classes(card_classes).style(self._notification_tray_card_style(item)):
+                        with ui.row().classes("w-full h-full items-stretch no-wrap gap-0"):
+                            with ui.element("div").classes("shrink-0 flex items-center justify-center").style(
+                                self._notification_tray_badge_style(item)
+                            ):
+                                ui.label(self._notification_tray_item_glyph(item)).classes(
+                                    "text-[0.62rem] font-black tracking-[0.2em] text-white"
+                                ).style("writing-mode: vertical-rl; transform: rotate(180deg);")
+                            ui.element("div").classes("shrink-0").style(self._notification_tray_node_stripe_style(item))
+                            with ui.column().classes("min-w-0 grow gap-0").style("background: #000000;"):
+                                with ui.column().classes("min-w-0 grow justify-center gap-1 px-3 pt-2 pb-2"):
+                                    ui.label(item.label).classes("text-base font-semibold leading-tight text-white").style(
+                                        "display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;"
+                                        " overflow: hidden; word-break: break-word;"
+                                    )
+                                    ui.label(item.detail_text or item.state.name.title()).classes(
+                                        "text-xs leading-tight text-white/80"
+                                    ).style(
+                                        "display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;"
+                                        " overflow: hidden;"
+                                    )
+                                with ui.element("div").classes("relative w-full overflow-hidden").style(
+                                    self._notification_tray_progress_track_style(item)
+                                ):
+                                    if item.progress_percent is not None:
+                                        ui.element("div").style(self._notification_tray_progress_fill_style(item))
+
+        refreshable = getattr(ui, "refreshable", None)
+        if not callable(refreshable):
+            _render_items(self._user_notification_tray_items(user=user))
+            return
+
+        @ui.refreshable
+        def _tray() -> None:
+            with ui.element("div").classes("w-full min-w-0 mod-user-header-tray-block").style(self._user_header_tray_block_style()):
+                _render_items(self._user_notification_tray_items(user=user))
+
+        _tray()
+        ui_context: object | None = getattr(cast(object, ui), "context", None)
+        client: object | None = getattr(ui_context, "client", None) if ui_context is not None else None
+        safe_invoke = getattr(client, "safe_invoke", None) if client is not None else None
+        if not callable(safe_invoke):
+            return
+        loop = asyncio.get_running_loop()
+
+        def _request_tray_refresh() -> None:
+            def _queue_refresh() -> None:
+                safe_invoke(_tray.refresh)
+
+            loop.call_soon_threadsafe(_queue_refresh)
+
+        unsubscribe = self._backend.subscribe_user_transfers(
+            user_id=user.discord_id,
+            subscriber=_request_tray_refresh,
+        )
+        self._register_client_cleanup(ui=ui, cleanup=unsubscribe)
+
+    def _user_notification_tray_items(self, *, user: ModWebUser) -> tuple[_ModWebNotificationTrayItem, ...]:
+        return self._backend.user_transfer_items(user_id=user.discord_id)
+
+    @staticmethod
+    def _notification_tray_item_glyph(item: _ModWebNotificationTrayItem) -> str:
+        if item.state is ModWebNotificationTrayItemState.ERROR:
+            return "ERROR"
+        if item.state is ModWebNotificationTrayItemState.SUCCESS:
+            return "DONE"
+        if item.kind is ModWebNotificationTrayItemKind.UPLOAD:
+            return "UPLOAD"
+        if item.kind is ModWebNotificationTrayItemKind.DOWNLOAD:
+            return "DOWNLOAD"
+        return "NOTICE"
+
+    @staticmethod
+    def _notification_tray_card_style(item: _ModWebNotificationTrayItem) -> str:
+        border_color = item.app_color_hex or "#000000"
+        return (
+            f"height: {_USER_HEADER_TRAY_CARD_HEIGHT_REM:.2f}rem;"
+            f"width: calc({_USER_HEADER_TRAY_CARD_HEIGHT_REM:.2f}rem * 4);"
+            f"max-width: calc({_USER_HEADER_TRAY_CARD_HEIGHT_REM:.2f}rem * 4);"
+            f"aspect-ratio: {_USER_HEADER_SURFACE_ASPECT_RATIO};"
+            f"border: 2px solid {border_color}; background: #000000;"
+            " box-shadow: 0 0 0 1px rgba(255,255,255,0.05);"
+        )
+
+    @staticmethod
+    def _notification_tray_badge_style(item: _ModWebNotificationTrayItem) -> str:
+        return (
+            "width: 2.1rem; min-height: 100%; padding: 0.2rem 0.1rem;"
+            f" background: {ModWebStatusMixin._notification_tray_badge_background(item)};"
+        )
+
+    @staticmethod
+    def _notification_tray_node_stripe_style(item: _ModWebNotificationTrayItem) -> str:
+        node_color = item.node_color_hex or "#000000"
+        return f"width: 0.2rem; align-self: stretch; background: {node_color};"
+
+    @staticmethod
+    def _notification_tray_progress_track_style(item: _ModWebNotificationTrayItem) -> str:
+        app_border_color = item.app_color_hex or "#000000"
+        return f"height: 0.9rem; background: #42106c; border-top: 1px solid {app_border_color};"
+
+    @staticmethod
+    def _user_header_surface_style() -> str:
+        return (
+            f"min-height: {_USER_HEADER_SURFACE_MIN_HEIGHT_REM:.2f}rem;"
+            f"width: {_USER_HEADER_STACK_WIDTH_REM:.2f}rem;"
+            f"min-width: {_USER_HEADER_STACK_WIDTH_REM:.2f}rem;"
+            "display: flex; flex-direction: column; justify-content: space-between;"
+            "padding: 0.5rem 0.75rem;"
+            "box-sizing: border-box;"
+            "border: 1px solid rgba(255,255,255,0.08);"
+            "background: rgba(0,0,0,0.28);"
+            "overflow: hidden;"
+        )
+
+    @staticmethod
+    def _user_header_tray_style() -> str:
+        return (
+            f"min-height: {_USER_HEADER_SURFACE_MIN_HEIGHT_REM:.2f}rem;"
+            "display: flex;"
+            "align-items: flex-start;"
+            "justify-content: flex-start;"
+        )
+
+    @staticmethod
+    def _user_header_tray_block_style() -> str:
+        return "width: 100%;"
+
+    @staticmethod
+    def _notification_tray_badge_background(item: _ModWebNotificationTrayItem) -> str:
+        if item.state is ModWebNotificationTrayItemState.ERROR:
+            return "#b91c1c"
+        if item.state is ModWebNotificationTrayItemState.WARNING:
+            return "#d97706"
+        if item.state is ModWebNotificationTrayItemState.SUCCESS:
+            return "#15803d"
+        if item.kind is ModWebNotificationTrayItemKind.DOWNLOAD:
+            return "#ea580c"
+        if item.kind is ModWebNotificationTrayItemKind.UPLOAD:
+            return "#0f766e"
+        return "#475569"
+
+    @staticmethod
+    def _notification_tray_progress_fill_style(item: _ModWebNotificationTrayItem) -> str:
+        width_percent: float = item.progress_percent or 0.0
+        if item.kind is ModWebNotificationTrayItemKind.UPLOAD:
+            return (
+                f"position: absolute; top: 0; right: 0; height: 100%; width: {width_percent:.2f}%;"
+                " background: linear-gradient(270deg, #7c3aed, #4c1d95);"
+            )
+        return (
+            f"position: absolute; top: 0; left: 0; height: 100%; width: {width_percent:.2f}%;"
+            " background: linear-gradient(90deg, #7c3aed, #4c1d95);"
+        )
 
     def _user_can_use_fake_chat_preview(self, user: ModWebUser) -> bool:
         return self._user_has_level(user, Power_Level.root)
@@ -525,7 +780,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
     def _user_can_manage_discord_settings(self, user: ModWebUser) -> bool:
         return self._manager is not None and self._user_has_level(user, Power_Level.sudo)
 
-    def _render_discord_settings_control(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+    def _build_discord_settings_panel(self, *, ui: ModWebUi, user: ModWebUser) -> Callable[[], None]:
         current_settings = self._node_api.read_discord_settings()
         activity_settings = current_settings.activity
         available_fields_text = config.format_discord_activity_fields(config.DiscordActivityField)
@@ -595,10 +850,6 @@ class ModWebStatusMixin(ModWebServiceSupport):
             _hide_discord_settings_panel()
             ui.navigate.reload()
 
-        ui.button(
-            "Discord",
-            on_click=lambda _: _show_discord_settings_panel(),
-        ).classes(f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm")
         with ui.element("div").classes("mod-node-settings-overlay").style("display: none;") as discord_settings_overlay:
             backdrop = ui.element("div").classes("mod-node-settings-backdrop")
             backdrop.on("click", lambda _: _hide_discord_settings_panel())
@@ -686,7 +937,16 @@ class ModWebStatusMixin(ModWebServiceSupport):
                             )
                             ui.button("Save", on_click=_handle_discord_settings_submit).classes("mod-list-button")
 
-    def _render_fake_chat_preview_control(self, *, ui: ModWebUi) -> None:
+        return _show_discord_settings_panel
+
+    def _render_discord_settings_control(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+        open_panel = self._build_discord_settings_panel(ui=ui, user=user)
+        ui.button(
+            "Discord",
+            on_click=lambda _: open_panel(),
+        ).classes(f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm")
+
+    def _build_fake_chat_preview_panel(self, *, ui: ModWebUi) -> Callable[[], None]:
         app_options: dict[str, str] = self._fake_chat_preview_app_options()
         source_options: dict[str, ChatEndpointKind] = {
             "Game": ChatEndpointKind.APP,
@@ -1097,8 +1357,11 @@ class ModWebStatusMixin(ModWebServiceSupport):
                             if self._chat_relay is None or not app_options:
                                 send_button.disable()
                         ui.button("Close", on_click=preview_dialog.close).classes("mod-list-button secondary")
+        return preview_dialog.open
 
-        ui.button("Fake Chat", on_click=preview_dialog.open).classes(f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm")
+    def _render_fake_chat_preview_control(self, *, ui: ModWebUi) -> None:
+        open_panel = self._build_fake_chat_preview_panel(ui=ui)
+        ui.button("Fake Chat", on_click=open_panel).classes(f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm")
 
     def _fake_chat_preview_app_options(self) -> dict[str, str]:
         return {f"{app.friendly} ({app.name})": app.name for app in self._managed_apps() if app.supports_chat_relay}

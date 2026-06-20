@@ -53,6 +53,7 @@ from font_assets import FontAssetEntry, font_assets
 from mod_web_auth import ModWebUser
 from node_api import (
     ConsoleResponseSource,
+    NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppMutationAction,
     NodeAppResourcePointSummary,
@@ -74,6 +75,7 @@ from node_api import (
     NodeModEntry,
     NodeModList,
     NodeModSummary,
+    NodeModUploadBatchResult,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveRootEntry,
@@ -97,6 +99,7 @@ from relay_notices import (
     PlayerSessionNotice,
     RelayNoticeSource,
 )
+from web_dash.backend import ModWebDashboardBackend
 from web_dash.home import _ModWebNodeLatencyBadgeSpec
 from web_dash.models import _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
 from web_dash.nicegui_protocols import ModWebUi
@@ -114,6 +117,8 @@ from web_dash.types import (
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
+    ModWebNotificationTrayItemKind,
+    ModWebNotificationTrayItemState,
     ModWebOverviewPageModel,
     ModWebPageModel,
     ModWebSearchOption,
@@ -128,6 +133,7 @@ from web_dash.types import (
     _ModWebFakeChatMessageMode,
     _ModWebFakeChatPreviewState,
     _ModWebLinkSpec,
+    _ModWebNotificationTrayItem,
     _ModWebTabActionSpec,
 )
 
@@ -340,6 +346,296 @@ class ModWebTests(unittest.TestCase):
             mods=(),
             app_stats=None,
         )
+
+    def test_notification_tray_item_validates_progress_range(self) -> None:
+        item = _ModWebNotificationTrayItem(
+            kind=ModWebNotificationTrayItemKind.UPLOAD,
+            state=ModWebNotificationTrayItemState.ACTIVE,
+            label=" Uploading ",
+            detail_text=" Waiting ",
+            progress_percent=42.5,
+            node_color_hex=" #ff0000 ",
+            app_color_hex=" #00ffff ",
+            blink=True,
+        )
+
+        self.assertEqual(item.label, "Uploading")
+        self.assertEqual(item.detail_text, "Waiting")
+        self.assertEqual(item.progress_percent, 42.5)
+        self.assertEqual(item.node_color_hex, "#ff0000")
+        self.assertEqual(item.app_color_hex, "#00ffff")
+        self.assertTrue(item.blink)
+
+        with self.assertRaises(ValueError):
+            _ModWebNotificationTrayItem(
+                kind=ModWebNotificationTrayItemKind.DOWNLOAD,
+                state=ModWebNotificationTrayItemState.ERROR,
+                label="Broken",
+                progress_percent=101.0,
+            )
+
+    def test_dashboard_backend_limits_active_transfers_per_user(self) -> None:
+        backend = ModWebDashboardBackend()
+
+        transfer_ids = backend.start_upload_transfers(
+            user_id=42,
+            filenames=("alpha.jar", "beta.jar", "gamma.jar"),
+            detail_text="Uploading mods.",
+            node_color_hex="#ff0000",
+            app_color_hex="#00ffff",
+        )
+
+        self.assertEqual(len(transfer_ids), 3)
+        self.assertEqual(backend.user_active_transfer_slots(user_id=42), 3)
+        self.assertEqual(len(backend.user_transfer_items(user_id=42)), 3)
+        self.assertEqual(backend.user_transfer_items(user_id=42)[0].node_color_hex, "#ff0000")
+        self.assertEqual(backend.user_transfer_items(user_id=42)[0].app_color_hex, "#00ffff")
+
+        with self.assertRaises(RuntimeError):
+            backend.start_download_transfers(
+                user_id=42,
+                filenames=("delta.jar",),
+                detail_text="Preparing download.",
+            )
+
+        backend.complete_transfer(transfer_id=transfer_ids[0], detail_text="Uploaded.")
+
+        resumed_transfer_ids = backend.start_download_transfers(
+            user_id=42,
+            filenames=("delta.jar",),
+            detail_text="Preparing download.",
+        )
+
+        self.assertEqual(len(resumed_transfer_ids), 1)
+
+    def test_dashboard_backend_notifies_transfer_subscribers_on_transfer_changes(self) -> None:
+        backend = ModWebDashboardBackend()
+        notifications: list[str] = []
+
+        def _record_notification() -> None:
+            notifications.append("changed")
+
+        unsubscribe = backend.subscribe_user_transfers(user_id=42, subscriber=_record_notification)
+
+        transfer_id = backend.start_upload_transfers(
+            user_id=42,
+            filenames=("alpha.jar",),
+            detail_text="Uploading mods.",
+        )[0]
+        backend.update_transfer_progress(
+            transfer_id=transfer_id,
+            progress_percent=55.0,
+            detail_text="Receiving mod payload.",
+        )
+        backend.complete_transfer(transfer_id=transfer_id, detail_text="Installed.")
+        backend.clear_user_transfers(user_id=42)
+
+        self.assertEqual(len(notifications), 4)
+
+        unsubscribe()
+        backend.start_upload_transfers(
+            user_id=42,
+            filenames=("beta.jar",),
+            detail_text="Uploading mods.",
+        )
+        self.assertEqual(len(notifications), 4)
+
+    def test_persist_uploaded_file_for_transfer_updates_backend_progress(self) -> None:
+        service = ModWebService()
+        transfer_id = service._backend.start_upload_transfers(
+            user_id=42,
+            filenames=("alpha.jar",),
+            detail_text="Staging mods.",
+        )[0]
+
+        class _FakeUploadFile:
+            name = "alpha.jar"
+            content_type = "application/java-archive"
+
+            def __init__(self, content: bytes) -> None:
+                self._content = content
+
+            async def read(self) -> bytes:
+                return self._content
+
+            async def text(self, encoding: str = "utf-8") -> str:
+                return self._content.decode(encoding)
+
+            def iterate(self, *, chunk_size: int = 1024 * 1024):
+                async def _iterate():
+                    for offset in range(0, len(self._content), chunk_size):
+                        yield self._content[offset : offset + chunk_size]
+
+                return _iterate()
+
+            async def save(self, path: str | Path) -> None:
+                Path(path).write_bytes(self._content)
+
+            def size(self) -> int:
+                return len(self._content)
+
+        async def _run_upload() -> Path:
+            return await service._persist_uploaded_file_for_transfer(
+                upload_file=_FakeUploadFile(b"mod-payload" * 32),
+                transfer_id=transfer_id,
+                active_detail_text="Receiving mods for Minecraft Alpha.",
+            )
+
+        temp_path = asyncio.run(_run_upload())
+        self.addCleanup(temp_path.unlink, missing_ok=True)
+
+        item = service._backend.user_transfer_items(user_id=42)[0]
+
+        self.assertEqual(temp_path.read_bytes(), b"mod-payload" * 32)
+        self.assertEqual(item.detail_text, "Receiving mods for Minecraft Alpha.")
+        self.assertEqual(item.progress_percent, 72.0)
+
+    def test_wait_for_upload_transfer_capacity_respects_transfer_limit(self) -> None:
+        service = ModWebService()
+        transfer_ids = service._backend.start_upload_transfers(
+            user_id=42,
+            filenames=("alpha.jar", "beta.jar"),
+            detail_text="Staging mods.",
+        )
+
+        available_slots = asyncio.run(
+            service._wait_for_upload_transfer_capacity(
+                user_id=42,
+                requested_slots=4,
+            )
+        )
+
+        self.assertEqual(available_slots, 1)
+
+        for transfer_id in transfer_ids:
+            service._backend.complete_transfer(transfer_id=transfer_id, detail_text="Installed.")
+
+    def test_upload_mods_batches_files_when_drop_exceeds_transfer_limit(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=NodeModList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                summary=NodeModSummary(
+                    total_count=0,
+                    enabled_count=0,
+                    disabled_count=0,
+                    coremod_count=0,
+                    downloadable_count=0,
+                    non_downloadable_count=0,
+                ),
+                mods=(),
+                app_stats=None,
+            ),
+            supports_chat=False,
+            chat_url=None,
+            map_url=None,
+            can_write_map_annotations=False,
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+        )
+        user = ModWebUser(discord_id=42, username="finch", global_name="Finch", avatar_hash=None)
+        service._user_has_level = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
+
+        class _FakeUploadFile:
+            content_type = "application/java-archive"
+
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            async def read(self) -> bytes:
+                return b""
+
+            async def text(self, encoding: str = "utf-8") -> str:
+                del encoding
+                return ""
+
+            def iterate(self, *, chunk_size: int = 1024 * 1024):
+                del chunk_size
+
+                async def _iterate():
+                    if False:
+                        yield b""
+
+                return _iterate()
+
+            async def save(self, path: str | Path) -> None:
+                Path(path).write_bytes(b"")
+
+            def size(self) -> int:
+                return 1
+
+        upload_files = tuple(
+            _FakeUploadFile(name)
+            for name in ("alpha.jar", "beta.jar", "gamma.jar", "delta.jar")
+        )
+        observed_batches: list[tuple[str, ...]] = []
+
+        async def _fake_wait_for_upload_transfer_capacity(*, user_id: int, requested_slots: int) -> int:
+            del user_id, requested_slots
+            return 3 if not observed_batches else 1
+
+        async def _fake_upload_mod_batch(
+            *,
+            model: ModWebPageModel,
+            upload_files: tuple[_FakeUploadFile, ...],
+            user: ModWebUser,
+        ) -> NodeModUploadBatchResult:
+            del user
+            batch_names = tuple(upload_file.name for upload_file in upload_files)
+            observed_batches.append(batch_names)
+            uploaded_mods = tuple(self._mod_entry(name=name) for name in batch_names)
+            return NodeModUploadBatchResult(
+                app_name=model.app_name,
+                app_friendly=model.app_friendly,
+                node=model.node_name,
+                message=f"Uploaded {len(uploaded_mods)} mods for {model.app_friendly}.",
+                mods=uploaded_mods,
+            )
+
+        service._wait_for_upload_transfer_capacity = _fake_wait_for_upload_transfer_capacity  # type: ignore[method-assign]
+        service._upload_mod_batch = _fake_upload_mod_batch  # type: ignore[method-assign]
+
+        result = asyncio.run(
+            service._upload_mods(
+                model=model,
+                upload_files=upload_files,
+                user=user,
+            )
+        )
+
+        self.assertEqual(
+            observed_batches,
+            [
+                ("alpha.jar", "beta.jar", "gamma.jar"),
+                ("delta.jar",),
+            ],
+        )
+        self.assertEqual(tuple(mod.name for mod in result.mods), tuple(upload_file.name for upload_file in upload_files))
+        self.assertEqual(result.message, "Uploaded 4 mods for Minecraft Alpha.")
 
     @staticmethod
     def _mod_entry(
@@ -9400,6 +9696,15 @@ class ModWebTests(unittest.TestCase):
             lifecycle_notice_started=False,
             lifecycle_notice_stopped=True,
             lifecycle_notice_crashed=False,
+            relay_notice_player_session=False,
+            relay_notice_player_death=False,
+            relay_notice_progress=False,
+            relay_notice_progress_label="Research",
+            relay_advancements_enabled=False,
+            relay_advancement_term="Advancement",
+            activity_providers=(
+                NodeAppActivityProviderEntry(provider_id="day", label="Day Counter", enabled=False),
+            ),
         )
         user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
 
@@ -9411,7 +9716,7 @@ class ModWebTests(unittest.TestCase):
                 refresh_async_runtime_model=None,
             )
 
-        self.assertIn("Details", [button.text for button in ui.buttons])
+        self.assertIn("Properties", [button.text for button in ui.buttons])
         self.assertIn("Disable", [button.text for button in ui.buttons])
         self.assertEqual(
             [control.value for control in ui.inputs],
@@ -9438,11 +9743,29 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ui.inputs[1].class_value, "mod-app-details-field mod-app-details-notes")
         self.assertEqual(
             [(control.label, control.value) for control in ui.checkboxes],
-            [("Started notices", False), ("Stopped notices", True), ("Crash notices", False)],
+            [
+                ("Started", False),
+                ("Stopped", True),
+                ("Crash", False),
+                ("Player Join/Leave", False),
+                ("Death", False),
+                ("Research", False),
+                ("Advancement", False),
+                ("Day Counter", False),
+            ],
         )
         self.assertEqual(
             [control.class_value for control in ui.checkboxes],
-            ["mod-app-details-toggle", "mod-app-details-toggle", "mod-app-details-toggle"],
+            [
+                "mod-app-details-toggle",
+                "mod-app-details-toggle",
+                "mod-app-details-toggle",
+                "mod-app-details-toggle",
+                "mod-app-details-toggle",
+                "mod-app-details-toggle",
+                "mod-app-details-toggle",
+                "mod-app-details-toggle",
+            ],
         )
 
     def test_render_user_header_exposes_discord_settings_button_for_sudo_users(self) -> None:
@@ -9592,6 +9915,106 @@ class ModWebTests(unittest.TestCase):
             ],
         )
         self.assertTrue(ui.inputs[1].disabled)
+
+    def test_render_user_header_keeps_utility_menu_for_unprivileged_users(self) -> None:
+        class FakeContainer:
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeContainer":
+                del value, replace
+                return self
+
+            def props(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def style(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+            ) -> "FakeContainer":
+                del value, add, remove
+                return self
+
+            def on(self, event: str, handler: object | None = None, *, js_handler: str | None = None) -> "FakeContainer":
+                del event, handler, js_handler
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeDialog(FakeContainer):
+            def open(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FakeButton(FakeContainer):
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.buttons: list[FakeButton] = []
+                self.navigate = SimpleNamespace(reload=lambda: None)
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def dialog(self) -> FakeDialog:
+                return FakeDialog()
+
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
+            def html(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def button(self, text: str = "", **kwargs: object) -> FakeButton:
+                del kwargs
+                button = FakeButton(text)
+                self.buttons.append(button)
+                return button
+
+        service = ModWebService()
+        ui = FakeUi()
+        user = ModWebUser(discord_id=42, username="visitor", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(config, "INDEV", False),
+            patch.object(service, "_badge", side_effect=lambda **kwargs: FakeContainer()),
+            patch.object(service, "_web_display_name", return_value="Visitor"),
+            patch.object(service, "_user_avatar_uri", return_value="https://example.com/avatar.png"),
+            patch.object(service, "_user_level_label", return_value="Visitor"),
+            patch.object(service, "_user_level_tone", return_value="grey"),
+            patch.object(service, "_user_can_manage_discord_settings", return_value=False),
+            patch.object(service, "_user_can_use_fake_chat_preview", return_value=False),
+        ):
+            service._render_user_header(ui=cast(ModWebUi, cast(object, ui)), user=user)
+
+        self.assertIn("Log out", [button.text for button in ui.buttons])
 
     def test_app_enable_disable_label_reflects_enabled_state(self) -> None:
         enabled_model = ModWebBasePageModel(

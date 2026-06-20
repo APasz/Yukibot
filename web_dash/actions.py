@@ -61,6 +61,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
         lifecycle_notice_started: bool | None = None,
         lifecycle_notice_stopped: bool | None = None,
         lifecycle_notice_crashed: bool | None = None,
+        relay_notice_player_session: bool | None = None,
+        relay_notice_player_death: bool | None = None,
+        relay_notice_progress: bool | None = None,
+        relay_advancements_enabled: bool | None = None,
+        disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
         startup_cpu_points: int | None = None,
@@ -83,6 +88,16 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload["lifecycle_notice_stopped"] = lifecycle_notice_stopped
         if lifecycle_notice_crashed is not None:
             json_payload["lifecycle_notice_crashed"] = lifecycle_notice_crashed
+        if relay_notice_player_session is not None:
+            json_payload["relay_notice_player_session"] = relay_notice_player_session
+        if relay_notice_player_death is not None:
+            json_payload["relay_notice_player_death"] = relay_notice_player_death
+        if relay_notice_progress is not None:
+            json_payload["relay_notice_progress"] = relay_notice_progress
+        if relay_advancements_enabled is not None:
+            json_payload["relay_advancements_enabled"] = relay_advancements_enabled
+        if disabled_activity_provider_ids is not None:
+            json_payload["disabled_activity_provider_ids"] = list(disabled_activity_provider_ids)
         if action is NodeAppMutationAction.UPDATE_DETAILS:
             json_payload["running_cpu_points"] = running_cpu_points
             json_payload["running_ram_points"] = running_ram_points
@@ -266,6 +281,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
         lifecycle_notice_started: bool | None = None,
         lifecycle_notice_stopped: bool | None = None,
         lifecycle_notice_crashed: bool | None = None,
+        relay_notice_player_session: bool | None = None,
+        relay_notice_player_death: bool | None = None,
+        relay_notice_progress: bool | None = None,
+        relay_advancements_enabled: bool | None = None,
+        disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
         startup_cpu_points: int | None = None,
@@ -290,6 +310,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 lifecycle_notice_started=lifecycle_notice_started,
                 lifecycle_notice_stopped=lifecycle_notice_stopped,
                 lifecycle_notice_crashed=lifecycle_notice_crashed,
+                relay_notice_player_session=relay_notice_player_session,
+                relay_notice_player_death=relay_notice_player_death,
+                relay_notice_progress=relay_notice_progress,
+                relay_advancements_enabled=relay_advancements_enabled,
+                disabled_activity_provider_ids=disabled_activity_provider_ids,
                 running_cpu_points=running_cpu_points,
                 running_ram_points=running_ram_points,
                 startup_cpu_points=startup_cpu_points,
@@ -311,6 +336,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
             lifecycle_notice_started,
             lifecycle_notice_stopped,
             lifecycle_notice_crashed,
+            relay_notice_player_session,
+            relay_notice_player_death,
+            relay_notice_progress,
+            relay_advancements_enabled,
+            disabled_activity_provider_ids,
             running_cpu_points,
             running_ram_points,
             startup_cpu_points,
@@ -643,12 +673,15 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 async def download_single() -> None:
                     await self._start_download(
                         ui=ui,
+                        user=user,
+                        model=model,
                         url=download_url,
                         message=self._download_feedback_message(
                             kind=ModDownloadKind.SINGLE,
                             app_friendly=app_friendly,
                             mod_friendly=entry.friendly,
                         ),
+                        filenames=(entry.name,),
                     )
 
                 ui.button("Download", on_click=download_single).props("flat dense no-caps").classes(
@@ -656,9 +689,33 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ).on("click", js_handler="(event) => event.stopPropagation()")
         return checkbox if can_select else None
 
-    async def _start_download(self, *, ui: ModWebUi, url: str, message: str) -> None:
+    async def _start_download(
+        self,
+        *,
+        ui: ModWebUi,
+        user: ModWebUser,
+        model: ModWebBasePageModel,
+        url: str,
+        message: str,
+        filenames: tuple[str, ...],
+    ) -> None:
+        try:
+            self._backend.start_download_transfers(
+                user_id=user.discord_id,
+                filenames=filenames,
+                detail_text=message,
+                node_color_hex=self._node_role_color_hex(node_name=model.node_name),
+                app_color_hex=model.app_color_hex,
+            )
+        except RuntimeError as xcp:
+            ui.notify(str(xcp), type="warning")
+            return
         ui.notify(message, type="info")
         await asyncio.sleep(_DOWNLOAD_FEEDBACK_DELAY_SECONDS)
+        download = getattr(ui, "download", None)
+        if callable(download):
+            download(url)
+            return
         ui.navigate.to(url)
 
     @staticmethod

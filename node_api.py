@@ -61,7 +61,13 @@ from apps._blueprint_files import (
     blueprint_file_type_from_name,
     classify_blueprint_upload_filenames,
 )
-from apps._config import AppTitleFont, ModDownloadBlockReason, ModType, normalise_app_title_font
+from apps._config import (
+    AppTitleFont,
+    ModDownloadBlockReason,
+    ModType,
+    normalise_activity_provider_ids,
+    normalise_app_title_font,
+)
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
 from apps._console import (
     ConsoleAction,
@@ -300,6 +306,28 @@ class NodeAppResourcePointSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeAppActivityProviderEntry:
+    provider_id: str
+    label: str
+    enabled: bool
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppActivityProviderEntry":
+        return cls(
+            provider_id=_required_string(payload, "provider_id"),
+            label=_required_string(payload, "label"),
+            enabled=_required_bool(payload, "enabled"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "provider_id": self.provider_id,
+            "label": self.label,
+            "enabled": self.enabled,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeAppEntry:
     name: str
     friendly: str
@@ -335,6 +363,13 @@ class NodeAppEntry:
     lifecycle_notice_started: bool = True
     lifecycle_notice_stopped: bool = True
     lifecycle_notice_crashed: bool = True
+    relay_notice_player_session: bool | None = None
+    relay_notice_player_death: bool | None = None
+    relay_notice_progress: bool | None = None
+    relay_notice_progress_label: str | None = None
+    relay_advancements_enabled: bool | None = None
+    relay_advancement_term: str | None = None
+    activity_providers: tuple[NodeAppActivityProviderEntry, ...] = ()
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeAppEntry:
@@ -372,6 +407,13 @@ class NodeAppEntry:
         lifecycle_notice_started = payload.get("lifecycle_notice_started", True)
         lifecycle_notice_stopped = payload.get("lifecycle_notice_stopped", True)
         lifecycle_notice_crashed = payload.get("lifecycle_notice_crashed", True)
+        relay_notice_player_session = payload.get("relay_notice_player_session")
+        relay_notice_player_death = payload.get("relay_notice_player_death")
+        relay_notice_progress = payload.get("relay_notice_progress")
+        relay_notice_progress_label = payload.get("relay_notice_progress_label")
+        relay_advancements_enabled = payload.get("relay_advancements_enabled")
+        relay_advancement_term = payload.get("relay_advancement_term")
+        raw_activity_providers = payload.get("activity_providers", ())
         if not isinstance(name, str) or not name:
             raise ValueError("Node app entry name is invalid.")
         if not isinstance(friendly, str) or not friendly:
@@ -430,6 +472,30 @@ class NodeAppEntry:
             raise ValueError("Node app entry lifecycle_notice_stopped is invalid.")
         if not isinstance(lifecycle_notice_crashed, bool):
             raise ValueError("Node app entry lifecycle_notice_crashed is invalid.")
+        if relay_notice_player_session is not None and not isinstance(relay_notice_player_session, bool):
+            raise ValueError("Node app entry relay_notice_player_session is invalid.")
+        if relay_notice_player_death is not None and not isinstance(relay_notice_player_death, bool):
+            raise ValueError("Node app entry relay_notice_player_death is invalid.")
+        if relay_notice_progress is not None and not isinstance(relay_notice_progress, bool):
+            raise ValueError("Node app entry relay_notice_progress is invalid.")
+        if relay_notice_progress_label is not None and (
+            not isinstance(relay_notice_progress_label, str) or not relay_notice_progress_label.strip()
+        ):
+            raise ValueError("Node app entry relay_notice_progress_label is invalid.")
+        if (relay_notice_progress is None) != (relay_notice_progress_label is None):
+            raise ValueError("Node app entry relay progress metadata is inconsistent.")
+        if relay_advancements_enabled is not None and not isinstance(relay_advancements_enabled, bool):
+            raise ValueError("Node app entry relay_advancements_enabled is invalid.")
+        if relay_advancement_term is not None and (
+            not isinstance(relay_advancement_term, str) or not relay_advancement_term.strip()
+        ):
+            raise ValueError("Node app entry relay_advancement_term is invalid.")
+        if (relay_advancements_enabled is None) != (relay_advancement_term is None):
+            raise ValueError("Node app entry relay advancement metadata is inconsistent.")
+        if not isinstance(raw_activity_providers, list | tuple):
+            raise ValueError("Node app entry activity_providers is invalid.")
+        if any(not isinstance(provider_payload, Mapping) for provider_payload in raw_activity_providers):
+            raise ValueError("Node app entry activity_providers is invalid.")
         return cls(
             name=name,
             friendly=friendly,
@@ -475,6 +541,16 @@ class NodeAppEntry:
             lifecycle_notice_started=lifecycle_notice_started,
             lifecycle_notice_stopped=lifecycle_notice_stopped,
             lifecycle_notice_crashed=lifecycle_notice_crashed,
+            relay_notice_player_session=relay_notice_player_session,
+            relay_notice_player_death=relay_notice_player_death,
+            relay_notice_progress=relay_notice_progress,
+            relay_notice_progress_label=relay_notice_progress_label,
+            relay_advancements_enabled=relay_advancements_enabled,
+            relay_advancement_term=relay_advancement_term,
+            activity_providers=tuple(
+                NodeAppActivityProviderEntry.from_mapping(cast(Mapping[str, object], provider_payload))
+                for provider_payload in raw_activity_providers
+            ),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -513,6 +589,13 @@ class NodeAppEntry:
             "lifecycle_notice_started": self.lifecycle_notice_started,
             "lifecycle_notice_stopped": self.lifecycle_notice_stopped,
             "lifecycle_notice_crashed": self.lifecycle_notice_crashed,
+            "relay_notice_player_session": self.relay_notice_player_session,
+            "relay_notice_player_death": self.relay_notice_player_death,
+            "relay_notice_progress": self.relay_notice_progress,
+            "relay_notice_progress_label": self.relay_notice_progress_label,
+            "relay_advancements_enabled": self.relay_advancements_enabled,
+            "relay_advancement_term": self.relay_advancement_term,
+            "activity_providers": [provider.to_mapping() for provider in self.activity_providers],
         }
 
 
@@ -715,6 +798,56 @@ class NodeModUploadResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class NodeModUploadBatchResult:
+    app_name: str
+    app_friendly: str
+    node: str
+    message: str
+    mods: tuple[NodeModEntry, ...]
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModUploadBatchResult":
+        raw_mods = payload.get("mods")
+        if isinstance(raw_mods, str) or not isinstance(raw_mods, Sequence):
+            raise ValueError("Node mod upload mods are invalid.")
+        mods: list[NodeModEntry] = []
+        for raw_mod in raw_mods:
+            if not isinstance(raw_mod, Mapping):
+                raise ValueError("Node mod upload mods are invalid.")
+            mods.append(NodeModEntry.from_mapping(cast(Mapping[str, object], raw_mod)))
+        if not mods:
+            raise ValueError("Node mod upload mods are invalid.")
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            message=_required_string(payload, "message"),
+            mods=tuple(mods),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "message": self.message,
+            "mods": [mod.to_mapping() for mod in self.mods],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeModUploadSource:
+    source_path: Path
+    upload_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedModUploadFile:
+    upload: UploadFile
+    upload_name: str
+
+
 class NodeAppMutationAction(StrEnum):
     START = "start"
     STOP = "stop"
@@ -770,6 +903,11 @@ class NodeAppMutationRequest(BaseModel):
     lifecycle_notice_started: bool | None = None
     lifecycle_notice_stopped: bool | None = None
     lifecycle_notice_crashed: bool | None = None
+    relay_notice_player_session: bool | None = None
+    relay_notice_player_death: bool | None = None
+    relay_notice_progress: bool | None = None
+    relay_advancements_enabled: bool | None = None
+    disabled_activity_provider_ids: tuple[str, ...] | None = None
     running_cpu_points: int | None = None
     running_ram_points: int | None = None
     startup_cpu_points: int | None = None
@@ -779,6 +917,13 @@ class NodeAppMutationRequest(BaseModel):
     update_branch_id: str | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("disabled_activity_provider_ids", mode="before")
+    @classmethod
+    def _validate_disabled_activity_provider_ids(cls, raw: object) -> tuple[str, ...] | None:
+        if raw is None:
+            return None
+        return normalise_activity_provider_ids(raw)
 
     @model_validator(mode="after")
     def _validate_payload(self) -> "NodeAppMutationRequest":
@@ -3194,6 +3339,11 @@ class NodeApiService:
                 lifecycle_notice_started=mutation_request.lifecycle_notice_started,
                 lifecycle_notice_stopped=mutation_request.lifecycle_notice_stopped,
                 lifecycle_notice_crashed=mutation_request.lifecycle_notice_crashed,
+                relay_notice_player_session=mutation_request.relay_notice_player_session,
+                relay_notice_player_death=mutation_request.relay_notice_player_death,
+                relay_notice_progress=mutation_request.relay_notice_progress,
+                relay_advancements_enabled=mutation_request.relay_advancements_enabled,
+                disabled_activity_provider_ids=mutation_request.disabled_activity_provider_ids,
                 running_cpu_points=mutation_request.running_cpu_points,
                 running_ram_points=mutation_request.running_ram_points,
                 startup_cpu_points=mutation_request.startup_cpu_points,
@@ -3249,8 +3399,8 @@ class NodeApiService:
         async def _upload_mod(
             app_name: str,
             request: Request,
-            upload: Annotated[UploadFile, File()],
-            filename: Annotated[str | None, Form()] = None,
+            upload: Annotated[list[UploadFile], File()],
+            filename: Annotated[list[str] | None, Form()] = None,
             access_token: str | None = None,
         ) -> dict[str, object]:
             traffic_log.info("Node API mod upload request: node=%s app=%s", self.node_name, app_name)
@@ -3263,10 +3413,10 @@ class NodeApiService:
                 verified_grant=grant,
             )
             app = self._resolve_app(app_name)
-            result = await self.upload_mod_file(
+            result = await self.upload_mod_files(
                 app=app,
-                upload=upload,
-                upload_name=filename,
+                uploads=upload,
+                upload_names=filename,
                 actor_user_id=actor_user_id,
             )
             audit_log(
@@ -3274,7 +3424,7 @@ class NodeApiService:
                 actor_user_id=actor_user_id,
                 node_name=self.node_name,
                 app_name=app.name,
-                mod_name=result.mod.name,
+                mod_name=",".join(mod.name for mod in result.mods),
                 required_level=Power_Level.user.name,
             )
             return result.to_mapping()
@@ -3915,6 +4065,16 @@ class NodeApiService:
         app_scope = getattr(app, "scope", None)
         update_info = getattr(app, "update_info", None)
         update_status = getattr(app, "update_status", None)
+        raw_activity_provider_entries = getattr(app, "activity_provider_entries", ())
+        activity_provider_entries = (
+            tuple(raw_activity_provider_entries)
+            if isinstance(raw_activity_provider_entries, list | tuple)
+            else ()
+        )
+        relay_notice_player_session = getattr(app, "relay_notice_player_session_enabled", None)
+        relay_notice_player_death = getattr(app, "relay_notice_player_death_enabled", None)
+        relay_notice_progress = getattr(app, "relay_notice_progress_enabled", None)
+        relay_advancements_enabled = getattr(app, "relay_advancements_enabled", None)
         return NodeAppEntry(
             name=app.name,
             friendly=app.friendly,
@@ -3952,6 +4112,24 @@ class NodeApiService:
             lifecycle_notice_started=getattr(app.cfg, "lifecycle_notice_started", True),
             lifecycle_notice_stopped=getattr(app.cfg, "lifecycle_notice_stopped", True),
             lifecycle_notice_crashed=getattr(app.cfg, "lifecycle_notice_crashed", True),
+            relay_notice_player_session=relay_notice_player_session,
+            relay_notice_player_death=relay_notice_player_death,
+            relay_notice_progress=relay_notice_progress,
+            relay_notice_progress_label=(
+                getattr(app, "relay_progress_notice_term", None) if relay_notice_progress is not None else None
+            ),
+            relay_advancements_enabled=relay_advancements_enabled,
+            relay_advancement_term=(
+                getattr(app, "relay_advancement_term", None) if relay_advancements_enabled is not None else None
+            ),
+            activity_providers=tuple(
+                NodeAppActivityProviderEntry(
+                    provider_id=entry.provider_id,
+                    label=entry.label,
+                    enabled=entry.enabled,
+                )
+                for entry in activity_provider_entries
+            ),
         )
 
     def _cached_app_transition_state(self, app_name: str) -> NodeAppTransitionState:
@@ -5437,6 +5615,11 @@ class NodeApiService:
         lifecycle_notice_started: bool | None = None,
         lifecycle_notice_stopped: bool | None = None,
         lifecycle_notice_crashed: bool | None = None,
+        relay_notice_player_session: bool | None = None,
+        relay_notice_player_death: bool | None = None,
+        relay_notice_progress: bool | None = None,
+        relay_advancements_enabled: bool | None = None,
+        disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
         startup_cpu_points: int | None = None,
@@ -5511,6 +5694,11 @@ class NodeApiService:
                     lifecycle_notice_started=lifecycle_notice_started,
                     lifecycle_notice_stopped=lifecycle_notice_stopped,
                     lifecycle_notice_crashed=lifecycle_notice_crashed,
+                    relay_notice_player_session=relay_notice_player_session,
+                    relay_notice_player_death=relay_notice_player_death,
+                    relay_notice_progress=relay_notice_progress,
+                    relay_advancements_enabled=relay_advancements_enabled,
+                    disabled_activity_provider_ids=disabled_activity_provider_ids,
                     running_cpu_points=running_cpu_points,
                     running_ram_points=running_ram_points,
                     startup_cpu_points=startup_cpu_points,
@@ -5908,20 +6096,43 @@ class NodeApiService:
         upload_name: str | None,
         actor_user_id: int,
     ) -> NodeModUploadResult:
-        resolved_upload_name: str = self._validated_upload_filename(
-            upload_name or upload.filename or "",
-            kind="Mod",
+        result = await self.upload_mod_files(
+            app=app,
+            uploads=[upload],
+            upload_names=None if upload_name is None else [upload_name],
+            actor_user_id=actor_user_id,
         )
-        temp_path = await self._persist_upload_to_temp(upload)
+        return self._single_mod_upload_result(result)
+
+    async def upload_mod_files(
+        self,
+        *,
+        app: App,
+        uploads: Sequence[UploadFile],
+        upload_names: Sequence[str] | None,
+        actor_user_id: int,
+    ) -> NodeModUploadBatchResult:
+        upload_sources = self._resolve_mod_upload_requests(uploads=uploads, upload_names=upload_names)
+        temp_paths: list[Path] = []
         try:
-            return await self.upload_mod_path(
+            resolved_sources: list[NodeModUploadSource] = []
+            for upload_request in upload_sources:
+                temp_path = await self._persist_upload_to_temp(upload_request.upload)
+                temp_paths.append(temp_path)
+                resolved_sources.append(
+                    NodeModUploadSource(
+                        source_path=temp_path,
+                        upload_name=upload_request.upload_name,
+                    )
+                )
+            return await self.upload_mod_paths(
                 app=app,
-                source_path=temp_path,
-                upload_name=resolved_upload_name,
+                upload_sources=resolved_sources,
                 actor_user_id=actor_user_id,
             )
         finally:
-            temp_path.unlink(missing_ok=True)
+            for temp_path in temp_paths:
+                temp_path.unlink(missing_ok=True)
 
     async def upload_mod_path(
         self,
@@ -5931,17 +6142,33 @@ class NodeApiService:
         upload_name: str,
         actor_user_id: int,
     ) -> NodeModUploadResult:
+        result = await self.upload_mod_paths(
+            app=app,
+            upload_sources=[NodeModUploadSource(source_path=source_path, upload_name=upload_name)],
+            actor_user_id=actor_user_id,
+        )
+        return self._single_mod_upload_result(result)
+
+    async def upload_mod_paths(
+        self,
+        *,
+        app: App,
+        upload_sources: Sequence[NodeModUploadSource],
+        actor_user_id: int,
+    ) -> NodeModUploadBatchResult:
         if app.mods is None:
             raise _http_exception(409, f"{app.friendly} does not support mods.")
-        resolved_upload_name = self._validated_upload_filename(upload_name, kind="Mod")
+        resolved_upload_sources: tuple[NodeModUploadSource, ...] = self._validated_mod_upload_sources(upload_sources)
         try:
             require_app_stopped_for_mod_mutation(app)
             manager: Mod_Manager = app.has_mod_manager
             await manager.reload_mods()
+            uploaded_mods: list[Mod] = []
             with tempfile.TemporaryDirectory(prefix="yukibot-mod-upload-") as temp_dir:
-                staged_path: Path = Path(temp_dir) / resolved_upload_name
-                await asyncio.to_thread(File_Utils.copy, source_path, staged_path, True)
-                uploaded: Mod = await manager.add(staged_path, atomic=True)
+                for upload_source in resolved_upload_sources:
+                    staged_path: Path = Path(temp_dir) / upload_source.upload_name
+                    await asyncio.to_thread(File_Utils.copy, upload_source.source_path, staged_path, True)
+                    uploaded_mods.append(await manager.add(staged_path, atomic=True))
         except RunningAppModMutationError as xcp:
             raise _http_exception(409, str(xcp)) from xcp
         except FileNotFoundError as xcp:
@@ -5954,18 +6181,19 @@ class NodeApiService:
             raise _http_exception(500, f"Mod upload failed: {xcp}") from xcp
 
         traffic_log.info(
-            "Node API mod uploaded: node=%s app=%s mod=%s actor=%s",
+            "Node API mods uploaded: node=%s app=%s mods=%s actor=%s",
             self.node_name,
             app.name,
-            uploaded.name,
+            ",".join(mod.name for mod in uploaded_mods),
             actor_user_id,
         )
-        return NodeModUploadResult(
+        mod_entries: tuple[NodeModEntry, ...] = tuple(self._mod_entry(uploaded_mod) for uploaded_mod in uploaded_mods)
+        return NodeModUploadBatchResult(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            message=f"Uploaded mod `{uploaded.friendly}` for {app.friendly}.",
-            mod=self._mod_entry(uploaded),
+            message=self._mod_upload_message(app=app, mods=mod_entries),
+            mods=mod_entries,
         )
 
     async def rename_save_file(
@@ -7027,6 +7255,64 @@ class NodeApiService:
         if resolved in {".", ".."} or PurePosixPath(resolved).name != resolved or "\\" in resolved:
             raise _http_exception(400, f"{kind} upload filename must not include directories.")
         return resolved
+
+    def _resolve_mod_upload_requests(
+        self,
+        *,
+        uploads: Sequence[UploadFile],
+        upload_names: Sequence[str] | None,
+    ) -> tuple[_ResolvedModUploadFile, ...]:
+        if not uploads:
+            raise _http_exception(400, "At least one mod upload is required.")
+        if upload_names is not None and len(upload_names) != len(uploads):
+            raise _http_exception(400, "Mod upload filenames must match the number of uploads.")
+        resolved_uploads: list[_ResolvedModUploadFile] = []
+        for index, upload in enumerate(uploads):
+            resolved_upload_name = self._validated_upload_filename(
+                (upload.filename or "") if upload_names is None else upload_names[index],
+                kind="Mod",
+            )
+            resolved_uploads.append(
+                _ResolvedModUploadFile(
+                    upload=upload,
+                    upload_name=resolved_upload_name,
+                )
+            )
+        return tuple(resolved_uploads)
+
+    def _validated_mod_upload_sources(
+        self,
+        upload_sources: Sequence[NodeModUploadSource],
+    ) -> tuple[NodeModUploadSource, ...]:
+        if not upload_sources:
+            raise _http_exception(400, "At least one mod upload is required.")
+        resolved_sources: list[NodeModUploadSource] = []
+        for upload_source in upload_sources:
+            resolved_sources.append(
+                NodeModUploadSource(
+                    source_path=upload_source.source_path,
+                    upload_name=self._validated_upload_filename(upload_source.upload_name, kind="Mod"),
+                )
+            )
+        return tuple(resolved_sources)
+
+    @staticmethod
+    def _mod_upload_message(*, app: App, mods: Sequence[NodeModEntry]) -> str:
+        if len(mods) == 1:
+            return f"Uploaded mod `{mods[0].friendly}` for {app.friendly}."
+        return f"Uploaded {len(mods)} mods for {app.friendly}."
+
+    @staticmethod
+    def _single_mod_upload_result(result: NodeModUploadBatchResult) -> NodeModUploadResult:
+        if len(result.mods) != 1:
+            raise ValueError("Exactly one uploaded mod is required.")
+        return NodeModUploadResult(
+            app_name=result.app_name,
+            app_friendly=result.app_friendly,
+            node=result.node,
+            message=result.message,
+            mod=result.mods[0],
+        )
 
     @staticmethod
     async def _persist_upload_to_temp(upload: UploadFile) -> Path:
