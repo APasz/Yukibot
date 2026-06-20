@@ -25,6 +25,7 @@ from .runtime_imports import (
     config,
     quote,
     requests,
+    urlsplit,
 )
 from .service_base import ModWebServiceSupport
 from .utils import _http_exception
@@ -43,6 +44,26 @@ class _ModWebClientMapErrorReport(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=False)
 
 class ModWebRoutesMixin(ModWebServiceSupport):
+    @staticmethod
+    def _is_self_redirect_target(*, request: Request, location: str) -> bool:
+        if not location:
+            return False
+        target = urlsplit(location)
+        request_url = getattr(request, "url", None)
+        request_path = getattr(request_url, "path", None)
+        if not isinstance(request_path, str) or not request_path.startswith("/"):
+            return False
+        request_query = getattr(request_url, "query", None)
+        normalized_request_query = request_query if isinstance(request_query, str) else ""
+        if target.scheme or target.netloc:
+            request_scheme = getattr(request_url, "scheme", None)
+            request_netloc = getattr(request_url, "netloc", None)
+            if not isinstance(request_scheme, str) or not isinstance(request_netloc, str):
+                return False
+            if target.scheme != request_scheme or target.netloc != request_netloc:
+                return False
+        return (target.path or "/") == request_path and target.query == normalized_request_query
+
     def _register_routes(self, *, nicegui_app: ModWebFastApiApp, ui: ModWebRouteUi) -> None:
         @nicegui_app.middleware("http")
         async def _log_mod_web_request(
@@ -51,11 +72,27 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> StarletteResponse | RedirectResponse:
             redirect = self._remote_portal_redirect(request)
             if redirect is not None:
+                redirect_target = redirect.headers.get("location", "")
+                if self._is_self_redirect_target(request=request, location=redirect_target):
+                    traffic_log.warning(
+                        "Remote mod web redirect loop avoided: method=%s path=%s target=%s",
+                        request.method,
+                        request.url.path,
+                        redirect_target,
+                    )
+                    return await self._build_framework_error_response(
+                        ui=ui,
+                        request=request,
+                        status_code=310,
+                        exception=RuntimeError(
+                            "Remote mod web attempted to redirect this request back to the same URL."
+                        ),
+                    )
                 traffic_log.info(
                     "Remote mod web redirect: method=%s path=%s target=%s",
                     request.method,
                     request.url.path,
-                    redirect.headers.get("location", ""),
+                    redirect_target,
                 )
                 return redirect
 
@@ -290,6 +327,22 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 node_name="erin",
                 exception=RuntimeError("Remote node rejected the request: missing scope token."),
             )
+
+        @ui.page("/mod-web/dev/error/redirect-loop")
+        async def _dev_redirect_loop(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._apply_theme(ui=ui)
+            with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
+                self._render_status_page_panel(
+                    ui=ui,
+                    config=self._framework_http_error_config(
+                        status_code=310,
+                        exception=RuntimeError(
+                            "Remote mod web attempted to redirect this request back to the same URL."
+                        ),
+                    ),
+                )
 
         @ui.page("/mod-web/dev/error/framework-404")
         async def _dev_framework_404(request: Request) -> None:

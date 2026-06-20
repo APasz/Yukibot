@@ -21,11 +21,9 @@ from relay_notices import (
 from restart_targets import RestartTarget
 
 from .constants import (
-    _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     log,
 )
 from .nicegui_protocols import (
-    AsyncRefresh,
     ModWebUi,
     ModWebValueContainer,
     WebChatRelayPublisher,
@@ -54,7 +52,6 @@ from .runtime_imports import (
     Path,
     Power_Level,
     Request,
-    Timer,
     asyncio,
     cast,
     config,
@@ -72,6 +69,7 @@ from .types import (
     _ModWebFakeChatMessageMode,
     _ModWebFakeChatPreviewState,
     _ModWebLinkSpec,
+    _ModWebNodePresenceBadgeSpec,
     _ModWebNotificationTrayItem,
     _ModWebStatusPageConfig,
 )
@@ -204,6 +202,18 @@ class ModWebStatusMixin(ModWebServiceSupport):
         return client.build_response(request, status_code)
 
     def _framework_http_error_config(self, *, status_code: int, exception: Exception) -> _ModWebStatusPageConfig:
+        if status_code == 310:
+            return _ModWebStatusPageConfig(
+                title="Too many redirects",
+                support_text="The page resolved back to itself instead of rendering. Check the requested route and node routing configuration.",
+                badge_text="310",
+                badge_tone="warn",
+                accent_color_hex="#f59e0b",
+                icon_markup=self._framework_error_icon_markup(),
+                detail_text=self._framework_http_error_detail_text(exception),
+                detail_label="Details",
+                actions=(_ModWebLinkSpec(label="Home", url=self.index_path()),),
+            )
         if status_code == 404:
             return _ModWebStatusPageConfig(
                 title="Page not found",
@@ -373,6 +383,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
         node_statuses: tuple[ModWebNodeStatus, ...] = self._login_node_statuses(
             simulated_down_node_names=simulated_down_node_names
         )
+        login_presence_badge_specs: list[_ModWebNodePresenceBadgeSpec] = []
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             with ui.card().classes(self._hero_card_classes()):
                 with ui.column().classes(self._hero_shell_classes()):
@@ -381,34 +392,48 @@ class ModWebStatusMixin(ModWebServiceSupport):
                             ui.label("Yukibot Web").classes(self._hero_title_classes())
                             ui.label(self._login_page_subtitle()).classes(self._hero_support_classes())
                         with ui.column().classes(self._hero_badges_classes()):
-
-                            @ui.refreshable
-                            def _render_login_node_badges(current_statuses: tuple[ModWebNodeStatus, ...]) -> None:
-                                with ui.row().classes(self._hero_badge_row_classes()):
-                                    for status in current_statuses:
-                                        self._interactive_badge(
-                                            ui=ui,
-                                            text=self._login_node_status_badge_text(status),
-                                            tone=self._login_node_status_badge_tone(status),
-                                            extra_classes="mod-node-status-badge",
+                            with ui.row().classes(self._hero_badge_row_classes()):
+                                for status in node_statuses:
+                                    badge = self._interactive_badge(
+                                        ui=ui,
+                                        text=self._login_node_status_badge_text(status),
+                                        tone=self._login_node_status_badge_tone(status),
+                                        extra_classes="mod-node-status-badge",
+                                    )
+                                    badge_element_id = getattr(badge, "id", None)
+                                    if not isinstance(badge_element_id, int):
+                                        continue
+                                    login_presence_badge_specs.append(
+                                        _ModWebNodePresenceBadgeSpec(
+                                            node_name=status.node.node_name,
+                                            badge_element_id=badge_element_id,
+                                            text_element_id=None,
+                                            node_label=status.node.label,
+                                            pending_text=self._login_node_status_badge_text(status),
+                                            alive_text=f"{status.node.label}: Alive",
+                                            down_text=f"{status.node.label}: Down",
+                                            presence_stream_url=(
+                                                None if status.is_simulated_down else status.node.presence_stream_url
+                                            ),
+                                            pending_class_name=self._badge_class_name(
+                                                tone=self._login_node_status_badge_tone(status),
+                                                extra_classes="mod-node-status-badge",
+                                            ),
+                                            healthy_class_name=self._badge_class_name(
+                                                tone="black",
+                                                extra_classes="mod-node-status-badge",
+                                            ),
+                                            unhealthy_class_name=self._badge_class_name(
+                                                tone="red",
+                                                extra_classes="mod-node-status-badge",
+                                            ),
                                         )
-
-                            _render_login_node_badges(node_statuses)
-                            refresh_login_node_badges: AsyncRefresh = (
-                                self._build_async_refreshable_updater(
-                                    refresh_async_value=lambda: asyncio.to_thread(
-                                        self._login_node_statuses,
-                                        simulated_down_node_names=simulated_down_node_names,
-                                    ),
-                                    apply_value=_render_login_node_badges.refresh,
-                                    error_context="Mod web login node badges",
-                                )
+                                    )
+                            self._run_node_presence_badges_javascript(
+                                ui=ui,
+                                badge_specs=tuple(login_presence_badge_specs),
+                                controller_key="modWebLoginNodePresence",
                             )
-                            refresh_login_node_badges_timer: Timer = ui.timer(
-                                _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
-                                lambda: asyncio.create_task(refresh_login_node_badges()),
-                            )
-                            self._register_timer_cleanup(ui=ui, timer=refresh_login_node_badges_timer)
                     login_show_api_actions: bool = show_api_actions
 
                     def _set_login_show_api_actions(enabled: bool) -> None:
@@ -484,6 +509,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
             _ModWebLinkSpec(label="Remote JSON Invalid", url="/mod-web/dev/error/remote-json-invalid"),
             _ModWebLinkSpec(label="Remote Timeout", url="/mod-web/dev/error/remote-timeout"),
             _ModWebLinkSpec(label="Remote Rejected", url="/mod-web/dev/error/remote-rejected"),
+            _ModWebLinkSpec(label="Redirect Loop 310", url="/mod-web/dev/error/redirect-loop"),
             _ModWebLinkSpec(label="Framework 404", url="/mod-web/dev/error/framework-404"),
             _ModWebLinkSpec(label="Framework 500", url="/mod-web/dev/error/framework-500"),
             _ModWebLinkSpec(label="NiceGUI Exception", url="/mod-web/dev/error/nicegui-exception"),

@@ -1797,26 +1797,25 @@ class AppManageTests(unittest.TestCase):
         acl = Mock()
 
         service._edit_editor_message = AsyncMock()
-        service._mod_web.open_mod_page = AsyncMock(return_value="https://mods.example/mod-web/mods/dummy")
-
-        asyncio.run(
-            service._handle_mod_web_action(
-                req=cast(Any, req),
-                acl=acl,
-                manager=manager,
-                state=AppManageState(mode=AppManageMode.MODS, page=0, app_name=app.name),
-                app=app,
+        with patch("cmd_app.current_node_app_url", return_value="https://mods.example/mod-web/nodes/yuki/mods/dummy") as page_url:
+            asyncio.run(
+                service._handle_mod_web_action(
+                    req=cast(Any, req),
+                    acl=acl,
+                    manager=manager,
+                    state=AppManageState(mode=AppManageMode.MODS, page=0, app_name=app.name),
+                    app=app,
+                )
             )
-        )
 
         interaction.create_initial_response.assert_awaited_once_with(hikari.ResponseType.DEFERRED_MESSAGE_UPDATE)
-        service._mod_web.open_mod_page.assert_awaited_once_with(app)
+        page_url.assert_called_once_with(app.name)
         service._edit_editor_message.assert_awaited_once()
         await_args = service._edit_editor_message.await_args
         assert await_args is not None
         status = await_args.kwargs["status"]
         self.assertIn("Opened mod web page for `Dummy`.", status)
-        self.assertIn("https://mods.example/mod-web/mods/dummy", status)
+        self.assertIn("https://mods.example/mod-web/nodes/yuki/mods/dummy", status)
 
     def test_touch_app_lock_preserves_manager_metadata_across_refreshes(self) -> None:
         service = AppManageService()

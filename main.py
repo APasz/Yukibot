@@ -47,7 +47,6 @@ from relay_notices import (
     RelayNoticeSource,
     render_system_notice_text,
 )
-from remote_node import RemoteNodeSupervisor
 from restart_targets import RestartTarget
 from web_dash.service import ModWebService
 
@@ -280,19 +279,12 @@ def main():
     maintenance = MaintenanceService()
     client: lightbulb.Client
 
-    if deg := config.env_opt("INDEV"):
-        log.info(f"DEG|DEV: {deg}")
-        client = lightbulb.client_from_app(
-            bot,
-        )
-    else:
-        client = lightbulb.client_from_app(bot)
+    client = lightbulb.client_from_app(bot)
 
     utilities = Utilities()
     resolutator = Resolutator(bot)
     authority_server = AuthorityServer(name_cache)
     node_api_server = NodeApiHttpService()
-    remote_node = RemoteNodeSupervisor()
     registry = client.di.registry_for(lightbulb.di.Contexts.DEFAULT)
     acl = Access_Control()
     registry.register_value(Access_Control, acl)
@@ -303,7 +295,6 @@ def main():
     registry.register_value(Resolutator, resolutator)
     dc_relay = DC_Relay(bot)
     if profile.has_service(config.BotService.GAME_RELAY):
-        app_editor.set_chat_relay_service(dc_relay)
         node_api_server.set_chat_relay_service(dc_relay)
     voice_client: hikariwave.VoiceClient | None = None
     voice_tts: VoiceTTSService | None = None
@@ -321,7 +312,6 @@ def main():
         voice_tts = VoiceTTSService(bot, voice_client)
         registry.register_value(VoiceTTSService, voice_tts)
         dc_relay.set_voice_tts_service(voice_tts)
-        app_editor.set_relay_tts_service(voice_tts)
         app_editor.set_voice_target_service(voice_tts)
         node_api_server.set_relay_tts_service(voice_tts)
     elif profile.has_service(config.BotService.GAME_RELAY):
@@ -397,9 +387,6 @@ def main():
             if profile.has_service(config.BotService.GAME_RELAY):
                 dc_relay.set_event_loop()
             await node_api_server.start(app_manager, acl=acl)
-            log.info("Starting mod web service")
-            await app_editor.start_web(app_manager, acl)
-            log.info("Mod web service startup returned")
 
             if profile.has_service(config.BotService.GAME_RELAY):
                 log.info("Starting Discord relay service")
@@ -421,7 +408,6 @@ def main():
                 bot.subscribe(hikari.VoiceStateUpdateEvent, voice_tts.on_voice_state_update)  # type: ignore
                 log.info("Voice TTS service ready")
             await authority_server.start()
-            await remote_node.start()
         except Exception as xcp:
             starting_xcp.append(str(xcp))
             raise xcp
@@ -671,14 +657,12 @@ def main():
         log.info("Ending")
         print("Ending")
         config.IS_SHUTTINGDOWN = True
-        app_editor.begin_web_shutdown()
         if voice_tts:
             await voice_tts.close()
         if music:
             await music.close()
         if voice_client:
             await voice_client.close()
-        await remote_node.stop()
         await node_api_server.stop()
         await authority_server.stop()
         await app_manager.end()

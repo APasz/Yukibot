@@ -26,16 +26,23 @@ from .runtime_imports import (
 from .constants import (
     _APP_LIST_API_QUERY_PARAM,
     _DEV_SIMULATED_DOWN_NODE_QUERY_PARAM,
+    _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
+    _HOME_NODE_LATENCY_TIMEOUT_SECONDS,
+    _NODE_PRESENCE_RECONNECT_DELAY_SECONDS,
 )
 from .nicegui_protocols import ModWebUi
 
 from .service_base import ModWebServiceSupport
-from .types import _ModWebBadgeSpec
+from .types import _ModWebBadgeSpec, _ModWebNodePresenceBadgeSpec
 
 if TYPE_CHECKING:
     from nicegui.element import Element
 
 class ModWebUiHelpersMixin(ModWebServiceSupport):
+    @staticmethod
+    def _badge_class_name(*, tone: BadgeTone, extra_classes: str = "") -> str:
+        return f"{mod_web_badge_class(tone)} {extra_classes}".strip()
+
     @staticmethod
     def _resolved_badge_tooltip_text(*, text: str, tooltip_text: str | None) -> str:
         return text if tooltip_text is None else tooltip_text
@@ -66,7 +73,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         extra_classes: str = "",
         tooltip_text: str | None = None,
     ) -> Label:
-        badge = ui.label(text).classes(f"{mod_web_badge_class(tone)} {extra_classes}".strip())
+        badge = ui.label(text).classes(ModWebUiHelpersMixin._badge_class_name(tone=tone, extra_classes=extra_classes))
         ModWebUiHelpersMixin._attach_badge_tooltip(
             ui=ui,
             target=cast("Element", badge),
@@ -84,12 +91,9 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         extra_classes: str = "",
         tooltip_text: str | None = None,
     ) -> Label:
-        badge = (
-            ui.label(text)
-            .classes(f"{mod_web_badge_class(tone)} {extra_classes}".strip())
-            .props("role=button tabindex=0")
-            .on("click", on_click)
-        )
+        badge = ui.label(text).classes(ModWebUiHelpersMixin._badge_class_name(tone=tone, extra_classes=extra_classes)).props(
+            "role=button tabindex=0"
+        ).on("click", on_click)
         ModWebUiHelpersMixin._attach_badge_tooltip(
             ui=ui,
             target=cast("Element", badge),
@@ -107,7 +111,9 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         extra_classes: str = "",
         tooltip_text: str | None = None,
     ) -> "Element":
-        badge = ui.element("span").classes(f"{mod_web_badge_class(tone)} mod-badge-icon-label {extra_classes}".strip())
+        badge = ui.element("span").classes(
+            ModWebUiHelpersMixin._badge_class_name(tone=tone, extra_classes=f"mod-badge-icon-label {extra_classes}".strip())
+        )
         with badge:
             ui.label(text).classes("mod-badge-value")
             ui.icon(icon).classes("mod-badge-icon")
@@ -192,7 +198,10 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         tooltip_text: str | None = None,
     ) -> "Element":
         badge = ui.link(text, url).classes(
-            f"{mod_web_badge_class(tone)} mod-badge-link cursor-pointer {extra_classes}".strip()
+            ModWebUiHelpersMixin._badge_class_name(
+                tone=tone,
+                extra_classes=f"mod-badge-link cursor-pointer {extra_classes}".strip(),
+            )
         )
         ModWebUiHelpersMixin._attach_badge_tooltip(
             ui=ui,
@@ -240,6 +249,286 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
             link.props('target="_blank" rel="noopener noreferrer"')
         if stop_propagation:
             link.on("click", js_handler="(event) => event.stopPropagation()")
+
+    @classmethod
+    def _run_node_presence_badges_javascript(
+        cls,
+        *,
+        ui: ModWebUi,
+        badge_specs: tuple[_ModWebNodePresenceBadgeSpec, ...],
+        controller_key: str,
+    ) -> None:
+        if not badge_specs:
+            return
+        ui.run_javascript(cls._node_presence_badges_javascript(badge_specs=badge_specs, controller_key=controller_key), timeout=0.1)
+
+    @classmethod
+    def _node_presence_badges_javascript(
+        cls,
+        *,
+        badge_specs: tuple[_ModWebNodePresenceBadgeSpec, ...],
+        controller_key: str,
+    ) -> str:
+        specs_json: str = json.dumps([badge_spec.to_mapping() for badge_spec in badge_specs], separators=(",", ":"))
+        latency_refresh_interval_ms: int = int(_HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS * 1000)
+        latency_timeout_ms: int = int(_HOME_NODE_LATENCY_TIMEOUT_SECONDS * 1000)
+        reconnect_delay_ms: int = int(_NODE_PRESENCE_RECONNECT_DELAY_SECONDS * 1000)
+        return f"""
+            (() => {{
+                const controllerKey = {json.dumps(controller_key)};
+                const specs = {specs_json};
+                const latencyRefreshIntervalMs = {latency_refresh_interval_ms};
+                const latencyTimeoutMs = {latency_timeout_ms};
+                const reconnectDelayMs = {reconnect_delay_ms};
+                const bootstrapProbeCount = 4;
+                const bootstrapProbeDelayMs = 850;
+                const getElementMaybe = (elementId) => getElement(elementId) || getHtmlElement(elementId);
+                const websocketUrl = (presenceStreamUrl) => {{
+                    const resolved = new URL(presenceStreamUrl, window.location.href);
+                    resolved.protocol = resolved.protocol === 'https:' ? 'wss:' : 'ws:';
+                    return resolved.toString();
+                }};
+                const existing = window[controllerKey];
+                const controllerState = existing && typeof existing === 'object'
+                    ? existing
+                    : {{connectionsByNode: {{}}, specByNode: {{}}}};
+                controllerState.connectionsByNode = controllerState.connectionsByNode || {{}};
+                controllerState.specByNode = Object.fromEntries(specs.map((spec) => [spec.node_name, spec]));
+                const getSpec = (nodeName) => controllerState.specByNode[nodeName] || null;
+                const renderBadge = (spec, text, className) => {{
+                    const badgeElement = getElementMaybe(spec.badge_element_id);
+                    if (badgeElement) {{
+                        badgeElement.className = className;
+                    }}
+                    const textElement = spec.text_element_id == null ? badgeElement : getElementMaybe(spec.text_element_id);
+                    if (textElement) {{
+                        textElement.textContent = text;
+                    }}
+                }};
+                const latencyText = (spec, latencyTextValue) => `${{spec.node_label}}: ${{latencyTextValue}}`;
+                const formatLatency = (latencyMs) => {{
+                    if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs)) {{
+                        return null;
+                    }}
+                    return `${{latencyMs}} ms`;
+                }};
+                const sleep = async (delayMs) => new Promise((resolve) => window.setTimeout(resolve, delayMs));
+                const summariseLatencyMeasurements = (measurements) => {{
+                    if (!measurements.length) {{
+                        return null;
+                    }}
+                    const sorted = [...measurements].sort((left, right) => left - right);
+                    const middle = Math.floor(sorted.length / 2);
+                    if (sorted.length % 2 === 1) {{
+                        return sorted[middle];
+                    }}
+                    return Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+                }};
+                const rejectPendingSamples = (connection) => {{
+                    for (const [sampleId, pending] of Object.entries(connection.pendingSamples || {{}})) {{
+                        window.clearTimeout(pending.timeoutHandle);
+                        pending.resolve(null);
+                        delete connection.pendingSamples[sampleId];
+                    }}
+                }};
+                const closeConnection = (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    if (!connection) {{
+                        return;
+                    }}
+                    connection.closedByScript = true;
+                    if (connection.reconnectTimeoutId) {{
+                        window.clearTimeout(connection.reconnectTimeoutId);
+                    }}
+                    if (connection.latencyIntervalId) {{
+                        window.clearInterval(connection.latencyIntervalId);
+                    }}
+                    rejectPendingSamples(connection);
+                    if (connection.socket) {{
+                        connection.socket.close();
+                    }}
+                    delete controllerState.connectionsByNode[nodeName];
+                }};
+                const sampleLatencyMeasurement = async (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    const spec = getSpec(nodeName);
+                    if (!connection || !spec || !spec.show_latency || !connection.socket || connection.socket.readyState !== WebSocket.OPEN) {{
+                        return null;
+                    }}
+                    return await new Promise((resolve) => {{
+                        const sampleId = `${{Date.now()}}-${{Math.random().toString(16).slice(2)}}`;
+                        const startedAt = performance.now();
+                        const timeoutHandle = window.setTimeout(() => {{
+                            delete connection.pendingSamples[sampleId];
+                            resolve(null);
+                        }}, latencyTimeoutMs);
+                        connection.pendingSamples[sampleId] = {{
+                            timeoutHandle,
+                            resolve: () => {{
+                                window.clearTimeout(timeoutHandle);
+                                delete connection.pendingSamples[sampleId];
+                                resolve(Math.max(1, Math.round(performance.now() - startedAt)));
+                            }},
+                        }};
+                        connection.socket.send(JSON.stringify({{type: 'ping', sample_id: sampleId}}));
+                    }});
+                }};
+                const renderAliveState = async (nodeName, latencyTextValue) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    const spec = getSpec(nodeName);
+                    if (!connection || !spec) {{
+                        return;
+                    }}
+                    const nextText = latencyTextValue === null ? spec.alive_text : latencyText(spec, latencyTextValue);
+                    connection.lastText = nextText;
+                    connection.lastClassName = spec.healthy_class_name;
+                    renderBadge(spec, nextText, spec.healthy_class_name);
+                }};
+                const runLatencyBootstrap = async (nodeName) => {{
+                    const spec = getSpec(nodeName);
+                    if (!spec || !spec.show_latency) {{
+                        return;
+                    }}
+                    const measurements = [];
+                    for (let attemptIndex = 0; attemptIndex < bootstrapProbeCount; attemptIndex += 1) {{
+                        const latency = await sampleLatencyMeasurement(nodeName);
+                        if (typeof latency === 'number' && Number.isFinite(latency)) {{
+                            measurements.push(latency);
+                        }}
+                        if (attemptIndex + 1 < bootstrapProbeCount) {{
+                            await sleep(bootstrapProbeDelayMs);
+                        }}
+                    }}
+                    const summary = summariseLatencyMeasurements(measurements);
+                    await renderAliveState(nodeName, formatLatency(summary));
+                }};
+                const runLatencySample = async (nodeName) => {{
+                    const spec = getSpec(nodeName);
+                    if (!spec || !spec.show_latency) {{
+                        return;
+                    }}
+                    const latency = await sampleLatencyMeasurement(nodeName);
+                    await renderAliveState(nodeName, formatLatency(latency));
+                }};
+                const scheduleReconnect = (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    if (!connection || connection.closedByScript) {{
+                        return;
+                    }}
+                    if (connection.reconnectTimeoutId) {{
+                        window.clearTimeout(connection.reconnectTimeoutId);
+                    }}
+                    connection.reconnectTimeoutId = window.setTimeout(() => {{
+                        void connect(nodeName);
+                    }}, reconnectDelayMs);
+                }};
+                const connect = async (nodeName) => {{
+                    const spec = getSpec(nodeName);
+                    if (!spec) {{
+                        closeConnection(nodeName);
+                        return;
+                    }}
+                    if (!spec.presence_stream_url) {{
+                        renderBadge(spec, spec.pending_text, spec.pending_class_name);
+                        closeConnection(nodeName);
+                        return;
+                    }}
+                    const existingConnection = controllerState.connectionsByNode[nodeName];
+                    if (existingConnection && existingConnection.socket) {{
+                        if (existingConnection.socket.readyState === WebSocket.OPEN || existingConnection.socket.readyState === WebSocket.CONNECTING) {{
+                            renderBadge(spec, existingConnection.lastText || spec.pending_text, existingConnection.lastClassName || spec.pending_class_name);
+                            return;
+                        }}
+                        closeConnection(nodeName);
+                    }}
+                    const connection = {{
+                        socket: null,
+                        reconnectTimeoutId: null,
+                        latencyIntervalId: null,
+                        pendingSamples: {{}},
+                        closedByScript: false,
+                        lastText: spec.pending_text,
+                        lastClassName: spec.pending_class_name,
+                    }};
+                    controllerState.connectionsByNode[nodeName] = connection;
+                    renderBadge(spec, spec.pending_text, spec.pending_class_name);
+                    const socket = new WebSocket(websocketUrl(spec.presence_stream_url));
+                    connection.socket = socket;
+                    socket.addEventListener('open', () => {{
+                        const latestSpec = getSpec(nodeName);
+                        if (!latestSpec) {{
+                            closeConnection(nodeName);
+                            return;
+                        }}
+                        connection.lastText = latestSpec.show_latency ? latestSpec.pending_text : latestSpec.alive_text;
+                        connection.lastClassName = latestSpec.healthy_class_name;
+                        renderBadge(latestSpec, connection.lastText, connection.lastClassName);
+                        rejectPendingSamples(connection);
+                        if (connection.latencyIntervalId) {{
+                            window.clearInterval(connection.latencyIntervalId);
+                        }}
+                        if (latestSpec.show_latency) {{
+                            void runLatencyBootstrap(nodeName);
+                            connection.latencyIntervalId = window.setInterval(() => {{
+                                void runLatencySample(nodeName);
+                            }}, latencyRefreshIntervalMs);
+                        }}
+                    }});
+                    socket.addEventListener('message', (event) => {{
+                        let payload = null;
+                        try {{
+                            payload = JSON.parse(event.data);
+                        }} catch (_error) {{
+                            return;
+                        }}
+                        if (!payload || typeof payload !== 'object') {{
+                            return;
+                        }}
+                        const sampleId = payload.sample_id;
+                        if (sampleId == null) {{
+                            return;
+                        }}
+                        const pending = connection.pendingSamples[String(sampleId)];
+                        if (!pending) {{
+                            return;
+                        }}
+                        pending.resolve();
+                    }});
+                    const markDisconnected = () => {{
+                        const latestConnection = controllerState.connectionsByNode[nodeName];
+                        const latestSpec = getSpec(nodeName);
+                        if (!latestConnection || latestConnection !== connection || !latestSpec) {{
+                            return;
+                        }}
+                        if (connection.latencyIntervalId) {{
+                            window.clearInterval(connection.latencyIntervalId);
+                            connection.latencyIntervalId = null;
+                        }}
+                        rejectPendingSamples(connection);
+                        connection.lastText = latestSpec.down_text;
+                        connection.lastClassName = latestSpec.unhealthy_class_name;
+                        renderBadge(latestSpec, latestSpec.down_text, latestSpec.unhealthy_class_name);
+                        scheduleReconnect(nodeName);
+                    }};
+                    socket.addEventListener('close', markDisconnected);
+                    socket.addEventListener('error', () => {{
+                        if (socket.readyState === WebSocket.CLOSED) {{
+                            markDisconnected();
+                        }}
+                    }});
+                }};
+                const activeNodeNames = new Set(specs.map((spec) => spec.node_name));
+                for (const nodeName of Object.keys(controllerState.connectionsByNode)) {{
+                    if (!activeNodeNames.has(nodeName)) {{
+                        closeConnection(nodeName);
+                    }}
+                }}
+                for (const spec of specs) {{
+                    void connect(spec.node_name);
+                }}
+                window[controllerKey] = controllerState;
+            }})();
+        """
 
     @staticmethod
     def _attach_html_tooltip(*, ui: ModWebUi, target: "Element", html: str = "") -> tuple[Tooltip, Html]:

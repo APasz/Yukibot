@@ -207,6 +207,16 @@ class ConfigPublicUrlTests(unittest.TestCase):
         )
 
 
+class ConfigProfileTests(unittest.TestCase):
+    def test_parse_bot_profile_requires_env_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "BOT_PROFILE must be set"):
+            config._parse_bot_profile(None)
+
+    def test_parse_bot_profile_rejects_unknown_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "BOT_PROFILE must be one of: erin, portal, yuki"):
+            config._parse_bot_profile("nope")
+
+
 class ConfigDataAuthorityTests(unittest.TestCase):
     def test_erin_profile_includes_activity_service(self) -> None:
         self.assertTrue(config.BOT_PROFILES[config.BotProfileName.ERIN].has_service(config.BotService.ACTIVITY))

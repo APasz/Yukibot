@@ -15,6 +15,7 @@ uv sync
 ```
 
 `uv` will create `.venv` automatically. The project requires Python `3.14+`.
+Set `BOT_PROFILE` in `.env` before running anything. Startup now fails if it is missing.
 
 ### Run
 
@@ -24,11 +25,11 @@ uv run python main.py
 
 ### Bot Profiles
 
-`BOT_PROFILE` controls which command groups and services are enabled for a deployment.
+`BOT_PROFILE` is required and controls which command groups and services are enabled for a deployment.
 
-- `yuki` is the default full bot profile.
+- `yuki` is the full bot profile.
 - `erin` enables game-control command groups, game chat relay, and `/ops logs`/`/ops restart`.
-- `portal` runs the NiceGUI web portal without starting a Discord gateway bot. It is intended as groundwork for a future standalone dashboard deployment and should be pointed at Yuki's authority endpoint.
+- `portal` runs the NiceGUI web portal without starting a Discord gateway bot. It is the standalone dashboard deployment and should be pointed at Yuki's authority endpoint.
 
 ### Data Authority
 
@@ -57,15 +58,16 @@ Sister bots also push a typed bot-metadata snapshot to Yuki through the same aut
 - The Discord OAuth redirect defaults to `{MOD_WEB_PUBLIC_BASE_URL}/auth/discord/callback`; override it with `MOD_WEB_AUTH_REDIRECT_URL` only when Discord is configured with a different public callback.
 - Mod web browser sessions authenticate as Discord user IDs and authorize through `users.json` / `Access_Control`; `visitor` access can use chat-only web relay routes, while `user` and above can use the broader mod web tools.
 - `BYPASS_WEB_AUTH=true` skips Discord web auth only when `INDEV` is also set. It is intended for local development and is ignored outside `INDEV`.
-- When Yuki is used as the web portal, sibling nodes do not need Discord OAuth credentials; Yuki reads their node API with short-lived tokens signed by the shared `NODE_API_TOKEN_SECRET` / `DATA_AUTHORITY_TOKEN`, and remote downloads redirect to the owning node with a scoped short-lived token.
+- When the standalone portal hosts the web UI, sibling nodes do not need Discord OAuth credentials; the portal reads their node API with short-lived tokens signed by the shared `NODE_API_TOKEN_SECRET` / `DATA_AUTHORITY_TOKEN`, and remote downloads redirect to the owning node with a scoped short-lived token.
 - Mods with a `download_block_reason` in their mod DB entry are listed in the web UI but excluded from downloads; 7D2D built-in mods are marked this way automatically.
-- For local multi-node testing, set `INDEV=true`, `DATA_AUTHORITY_TOKEN`, and `REMOTE_NODES=true`. Yukibot loads child node definitions from `REMOTE_NODES_FILE` (default `remote_nodes.json`), starts each configured node, and stops them during shutdown. Each node may provide either `bot_token` directly or `bot_token_env` to read a token from the environment.
+- For local multi-node testing, use `uv run python dev_cluster.py`. It launches Yuki, Erin, and Portal as separate processes with local loopback ports and gives you `start` / `stop` / `restart` controls in one terminal.
 
 All other bot profiles act as clients.
 
 The `portal` profile also acts as a remote client.
 
 - `BOT_TOKEN` is not required for `portal`.
+- `ERIN_BOT_TOKEN` is required by `dev_cluster.py`; `YUKI_BOT_TOKEN` is optional and otherwise falls back to `BOT_TOKEN`.
 - Set `DATA_AUTHORITY_HOST` to Yuki's public authority host.
 - `PUBLIC_BASE_URL` / `MOD_WEB_PUBLIC_BASE_URL` should point at the portal host, not Yuki.
 - The portal home page lists remote nodes from the shared bot registry; app and chat pages should be reached through `/mod-web/nodes/{node_name}/...`.

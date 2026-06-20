@@ -356,6 +356,7 @@ class ModWebNodeLink:
     api_url: str
     is_current: bool
     latency_probe_url: str | None = field(default=None, kw_only=True)
+    presence_stream_url: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +373,38 @@ class ModWebNodeStatus:
     alive: bool
     detail: str | None = None
     is_simulated_down: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebNodePresenceBadgeSpec:
+    node_name: str
+    badge_element_id: int
+    text_element_id: int | None
+    node_label: str
+    pending_text: str
+    alive_text: str
+    down_text: str
+    presence_stream_url: str | None
+    pending_class_name: str
+    healthy_class_name: str
+    unhealthy_class_name: str
+    show_latency: bool = False
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node_name": self.node_name,
+            "badge_element_id": self.badge_element_id,
+            "text_element_id": self.text_element_id,
+            "node_label": self.node_label,
+            "pending_text": self.pending_text,
+            "alive_text": self.alive_text,
+            "down_text": self.down_text,
+            "presence_stream_url": self.presence_stream_url,
+            "pending_class_name": self.pending_class_name,
+            "healthy_class_name": self.healthy_class_name,
+            "unhealthy_class_name": self.unhealthy_class_name,
+            "show_latency": self.show_latency,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -775,6 +808,7 @@ __all__: tuple[str, ...] = (
     "_ModWebKillControlState",
     "_ModWebLinkSpec",
     "_ModWebModToolbarBindings",
+    "_ModWebNodePresenceBadgeSpec",
     "_ModWebNotificationTrayItem",
     "_ModWebRuntimeToolbarBindings",
     "_ModWebStartStopControlState",

@@ -617,6 +617,17 @@ class NodeApiTests(unittest.TestCase):
             self.assertEqual(service.ping_url(), "https://erin.example/api/node/ping")
             self.assertEqual(service.ping_url(base_url="/api/node"), "/api/node/ping")
 
+    def test_presence_stream_url_uses_base_path_without_token(self) -> None:
+        server = replace(
+            config.MOD_WEB_SERVER,
+            node_api_base_url="https://erin.example/api/node",
+            token_secret="secret",
+        )
+        with patch.object(config, "MOD_WEB_SERVER", server):
+            service = NodeApiService()
+            self.assertEqual(service.presence_stream_url(), "https://erin.example/api/node/presence/stream")
+            self.assertEqual(service.presence_stream_url(base_url="/api/node"), "/api/node/presence/stream")
+
     def test_map_api_url_is_signed_and_escaped(self) -> None:
         server = replace(
             config.MOD_WEB_SERVER,
@@ -826,6 +837,7 @@ class NodeApiTests(unittest.TestCase):
         hints = get_type_hints(route)
         self.assertIs(hints["request"], Request)
         self.assertIn("/api/node/ping", handlers)
+        self.assertIn("/api/node/presence/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
 
     def test_mod_mutation_result_round_trips_mapping(self) -> None:
@@ -2442,6 +2454,57 @@ class NodeApiTests(unittest.TestCase):
         app = _build_app(Mock())
 
         asyncio.run(service._serve_chat_stream(websocket=cast(Any, _DisconnectingWebSocket()), app=app))
+
+    def test_serve_presence_stream_returns_pong_with_sample_id(self) -> None:
+        sent_payloads: list[object] = []
+
+        class _PresenceWebSocket:
+            def __init__(self) -> None:
+                self._messages = iter(
+                    (
+                        {"type": "websocket.receive", "text": json.dumps({"type": "ping", "sample_id": "sample-1"})},
+                        {"type": "websocket.disconnect"},
+                    )
+                )
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive(self) -> dict[str, str]:
+                return next(self._messages)
+
+            async def send_json(self, payload: object) -> None:
+                sent_payloads.append(payload)
+
+            async def close(self) -> None:
+                return None
+
+        service = NodeApiService()
+
+        asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
+
+        self.assertEqual(
+            sent_payloads,
+            [{"type": "pong", "node": service.node_name, "sample_id": "sample-1"}],
+        )
+
+    def test_serve_presence_stream_ignores_disconnect_while_closing_websocket(self) -> None:
+        class _DisconnectingWebSocket:
+            async def accept(self) -> None:
+                return None
+
+            async def receive(self) -> dict[str, str]:
+                return {"type": "websocket.disconnect"}
+
+            async def send_json(self, payload: object) -> None:
+                del payload
+
+            async def close(self) -> None:
+                raise WebSocketDisconnect(code=1006)
+
+        service = NodeApiService()
+
+        asyncio.run(service._serve_presence_stream(websocket=cast(Any, _DisconnectingWebSocket())))
 
     def test_build_chat_room_snapshot_counts_discord_guilds_as_separate_endpoints(self) -> None:
         app = _build_app(Mock())

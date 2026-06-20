@@ -259,6 +259,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             hero_card: Card = ui.card().classes(self._app_hero_card_classes(model.app_stats)).style(
                 self._hero_card_style(model.app_color_hex)
             )
+            hero_runtime_refresh = None if subscribe_app_state_updates is not None else refresh_async_app_stats
             with hero_card:
                 hero_corner_bindings = self._render_app_hero_corner_badges(
                     ui=ui,
@@ -277,7 +278,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                             title_font_preset=model.app_title_font_preset,
                             static_badges=self._app_page_hero_badges(model),
                             initial_app_stats=model.app_stats,
-                            refresh_async_app_stats=refresh_async_app_stats,
+                            refresh_async_app_stats=hero_runtime_refresh,
                         )
                     )
                     toolbar_bindings: _ModWebRuntimeToolbarBindings = self._render_global_app_toolbar(
@@ -360,6 +361,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             hero_card: Card = ui.card().classes(self._app_hero_card_classes(model.app_stats)).style(
                 self._hero_card_style(model.app_color_hex)
             )
+            hero_runtime_refresh = None if subscribe_app_state_updates is not None else refresh_async_app_stats
             with hero_card:
                 hero_corner_bindings = self._render_app_hero_corner_badges(
                     ui=ui,
@@ -378,7 +380,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                             title_font_preset=model.app_title_font_preset,
                             static_badges=self._app_page_hero_badges(model),
                             initial_app_stats=model.app_stats,
-                            refresh_async_app_stats=refresh_async_app_stats,
+                            refresh_async_app_stats=hero_runtime_refresh,
                         )
                     )
                     toolbar_bindings: _ModWebRuntimeToolbarBindings = self._render_global_app_toolbar(

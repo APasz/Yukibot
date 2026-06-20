@@ -15,6 +15,7 @@ from .constants import (
 )
 from .home import ModWebHomeMixin
 from .json_helpers import _json_object, _json_request_object
+from .links import mod_web_node_path
 from .nicegui_protocols import AsyncRefresh, ModWebUi, RefreshableValue
 from .runtime_imports import (
     App,
@@ -106,6 +107,63 @@ class _LocalAppPageData:
 
 
 class ModWebModelsMixin(ModWebServiceSupport):
+    _PORTAL_OWNED_PATH_PREFIXES: tuple[str, ...] = (
+        "/auth/",
+        "/mod-web/assets/",
+        "/mod-web/dev/",
+    )
+    _NODE_SCOPED_PATH_PREFIX: str = "/mod-web/nodes/"
+
+    @staticmethod
+    def _dev_cluster_node_links() -> tuple[ModWebNodeLink, ...]:
+        raw_payload = config.env_opt("DEV_CLUSTER_NODE_LINKS_JSON")
+        if raw_payload is None:
+            return ()
+        try:
+            payload = json.loads(raw_payload)
+        except ValueError as xcp:
+            log.warning("Mod web failed to parse DEV_CLUSTER_NODE_LINKS_JSON: %s", xcp)
+            return ()
+        if not isinstance(payload, list):
+            log.warning("Mod web ignored DEV_CLUSTER_NODE_LINKS_JSON because the payload is not a JSON array.")
+            return ()
+
+        links: list[ModWebNodeLink] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                log.warning("Mod web ignored a DEV_CLUSTER_NODE_LINKS_JSON entry because it is not a JSON object.")
+                continue
+            try:
+                node_name = str(item["node_name"]).strip()
+                label = str(item.get("label", node_name)).strip()
+                node_api_public_base_url = str(item["node_api_public_base_url"]).strip()
+                if not node_name or not label or not node_api_public_base_url:
+                    raise ValueError("fields must not be blank")
+                resolved_public_base_url = config.resolve_node_api_public_base_url(
+                    node_api_public_base_url,
+                    mod_web_public_base_url=config.MOD_WEB_SERVER.public_base_url,
+                )
+                node_api_base_url = config.resolve_node_api_base_url(
+                    resolved_public_base_url,
+                    source_name="DEV_CLUSTER_NODE_LINKS_JSON",
+                )
+            except (KeyError, TypeError, ValueError) as xcp:
+                log.warning("Mod web ignored invalid DEV_CLUSTER_NODE_LINKS_JSON entry: %s", xcp)
+                continue
+            links.append(
+                ModWebNodeLink(
+                    node_name=node_name,
+                    label=label,
+                    url=mod_web_node_path(node_name),
+                    api_base_url=node_api_base_url,
+                    api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
+                    is_current=False,
+                    latency_probe_url=f"{node_api_base_url.rstrip('/')}/ping",
+                    presence_stream_url=f"{node_api_base_url.rstrip('/')}/presence/stream",
+                )
+            )
+        return tuple(links)
+
     @staticmethod
     def _portal_default_node_snapshot() -> config.BotMetadataSnapshot | None:
         snapshots = ModWebModelsMixin._known_bot_snapshots()
@@ -119,6 +177,12 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
     @classmethod
     def _portal_default_node_name(cls) -> str | None:
+        dev_cluster_links = cls._dev_cluster_node_links()
+        for link in dev_cluster_links:
+            if link.node_name.casefold() == config.BotProfileName.YUKI.value.casefold():
+                return link.node_name
+        if dev_cluster_links:
+            return dev_cluster_links[0].node_name
         snapshot = cls._portal_default_node_snapshot()
         mod_web = None if snapshot is None else snapshot.features.mod_web
         if mod_web is None:
@@ -134,6 +198,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             api_url=self._node_api.apps_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
             is_current=True,
             latency_probe_url=self._node_api.ping_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
+            presence_stream_url=self._node_api.presence_stream_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
         )
 
     @staticmethod
@@ -505,6 +570,12 @@ class ModWebModelsMixin(ModWebServiceSupport):
             current = self._current_node_link()
             links[current.node_name.casefold()] = current
 
+        for node in self._dev_cluster_node_links():
+            key = node.node_name.casefold()
+            if key in links:
+                continue
+            links[key] = node
+
         for snapshot in self._known_bot_snapshots():
             mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
             if mod_web is None:
@@ -521,6 +592,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
                 is_current=False,
                 latency_probe_url=self._node_api.ping_url(base_url=mod_web.node_api_base_url),
+                presence_stream_url=self._node_api.presence_stream_url(base_url=mod_web.node_api_base_url),
             )
         return tuple(links.values())
 
@@ -1301,9 +1373,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
         target_path = self._remote_portal_path(request.url.path, target_node_name=config.MOD_WEB_SERVER.node_name)
         if target_path is None:
             return None
-        base_url: str | None = self._yuki_portal_base_url()
+        base_url: str | None = self._portal_base_url()
         if base_url is None:
-            log.warning("Remote mod web redirect skipped because Yuki mod web URL is unknown.")
+            log.warning("Remote mod web redirect skipped because the portal URL is unknown.")
             return None
         query = request.url.query
         if query and "?" in target_path:
@@ -1319,10 +1391,24 @@ class ModWebModelsMixin(ModWebServiceSupport):
             return None
         if path.startswith("/_nicegui") or path.startswith("/static"):
             return None
+        is_portal_profile: bool = config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL
+        if path.startswith("/auth/"):
+            if is_portal_profile:
+                return None
+            node_path = mod_web_node_path(target_node_name)
+            return f"/auth/login?{urlencode({'next_path': node_path})}"
+        if path.startswith(self._NODE_SCOPED_PATH_PREFIX):
+            if is_portal_profile:
+                return None
+            return path
+        if path.startswith(self._PORTAL_OWNED_PATH_PREFIXES):
+            if is_portal_profile:
+                return None
+            return path
 
-        node_path: str = f"/mod-web/nodes/{quote(target_node_name, safe='')}"
+        node_path: str = mod_web_node_path(target_node_name)
         if path in {"", "/", "/mod-web"}:
-            if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
+            if is_portal_profile:
                 return None
             return node_path
 
@@ -1334,9 +1420,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         if app_name is not None:
             return f"{node_path}/mods/{quote(app_name, safe='')}"
 
-        if path.startswith("/auth/"):
-            return f"/auth/login?{urlencode({'next_path': node_path})}"
-
+        if is_portal_profile and path.startswith("/mod-web"):
+            return None
         if (
             path.startswith("/mod-web")
             or path.startswith("/apps/")
@@ -1375,7 +1460,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 return app_name or None
         return None
 
-    def _yuki_portal_base_url(self) -> str | None:
+    def _portal_base_url(self) -> str | None:
+        for snapshot in self._known_bot_snapshots():
+            if snapshot.profile.bot_profile is not config.BotProfileName.PORTAL:
+                continue
+            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
+            if mod_web is not None:
+                return mod_web.public_base_url
+
         for snapshot in self._known_bot_snapshots():
             if snapshot.profile.bot_profile is not config.BotProfileName.YUKI:
                 continue

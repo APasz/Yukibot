@@ -5,8 +5,6 @@ from typing import TYPE_CHECKING
 from . import avatars as mod_web_avatars
 from .constants import (
     _APP_SECTION_QUERY_PARAM,
-    _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
-    _HOME_NODE_LATENCY_TIMEOUT_SECONDS,
     _SAME_ORIGIN_NODE_API_BASE,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
@@ -39,7 +37,6 @@ from .runtime_imports import (
     config,
     dataclass,
     escape,
-    json,
     mod_web_badge_class,
     quote,
     replace,
@@ -60,26 +57,11 @@ from .types import (
     _ModWebAppRuntimeState,
     _ModWebBadgeSpec,
     _ModWebLinkSpec,
+    _ModWebNodePresenceBadgeSpec,
 )
 
 if TYPE_CHECKING:
     from nicegui.element import Element
-
-
-@dataclass(frozen=True, slots=True)
-class _ModWebNodeLatencyBadgeSpec:
-    text_element_id: int
-    node_label: str
-    fallback_text: str
-    probe_url: str | None
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "text_element_id": self.text_element_id,
-            "node_label": self.node_label,
-            "fallback_text": self.fallback_text,
-            "probe_url": self.probe_url,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,11 +216,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
         def _current_summaries() -> tuple[ModWebHomeNodeSummary, ...]:
             return tuple[ModWebHomeNodeSummary, ...](
                 summaries_by_node[node_name] for node_name in node_order if node_name in summaries_by_node
-            )
-
-        async def _refresh_home_node_summaries() -> tuple[ModWebHomeNodeSummary, ...]:
-            return await self._home_node_summaries(
-                sections=_current_sections(), user=user
             )
 
         def _parse_required_non_negative_int(*, raw_value: str, field_label: str) -> int:
@@ -470,7 +447,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
                                 @ui.refreshable
                                 def _render_home_badges(current_sections: tuple[ModWebNodeAppSection, ...]) -> None:
-                                    home_node_latency_badges: list[_ModWebNodeLatencyBadgeSpec] = []
+                                    home_node_latency_badges: list[_ModWebNodePresenceBadgeSpec] = []
                                     app_links: tuple[ModWebAppLink, ...] = tuple[ModWebAppLink, ...](
                                         app for section in current_sections for app in section.app_links
                                     )
@@ -479,7 +456,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     )
                                     with ui.row().classes(self._hero_badge_row_classes()):
                                         for section in current_sections:
-                                            badge_text = self._render_home_node_status_badge(
+                                            badge, badge_text = self._render_home_node_status_badge(
                                                 ui=ui,
                                                 section=section,
                                                 on_click=(
@@ -494,8 +471,14 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                                 ),
                                             )
                                             badge_spec = self._home_node_latency_badge_spec(
+                                                badge_element=badge,
                                                 text_element=badge_text,
                                                 section=section,
+                                                extra_classes=(
+                                                    "mod-node-status-badge mod-node-status-badge-actionable"
+                                                    if can_manage_node_configuration
+                                                    else "mod-node-status-badge"
+                                                ),
                                             )
                                             if badge_spec is not None:
                                                 home_node_latency_badges.append(badge_spec)
@@ -518,7 +501,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             self._render_live_home_node_stats(
                                 ui=ui,
                                 initial_summaries=home_node_summaries,
-                                refresh_async_summaries=_refresh_home_node_summaries,
                             )
                         )
 
@@ -900,10 +882,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             url=self._app_list_view_url(self.index_path(), show_api_actions=show_api_actions),
                             compact=True,
                         )
+                    title_stats_refresh = None if subscribe_node_state_updates is not None else refresh_async_title_stats
                     apply_title_stats: Callable[[tuple[ModWebTitleStat, ...]], None] = self._render_live_title_stats(
                         ui=ui,
                         initial_stats=initial_title_stats,
-                        refresh_async_stats=refresh_async_title_stats,
+                        refresh_async_stats=title_stats_refresh,
                     )
 
             @ui.refreshable
@@ -1106,23 +1089,38 @@ class ModWebHomeMixin(ModWebServiceSupport):
             return ModWebHomeMixin._node_status_badge_text(section)
         return f"{section.node.label}: ..."
 
-    @staticmethod
+    @classmethod
     def _home_node_latency_badge_spec(
+        cls,
         *,
+        badge_element: Element,
         text_element: Element,
         section: ModWebNodeAppSection,
-    ) -> _ModWebNodeLatencyBadgeSpec | None:
+        extra_classes: str,
+    ) -> _ModWebNodePresenceBadgeSpec | None:
+        badge_element_id = getattr(badge_element, "id", None)
         text_element_id = getattr(text_element, "id", None)
-        if section.error is None and not isinstance(text_element_id, int):
+        if section.error is None and (not isinstance(badge_element_id, int) or not isinstance(text_element_id, int)):
             raise RuntimeError(f"Healthy node badge text element is missing its id: {section.node.node_name}")
-        if not isinstance(text_element_id, int):
+        if not isinstance(badge_element_id, int) or not isinstance(text_element_id, int):
             return None
-        probe_url: str | None = section.node.latency_probe_url if section.error is None else None
-        return _ModWebNodeLatencyBadgeSpec(
+        pending_text = cls._home_node_badge_initial_text(section)
+        return _ModWebNodePresenceBadgeSpec(
+            node_name=section.node.node_name,
+            badge_element_id=badge_element_id,
             text_element_id=text_element_id,
             node_label=section.node.label,
-            fallback_text=ModWebHomeMixin._node_status_badge_text(section),
-            probe_url=probe_url,
+            pending_text=pending_text,
+            alive_text=f"{section.node.label}: Alive",
+            down_text=f"{section.node.label}: Down",
+            presence_stream_url=section.node.presence_stream_url if section.error is None else None,
+            pending_class_name=cls._badge_class_name(
+                tone=cls._node_status_badge_tone(section),
+                extra_classes=extra_classes,
+            ),
+            healthy_class_name=cls._badge_class_name(tone="black", extra_classes=extra_classes),
+            unhealthy_class_name=cls._badge_class_name(tone="red", extra_classes=extra_classes),
+            show_latency=section.error is None,
         )
 
     @classmethod
@@ -1130,155 +1128,23 @@ class ModWebHomeMixin(ModWebServiceSupport):
         cls,
         *,
         ui: ModWebUi,
-        badge_specs: tuple[_ModWebNodeLatencyBadgeSpec, ...],
+        badge_specs: tuple[_ModWebNodePresenceBadgeSpec, ...],
     ) -> None:
-        if not badge_specs:
-            return
-        ui.run_javascript(cls._home_node_latency_badges_javascript(badge_specs), timeout=0.1)
+        cls._run_node_presence_badges_javascript(
+            ui=ui,
+            badge_specs=badge_specs,
+            controller_key="modWebHomeNodeLatency",
+        )
 
     @classmethod
     def _home_node_latency_badges_javascript(
         cls,
-        badge_specs: tuple[_ModWebNodeLatencyBadgeSpec, ...],
+        badge_specs: tuple[_ModWebNodePresenceBadgeSpec, ...],
     ) -> str:
-        specs_json: str = json.dumps([badge_spec.to_mapping() for badge_spec in badge_specs], separators=(",", ":"))
-        refresh_interval_ms: int = int(_HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS * 1000)
-        timeout_ms: int = int(_HOME_NODE_LATENCY_TIMEOUT_SECONDS * 1000)
-        return f"""
-            (() => {{
-                const controllerKey = 'modWebHomeNodeLatency';
-                const specs = {specs_json};
-                const refreshIntervalMs = {refresh_interval_ms};
-                const timeoutMs = {timeout_ms};
-                const bootstrapProbeCount = 4;
-                const bootstrapProbeDelayMs = 850;
-                const findTextElement = (textElementId) => getElement(textElementId) || getHtmlElement(textElementId);
-                const existing = window[controllerKey];
-                const controllerState = existing && typeof existing === 'object'
-                    ? existing
-                    : {{intervalId: null, inFlight: false, sampleId: 0, lastTextByElementId: {{}}, hasBootstrapped: false}};
-                controllerState.lastTextByElementId = controllerState.lastTextByElementId || {{}};
-                controllerState.hasBootstrapped = Boolean(controllerState.hasBootstrapped);
-                const renderText = (spec, text) => {{
-                    const textElement = findTextElement(spec.text_element_id);
-                    if (!textElement) {{
-                        return false;
-                    }}
-                    textElement.textContent = text;
-                    return true;
-                }};
-                const probeLatencyMeasurement = async (spec) => {{
-                    if (!spec.probe_url) {{
-                        return null;
-                    }}
-                    const controller = new AbortController();
-                    const timeoutHandle = window.setTimeout(() => controller.abort(), timeoutMs);
-                    const probeUrl = new URL(spec.probe_url, window.location.href);
-                    probeUrl.searchParams.set('_mod_web_latency_probe', `${{Date.now()}}`);
-                    const startedAt = performance.now();
-                    try {{
-                        await fetch(probeUrl.toString(), {{
-                            method: 'GET',
-                            mode: 'no-cors',
-                            cache: 'no-store',
-                            credentials: 'omit',
-                            signal: controller.signal,
-                        }});
-                        return Math.max(1, Math.round(performance.now() - startedAt));
-                    }} catch (_error) {{
-                        return null;
-                    }} finally {{
-                        window.clearTimeout(timeoutHandle);
-                    }}
-                }};
-                const sleep = async (delayMs) => new Promise((resolve) => window.setTimeout(resolve, delayMs));
-                const summariseLatencyMeasurements = (measurements) => {{
-                    if (!measurements.length) {{
-                        return null;
-                    }}
-                    const sorted = [...measurements].sort((left, right) => left - right);
-                    const middle = Math.floor(sorted.length / 2);
-                    if (sorted.length % 2 === 1) {{
-                        return sorted[middle];
-                    }}
-                    return Math.round((sorted[middle - 1] + sorted[middle]) / 2);
-                }};
-                const probeLatencySeries = async (spec, attemptCount, delayMs) => {{
-                    const measurements = [];
-                    for (let attemptIndex = 0; attemptIndex < attemptCount; attemptIndex += 1) {{
-                        const measurement = await probeLatencyMeasurement(spec);
-                        if (typeof measurement === 'number' && Number.isFinite(measurement)) {{
-                            measurements.push(measurement);
-                        }}
-                        if (attemptIndex + 1 < attemptCount) {{
-                            await sleep(delayMs);
-                        }}
-                    }}
-                    return summariseLatencyMeasurements(measurements);
-                }};
-                const formatLatency = (latencyMs) => {{
-                    if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs)) {{
-                        return 'n/a';
-                    }}
-                    return `${{latencyMs}} ms`;
-                }};
-                const latencyText = (spec, latency) => `${{spec.node_label}}: ${{latency}}`;
-                const cachedText = (spec) => {{
-                    const cached = controllerState.lastTextByElementId[String(spec.text_element_id)];
-                    if (typeof cached === 'string' && cached) {{
-                        return cached;
-                    }}
-                    if (!spec.probe_url) {{
-                        return spec.fallback_text;
-                    }}
-                    return latencyText(spec, '...');
-                }};
-                const sample = async () => {{
-                    if (controllerState.inFlight) {{
-                        return;
-                    }}
-                    controllerState.inFlight = true;
-                    const sampleId = controllerState.sampleId + 1;
-                    controllerState.sampleId = sampleId;
-                    const visibleSpecs = specs.filter((spec) => renderText(spec, cachedText(spec)));
-                    if (!visibleSpecs.length) {{
-                        if (controllerState.intervalId) {{
-                            window.clearInterval(controllerState.intervalId);
-                        }}
-                        delete window[controllerKey];
-                        controllerState.inFlight = false;
-                        return;
-                    }}
-                    try {{
-                        await Promise.all(visibleSpecs.map(async (spec) => {{
-                            if (!spec.probe_url) {{
-                                return;
-                            }}
-                            if (!(String(spec.text_element_id) in controllerState.lastTextByElementId)) {{
-                                renderText(spec, latencyText(spec, '...'));
-                            }}
-                            const latency = controllerState.hasBootstrapped
-                                ? await probeLatencyMeasurement(spec)
-                                : await probeLatencySeries(spec, bootstrapProbeCount, bootstrapProbeDelayMs);
-                            const nextText = latencyText(spec, formatLatency(latency));
-                            controllerState.lastTextByElementId[String(spec.text_element_id)] = nextText;
-                            if (controllerState.sampleId === sampleId) {{
-                                renderText(spec, nextText);
-                            }}
-                        }}));
-                        controllerState.hasBootstrapped = true;
-                    }} finally {{
-                        controllerState.inFlight = false;
-                    }}
-                }};
-                if (controllerState.intervalId) {{
-                    window.clearInterval(controllerState.intervalId);
-                }}
-                controllerState.intervalId = window.setInterval(() => {{ void sample(); }}, refreshIntervalMs);
-                window[controllerKey] = controllerState;
-                void sample();
-            }})();
-        """
+        return cls._node_presence_badges_javascript(
+            badge_specs=badge_specs,
+            controller_key="modWebHomeNodeLatency",
+        )
 
     @staticmethod
     def _node_status_badge_tone(section: ModWebNodeAppSection) -> BadgeTone:
@@ -1295,17 +1161,15 @@ class ModWebHomeMixin(ModWebServiceSupport):
         section: ModWebNodeAppSection,
         on_click: Callable[[object | None], object] | None,
         extra_classes: str,
-    ) -> Label:
+    ) -> tuple[Element, Label]:
         badge_text = self._home_node_badge_initial_text(section)
-        badge = ui.element("span").classes(
-            f"{mod_web_badge_class(self._node_status_badge_tone(section))} {extra_classes}".strip()
-        )
+        badge = ui.element("span").classes(self._badge_class_name(tone=self._node_status_badge_tone(section), extra_classes=extra_classes))
         if on_click is not None:
             badge.on("click", on_click)
         self._attach_badge_tooltip(ui=ui, target=badge, text=badge_text)
         with badge:
             text_label = ui.label(badge_text).classes("mod-home-node-status-badge-text")
-        return text_label
+        return badge, text_label
 
     @staticmethod
     def _login_node_status_badge_text(status: ModWebNodeStatus) -> str:

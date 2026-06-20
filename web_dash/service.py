@@ -11,6 +11,10 @@ from .constants import (
 )
 from .editors import ModWebEditorsMixin
 from .home import ModWebHomeMixin
+from .links import (
+    mod_web_node_app_path,
+    mod_web_node_chat_path,
+)
 from .models import ModWebModelsMixin
 from .nicegui_protocols import (
     ModWebFastApiApp,
@@ -128,10 +132,10 @@ class ModWebService(
         return f"/mod-web/chat/{quote(app_name, safe='')}"
 
     def node_app_path(self, node_name: str, app_name: str) -> str:
-        return f"/mod-web/nodes/{quote(node_name, safe='')}/mods/{quote(app_name, safe='')}"
+        return mod_web_node_app_path(node_name, app_name)
 
     def node_app_chat_path(self, node_name: str, app_name: str) -> str:
-        return f"/mod-web/nodes/{quote(node_name, safe='')}/chat/{quote(app_name, safe='')}"
+        return mod_web_node_chat_path(node_name, app_name)
 
     def index_url(self) -> str:
         return config.MOD_WEB_SERVER.public_base_url

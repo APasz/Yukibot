@@ -2901,6 +2901,11 @@ class NodeApiService:
         async def _ping() -> Response:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+        @nicegui_app.websocket(f"{_NODE_API_PREFIX}/presence/stream")
+        async def _presence_stream(websocket: WebSocket) -> None:
+            traffic_log.info("Node API presence stream request: node=%s", self.node_name)
+            await self._serve_presence_stream(websocket=websocket)
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/system")
         async def _system_summary(request: Request, access_token: str | None = None) -> dict[str, object]:
             traffic_log.info("Node API system summary request: node=%s", self.node_name)
@@ -5313,6 +5318,30 @@ class NodeApiService:
             unsubscribe_runtime()
             await self._close_websocket_quietly(websocket)
 
+    async def _serve_presence_stream(self, *, websocket: WebSocket) -> None:
+        await websocket.accept()
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                sample_id: str | None = None
+                payload_text = message.get("text")
+                if isinstance(payload_text, str) and payload_text:
+                    try:
+                        payload = json.loads(payload_text)
+                    except ValueError:
+                        payload = None
+                    if isinstance(payload, Mapping):
+                        raw_sample_id = payload.get("sample_id")
+                        if raw_sample_id is not None:
+                            sample_id = str(raw_sample_id)
+                await websocket.send_json({"type": "pong", "node": self.node_name, "sample_id": sample_id})
+        except WebSocketDisconnect:
+            return
+        finally:
+            await self._close_websocket_quietly(websocket)
+
     async def _serve_node_state_stream(self, *, websocket: WebSocket) -> None:
         await websocket.accept()
         update_queue: asyncio.Queue[NodeStateStreamEvent] = asyncio.Queue()
@@ -6825,6 +6854,9 @@ class NodeApiService:
 
     def ping_url(self, *, base_url: str | None = None) -> str:
         return f"{self._base_url(base_url)}/ping"
+
+    def presence_stream_url(self, *, base_url: str | None = None) -> str:
+        return f"{self._base_url(base_url)}/presence/stream"
 
     def map_api_url(self, app_name: str, *, subject: str = "web", base_url: str | None = None) -> str:
         token: str | None = self.issue_access_token(

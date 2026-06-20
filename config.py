@@ -102,8 +102,6 @@ class EnvSettings(BaseSettings):
     mod_web_discord_client_id: str | None = None
     mod_web_discord_client_secret: str | None = None
     mod_web_auth_redirect_url: str | None = None
-    remote_nodes_file: str | None = None
-    remote_nodes: str | None = None
     dir_tmp: str | None = None
     dir_opt: str | None = None
     exg_token: str | None = None
@@ -1117,23 +1115,6 @@ class ModWebAuthConfig:
         return self.bypass_enabled or (self.discord_client_id is not None and self.discord_client_secret is not None)
 
 
-@dataclass(frozen=True, slots=True)
-class RemoteNodeSpec:
-    profile: BotProfileName
-    node_name: str
-    bot_token: str | None
-    mod_web_host: str
-    mod_web_port: int
-    public_base_url: str
-
-
-@dataclass(frozen=True, slots=True)
-class RemoteNodeAutostartConfig:
-    enabled: bool
-    path: Path
-    nodes: tuple[RemoteNodeSpec, ...]
-
-
 _RAM_POINT_BYTES: int = 500 * 1024 * 1024
 
 
@@ -1293,7 +1274,7 @@ BOT_PROFILES: dict[BotProfileName, BotProfileConfig] = {
 
 def _parse_bot_profile(raw: str | None) -> BotProfileName:
     if not raw:
-        return BotProfileName.YUKI
+        raise ValueError("BOT_PROFILE must be set")
 
     value = raw.strip().lower()
     try:
@@ -1342,95 +1323,6 @@ def _parse_env_flag(raw: str | None, *, var_name: str) -> bool:
     if value in {"0", "false", "no", "n", "off"}:
         return False
     raise ValueError(f"{var_name} must be a boolean flag such as true/false or 1/0")
-
-
-def _remote_node_text(payload: Mapping[str, object], key: str, *, default: str | None = None) -> str:
-    value = payload.get(key, default)
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"REMOTE_NODES entries require non-empty string field {key!r}")
-    return value.strip()
-
-
-def _remote_node_optional_text(payload: Mapping[str, object], key: str) -> str | None:
-    value = payload.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"REMOTE_NODES field {key!r} must be a non-empty string when set")
-    return value.strip()
-
-
-def _remote_node_bot_token(payload: Mapping[str, object]) -> str | None:
-    token = _remote_node_optional_text(payload, "bot_token")
-    token_env = _remote_node_optional_text(payload, "bot_token_env")
-    if token is not None and token_env is not None:
-        raise ValueError("REMOTE_NODES entries must not set both 'bot_token' and 'bot_token_env'")
-    if token_env is None:
-        return token
-    resolved = env_opt(token_env)
-    if resolved is None:
-        raise ValueError(f"REMOTE_NODES bot_token_env {token_env!r} is not set in the environment")
-    return resolved
-
-
-def _remote_node_port(payload: Mapping[str, object], index: int) -> int:
-    value = payload.get("mod_web_port", MOD_WEB_PORT + index + 1)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("REMOTE_NODES field 'mod_web_port' must be an integer")
-    if value < 1 or value > 65535:
-        raise ValueError("REMOTE_NODES field 'mod_web_port' must be between 1 and 65535")
-    return value
-
-
-def _parse_remote_node_specs_payload(payload: object) -> tuple[RemoteNodeSpec, ...]:
-    if payload is None:
-        return ()
-    if not isinstance(payload, list):
-        raise ValueError("REMOTE_NODES must be a JSON array of node objects")
-
-    nodes: list[RemoteNodeSpec] = []
-    seen_names: set[str] = set()
-    seen_ports: set[int] = set()
-    for index, item in enumerate(payload):
-        if not isinstance(item, dict):
-            raise ValueError("REMOTE_NODES entries must be JSON objects")
-        entry: Mapping[str, object] = item
-        profile = _parse_bot_profile(_remote_node_text(entry, "profile", default=BotProfileName.ERIN.value))
-        node_name = _remote_node_text(entry, "node_name", default=profile.value)
-        if node_name in seen_names:
-            raise ValueError(f"REMOTE_NODES contains duplicate node_name {node_name!r}")
-        seen_names.add(node_name)
-
-        port = _remote_node_port(entry, index)
-        if port in seen_ports:
-            raise ValueError(f"REMOTE_NODES contains duplicate mod_web_port {port}")
-        seen_ports.add(port)
-
-        public_base_url = resolve_mod_web_public_base_url(
-            _remote_node_optional_text(entry, "public_base_url") or f"http://127.0.0.1:{port}",
-            public_base_url=PUBLIC_BASE_URL,
-        )
-        nodes.append(
-            RemoteNodeSpec(
-                profile=profile,
-                node_name=node_name,
-                bot_token=_remote_node_bot_token(entry),
-                mod_web_host=_remote_node_optional_text(entry, "mod_web_host") or "127.0.0.1",
-                mod_web_port=port,
-                public_base_url=public_base_url,
-            )
-        )
-    return tuple(nodes)
-
-
-def load_remote_node_specs(path: Path) -> tuple[RemoteNodeSpec, ...]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as xcp:
-        raise ValueError(f"REMOTE_NODES_FILE does not exist: {path}") from xcp
-    except json.JSONDecodeError as xcp:
-        raise ValueError(f"REMOTE_NODES_FILE must contain valid JSON: {path}") from xcp
-    return _parse_remote_node_specs_payload(payload)
 
 
 def _default_port_for_scheme(scheme: HttpScheme) -> int:
@@ -1982,16 +1874,6 @@ MOD_WEB_AUTH = ModWebAuthConfig(
         mod_web_public_base_url=MOD_WEB_PUBLIC_BASE_URL,
     ),
     bypass_enabled=BYPASS_WEB_AUTH,
-)
-REMOTE_NODES_FILE = Path(_env_settings.remote_nodes_file or "remote_nodes.json")
-REMOTE_NODES_ENABLED = _parse_env_flag(_env_settings.remote_nodes, var_name="REMOTE_NODES")
-_REMOTE_NODE_SPECS = load_remote_node_specs(REMOTE_NODES_FILE) if REMOTE_NODES_ENABLED else ()
-REMOTE_NODE_AUTOSTART = RemoteNodeAutostartConfig(
-    enabled=(
-        INDEV and ACTIVE_BOT_PROFILE.name is BotProfileName.YUKI and REMOTE_NODES_ENABLED and bool(_REMOTE_NODE_SPECS)
-    ),
-    path=REMOTE_NODES_FILE,
-    nodes=_REMOTE_NODE_SPECS,
 )
 DATA_AUTHORITY_ENDPOINT = resolve_data_authority_endpoint(
     DATA_AUTHORITY_HOST,

@@ -11,7 +11,7 @@ class RestartTarget(StrEnum):
 
 
 def coalesce_restart_targets(targets: Iterable[RestartTarget]) -> RestartTarget | None:
-    target_set = set(targets)
+    target_set: set[RestartTarget] = set[RestartTarget](targets)
     for target in (RestartTarget.SYSTEM, RestartTarget.BOT, RestartTarget.VOICE):
         if target in target_set:
             return target

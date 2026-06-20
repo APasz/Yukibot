@@ -10,17 +10,21 @@ import sys
 import tarfile
 import tempfile
 import time
+from _io import BytesIO
+from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from subprocess import CompletedProcess
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT: Path = Path(__file__).resolve().parent
 PLACEHOLDER_USER = "your-ssh-user"
 PLACEHOLDER_PASSWORD = "replace-me"
-PLACEHOLDER_REMOTE_ROOT = PurePosixPath("/path/to/Yukibot")
+PLACEHOLDER_REMOTE_ROOT: PurePosixPath = PurePosixPath("/path/to/Yukibot")
 SSH_CONNECTION_TIMEOUT_SECONDS = 5
 SSH_CONTROL_PERSIST_SECONDS = 30
-KOUSEI_RESTART_DELAY_SECONDS = 5
+PORTAL_RESTART_DELAY_SECONDS = 1
+BOT_RESTART_DELAY_SECONDS = 5
 REMOTE_MKDIR_PATH = "/bin/mkdir"
 REMOTE_CAT_PATH = "/bin/cat"
 REMOTE_RM_PATH = "/bin/rm"
@@ -46,6 +50,7 @@ NO_CHANGED_PYTHON_FILES_ERROR = "git status returned no changed Python files"
 class TargetName(StrEnum):
     WAKUSEI = "wakusei"
     KOUSEI = "kousei"
+    PORTAL = "portal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +88,14 @@ class SyncPlan:
 
 
 REMOTE_TARGETS: dict[TargetName, RemoteTarget] = {
+    TargetName.PORTAL: RemoteTarget(
+        name=TargetName.PORTAL,
+        host="wakusei.apasz.com",
+        user="debian",
+        password="scheme-python-dingo",
+        remote_root=PurePosixPath("/home/debian/yukiportal"),
+        restart_command="/usr/bin/sudo /usr/bin/systemctl restart yukiportal.service",
+    ),
     TargetName.WAKUSEI: RemoteTarget(
         name=TargetName.WAKUSEI,
         host="wakusei.apasz.com",
@@ -103,7 +116,7 @@ REMOTE_TARGETS: dict[TargetName, RemoteTarget] = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    parser: ArgumentParser = argparse.ArgumentParser(
         description="Copy tracked Python files from this repo to one or more remote Yukibot hosts.",
     )
     parser.add_argument(
@@ -142,14 +155,14 @@ def require_program(name: str) -> None:
 
 
 def parse_tracked_python_files(stdout: str) -> list[Path]:
-    files = [Path(line.strip()) for line in stdout.splitlines() if line.strip()]
+    files: list[Path] = [Path(line.strip()) for line in stdout.splitlines() if line.strip()]
     if not files:
         raise RuntimeError("git ls-files returned no tracked Python files")
     return files
 
 
 def tracked_python_files() -> list[Path]:
-    result = subprocess.run(
+    result: CompletedProcess[str] = subprocess.run(
         ["git", "ls-files", "--", "*.py"],
         cwd=REPO_ROOT,
         check=True,
@@ -165,7 +178,7 @@ def planned_sync_files(python_files: list[Path]) -> list[Path]:
     for path in [*python_files, *ALWAYS_SYNCED_FILES]:
         if path in seen:
             continue
-        local_path = REPO_ROOT / path
+        local_path: Path = REPO_ROOT / path
         if not local_path.is_file():
             raise RuntimeError(f"Required sync file does not exist: {path.as_posix()}")
         seen.add(path)
@@ -182,19 +195,19 @@ def _append_unique_path(files: list[Path], seen: set[Path], path: Path) -> None:
 def parse_changed_python_plan(stdout: str) -> SyncPlan:
     write_files: list[Path] = []
     delete_files: list[Path] = []
-    seen_write: set[Path] = set()
-    seen_delete: set[Path] = set()
+    seen_write: set[Path] = set[Path]()
+    seen_delete: set[Path] = set[Path]()
     for raw_line in stdout.splitlines():
         if not raw_line:
             continue
-        status = raw_line[:2]
-        path_text = raw_line[3:]
+        status: str = raw_line[:2]
+        path_text: str = raw_line[3:]
         old_path: Path | None = None
-        is_rename = "R" in status
+        is_rename: bool = "R" in status
         if is_rename and " -> " in path_text:
             old_text, path_text = path_text.rsplit(" -> ", 1)
             old_path = Path(old_text)
-        path = Path(path_text)
+        path: Path = Path(path_text)
         if is_rename and old_path is not None and old_path != path:
             if old_path.suffix == ".py":
                 _append_unique_path(delete_files, seen_delete, old_path)
@@ -209,18 +222,18 @@ def parse_changed_python_plan(stdout: str) -> SyncPlan:
         _append_unique_path(write_files, seen_write, path)
     if not write_files and not delete_files:
         raise RuntimeError(NO_CHANGED_PYTHON_FILES_ERROR)
-    return SyncPlan(write_files=tuple(write_files), delete_files=tuple(delete_files))
+    return SyncPlan(write_files=tuple[Path, ...](write_files), delete_files=tuple[Path, ...](delete_files))
 
 
 def parse_changed_python_files(stdout: str) -> list[Path]:
-    files = list(parse_changed_python_plan(stdout).write_files)
+    files: list[Path] = list[Path](parse_changed_python_plan(stdout).write_files)
     if not files:
         raise RuntimeError(NO_CHANGED_PYTHON_FILES_ERROR)
     return files
 
 
 def changed_python_plan() -> SyncPlan:
-    result = subprocess.run(
+    result: CompletedProcess[str] = subprocess.run(
         ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", "*.py"],
         cwd=REPO_ROOT,
         check=True,
@@ -231,7 +244,7 @@ def changed_python_plan() -> SyncPlan:
 
 
 def tracked_python_sync_plan() -> SyncPlan:
-    return SyncPlan(write_files=tuple(tracked_python_files()), delete_files=())
+    return SyncPlan(write_files=tuple[Path, ...](tracked_python_files()), delete_files=())
 
 
 def select_sync_plan(*, sync_all_tracked: bool) -> SyncPlan:
@@ -247,7 +260,7 @@ def select_sync_plan(*, sync_all_tracked: bool) -> SyncPlan:
 
 
 def changed_python_files() -> list[Path]:
-    return list(changed_python_plan().write_files)
+    return list[Path](changed_python_plan().write_files)
 
 
 def dry_run_report_path() -> Path:
@@ -255,8 +268,8 @@ def dry_run_report_path() -> Path:
 
 
 def write_dry_run_report(targets: list[RemoteTarget], plan: SyncPlan, files: list[Path]) -> Path:
-    report_path = dry_run_report_path()
-    report_lines = [
+    report_path: Path = dry_run_report_path()
+    report_lines: list[str] = [
         "Planned Yukibot sync",
         f"Targets: {', '.join(target.name.value for target in targets)}",
         f"Write count: {len(files)}",
@@ -281,7 +294,7 @@ def run_checked(
 ) -> None:
     if stdin_text is not None and stdin_bytes is not None:
         raise ValueError("stdin_text and stdin_bytes are mutually exclusive")
-    env = os.environ.copy()
+    env: dict[str, str] = os.environ.copy()
     if password is not None:
         env["SSHPASS"] = password
     print(shlex.join(command))
@@ -359,7 +372,7 @@ def close_ssh_master(target: RemoteTarget, control_path: Path) -> None:
 
 
 def open_remote_session(target: RemoteTarget, run_token: str) -> RemoteSession:
-    control_path = ssh_control_path(target, run_token)
+    control_path: Path = ssh_control_path(target, run_token)
     open_ssh_master(target, control_path)
     return RemoteSession(target=target, control_path=control_path)
 
@@ -369,13 +382,13 @@ def close_remote_session(session: RemoteSession) -> None:
 
 
 def remote_parent_directories(target: RemoteTarget, files: list[Path]) -> list[PurePosixPath]:
-    directories = {remote_file_path(target, path).parent for path in files}
+    directories: set[PurePosixPath] = {remote_file_path(target, path).parent for path in files}
     return sorted(directories, key=lambda path: path.as_posix())
 
 
 def heredoc_delimiter(path: Path, content: str) -> str:
-    base = f"__YUKIBOT_SYNC_{path.as_posix().replace('/', '_').replace('.', '_').upper()}__"
-    delimiter = base
+    base: str = f"__YUKIBOT_SYNC_{path.as_posix().replace('/', '_').replace('.', '_').upper()}__"
+    delimiter: str = base
     suffix = 0
     while delimiter in content:
         suffix += 1
@@ -384,18 +397,18 @@ def heredoc_delimiter(path: Path, content: str) -> str:
 
 
 def build_remote_sync_script(target: RemoteTarget, files: list[Path]) -> str:
-    directories = remote_parent_directories(target, files)
+    directories: list[PurePosixPath] = remote_parent_directories(target, files)
     if not directories:
         raise RuntimeError("No remote directories were derived from the selected files")
 
     lines: list[str] = ["set -eu"]
-    quoted_directories = " ".join(shlex.quote(directory.as_posix()) for directory in directories)
+    quoted_directories: str = " ".join(shlex.quote(directory.as_posix()) for directory in directories)
     lines.append(f"{REMOTE_MKDIR_PATH} -p -- {quoted_directories}")
 
     for path in files:
-        remote_path = remote_file_path(target, path).as_posix()
-        content = (REPO_ROOT / path).read_text(encoding="utf-8")
-        delimiter = heredoc_delimiter(path, content)
+        remote_path: str = remote_file_path(target, path).as_posix()
+        content: str = (REPO_ROOT / path).read_text(encoding="utf-8")
+        delimiter: str = heredoc_delimiter(path, content)
         lines.append(f"{REMOTE_CAT_PATH} > {shlex.quote(remote_path)} <<'{delimiter}'")
         lines.append(content)
         if not content.endswith("\n"):
@@ -406,7 +419,7 @@ def build_remote_sync_script(target: RemoteTarget, files: list[Path]) -> str:
 
 
 def build_sync_archive(files: list[Path]) -> bytes:
-    archive_buffer = io.BytesIO()
+    archive_buffer: BytesIO = io.BytesIO()
     with tarfile.open(fileobj=archive_buffer, mode="w") as archive:
         for path in files:
             archive.add(REPO_ROOT / path, arcname=path.as_posix(), recursive=False)
@@ -414,12 +427,12 @@ def build_sync_archive(files: list[Path]) -> bytes:
 
 
 def build_remote_extract_command(target: RemoteTarget) -> str:
-    remote_root = shlex.quote(target.remote_root.as_posix())
+    remote_root: str = shlex.quote(target.remote_root.as_posix())
     return f"{REMOTE_MKDIR_PATH} -p -- {remote_root} && {REMOTE_TAR_PATH} -xf - -C {remote_root}"
 
 
 def sync_python_files(session: RemoteSession, files: list[Path]) -> None:
-    archive_bytes = build_sync_archive(files)
+    archive_bytes: bytes = build_sync_archive(files)
     run_checked(
         [
             "ssh",
@@ -435,7 +448,7 @@ def sync_python_files(session: RemoteSession, files: list[Path]) -> None:
 def delete_remote_files(session: RemoteSession, files: list[Path]) -> None:
     if not files:
         return
-    quoted_paths = " ".join(shlex.quote(remote_file_path(session.target, path).as_posix()) for path in files)
+    quoted_paths: str = " ".join(shlex.quote(remote_file_path(session.target, path).as_posix()) for path in files)
     run_checked(
         [
             "ssh",
@@ -452,7 +465,7 @@ def build_remote_project_command(target: RemoteTarget, command: str) -> str:
 
 
 def build_remote_program_check_command(program_name: str) -> str:
-    quoted_program_name = shlex.quote(program_name)
+    quoted_program_name: str = shlex.quote(program_name)
     return (
         f"{build_remote_path_setup_command()}"
         f"command -v {quoted_program_name} >/dev/null 2>&1 || "
@@ -461,7 +474,7 @@ def build_remote_program_check_command(program_name: str) -> str:
 
 
 def build_remote_command_path_check_command(command_path: str) -> str:
-    quoted_command_path = shlex.quote(command_path)
+    quoted_command_path: str = shlex.quote(command_path)
     return (
         f"[ -x {quoted_command_path} ] || "
         f"{{ echo 'Required remote command is missing or not executable: {quoted_command_path}' >&2; exit 1; }}"
@@ -469,7 +482,7 @@ def build_remote_command_path_check_command(command_path: str) -> str:
 
 
 def build_remote_path_setup_command() -> str:
-    prefix = ":".join((*REMOTE_USER_PATH_PREFIXES, *REMOTE_SYSTEM_PATH_PREFIXES))
+    prefix: str = ":".join((*REMOTE_USER_PATH_PREFIXES, *REMOTE_SYSTEM_PATH_PREFIXES))
     return f'export PATH="{prefix}${{PATH:+:$PATH}}"; '
 
 
@@ -554,67 +567,67 @@ def restart_remote(session: RemoteSession) -> None:
 
 
 def restart_delay_seconds(target: RemoteTarget, restart_targets: list[RemoteTarget]) -> int:
-    target_names = {configured_target.name for configured_target in restart_targets}
-    if target.name is TargetName.KOUSEI and TargetName.WAKUSEI in target_names and TargetName.KOUSEI in target_names:
-        return KOUSEI_RESTART_DELAY_SECONDS
-    return 0
+    if target.name is TargetName.PORTAL:
+        return PORTAL_RESTART_DELAY_SECONDS
+    return BOT_RESTART_DELAY_SECONDS
 
 
 def ordered_restart_targets(targets: list[RemoteTarget]) -> list[RemoteTarget]:
-    priority = {
-        TargetName.WAKUSEI: 0,
-        TargetName.KOUSEI: 1,
+    priority: dict[TargetName, int] = {
+        TargetName.PORTAL: 0,
+        TargetName.WAKUSEI: 1,
+        TargetName.KOUSEI: 2,
     }
     return sorted(targets, key=lambda target: priority[target.name])
 
 
 def configured_targets(target_names: list[str]) -> list[RemoteTarget]:
-    targets = [REMOTE_TARGETS[TargetName(name)] for name in target_names]
+    targets: list[RemoteTarget] = [REMOTE_TARGETS[TargetName(name)] for name in target_names]
     for target in targets:
         target.validate()
     return targets
 
 
 def main() -> int:
-    args = parse_args()
+    args: Namespace = parse_args()
     require_program("git")
 
-    sync_plan = select_sync_plan(sync_all_tracked=args.all_tracked)
-    files = planned_sync_files(list(sync_plan.write_files))
-    targets = configured_targets(args.targets)
+    sync_plan: SyncPlan = select_sync_plan(sync_all_tracked=args.all_tracked)
+    files: list[Path] = planned_sync_files(list[Path](sync_plan.write_files))
+    targets: list[RemoteTarget] = configured_targets(args.targets)
     print(f"Preparing to sync {len(files)} files")
 
     if args.dry:
-        report_path = write_dry_run_report(targets, sync_plan, files)
+        report_path: Path = write_dry_run_report(targets, sync_plan, files)
         print(f"Wrote dry run report to {report_path}")
         return 0
 
     if args.check:
         for target in targets:
-            print_check_plan(target, files, list(sync_plan.delete_files))
+            print_check_plan(target, files, list[Path](sync_plan.delete_files))
         return 0
 
     require_program("sshpass")
     require_program("ssh")
 
-    run_token = f"{os.getpid()}-{time.time_ns():x}"
+    run_token: str = f"{os.getpid()}-{time.time_ns():x}"
     sessions_by_name: dict[TargetName, RemoteSession] = {}
 
     try:
         for target in targets:
             print(f"==> {target.name.value} ({target.host})")
-            session = open_remote_session(target, run_token)
+            session: RemoteSession = open_remote_session(target, run_token)
             sessions_by_name[target.name] = session
             require_remote_command_path(session, REMOTE_TAR_PATH)
             require_remote_program(session, "uv")
-            delete_remote_files(session, list(sync_plan.delete_files))
+            delete_remote_files(session, list[Path](sync_plan.delete_files))
             sync_python_files(session, files)
             sync_remote_dependencies(session)
-            print_synced_files(target, files, list(sync_plan.delete_files))
+            print_synced_files(target, files, list[Path](sync_plan.delete_files))
 
         if args.restart:
             for target in ordered_restart_targets(targets):
-                delay_seconds = restart_delay_seconds(target, targets)
+                delay_seconds: int = restart_delay_seconds(target, targets)
                 if delay_seconds > 0:
                     print(f"Waiting {delay_seconds}s before restarting {target.name.value}")
                     time.sleep(delay_seconds)

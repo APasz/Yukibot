@@ -53,9 +53,7 @@ from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionRe
 from apps._mod import Mod
 from apps._settings import Setting, Settings_Manager
 from config import VoiceTargetConfig
-from node_api import RelayTTSQueue
-from web_dash.nicegui_protocols import WebChatRelayPublisher
-from web_dash.service import ModWebService
+from web_dash.links import current_node_app_url
 
 log: Logger = logging.getLogger(__name__)
 
@@ -1303,23 +1301,10 @@ class AppManageService:
             ),
         )
         self._app_locks: dict[hikari.Snowflake, AppManagementLock] = {}
-        self._mod_web = ModWebService()
         self._voice_target_service: RelayVoiceTargetService | None = None
-
-    async def start_web(self, manager: App_Manager, acl: Access_Control) -> None:
-        await self._mod_web.start(manager, acl=acl)
-
-    def begin_web_shutdown(self) -> None:
-        self._mod_web.begin_shutdown()
-
-    def set_relay_tts_service(self, relay_tts_service: RelayTTSQueue | None) -> None:
-        self._mod_web.set_relay_tts_service(relay_tts_service)
 
     def set_voice_target_service(self, voice_target_service: RelayVoiceTargetService | None) -> None:
         self._voice_target_service = voice_target_service
-
-    def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
-        self._mod_web.set_chat_relay_service(chat_relay)
 
     @staticmethod
     def _interaction_message_id(interaction: hikari.ComponentInteraction) -> hikari.Snowflake | None:
@@ -3226,8 +3211,7 @@ class AppManageService:
         try:
             if reason := self.manage_lock_reason(app, message_id=self._interaction_message_id(req.interaction)):
                 raise RuntimeError(reason)
-            self._mod_web.set_manager(manager)
-            page_url = await self._mod_web.open_mod_page(app)
+            page_url = current_node_app_url(app.name)
             status = f"Opened mod web page for `{app.friendly}`.\n{page_url}"
         except Exception as xcp:
             status = _error_status(f"Error: mod web failed for `{app.friendly}`: {xcp}")

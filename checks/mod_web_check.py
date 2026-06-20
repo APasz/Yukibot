@@ -100,7 +100,7 @@ from relay_notices import (
     RelayNoticeSource,
 )
 from web_dash.backend import ModWebDashboardBackend
-from web_dash.home import _ModWebNodeLatencyBadgeSpec
+from web_dash.links import current_node_app_url
 from web_dash.models import _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
 from web_dash.nicegui_protocols import ModWebUi
 from web_dash.service import ModWebService
@@ -133,6 +133,7 @@ from web_dash.types import (
     _ModWebFakeChatMessageMode,
     _ModWebFakeChatPreviewState,
     _ModWebLinkSpec,
+    _ModWebNodePresenceBadgeSpec,
     _ModWebNotificationTrayItem,
     _ModWebTabActionSpec,
 )
@@ -896,41 +897,68 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ModWebService._node_status_badge_text(section), "Erin: Simulated Down")
         self.assertEqual(ModWebService._node_status_badge_tone(section), "warn")
 
-    def test_home_node_latency_badges_javascript_embeds_probe_urls(self) -> None:
+    def test_home_node_latency_badges_javascript_embeds_presence_stream_urls(self) -> None:
         script = ModWebService._home_node_latency_badges_javascript(
             (
-                _ModWebNodeLatencyBadgeSpec(
+                _ModWebNodePresenceBadgeSpec(
+                    node_name="yuki",
+                    badge_element_id=100,
                     text_element_id=101,
                     node_label="Yuki",
-                    fallback_text="Yuki: Alive",
-                    probe_url="/api/node/ping",
+                    pending_text="Yuki: ...",
+                    alive_text="Yuki: Alive",
+                    down_text="Yuki: Down",
+                    presence_stream_url="/api/node/presence/stream",
+                    pending_class_name="badge-pending",
+                    healthy_class_name="badge-healthy",
+                    unhealthy_class_name="badge-down",
+                    show_latency=True,
                 ),
-                _ModWebNodeLatencyBadgeSpec(
+                _ModWebNodePresenceBadgeSpec(
+                    node_name="erin",
+                    badge_element_id=200,
                     text_element_id=202,
                     node_label="Erin",
-                    fallback_text="Erin: Down",
-                    probe_url=None,
+                    pending_text="Erin: Down",
+                    alive_text="Erin: Alive",
+                    down_text="Erin: Down",
+                    presence_stream_url=None,
+                    pending_class_name="badge-down",
+                    healthy_class_name="badge-healthy",
+                    unhealthy_class_name="badge-down",
+                    show_latency=False,
                 ),
             )
         )
 
+        self.assertIn('"badge_element_id":100', script)
         self.assertIn('"text_element_id":101', script)
         self.assertIn('"node_label":"Yuki"', script)
-        self.assertIn('"fallback_text":"Yuki: Alive"', script)
-        self.assertIn('"probe_url":"/api/node/ping"', script)
-        self.assertIn('"probe_url":null', script)
+        self.assertIn('"pending_text":"Yuki: ..."', script)
+        self.assertIn('"alive_text":"Yuki: Alive"', script)
+        self.assertIn('"down_text":"Yuki: Down"', script)
+        self.assertIn('"presence_stream_url":"/api/node/presence/stream"', script)
+        self.assertIn('"presence_stream_url":null', script)
+        self.assertIn('"show_latency":true', script)
+        self.assertIn('"show_latency":false', script)
         self.assertIn("modWebHomeNodeLatency", script)
-        self.assertIn("_mod_web_latency_probe", script)
-        self.assertIn("${spec.node_label}: ${latency}", script)
-        self.assertIn("lastTextByElementId", script)
-        self.assertIn("textElement.textContent = text", script)
-        self.assertNotIn("badge.textContent = text", script)
+        self.assertIn("new WebSocket", script)
+        self.assertIn("sample_id", script)
+        self.assertIn("type: 'ping'", script)
+        self.assertIn("latencyRefreshIntervalMs", script)
+        self.assertIn("latencyTimeoutMs", script)
+        self.assertIn("reconnectDelayMs", script)
+        self.assertIn("socket.addEventListener('message'", script)
+        self.assertIn("renderBadge(spec, spec.pending_text, spec.pending_class_name);", script)
+        self.assertIn("${spec.node_label}: ${latencyTextValue}", script)
+        self.assertIn("textElement.textContent = text;", script)
+        self.assertNotIn("_mod_web_latency_probe", script)
+        self.assertNotIn("fetch(", script)
         self.assertIn("bootstrapProbeCount = 4", script)
         self.assertIn("bootstrapProbeDelayMs = 850", script)
-        self.assertIn("probeLatencySeries", script)
         self.assertIn("summariseLatencyMeasurements", script)
-        self.assertIn("hasBootstrapped", script)
-        self.assertIn("if (controllerState.inFlight)", script)
+        self.assertIn("connectionsByNode", script)
+        self.assertIn("pendingSamples", script)
 
     def test_node_capability_badges_use_icon_app_count_badge(self) -> None:
         badges = ModWebService._node_capability_badges(
@@ -1920,10 +1948,12 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(links[0].is_current)
         self.assertEqual(links[0].url, "/")
         self.assertEqual(links[0].latency_probe_url, "/api/node/ping")
+        self.assertEqual(links[0].presence_stream_url, "/api/node/presence/stream")
         self.assertEqual(links[1].url, "/mod-web/nodes/erin")
         self.assertEqual(links[1].api_base_url, "http://erin.example:3180/api/node")
         self.assertEqual(links[1].api_url, "/api/node-proxy/erin/apps")
         self.assertEqual(links[1].latency_probe_url, "http://erin.example:3180/api/node/ping")
+        self.assertEqual(links[1].presence_stream_url, "http://erin.example:3180/api/node/presence/stream")
 
     def test_portal_node_links_omit_local_current_node(self) -> None:
         yuki_snapshot = config.BotMetadataSnapshot(
@@ -1975,6 +2005,104 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual([link.node_name for link in links], ["yuki", "erin"])
         self.assertTrue(all(not link.is_current for link in links))
+
+    def test_portal_node_links_prefer_dev_cluster_env_over_stale_snapshots(self) -> None:
+        stale_yuki_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="764270771350142976",
+                label="Yuki",
+                bot_profile=config.BotProfileName.YUKI,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="yuki",
+                    public_base_url="http://124.187.226.10",
+                    node_api_base_url="http://124.187.226.10/api/node",
+                )
+            ),
+        )
+        stale_erin_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="123456789012345678",
+                label="Erin",
+                bot_profile=config.BotProfileName.ERIN,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="erin",
+                    public_base_url="http://127.0.0.1:3181",
+                    node_api_base_url="http://127.0.0.1:3181/api/node",
+                )
+            ),
+        )
+        bot_config = config.BotConfiguration(
+            KnownBots={
+                stale_yuki_snapshot.profile.id: stale_yuki_snapshot,
+                stale_erin_snapshot.profile.id: stale_erin_snapshot,
+            }
+        )
+        portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+        server = replace(config.MOD_WEB_SERVER, node_name="portal", public_base_url="http://127.0.0.1:3180")
+        dev_cluster_payload = json.dumps(
+            [
+                {
+                    "node_name": "yuki",
+                    "label": "Yuki",
+                    "node_api_public_base_url": "http://127.0.0.1:8082",
+                },
+                {
+                    "node_name": "erin",
+                    "label": "Erin",
+                    "node_api_public_base_url": "http://127.0.0.1:8083",
+                },
+            ]
+        )
+
+        with TemporaryDirectory[str]() as temp_dir:
+            missing_cache = Path(temp_dir) / "bots.json"
+            with (
+                patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile),
+                patch.object(config, "MOD_WEB_SERVER", server),
+                patch.object(config, "load_bot_configuration", return_value=bot_config),
+                patch.object(config, "authority_cache_path", return_value=missing_cache),
+                patch.object(config, "INDEV", True),
+                patch.object(config, "env_opt", side_effect=lambda name: dev_cluster_payload if name == "DEV_CLUSTER_NODE_LINKS_JSON" else None),
+            ):
+                links = ModWebService()._node_links()
+
+        self.assertEqual([link.node_name for link in links], ["yuki", "erin"])
+        self.assertEqual(links[0].api_base_url, "http://127.0.0.1:8082/api/node")
+        self.assertEqual(links[1].api_base_url, "http://127.0.0.1:8083/api/node")
+        self.assertEqual(links[0].latency_probe_url, "http://127.0.0.1:8082/api/node/ping")
+        self.assertEqual(links[1].latency_probe_url, "http://127.0.0.1:8083/api/node/ping")
+        self.assertEqual(links[0].presence_stream_url, "http://127.0.0.1:8082/api/node/presence/stream")
+        self.assertEqual(links[1].presence_stream_url, "http://127.0.0.1:8083/api/node/presence/stream")
+
+    def test_portal_default_node_name_prefers_dev_cluster_yuki_link(self) -> None:
+        dev_cluster_payload = json.dumps(
+            [
+                {
+                    "node_name": "erin",
+                    "label": "Erin",
+                    "node_api_public_base_url": "http://127.0.0.1:8083",
+                },
+                {
+                    "node_name": "yuki",
+                    "label": "Yuki",
+                    "node_api_public_base_url": "http://127.0.0.1:8082",
+                },
+            ]
+        )
+
+        with (
+            patch.object(config, "INDEV", True),
+            patch.object(
+                config,
+                "env_opt",
+                side_effect=lambda name: dev_cluster_payload if name == "DEV_CLUSTER_NODE_LINKS_JSON" else None,
+            ),
+        ):
+            self.assertEqual(ModWebService()._portal_default_node_name(), "yuki")
 
     def test_app_links_include_dedicated_chat_link_for_local_chat_relay_apps(self) -> None:
         service: ModWebService = ModWebService()
@@ -2660,6 +2788,103 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(len(ui.html_fragments), 1)
         self.assertIn('class="mod-user-avatar mod-home-section-avatar"', ui.html_fragments[0])
 
+    def test_render_node_apps_page_disables_title_stat_polling_when_live_node_updates_are_subscribed(self) -> None:
+        class FakeContainer:
+            def classes(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def style(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeLabel:
+            def classes(self, value: str) -> "FakeLabel":
+                del value
+                return self
+
+            def style(self, value: str) -> "FakeLabel":
+                del value
+                return self
+
+        class FakeRefreshable:
+            def __init__(self, func: Callable[..., None]) -> None:
+                self._func = func
+
+            def __call__(self, *args: object, **kwargs: object) -> None:
+                self._func(*args, **kwargs)
+
+            def refresh(self, *args: object, **kwargs: object) -> None:
+                self._func(*args, **kwargs)
+
+        class FakeUi:
+            def refreshable(self, func: Callable[..., None]) -> FakeRefreshable:
+                return FakeRefreshable(func)
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeLabel:
+                del text
+                return FakeLabel()
+
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="/api/node",
+            api_url="/api/node/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        ui = FakeUi()
+        subscribe_updates = Mock(return_value=lambda: None)
+
+        with (
+            patch.object(ModWebService, "_apply_theme"),
+            patch.object(ModWebService, "_render_user_header"),
+            patch.object(ModWebService, "_node_text_style", return_value=None),
+            patch.object(ModWebService, "_section_badge_rows", return_value=()),
+            patch.object(ModWebService, "_node_capability_badges", return_value=()),
+            patch.object(ModWebService, "_badge_spec"),
+            patch.object(ModWebService, "_action_link"),
+            patch.object(ModWebService, "_render_live_title_stats", return_value=lambda *_args: None) as render_stats,
+            patch.object(ModWebService, "_register_client_cleanup"),
+            patch("web_dash.home.asyncio.get_running_loop", return_value=cast(Any, object())),
+        ):
+            service._render_node_apps_page(
+                ui=cast(ModWebUi, cast(object, ui)),
+                node=node,
+                app_links=(),
+                user=user,
+                show_api_actions=False,
+                initial_title_stats=(),
+                refresh_async_title_stats=AsyncMock(return_value=()),
+                subscribe_node_state_updates=subscribe_updates,
+            )
+
+        self.assertIsNone(render_stats.call_args.kwargs["refresh_async_stats"])
+        subscribe_updates.assert_called_once()
+
     def test_node_resource_point_badges_show_available_capacity(self) -> None:
         node = ModWebNodeLink(
             node_name="yuki",
@@ -3289,6 +3514,92 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(ui.labels[2].text, "Starting")
 
+    def test_render_page_disables_hero_runtime_polling_when_live_app_updates_are_subscribed(self) -> None:
+        class FakeContainer:
+            def classes(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def style(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeUi:
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        model = cast(
+            ModWebPageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    supports_chat=False,
+                    app_stats=None,
+                    app_color_hex="#22C55E",
+                    app_name="minecraft_alpha",
+                    app_friendly="Minecraft Alpha",
+                    app_title_font_preset=AppTitleFont.DEFAULT,
+                    node_name="yuki",
+                ),
+            ),
+        )
+        ui = FakeUi()
+        subscribe_updates = Mock(return_value=lambda: None)
+
+        with (
+            patch.object(ModWebService, "_apply_theme"),
+            patch.object(ModWebService, "_render_user_header"),
+            patch.object(
+                ModWebService,
+                "_render_app_hero_corner_badges",
+                return_value=SimpleNamespace(apply_node_summary=lambda *_args: None, apply_app_stats=lambda *_args: None),
+            ),
+            patch.object(ModWebService, "_app_page_hero_badges", return_value=()),
+            patch.object(ModWebService, "_render_live_app_hero_runtime", return_value=lambda *_args: None) as render_hero,
+            patch.object(
+                ModWebService,
+                "_render_global_app_toolbar",
+                return_value=SimpleNamespace(apply_runtime_model=None),
+            ),
+            patch.object(ModWebService, "_page_tabs", return_value=()),
+            patch.object(ModWebService, "_render_tabbed_page_sections", return_value=None),
+            patch.object(ModWebService, "_register_client_cleanup"),
+            patch("web_dash.app_page.asyncio.get_running_loop", return_value=cast(Any, object())),
+        ):
+            service._render_page(
+                ui=cast(ModWebUi, cast(object, ui)),
+                model=model,
+                user=user,
+                current_url="/mod-web/mods/minecraft_alpha",
+                refresh_async_app_stats=AsyncMock(return_value=None),
+                refresh_async_runtime_model=AsyncMock(return_value=model),
+                subscribe_app_state_updates=subscribe_updates,
+            )
+
+        self.assertIsNone(render_hero.call_args.kwargs["refresh_async_app_stats"])
+        subscribe_updates.assert_called_once()
+
     def test_app_card_badges_omit_no_mods_placeholder(self) -> None:
         service = ModWebService()
         app = ModWebAppLink(
@@ -3850,6 +4161,25 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(config.detail_text, "Missing page")
         self.assertIsNotNone(config.icon_markup)
 
+    def test_framework_http_error_config_formats_redirect_loop_page(self) -> None:
+        service = ModWebService()
+
+        config = service._framework_http_error_config(
+            status_code=310,
+            exception=RuntimeError("Remote mod web attempted to redirect this request back to the same URL."),
+        )
+
+        self.assertEqual(config.title, "Too many redirects")
+        self.assertEqual(config.badge_text, "310")
+        self.assertEqual(config.badge_tone, "warn")
+        self.assertEqual(config.accent_color_hex, "#f59e0b")
+        self.assertEqual(config.detail_label, "Details")
+        self.assertEqual(
+            config.detail_text,
+            "RuntimeError: Remote mod web attempted to redirect this request back to the same URL.",
+        )
+        self.assertIsNotNone(config.icon_markup)
+
     def test_dev_error_preview_actions_list_expected_preview_routes(self) -> None:
         actions = ModWebService._dev_error_preview_actions()
 
@@ -3864,6 +4194,7 @@ class ModWebTests(unittest.TestCase):
                 _ModWebLinkSpec(label="Remote JSON Invalid", url="/mod-web/dev/error/remote-json-invalid"),
                 _ModWebLinkSpec(label="Remote Timeout", url="/mod-web/dev/error/remote-timeout"),
                 _ModWebLinkSpec(label="Remote Rejected", url="/mod-web/dev/error/remote-rejected"),
+                _ModWebLinkSpec(label="Redirect Loop 310", url="/mod-web/dev/error/redirect-loop"),
                 _ModWebLinkSpec(label="Framework 404", url="/mod-web/dev/error/framework-404"),
                 _ModWebLinkSpec(label="Framework 500", url="/mod-web/dev/error/framework-500"),
                 _ModWebLinkSpec(label="NiceGUI Exception", url="/mod-web/dev/error/nicegui-exception"),
@@ -6357,6 +6688,16 @@ class ModWebTests(unittest.TestCase):
                 self.class_value = value
                 return self
 
+            def on(
+                self,
+                event_name: str,
+                handler: Callable[[object], None] | None = None,
+                *,
+                js_handler: str | None = None,
+            ) -> "FakeButton":
+                del event_name, handler, js_handler
+                return self
+
             def set_text(self, value: str) -> None:
                 self.text = value
 
@@ -6398,6 +6739,10 @@ class ModWebTests(unittest.TestCase):
             def classes(self, value: str) -> "FakeUpload":
                 del value
                 return self
+
+            def add_slot(self, name: str) -> FakeContainer:
+                del name
+                return FakeContainer()
 
             def disable(self) -> None:
                 return None
@@ -6441,6 +6786,10 @@ class ModWebTests(unittest.TestCase):
             def row(self) -> FakeContainer:
                 return FakeContainer()
 
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
             def dialog(self) -> FakeDialog:
                 return FakeDialog()
 
@@ -6468,6 +6817,10 @@ class ModWebTests(unittest.TestCase):
 
             def notify(self, message: str, *, type: str | None = None) -> None:
                 del message, type
+                return None
+
+            def add_head_html(self, html: str) -> None:
+                del html
                 return None
 
         service = ModWebService()
@@ -6567,6 +6920,16 @@ class ModWebTests(unittest.TestCase):
                 self.class_value = value
                 return self
 
+            def on(
+                self,
+                event_name: str,
+                handler: Callable[[object], None] | None = None,
+                *,
+                js_handler: str | None = None,
+            ) -> "FakeButton":
+                del event_name, handler, js_handler
+                return self
+
             def set_text(self, value: str) -> None:
                 self.text = value
 
@@ -6598,6 +6961,10 @@ class ModWebTests(unittest.TestCase):
             def classes(self, value: str) -> "FakeUpload":
                 del value
                 return self
+
+            def add_slot(self, name: str) -> FakeContainer:
+                del name
+                return FakeContainer()
 
             def disable(self) -> None:
                 return None
@@ -6639,6 +7006,10 @@ class ModWebTests(unittest.TestCase):
             def row(self) -> FakeContainer:
                 return FakeContainer()
 
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
             def dialog(self) -> FakeDialog:
                 return FakeDialog()
 
@@ -6662,6 +7033,10 @@ class ModWebTests(unittest.TestCase):
 
             def notify(self, message: str, *, type: str | None = None) -> None:
                 del message, type
+                return None
+
+            def add_head_html(self, html: str) -> None:
+                del html
                 return None
 
         service = ModWebService()
@@ -6976,6 +7351,15 @@ class ModWebTests(unittest.TestCase):
         assert response is not None
         self.assertEqual(response.headers["location"], "https://wakusei.apasz.com/mod-web/nodes/erin")
 
+    def test_current_node_app_url_targets_node_specific_route(self) -> None:
+        server = replace(config.MOD_WEB_SERVER, node_name="erin", public_base_url="https://portal.example")
+
+        with patch.object(config, "MOD_WEB_SERVER", server):
+            self.assertEqual(
+                current_node_app_url("minecraft_survival"),
+                "https://portal.example/mod-web/nodes/erin/mods/minecraft_survival",
+            )
+
     def test_remote_node_app_page_redirects_to_yuki_portal_app_page(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="erin")
         request = SimpleNamespace(
@@ -6985,7 +7369,7 @@ class ModWebTests(unittest.TestCase):
         with (
             patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
             patch.object(config, "MOD_WEB_SERVER", server),
-            patch.object(ModWebService, "_yuki_portal_base_url", return_value="https://wakusei.apasz.com"),
+            patch.object(ModWebService, "_portal_base_url", return_value="https://wakusei.apasz.com"),
         ):
             response = ModWebService()._remote_portal_redirect(cast(Any, request))
 
@@ -6994,6 +7378,27 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             response.headers["location"],
             "https://wakusei.apasz.com/mod-web/nodes/erin/mods/minecraft_survival?tab=mods",
+        )
+
+    def test_remote_node_node_page_redirect_preserves_requested_node_path(self) -> None:
+        server = replace(config.MOD_WEB_SERVER, node_name="erin")
+        request = SimpleNamespace(
+            method="GET",
+            url=SimpleNamespace(path="/mod-web/nodes/yuki/mods/minecraft_survival", query="tab=mods"),
+        )
+
+        with (
+            patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
+            patch.object(config, "MOD_WEB_SERVER", server),
+            patch.object(ModWebService, "_portal_base_url", return_value="https://wakusei.apasz.com"),
+        ):
+            response = ModWebService()._remote_portal_redirect(cast(Any, request))
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual(
+            response.headers["location"],
+            "https://wakusei.apasz.com/mod-web/nodes/yuki/mods/minecraft_survival?tab=mods",
         )
 
     def test_portal_profile_redirects_local_alias_app_page_to_default_remote_node(self) -> None:
@@ -7038,7 +7443,7 @@ class ModWebTests(unittest.TestCase):
         with (
             patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
             patch.object(config, "MOD_WEB_SERVER", server),
-            patch.object(ModWebService, "_yuki_portal_base_url", return_value="https://wakusei.apasz.com"),
+            patch.object(ModWebService, "_portal_base_url", return_value="https://wakusei.apasz.com"),
         ):
             response = ModWebService()._remote_portal_redirect(cast(Any, request))
 
@@ -7049,6 +7454,39 @@ class ModWebTests(unittest.TestCase):
             "https://wakusei.apasz.com/mod-web/nodes/erin/chat/minecraft_survival",
         )
 
+    def test_portal_base_url_prefers_portal_snapshot_over_yuki_snapshot(self) -> None:
+        yuki_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="1350601198637551659",
+                label="Yuki",
+                bot_profile=config.BotProfileName.YUKI,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="yuki",
+                    public_base_url="https://wakusei.apasz.com",
+                    node_api_base_url="https://wakusei.apasz.com/api/node",
+                )
+            ),
+        )
+        portal_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="764270771350142976",
+                label="Portal",
+                bot_profile=config.BotProfileName.PORTAL,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="portal",
+                    public_base_url="https://portal.example",
+                    node_api_base_url="https://portal.example/api/node",
+                )
+            ),
+        )
+
+        with patch.object(ModWebService, "_known_bot_snapshots", return_value=(yuki_snapshot, portal_snapshot)):
+            self.assertEqual(ModWebService()._portal_base_url(), "https://portal.example")
+
     def test_remote_node_api_is_not_redirected(self) -> None:
         request = SimpleNamespace(method="GET", url=SimpleNamespace(path="/api/node/apps", query=""))
 
@@ -7056,6 +7494,28 @@ class ModWebTests(unittest.TestCase):
             response = ModWebService()._remote_portal_redirect(cast(Any, request))
 
         self.assertIsNone(response)
+
+    def test_portal_profile_does_not_redirect_portal_owned_routes(self) -> None:
+        portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+        server = replace(config.MOD_WEB_SERVER, node_name="portal")
+        cases: tuple[tuple[str, str], ...] = (
+            ("/auth/login", "next_path=%2F"),
+            ("/mod-web/nodes/yuki", ""),
+            ("/mod-web/nodes/erin/mods/minecraft_survival", "tab=mods"),
+            ("/mod-web/dev/error/page-unavailable", ""),
+            ("/mod-web/assets/fonts/test.woff2", ""),
+        )
+
+        with (
+            patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile),
+            patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
+            patch.object(config, "MOD_WEB_SERVER", server),
+        ):
+            for path, query in cases:
+                with self.subTest(path=path, query=query):
+                    request = SimpleNamespace(method="GET", url=SimpleNamespace(path=path, query=query))
+                    response = ModWebService()._remote_portal_redirect(cast(Any, request))
+                    self.assertIsNone(response)
 
     def test_app_hero_runtime_details_use_status_text_and_badges(self) -> None:
         stats = NodeAppRuntimeSummary(
