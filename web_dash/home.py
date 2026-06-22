@@ -972,23 +972,26 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
     def _node_bot_avatar_uri(self, *, node_name: str) -> str:
         bot = self._mod_web_bot()
-        if bot is None:
-            return self._bot_avatar_uri_fallback()
-        target_user_id: int | None = self._node_bot_user_id(node_name=node_name, bot=bot)
-        if target_user_id is None:
-            return self._bot_avatar_uri_fallback()
-        if node_name.casefold() == config.MOD_WEB_SERVER.node_name.casefold():
-            avatar_uri = self._avatar_url_text(bot.get_me())
+        if bot is not None:
+            target_user_id: int | None = self._node_bot_user_id(node_name=node_name, bot=bot)
+            if target_user_id is not None:
+                if node_name.casefold() == config.MOD_WEB_SERVER.node_name.casefold():
+                    avatar_uri = self._avatar_url_text(bot.get_me())
+                    if avatar_uri is not None:
+                        return avatar_uri
+                cached_user = bot.cache.get_user(target_user_id)
+                avatar_uri = self._avatar_url_text(cached_user)
+                if avatar_uri is not None:
+                    return avatar_uri
+                cached_member = bot.cache.get_member(config.DISCORD_GUILD, target_user_id)
+                avatar_uri = self._avatar_url_text(cached_member)
+                if avatar_uri is not None:
+                    return avatar_uri
+        snapshot = self._known_bot_snapshot_for_node(node_name=node_name)
+        if snapshot is not None and snapshot.features.presentation is not None:
+            avatar_uri = snapshot.features.presentation.avatar_uri
             if avatar_uri is not None:
                 return avatar_uri
-        cached_user = bot.cache.get_user(target_user_id)
-        avatar_uri = self._avatar_url_text(cached_user)
-        if avatar_uri is not None:
-            return avatar_uri
-        cached_member = bot.cache.get_member(config.DISCORD_GUILD, target_user_id)
-        avatar_uri = self._avatar_url_text(cached_member)
-        if avatar_uri is not None:
-            return avatar_uri
         return self._bot_avatar_uri_fallback()
 
     def _home_section_avatar_markup(self, *, node_name: str, display_name: str) -> str:

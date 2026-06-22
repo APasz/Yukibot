@@ -131,7 +131,7 @@ class _ModWebAppHeroRuntimeDetails:
     status_text: str
     status_tone: BadgeTone
     relay_badge: _ModWebBadgeSpec
-    badges: tuple[_ModWebBadgeSpec, ...] = ()
+    version_badge: _ModWebBadgeSpec
     player_count_badge: _ModWebBadgeSpec | None = None
 
 

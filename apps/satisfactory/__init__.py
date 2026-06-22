@@ -8,10 +8,11 @@ import logging
 import re
 import signal
 import ssl
+import aiohttp
 from asyncio.events import AbstractEventLoop
 from asyncio.locks import Lock
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from logging import Logger
@@ -19,21 +20,23 @@ from pathlib import Path
 from re import Pattern
 from ssl import SSLContext
 from threading import Lock as ThreadLock
-from typing import Any, Protocol, Self, TypeVar
+from typing import Any, Protocol, Self, TypeVar, cast
 from urllib.parse import SplitResult, urlsplit
 
 import hikari
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from satisfactory_api_client import AsyncSatisfactoryAPI
+from satisfactory_api_client.data.advanced_game_settings import AdvancedGameSettings
 from satisfactory_api_client.data.minimum_privilege_level import MinimumPrivilegeLevel
 from satisfactory_api_client.data.response import Response as SatisfactoryAPIResponse
 from satisfactory_api_client.data.server_options import ServerOptions
+from satisfactory_api_client.exceptions import APIError
 
 import config
 from _discord import DC_Bound, DC_Relay
 from _file import File_Utils
 from _security import Power_Level
-from apps._app import App
+from apps._app import App, AppActivityProvider, AppActivityProviderMetadata
 from apps._blueprint_files import (
     AppBlueprintEntry,
     AppBlueprintFileType,
@@ -43,12 +46,16 @@ from apps._blueprint_files import (
     find_matching_blueprint_config_relative_path,
     find_matching_blueprint_module_relative_path,
     list_blueprint_files,
+    normalise_blueprint_file_id,
+    normalise_existing_blueprint_filename,
     resolve_blueprint_file_path,
     resolve_blueprint_upload_target,
     validate_blueprint_session_name,
     validate_blueprint_upload_pair,
 )
 from apps._config import App_Config, AppVersion, resolve_config_path
+from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
+from apps._save_files import AppSaveEntry, AppSaveEntryKind, AppSaveRoot, AppSaveRootMode
 from apps._settings import (
     App_Settings,
     BoolSettingSpec,
@@ -105,6 +112,10 @@ _SML_UPLUGIN_FILES: tuple[Path, Path] = (
     Path("Mods") / "SML" / "SML.uplugin",
 )
 _BLUEPRINT_ROOT: Path = Path("~/.config/Epic/FactoryGame/Saved/SaveGames/blueprints").expanduser()
+_SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME = "Shared"
+_SATISFACTORY_BLUEPRINT_STORAGE_SUFFIX = "-shared"
+_SATISFACTORY_SAVE_ROOT_ID = "saves"
+_SATISFACTORY_SAVE_ROOT_LABEL = "Server Saves"
 
 
 class SatisfactoryNetworkQuality(enum.IntEnum):
@@ -288,6 +299,25 @@ def _string_object_mapping(value: object, *, label: str) -> dict[str, object]:
     return result
 
 
+def _is_non_empty_text(value: str) -> bool:
+    return bool(value.strip())
+
+
+def _satisfactory_api_response_text(payload: object) -> str | None:
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        stripped_payload: str = payload.strip()
+        return stripped_payload or None
+    if isinstance(payload, Mapping):
+        return json.dumps(dict(payload), ensure_ascii=True, sort_keys=True)
+    if isinstance(payload, list):
+        return json.dumps(payload, ensure_ascii=True)
+    if isinstance(payload, tuple):
+        return json.dumps(list(payload), ensure_ascii=True)
+    return str(payload)
+
+
 class SatisfactoryBlueprintOwnershipEntry(BaseModel):
     uploaded_by_user_id: int
 
@@ -322,6 +352,17 @@ class SatisfactoryBlueprintOwnershipStore:
             if relative_path in index.files:
                 index.files.pop(relative_path)
                 self._save_index(index)
+
+    def replace_all(self, *, uploaded_by_user_id_by_relative_path: Mapping[str, int]) -> None:
+        with self._lock:
+            self._save_index(
+                SatisfactoryBlueprintOwnershipIndex(
+                    files={
+                        relative_path: SatisfactoryBlueprintOwnershipEntry(uploaded_by_user_id=actor_user_id)
+                        for relative_path, actor_user_id in uploaded_by_user_id_by_relative_path.items()
+                    }
+                )
+            )
 
     def _load_index(self) -> SatisfactoryBlueprintOwnershipIndex:
         if not self._path.exists():
@@ -403,9 +444,21 @@ class SatisfactoryServerState(BaseModel):
         default=None,
         validation_alias=AliasChoices("playerLimit", "PlayerLimit"),
     )
+    tech_tier: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("techTier", "TechTier"),
+    )
+    active_schematic: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("activeSchematic", "ActiveSchematic"),
+    )
     is_game_running: bool | None = Field(
         default=None,
         validation_alias=AliasChoices("isGameRunning", "IsGameRunning"),
+    )
+    total_game_duration: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("totalGameDuration", "TotalGameDuration"),
     )
     average_tick_rate: float | None = Field(
         default=None,
@@ -413,6 +466,24 @@ class SatisfactoryServerState(BaseModel):
     )
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True, str_strip_whitespace=True)
+
+    @field_validator("tech_tier", mode="before")
+    def normalise_tech_tier(cls, raw: object) -> int | None:
+        if raw is None:
+            return None
+        value: int = _coerce_integral_value(raw, label="tech tier")
+        if value < 0:
+            raise ValueError("tech tier must not be negative")
+        return value
+
+    @field_validator("total_game_duration", mode="before")
+    def normalise_total_game_duration(cls, raw: object) -> int | None:
+        if raw is None:
+            return None
+        value: int = _coerce_integral_value(raw, label="total game duration")
+        if value < 0:
+            raise ValueError("total game duration must not be negative")
+        return value
 
     @classmethod
     def from_api_payload(cls, payload: Mapping[str, object]) -> Self:
@@ -424,13 +495,24 @@ class SatisfactoryServerState(BaseModel):
         return cls.model_validate(_string_object_mapping(state_payload, label="server game state payload"))
 
 
-class SatisfactorySettingsSnapshot(BaseModel):
-    auto_load_session_name: str | None = None
-    auto_pause: bool | None = Field(default=None, validation_alias="FG.DSAutoPause")
-    auto_save_on_disconnect: bool | None = Field(default=None, validation_alias="FG.DSAutoSaveOnDisconnect")
-    autosave_interval_seconds: int | None = Field(default=None, validation_alias="FG.AutosaveInterval")
-    send_gameplay_data: bool | None = Field(default=None, validation_alias="FG.SendGameplayData")
-    network_quality: SatisfactoryNetworkQuality | None = Field(default=None, validation_alias="FG.NetworkQuality")
+class SatisfactoryServerOptionsSnapshot(BaseModel):
+    auto_pause: bool | None = Field(default=None, validation_alias=AliasChoices("FG.DSAutoPause", "DSAutoPause"))
+    auto_save_on_disconnect: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.DSAutoSaveOnDisconnect", "DSAutoSaveOnDisconnect"),
+    )
+    autosave_interval_seconds: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.AutosaveInterval", "AutosaveInterval"),
+    )
+    send_gameplay_data: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.SendGameplayData", "SendGameplayData"),
+    )
+    network_quality: SatisfactoryNetworkQuality | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.NetworkQuality", "NetworkQuality"),
+    )
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True, str_strip_whitespace=True)
 
@@ -451,7 +533,7 @@ class SatisfactorySettingsSnapshot(BaseModel):
         return SatisfactoryNetworkQuality(quality)
 
     @classmethod
-    def from_api_payloads(cls, state: SatisfactoryServerState, payload: Mapping[str, object]) -> Self:
+    def from_api_payload(cls, payload: Mapping[str, object]) -> Self:
         server_options = payload.get("serverOptions")
         if server_options is None:
             server_options = payload.get("ServerOptions")
@@ -462,10 +544,13 @@ class SatisfactorySettingsSnapshot(BaseModel):
             raise ValueError("server options payload must be a mapping")
         if pending_options is not None and not isinstance(pending_options, Mapping):
             raise ValueError("pending server options payload must be a mapping")
-        effective_options = dict(server_options) if isinstance(server_options, Mapping) else {}
+        effective_options = (
+            dict(_string_object_mapping(server_options, label="server options payload"))
+            if isinstance(server_options, Mapping)
+            else {}
+        )
         if isinstance(pending_options, Mapping):
-            effective_options.update(pending_options)
-        effective_options["auto_load_session_name"] = state.auto_load_session_name
+            effective_options.update(_string_object_mapping(pending_options, label="pending server options payload"))
         return cls.model_validate(effective_options)
 
     def to_sdk_server_options(self) -> ServerOptions:
@@ -478,6 +563,307 @@ class SatisfactorySettingsSnapshot(BaseModel):
             SendGameplayData=self.send_gameplay_data,
             NetworkQuality=None if self.network_quality is None else self.network_quality.value,
         )
+
+
+class SatisfactoryAdvancedGameSettingsSnapshot(BaseModel):
+    creative_mode_enabled: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("creativeModeEnabled", "CreativeModeEnabled"),
+    )
+    no_power: bool | None = Field(default=None, validation_alias=AliasChoices("FG.NoPower", "NoPower"))
+    disable_arachnid_creatures: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.DisableArachnidCreatures", "DisableArachnidCreatures"),
+    )
+    no_unlock_cost: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.NoUnlockCost", "NoUnlockCost"),
+    )
+    set_game_phase: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.SetGamePhase", "SetGamePhase"),
+    )
+    give_all_tiers: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.GiveAllTiers", "GiveAllTiers"),
+    )
+    unlock_all_research_schematics: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.UnlockAllResearchSchematics", "UnlockAllResearchSchematics"),
+    )
+    unlock_instant_alt_recipes: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.UnlockInstantAltRecipes", "UnlockInstantAltRecipes"),
+    )
+    unlock_all_resource_sink_schematics: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "FG.UnlockAllResourceSinkSchematics",
+            "UnlockAllResourceSinkSchematics",
+        ),
+    )
+    give_items: str | None = Field(default=None, validation_alias=AliasChoices("FG.GiveItems", "GiveItems"))
+    no_build_cost: bool | None = Field(
+        default=None,
+        validation_alias=AliasChoices("FG.NoBuildCost", "NoBuildCost"),
+    )
+    god_mode: bool | None = Field(default=None, validation_alias=AliasChoices("FG.GodMode", "GodMode"))
+    flight_mode: bool | None = Field(default=None, validation_alias=AliasChoices("FG.FlightMode", "FlightMode"))
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, str_strip_whitespace=True)
+
+    @field_validator("set_game_phase", mode="before")
+    def normalise_set_game_phase(cls, raw: object) -> int | None:
+        if raw is None:
+            return None
+        value: int = _coerce_integral_value(raw, label="advanced game phase")
+        if value < 0:
+            raise ValueError("advanced game phase must not be negative")
+        return value
+
+    @field_validator("give_items", mode="before")
+    def normalise_give_items(cls, raw: object) -> str | None:
+        if raw is None:
+            return None
+        text: str = str(raw).strip()
+        return text or None
+
+    @classmethod
+    def from_api_payload(cls, payload: Mapping[str, object]) -> Self:
+        advanced_game_settings = payload.get("advancedGameSettings")
+        if advanced_game_settings is None:
+            advanced_game_settings = payload.get("AdvancedGameSettings")
+        if advanced_game_settings is not None and not isinstance(advanced_game_settings, Mapping):
+            raise ValueError("advanced game settings payload must be a mapping")
+        effective_options = (
+            dict(_string_object_mapping(advanced_game_settings, label="advanced game settings payload"))
+            if isinstance(advanced_game_settings, Mapping)
+            else {}
+        )
+        creative_mode_enabled: object | None = payload.get("creativeModeEnabled")
+        if creative_mode_enabled is None:
+            creative_mode_enabled = payload.get("CreativeModeEnabled")
+        effective_options["creative_mode_enabled"] = creative_mode_enabled
+        return cls.model_validate(effective_options)
+
+    def to_sdk_advanced_game_settings(self) -> AdvancedGameSettings:
+        return AdvancedGameSettings(
+            NoPower=self.no_power,
+            DisableArachnidCreatures=self.disable_arachnid_creatures,
+            NoUnlockCost=self.no_unlock_cost,
+            SetGamePhase=self.set_game_phase,
+            GiveAllTiers=self.give_all_tiers,
+            UnlockAllResearchSchematics=self.unlock_all_research_schematics,
+            UnlockInstantAltRecipes=self.unlock_instant_alt_recipes,
+            UnlockAllResourceSinkSchematics=self.unlock_all_resource_sink_schematics,
+            GiveItems=self.give_items,
+            NoBuildCost=self.no_build_cost,
+            GodMode=self.god_mode,
+            FlightMode=self.flight_mode,
+        )
+
+
+class SatisfactorySettingsSnapshot(BaseModel):
+    auto_load_session_name: str | None = None
+    server_options: SatisfactoryServerOptionsSnapshot = Field(default_factory=SatisfactoryServerOptionsSnapshot)
+    advanced_game_settings: SatisfactoryAdvancedGameSettingsSnapshot = Field(
+        default_factory=SatisfactoryAdvancedGameSettingsSnapshot
+    )
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, str_strip_whitespace=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_flat_payload(cls, raw: object) -> object:
+        if not isinstance(raw, Mapping):
+            return raw
+        payload = _string_object_mapping(raw, label="satisfactory settings snapshot")
+        if "server_options" in payload or "advanced_game_settings" in payload:
+            return payload
+
+        server_options_keys = (
+            "auto_pause",
+            "FG.DSAutoPause",
+            "auto_save_on_disconnect",
+            "FG.DSAutoSaveOnDisconnect",
+            "autosave_interval_seconds",
+            "FG.AutosaveInterval",
+            "send_gameplay_data",
+            "FG.SendGameplayData",
+            "network_quality",
+            "FG.NetworkQuality",
+        )
+        advanced_game_settings_keys = (
+            "creative_mode_enabled",
+            "CreativeModeEnabled",
+            "creativeModeEnabled",
+            "no_power",
+            "FG.NoPower",
+            "disable_arachnid_creatures",
+            "FG.DisableArachnidCreatures",
+            "no_unlock_cost",
+            "FG.NoUnlockCost",
+            "set_game_phase",
+            "FG.SetGamePhase",
+            "give_all_tiers",
+            "FG.GiveAllTiers",
+            "unlock_all_research_schematics",
+            "FG.UnlockAllResearchSchematics",
+            "unlock_instant_alt_recipes",
+            "FG.UnlockInstantAltRecipes",
+            "unlock_all_resource_sink_schematics",
+            "FG.UnlockAllResourceSinkSchematics",
+            "give_items",
+            "FG.GiveItems",
+            "no_build_cost",
+            "FG.NoBuildCost",
+            "god_mode",
+            "FG.GodMode",
+            "flight_mode",
+            "FG.FlightMode",
+        )
+
+        server_options = {key: payload[key] for key in server_options_keys if key in payload}
+        advanced_game_settings = {key: payload[key] for key in advanced_game_settings_keys if key in payload}
+
+        if not server_options and not advanced_game_settings:
+            return payload
+
+        migrated_payload: dict[str, object] = {
+            key: value
+            for key, value in payload.items()
+            if key not in {*server_options_keys, *advanced_game_settings_keys}
+        }
+        migrated_payload["server_options"] = server_options
+        migrated_payload["advanced_game_settings"] = advanced_game_settings
+        return migrated_payload
+
+    @classmethod
+    def from_api_payloads(
+        cls,
+        state: SatisfactoryServerState,
+        server_options_payload: Mapping[str, object],
+        advanced_game_settings_payload: Mapping[str, object],
+    ) -> Self:
+        return cls(
+            auto_load_session_name=state.auto_load_session_name,
+            server_options=SatisfactoryServerOptionsSnapshot.from_api_payload(server_options_payload),
+            advanced_game_settings=SatisfactoryAdvancedGameSettingsSnapshot.from_api_payload(
+                advanced_game_settings_payload
+            ),
+        )
+
+
+class SatisfactorySaveHeader(BaseModel):
+    save_name: str = Field(validation_alias=AliasChoices("saveName", "SaveName"))
+    session_name: str = Field(validation_alias=AliasChoices("sessionName", "SessionName"))
+    save_date_time: datetime = Field(validation_alias=AliasChoices("saveDateTime", "SaveDateTime"))
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, str_strip_whitespace=True)
+
+    @field_validator("save_name", "session_name", mode="before")
+    def normalise_required_text(cls, raw: object) -> str:
+        text: str = str(raw).strip()
+        if not text:
+            raise ValueError("save metadata text field must not be empty")
+        return text
+
+    def to_app_save_entry(self) -> AppSaveEntry:
+        relative_path = f"{self.session_name}/{self.save_name}"
+        return AppSaveEntry(
+            id=f"{_SATISFACTORY_SAVE_ROOT_ID}/{relative_path}",
+            label=self.save_name,
+            relative_path=relative_path,
+            root_id=_SATISFACTORY_SAVE_ROOT_ID,
+            root_label=_SATISFACTORY_SAVE_ROOT_LABEL,
+            kind=AppSaveEntryKind.FILE,
+            size_bytes=0,
+            modified_at=self.save_date_time,
+        )
+
+
+class SatisfactorySessionSaveSnapshot(BaseModel):
+    session_name: str = Field(validation_alias=AliasChoices("sessionName", "SessionName"))
+    save_headers: tuple[SatisfactorySaveHeader, ...] = Field(
+        validation_alias=AliasChoices("saveHeaders", "SaveHeaders")
+    )
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, str_strip_whitespace=True)
+
+    @field_validator("session_name", mode="before")
+    def normalise_session_name(cls, raw: object) -> str:
+        text: str = str(raw).strip()
+        if not text:
+            raise ValueError("session name must not be empty")
+        return text
+
+    @field_validator("save_headers", mode="before")
+    def normalise_save_headers(
+        cls, raw: object
+    ) -> tuple[Mapping[str, object] | SatisfactorySaveHeader, ...]:
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            raise TypeError("save headers payload must be a sequence")
+        headers: list[Mapping[str, object] | SatisfactorySaveHeader] = []
+        for item in cast(Sequence[object], raw):
+            if isinstance(item, SatisfactorySaveHeader):
+                headers.append(item)
+                continue
+            if not isinstance(item, Mapping):
+                raise TypeError("save header payload must be a mapping")
+            headers.append(_string_object_mapping(item, label="save header payload"))
+        return tuple(headers)
+
+
+class SatisfactorySessionEnumerationSnapshot(BaseModel):
+    sessions: tuple[SatisfactorySessionSaveSnapshot, ...]
+    current_session_index: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("currentSessionIndex", "CurrentSessionIndex"),
+    )
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, str_strip_whitespace=True)
+
+    @field_validator("sessions", mode="before")
+    def normalise_sessions(
+        cls, raw: object
+    ) -> tuple[Mapping[str, object] | SatisfactorySessionSaveSnapshot, ...]:
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            raise TypeError("sessions payload must be a sequence")
+        sessions: list[Mapping[str, object] | SatisfactorySessionSaveSnapshot] = []
+        for item in cast(Sequence[object], raw):
+            if isinstance(item, SatisfactorySessionSaveSnapshot):
+                sessions.append(item)
+                continue
+            if not isinstance(item, Mapping):
+                raise TypeError("session payload must be a mapping")
+            sessions.append(_string_object_mapping(item, label="session payload"))
+        return tuple(sessions)
+
+    @field_validator("current_session_index", mode="before")
+    def normalise_current_session_index(cls, raw: object) -> int | None:
+        if raw is None:
+            return None
+        value: int = _coerce_integral_value(raw, label="current session index")
+        if value < 0:
+            raise ValueError("current session index must not be negative")
+        return value
+
+    @classmethod
+    def from_api_payload(cls, payload: Mapping[str, object]) -> Self:
+        return cls.model_validate(_string_object_mapping(payload, label="enumerate sessions payload"))
+
+    def save_entries(self) -> tuple[AppSaveEntry, ...]:
+        entries: list[AppSaveEntry] = []
+        for session in self.sessions:
+            entries.extend(save_header.to_app_save_entry() for save_header in session.save_headers)
+        return tuple(sorted(entries, key=lambda entry: entry.relative_path.casefold()))
+
+    def save_header_by_id(self) -> dict[str, SatisfactorySaveHeader]:
+        return {
+            save_header.to_app_save_entry().id: save_header
+            for session in self.sessions
+            for save_header in session.save_headers
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,6 +881,61 @@ class SatisfactoryAPIClient(AsyncSatisfactoryAPI):
         ssl_context.load_verify_locations(str(chain_path))
         self.cert_path = str(chain_path)
         self._ssl_context = ssl_context
+
+    async def upload_save_game_file(
+        self,
+        *,
+        save_name: str,
+        source_path: Path,
+        load_save_game: bool = False,
+        enable_advanced_game_settings: bool = False,
+    ) -> SatisfactoryAPIResponse:
+        url = f"https://{self.host}:{self.port}/api/v1"
+        headers: dict[str, str] = {}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+
+        envelope = {
+            "function": "UploadSaveGame",
+            "data": {
+                "SaveName": save_name,
+                "LoadSaveGame": load_save_game,
+                "EnableAdvancedGameSettings": enable_advanced_game_settings,
+            },
+        }
+        form = aiohttp.FormData()
+        form.add_field("_charset_", "utf-8")
+        form.add_field("data", json.dumps(envelope), content_type="application/json")
+        form.add_field(
+            "saveGameFile",
+            source_path.read_bytes(),
+            filename=source_path.name,
+            content_type="application/octet-stream",
+        )
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=form, headers=headers, ssl=self._get_ssl()) as response:
+                if response.status not in (200, 201, 202, 204):
+                    error_data = await response.json(content_type=None)
+                    raise APIError(
+                        error_code=str(error_data.get("errorCode", "upload_failed")),
+                        message=str(error_data.get("errorMessage", "Save upload failed")),
+                    )
+                if response.status == 204:
+                    return SatisfactoryAPIResponse(success=True, data={})
+
+                content_type = response.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    result = await response.json(content_type=None)
+                    if result.get("errorCode"):
+                        raise APIError(
+                            error_code=str(result.get("errorCode")),
+                            message=str(result.get("errorMessage", "Save upload failed")),
+                        )
+                    return SatisfactoryAPIResponse(success=True, data=result.get("data"))
+                if content_type == "application/octet-stream":
+                    return SatisfactoryAPIResponse(success=True, data=await response.read())
+                return SatisfactoryAPIResponse(success=True, data=await response.text())
 
 
 class SatisfactoryBridge:
@@ -542,26 +983,85 @@ class SatisfactoryBridge:
             _string_object_mapping(payload, label="query_server_state payload")
         )
 
-    async def read_settings(self) -> SatisfactorySettingsSnapshot:
-        state: SatisfactoryServerState = await self.query_server_state()
+    async def read_server_options(self) -> SatisfactoryServerOptionsSnapshot:
         payload: object = (await self._call("get_server_options")).data
-        return SatisfactorySettingsSnapshot.from_api_payloads(
-            state,
+        return SatisfactoryServerOptionsSnapshot.from_api_payload(
             _string_object_mapping(payload, label="get_server_options payload"),
         )
 
-    async def apply_settings(self, settings: SatisfactorySettingsSnapshot) -> None:
-        if settings.auto_load_session_name is not None:
-            await self._call("set_auto_load_session_name", settings.auto_load_session_name)
+    async def apply_server_options(
+        self,
+        settings: SatisfactoryServerOptionsSnapshot,
+        *,
+        auto_load_session_name: str | None = None,
+    ) -> None:
+        if auto_load_session_name is not None:
+            await self._call("set_auto_load_session_name", auto_load_session_name)
         server_options: ServerOptions = settings.to_sdk_server_options()
         if server_options.to_dict():
             await self._call("apply_server_options", server_options)
 
-    async def save_game(self, save_name: str) -> None:
-        await self._call("save_game", save_name)
+    async def read_advanced_game_settings(self) -> SatisfactoryAdvancedGameSettingsSnapshot:
+        payload: object = (await self._call("get_advanced_game_settings")).data
+        return SatisfactoryAdvancedGameSettingsSnapshot.from_api_payload(
+            _string_object_mapping(payload, label="get_advanced_game_settings payload")
+        )
 
-    async def shutdown(self) -> None:
-        await self._call("shutdown")
+    async def apply_advanced_game_settings(self, settings: SatisfactoryAdvancedGameSettingsSnapshot) -> None:
+        advanced_game_settings: AdvancedGameSettings = settings.to_sdk_advanced_game_settings()
+        if advanced_game_settings.to_dict():
+            await self._call("apply_advanced_game_settings", advanced_game_settings)
+
+    async def read_settings(self) -> SatisfactorySettingsSnapshot:
+        state: SatisfactoryServerState = await self.query_server_state()
+        server_options: SatisfactoryServerOptionsSnapshot = await self.read_server_options()
+        advanced_game_settings: SatisfactoryAdvancedGameSettingsSnapshot = await self.read_advanced_game_settings()
+        return SatisfactorySettingsSnapshot(
+            auto_load_session_name=state.auto_load_session_name,
+            server_options=server_options,
+            advanced_game_settings=advanced_game_settings,
+        )
+
+    async def apply_settings(self, settings: SatisfactorySettingsSnapshot) -> None:
+        await self.apply_server_options(
+            settings.server_options,
+            auto_load_session_name=settings.auto_load_session_name,
+        )
+        await self.apply_advanced_game_settings(settings.advanced_game_settings)
+
+    async def enumerate_sessions(self) -> SatisfactorySessionEnumerationSnapshot:
+        payload: object = (await self._call("enumerate_sessions")).data
+        return SatisfactorySessionEnumerationSnapshot.from_api_payload(
+            _string_object_mapping(payload, label="enumerate_sessions payload")
+        )
+
+    async def save_game(self, save_name: str) -> str | None:
+        payload: object = (await self._call("save_game", save_name)).data
+        return _satisfactory_api_response_text(payload)
+
+    async def delete_save_file(self, save_name: str) -> str | None:
+        payload: object = (await self._call("delete_save_file", save_name)).data
+        return _satisfactory_api_response_text(payload)
+
+    async def download_save_game(self, save_name: str) -> bytes:
+        payload: object = (await self._call("download_save_game", save_name)).data
+        if not isinstance(payload, bytes):
+            raise TypeError(f"download_save_game returned {type(payload).__name__}, expected bytes")
+        return payload
+
+    async def upload_save_game(self, *, save_name: str, source_path: Path) -> str | None:
+        payload: object = (
+            await (await self._client()).upload_save_game_file(save_name=save_name, source_path=source_path)
+        ).data
+        return _satisfactory_api_response_text(payload)
+
+    async def shutdown(self) -> str | None:
+        payload: object = (await self._call("shutdown")).data
+        return _satisfactory_api_response_text(payload)
+
+    async def run_command(self, command: str) -> str | None:
+        payload: object = (await self._call("run_command", command)).data
+        return _satisfactory_api_response_text(payload)
 
     def update_password(self, password: str) -> None:
         self._cfg = SatisfactoryBridgeConfig(
@@ -580,10 +1080,42 @@ class SatisfactorySettingsBridge(Protocol):
 
 
 SettingValueT = TypeVar("SettingValueT")
+_SATISFACTORY_ADVANCED_GAME_BOOL_SETTINGS: tuple[tuple[str, str, str, str], ...] = (
+    ("no_power", "FG.NoPower", "No Power", "Disable all power requirements for the loaded save."),
+    (
+        "disable_arachnid_creatures",
+        "FG.DisableArachnidCreatures",
+        "Disable Arachnid Creatures",
+        "Disable arachnid creatures for the loaded save.",
+    ),
+    ("no_unlock_cost", "FG.NoUnlockCost", "No Unlock Cost", "Remove unlock costs for milestones and research."),
+    ("give_all_tiers", "FG.GiveAllTiers", "Give All Tiers", "Unlock all HUB tiers for the loaded save."),
+    (
+        "unlock_all_research_schematics",
+        "FG.UnlockAllResearchSchematics",
+        "Unlock All Research Schematics",
+        "Unlock all MAM research schematics.",
+    ),
+    (
+        "unlock_instant_alt_recipes",
+        "FG.UnlockInstantAltRecipes",
+        "Unlock Instant Alt Recipes",
+        "Unlock alternate recipes immediately.",
+    ),
+    (
+        "unlock_all_resource_sink_schematics",
+        "FG.UnlockAllResourceSinkSchematics",
+        "Unlock All Resource Sink Schematics",
+        "Unlock all AWESOME Shop schematics.",
+    ),
+    ("no_build_cost", "FG.NoBuildCost", "No Build Cost", "Remove build costs for construction."),
+    ("god_mode", "FG.GodMode", "God Mode", "Prevent player damage."),
+    ("flight_mode", "FG.FlightMode", "Flight Mode", "Allow free flight for players."),
+)
 
 
 class SatisfactorySettings(App_Settings):
-    """Caches desired settings locally and applies them via the HTTPS API when reachable."""
+    """Caches desired Satisfactory API settings locally and applies them when the server is reachable."""
 
     def __init__(
         self,
@@ -600,6 +1132,7 @@ class SatisfactorySettings(App_Settings):
         self._cfg: Satisfactory_Config = cfg
         self._instances_path: Path = instances_path
         self._apply_task: asyncio.Task[None] | None = None
+        self._creative_mode_enabled: bool | None = None
 
         self._auto_load_session_name: Setting[str] = Setting[str](
             StringSettingSpec(allow_blank=True),
@@ -656,6 +1189,35 @@ class SatisfactorySettings(App_Settings):
             default=SatisfactoryNetworkQuality.MEDIUM.value,
             desc="Higher values can improve network responsiveness at the cost of server performance.",
         )
+        self._advanced_game_bool_settings: dict[str, Setting[bool]] = {}
+        for field_name, key, label, desc in _SATISFACTORY_ADVANCED_GAME_BOOL_SETTINGS:
+            self._advanced_game_bool_settings[field_name] = Setting[bool](
+                BoolSettingSpec(),
+                label,
+                key,
+                [],
+                default=False,
+                desc=desc,
+                power_level=Power_Level.sudo,
+            )
+        self._set_game_phase: Setting[int] = Setting[int](
+            IntSettingSpec(min_value=0),
+            "Set Game Phase",
+            "FG.SetGamePhase",
+            [],
+            default=0,
+            desc="Force the active project assembly phase for the loaded save.",
+            power_level=Power_Level.sudo,
+        )
+        self._give_items: Setting[str] = Setting[str](
+            StringSettingSpec(allow_blank=True),
+            "Give Items",
+            "FG.GiveItems",
+            [],
+            default="",
+            desc="Item grant payload forwarded to Satisfactory advanced game settings.",
+            power_level=Power_Level.sudo,
+        )
         self._admin_password: Setting[str] = Setting[str](
             StringSettingSpec(
                 allow_blank=True,
@@ -678,6 +1240,9 @@ class SatisfactorySettings(App_Settings):
                 self._autosave_interval_seconds,
                 self._send_gameplay_data,
                 self._network_quality,
+                *self._advanced_game_bool_settings.values(),
+                self._set_game_phase,
+                self._give_items,
                 self._admin_password,
             ],
             version_getter=version_getter,
@@ -686,14 +1251,27 @@ class SatisfactorySettings(App_Settings):
     def _snapshot_from_settings(self) -> SatisfactorySettingsSnapshot:
         return SatisfactorySettingsSnapshot(
             auto_load_session_name=self._optional_setting_value(self._auto_load_session_name, str),
-            auto_pause=self._optional_setting_value(self._auto_pause, bool),
-            auto_save_on_disconnect=self._optional_setting_value(self._auto_save_on_disconnect, bool),
-            autosave_interval_seconds=self._optional_setting_value(self._autosave_interval_seconds, int),
-            send_gameplay_data=self._optional_setting_value(self._send_gameplay_data, bool),
-            network_quality=(
-                None
-                if (quality := self._optional_setting_value(self._network_quality, int)) is None
-                else SatisfactoryNetworkQuality(quality)
+            server_options=SatisfactoryServerOptionsSnapshot(
+                auto_pause=self._optional_setting_value(self._auto_pause, bool),
+                auto_save_on_disconnect=self._optional_setting_value(self._auto_save_on_disconnect, bool),
+                autosave_interval_seconds=self._optional_setting_value(self._autosave_interval_seconds, int),
+                send_gameplay_data=self._optional_setting_value(self._send_gameplay_data, bool),
+                network_quality=(
+                    None
+                    if (quality := self._optional_setting_value(self._network_quality, int)) is None
+                    else SatisfactoryNetworkQuality(quality)
+                ),
+            ),
+            advanced_game_settings=SatisfactoryAdvancedGameSettingsSnapshot.model_validate(
+                {
+                    "creative_mode_enabled": self._creative_mode_enabled,
+                    **{
+                        field_name: self._optional_setting_value(setting, bool)
+                        for field_name, setting in self._advanced_game_bool_settings.items()
+                    },
+                    "set_game_phase": self._optional_setting_value(self._set_game_phase, int),
+                    "give_items": self._optional_setting_value(self._give_items, str),
+                }
             ),
         )
 
@@ -713,20 +1291,25 @@ class SatisfactorySettings(App_Settings):
 
     def _apply_snapshot(self, snapshot: SatisfactorySettingsSnapshot) -> None:
         self._assign_setting(self._auto_load_session_name, snapshot.auto_load_session_name)
-        self._assign_setting(self._auto_pause, snapshot.auto_pause)
-        self._assign_setting(self._auto_save_on_disconnect, snapshot.auto_save_on_disconnect)
-        self._assign_setting(self._autosave_interval_seconds, snapshot.autosave_interval_seconds)
-        self._assign_setting(self._send_gameplay_data, snapshot.send_gameplay_data)
+        self._assign_setting(self._auto_pause, snapshot.server_options.auto_pause)
+        self._assign_setting(self._auto_save_on_disconnect, snapshot.server_options.auto_save_on_disconnect)
+        self._assign_setting(self._autosave_interval_seconds, snapshot.server_options.autosave_interval_seconds)
+        self._assign_setting(self._send_gameplay_data, snapshot.server_options.send_gameplay_data)
         self._assign_setting(
             self._network_quality,
-            None if snapshot.network_quality is None else snapshot.network_quality.value,
+            None if snapshot.server_options.network_quality is None else snapshot.server_options.network_quality.value,
         )
+        for field_name, setting in self._advanced_game_bool_settings.items():
+            self._assign_setting(setting, getattr(snapshot.advanced_game_settings, field_name))
+        self._assign_setting(self._set_game_phase, snapshot.advanced_game_settings.set_game_phase)
+        self._assign_setting(self._give_items, snapshot.advanced_game_settings.give_items)
+        self._creative_mode_enabled = snapshot.advanced_game_settings.creative_mode_enabled
 
     def _apply_local_settings(self) -> None:
         self._assign_setting(self._admin_password, self._cfg.admin_password)
 
     def _write_snapshot(self, snapshot: SatisfactorySettingsSnapshot) -> dict[str, object]:
-        payload = snapshot.model_dump(mode="json")
+        payload = snapshot.model_dump(mode="json", exclude_none=True)
         self.pointer.write_text(json.dumps(payload, indent=4), config.STR_ENCODE)
         return payload
 
@@ -788,7 +1371,10 @@ class SatisfactorySettings(App_Settings):
             log.exception("Failed to apply Satisfactory settings")
 
     async def refresh_from_server(self) -> SatisfactorySettingsSnapshot:
-        snapshot: SatisfactorySettingsSnapshot = await self._bridge.read_settings()
+        snapshot: SatisfactorySettingsSnapshot = await self._call_live_bridge(
+            self._bridge.read_settings,
+            unavailable_detail=f"{self._cfg.friendly_name} API is unavailable.",
+        )
         self._apply_snapshot(snapshot)
         self._write_snapshot(snapshot)
         self._apply_local_settings()
@@ -798,9 +1384,147 @@ class SatisfactorySettings(App_Settings):
         if not self._is_running():
             return False
         snapshot: SatisfactorySettingsSnapshot = self._snapshot_from_settings()
-        await self._bridge.apply_settings(snapshot)
+        await self._call_live_bridge(
+            lambda: self._bridge.apply_settings(snapshot),
+            unavailable_detail=f"{self._cfg.friendly_name} API is unavailable.",
+        )
         await self.refresh_from_server()
         return True
+
+    async def _call_live_bridge(
+        self,
+        operation: Callable[[], Awaitable[SettingValueT]],
+        *,
+        unavailable_detail: str,
+    ) -> SettingValueT:
+        if not self._is_running():
+            raise RuntimeError(f"{self._cfg.friendly_name} is not running.")
+        try:
+            return await operation()
+        except (aiohttp.ClientError, OSError, TimeoutError) as xcp:
+            raise RuntimeError(unavailable_detail) from xcp
+
+
+def _require_satisfactory_app(app_obj: object) -> "Satisfactory":
+    return app_obj if isinstance(app_obj, Satisfactory) else cast(Satisfactory, app_obj)
+
+
+_SATISFACTORY_RAW_COMMAND_PARAMETER: ConsoleActionParameter[str] = ConsoleActionParameter[str](
+    key="command",
+    label="Command",
+    value_type=str,
+    validator=_is_non_empty_text,
+    desc="Raw Satisfactory server command sent through the HTTPS API.",
+    max_length=500,
+    multiline=True,
+)
+
+
+async def _console_raw_command(app_obj: object, value: object | None) -> ConsoleActionResult:
+    app: Satisfactory = _require_satisfactory_app(app_obj)
+    command: str = cast(str, value)
+    response_text: str | None = await app.run_console_command(command)
+    return ConsoleActionResult(
+        summary=f"{app.friendly}: API command sent.",
+        text=response_text,
+        source=ConsoleResponseSource.API,
+    )
+
+
+async def _console_save_game(app_obj: object, value: object | None) -> ConsoleActionResult:
+    del value
+    app: Satisfactory = _require_satisfactory_app(app_obj)
+    save_name, response_text = await app.request_manual_save()
+    return ConsoleActionResult(
+        summary=f"{app.friendly}: save requested as `{save_name}`.",
+        text=response_text,
+        source=ConsoleResponseSource.API,
+    )
+
+
+async def _console_shutdown(app_obj: object, value: object | None) -> ConsoleActionResult:
+    del value
+    app: Satisfactory = _require_satisfactory_app(app_obj)
+    response_text: str | None = await app.request_api_shutdown()
+    return ConsoleActionResult(
+        summary=f"{app.friendly}: shutdown requested via API.",
+        text=response_text,
+        source=ConsoleResponseSource.API,
+    )
+
+
+_SATISFACTORY_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
+    ConsoleAction(
+        key="save_game",
+        label="Save Game",
+        description="Create a timestamped save through the Satisfactory HTTPS API.",
+        power_level=Power_Level.user,
+        execute=_console_save_game,
+    ),
+    ConsoleAction(
+        key="run_command",
+        label="Run Command",
+        description="Send a raw command through the Satisfactory HTTPS API.",
+        power_level=Power_Level.sudo,
+        execute=_console_raw_command,
+        parameter=_SATISFACTORY_RAW_COMMAND_PARAMETER,
+    ),
+    ConsoleAction(
+        key="shutdown",
+        label="Shutdown",
+        description="Gracefully stop the Satisfactory server through the HTTPS API.",
+        power_level=Power_Level.sudo,
+        execute=_console_shutdown,
+    ),
+)
+
+
+def _normalise_active_schematic_label(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    text: str = raw.strip().strip("\"'")
+    if not text:
+        return None
+    text = text.rsplit("/", 1)[-1]
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    text = text.removesuffix("_C").replace("_", " ").strip()
+    return text or None
+
+
+class Provider_SatisfactoryDay(AppActivityProvider):
+    metadata = AppActivityProviderMetadata(provider_id="day", label="Day Counter")
+
+    async def get(self) -> str | None:
+        state: SatisfactoryServerState | None = self.app._players.state
+        if state is None or state.total_game_duration is None:
+            return None
+        return f"D{state.total_game_duration // 86400}"
+
+
+class Provider_SatisfactoryStage(AppActivityProvider):
+    metadata = AppActivityProviderMetadata(provider_id="stage", label="Stage")
+
+    async def get(self) -> str | None:
+        state: SatisfactoryServerState | None = self.app._players.state
+        if state is None:
+            return None
+
+        status_parts: list[str] = []
+        if state.tech_tier is not None:
+            status_parts.append(f"T{state.tech_tier}")
+        if active_schematic := _normalise_active_schematic_label(state.active_schematic):
+            status_parts.append(active_schematic)
+        if not status_parts:
+            return None
+        return ": ".join(status_parts)
+
+
+def _build_satisfactory_activity_providers(app: "Satisfactory") -> tuple[AppActivityProvider, ...]:
+    return (
+        Provider_SatisfactoryDay(app),
+        Provider_SatisfactoryStage(app),
+    )
 
 
 class SatisfactoryPlayers:
@@ -1023,29 +1747,163 @@ class Satisfactory(App[Satisfactory_Config]):
         self._player_session_matcher: SatisfactoryPlayerSessionMatcher = SatisfactoryPlayerSessionMatcher(self)
         self._tail_matchers.add(self._player_session_matcher.match)
         self._players: SatisfactoryPlayers = SatisfactoryPlayers(self)
+        self._save_index: dict[str, SatisfactorySaveHeader] = {}
+        self.set_activity_providers(_build_satisfactory_activity_providers(self))
 
     def detect_installed_version(self) -> AppVersion | None:
         return detect_satisfactory_version(directory=self.cfg.directory, server_log=self.cfg.server_log_file)
 
     @property
-    def supports_blueprints(self) -> bool:
+    def console_actions(self) -> tuple[ConsoleAction, ...]:
+        return self.available_console_actions(_SATISFACTORY_CONSOLE_ACTIONS)
+
+    @property
+    def save_file_roots(self) -> tuple[AppSaveRoot, ...]:
+        return (
+            AppSaveRoot(
+                id=_SATISFACTORY_SAVE_ROOT_ID,
+                label=_SATISFACTORY_SAVE_ROOT_LABEL,
+                path=self.cfg.directory / "FactoryGame" / "Saved" / "SaveGames",
+                mode=AppSaveRootMode.CHILDREN,
+                recursive=True,
+                suffixes=frozenset({".sav"}),
+                include_files=True,
+                include_directories=False,
+            ),
+        )
+
+    @property
+    def supports_save_uploads(self) -> bool:
         return True
 
     @property
+    def supports_save_delete(self) -> bool:
+        return True
+
+    @property
+    def supports_blueprints(self) -> bool:
+        return True
+
+    async def run_console_command(self, command: str) -> str | None:
+        return await self._call_live_api(
+            lambda: self._bridge.run_command(command),
+            unavailable_detail=f"{self.friendly} API is unavailable.",
+        )
+
+    async def request_manual_save(self) -> tuple[str, str | None]:
+        self._require_live_runtime_api()
+        save_name: str | None = self._build_session_save_name(reason="manual")
+        if save_name is None:
+            raise RuntimeError(f"{self.friendly} does not have an active game session to save.")
+        response_text = await self._call_live_api(
+            lambda: self._bridge.save_game(save_name),
+            unavailable_detail=f"{self.friendly} API is unavailable.",
+        )
+        return (save_name, response_text)
+
+    async def request_api_shutdown(self) -> str | None:
+        return await self._call_live_api(
+            self._bridge.shutdown,
+            unavailable_detail=f"{self.friendly} API is unavailable.",
+        )
+
+    async def list_save_files_async(self) -> tuple[AppSaveEntry, ...]:
+        if not self.check_running():
+            self._save_index = {}
+            return ()
+        try:
+            enumeration = await self._enumerate_live_save_sessions()
+        except RuntimeError as xcp:
+            self._save_index = {}
+            log.warning("%s", xcp)
+            return ()
+        self._save_index = enumeration.save_header_by_id()
+        return enumeration.save_entries()
+
+    async def download_save_content(self, file_id: str) -> tuple[str, bytes] | None:
+        self._require_live_save_api()
+        save_header = await self._save_header_for_id(file_id)
+        content = await self._call_live_api(
+            lambda: self._bridge.download_save_game(save_header.save_name),
+            unavailable_detail=f"{self.friendly} save API is unavailable.",
+        )
+        return (save_header.save_name, content)
+
+    async def upload_save_file_async(self, *, root_id: str, upload_name: str, source_path: Path) -> AppSaveEntry:
+        self._require_live_save_api()
+        if root_id != _SATISFACTORY_SAVE_ROOT_ID:
+            raise ValueError(f"Unknown save root: {root_id}")
+        if "/" in upload_name or "\\" in upload_name or Path(upload_name).name != upload_name:
+            raise ValueError("Satisfactory save upload filename must not include path separators.")
+        if Path(upload_name).suffix.casefold() != ".sav":
+            raise ValueError("Satisfactory save uploads must use a .sav filename.")
+        await self._call_live_api(
+            lambda: self._bridge.upload_save_game(save_name=upload_name, source_path=source_path),
+            unavailable_detail=f"{self.friendly} save API is unavailable.",
+        )
+        save_header = await self._find_save_header_by_name(upload_name)
+        if save_header is None:
+            raise FileNotFoundError(f"Uploaded save is not yet visible through the Satisfactory API: {upload_name}")
+        return save_header.to_app_save_entry()
+
+    async def delete_save_file_async(self, *, file_id: str) -> AppSaveEntry:
+        self._require_live_save_api()
+        save_header = await self._save_header_for_id(file_id)
+        await self._call_live_api(
+            lambda: self._bridge.delete_save_file(save_header.save_name),
+            unavailable_detail=f"{self.friendly} save API is unavailable.",
+        )
+        self._save_index.pop(file_id, None)
+        return save_header.to_app_save_entry()
+
+    @property
     def default_blueprint_session_name(self) -> str | None:
-        players = getattr(self, "_players", None)
-        state: SatisfactoryServerState | None = getattr(players, "state", None)
-        if state is not None:
-            if active_session_name := _validated_blueprint_session_name_or_none(state.active_session_name):
-                return active_session_name
-            if auto_load_session_name := _validated_blueprint_session_name_or_none(state.auto_load_session_name):
-                return auto_load_session_name
-        settings = getattr(self, "_settings", None)
-        if isinstance(settings, App_Settings):
-            setting = settings.get_setting("auto_load_session_name")
-            if setting is not None and isinstance(setting.value, str):
-                return _validated_blueprint_session_name_or_none(setting.value)
+        return _SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME
+
+    async def _save_header_for_id(self, file_id: str) -> SatisfactorySaveHeader:
+        if save_header := self._save_index.get(file_id):
+            return save_header
+        enumeration = await self._enumerate_live_save_sessions()
+        self._save_index = enumeration.save_header_by_id()
+        if save_header := self._save_index.get(file_id):
+            return save_header
+        raise FileNotFoundError(f"Unknown save file: {file_id}")
+
+    async def _find_save_header_by_name(self, save_name: str) -> SatisfactorySaveHeader | None:
+        for save_header in (await self._enumerate_live_save_sessions()).save_header_by_id().values():
+            if save_header.save_name == save_name:
+                self._save_index[save_header.to_app_save_entry().id] = save_header
+                return save_header
         return None
+
+    def _require_live_save_api(self) -> None:
+        self._require_live_runtime_api()
+
+    def _require_live_runtime_api(self) -> None:
+        if not self.check_running():
+            raise RuntimeError(f"{self.friendly} is not running.")
+
+    async def _enumerate_live_save_sessions(self) -> SatisfactorySessionEnumerationSnapshot:
+        enumeration = await self._call_live_api(
+            self._bridge.enumerate_sessions,
+            unavailable_detail=f"{self.friendly} save API is unavailable.",
+        )
+        with contextlib.suppress(Exception):
+            for session in enumeration.sessions:
+                self._ensure_shared_blueprint_session_link(session.session_name)
+        return enumeration
+
+    async def _call_live_api(
+        self,
+        operation: Callable[[], Awaitable[SettingValueT]],
+        *,
+        unavailable_detail: str,
+    ) -> SettingValueT:
+        self._require_live_runtime_api()
+        try:
+            return await operation()
+        except (aiohttp.ClientError, OSError, TimeoutError) as xcp:
+            raise RuntimeError(unavailable_detail) from xcp
 
     def _blueprint_root_path(self) -> Path:
         override = getattr(self, "_blueprint_root_override", None)
@@ -1054,8 +1912,9 @@ class Satisfactory(App[Satisfactory_Config]):
         return _BLUEPRINT_ROOT
 
     def list_blueprint_files(self) -> tuple[AppBlueprintEntry, ...]:
+        self._prepare_shared_blueprint_layout()
         return list_blueprint_files(
-            self._blueprint_root_path(),
+            self._blueprint_storage_root_path(),
             uploaded_by_user_id_by_relative_path=self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path(),
         )
 
@@ -1086,21 +1945,23 @@ class Satisfactory(App[Satisfactory_Config]):
     ) -> AppBlueprintEntry:
         if (config_upload_name is None) != (config_source_path is None):
             raise ValueError("Blueprint config upload requires both a filename and source path.")
-        root = self._blueprint_root_path()
+        self._prepare_shared_blueprint_layout()
+        self._ensure_shared_blueprint_session_link(session_name)
+        root = self._blueprint_storage_root_path()
         upload_pair: BlueprintUploadPair = validate_blueprint_upload_pair(
             module_filename=upload_name,
             config_filename=config_upload_name,
         )
         module_destination, module_relative_path = resolve_blueprint_upload_target(
             root,
-            session_name=session_name,
+            session_name=_SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME,
             upload_name=upload_pair.module_filename,
         )
         config_target: tuple[Path, str] | None = None
         if upload_pair.config_filename is not None:
             config_destination, config_relative_path = resolve_blueprint_upload_target(
                 root,
-                session_name=session_name,
+                session_name=_SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME,
                 upload_name=upload_pair.config_filename,
             )
             config_target = (config_destination, config_relative_path)
@@ -1122,8 +1983,7 @@ class Satisfactory(App[Satisfactory_Config]):
         except Exception:
             for cleanup_path in reversed(cleanup_paths):
                 cleanup_path.unlink(missing_ok=True)
-            with contextlib.suppress(OSError):
-                module_destination.parent.rmdir()
+            self._cleanup_empty_blueprint_directory(module_destination.parent)
             raise
 
         self._blueprint_ownership_store.record_upload(relative_path=module_relative_path, actor_user_id=actor_user_id)
@@ -1142,8 +2002,10 @@ class Satisfactory(App[Satisfactory_Config]):
         actor_user_id: int,
         actor_is_sudo: bool,
     ) -> AppBlueprintEntry:
-        root = self._blueprint_root_path()
-        blueprint_path, relative_path = resolve_blueprint_file_path(root, file_id)
+        self._prepare_shared_blueprint_layout()
+        root = self._blueprint_storage_root_path()
+        canonical_file_id: str = self._canonical_blueprint_file_id(file_id)
+        blueprint_path, relative_path = resolve_blueprint_file_path(root, canonical_file_id)
         if not blueprint_path.exists():
             raise FileNotFoundError(f"Blueprint file does not exist: {relative_path}")
         ownership_index = self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path()
@@ -1164,8 +2026,7 @@ class Satisfactory(App[Satisfactory_Config]):
                 raise FileNotFoundError(f"Blueprint module does not exist for config file: {relative_path}")
             blueprint_path.unlink()
             self._blueprint_ownership_store.clear(relative_path=relative_path)
-            with contextlib.suppress(OSError):
-                blueprint_path.parent.rmdir()
+            self._cleanup_empty_blueprint_directory(blueprint_path.parent)
             return describe_blueprint(
                 root,
                 relative_path=module_relative_path,
@@ -1192,28 +2053,188 @@ class Satisfactory(App[Satisfactory_Config]):
         if config_path is not None and config_path.exists() and config_relative_path is not None:
             config_path.unlink()
             self._blueprint_ownership_store.clear(relative_path=config_relative_path)
-        with contextlib.suppress(OSError):
-            blueprint_path.parent.rmdir()
+        self._cleanup_empty_blueprint_directory(blueprint_path.parent)
         return deleted_entry
 
-    async def _warm_bridge(self) -> bool:
+    def _blueprint_storage_root_path(self) -> Path:
+        override = getattr(self, "_blueprint_shared_root_override", None)
+        if isinstance(override, Path):
+            return override
+        root = self._blueprint_root_path()
+        return root.with_name(f"{root.name}{_SATISFACTORY_BLUEPRINT_STORAGE_SUFFIX}")
+
+    def _shared_blueprint_session_path(self) -> Path:
+        return self._blueprint_storage_root_path() / _SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME
+
+    def _cleanup_empty_blueprint_directory(self, directory: Path) -> None:
+        if directory.resolve() == self._shared_blueprint_session_path().resolve():
+            return
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+
+    def _canonical_blueprint_file_id(self, file_id: str) -> str:
+        normalised_file_id: str = normalise_blueprint_file_id(file_id)
+        _session_name, filename = normalised_file_id.split("/", maxsplit=1)
+        return str(Path(_SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME) / filename).replace("\\", "/")
+
+    def _prepare_shared_blueprint_layout(self) -> None:
+        mount_root = self._blueprint_root_path()
+        mount_root.mkdir(parents=True, exist_ok=True)
+        storage_root = self._blueprint_storage_root_path()
+        shared_session_path = self._shared_blueprint_session_path()
+        shared_session_path.mkdir(parents=True, exist_ok=True)
+        migrated_ownership = self._migrate_legacy_blueprint_directories(
+            mount_root=mount_root,
+            shared_session_path=shared_session_path,
+            uploaded_by_user_id_by_relative_path=self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path(),
+        )
+        if migrated_ownership is not None:
+            self._blueprint_ownership_store.replace_all(
+                uploaded_by_user_id_by_relative_path=migrated_ownership,
+            )
+        for known_session_name in self._known_blueprint_session_names():
+            self._ensure_shared_blueprint_session_link(known_session_name)
+
+    def _migrate_legacy_blueprint_directories(
+        self,
+        *,
+        mount_root: Path,
+        shared_session_path: Path,
+        uploaded_by_user_id_by_relative_path: Mapping[str, int],
+    ) -> dict[str, int] | None:
+        next_uploaded_by_relative_path = dict(uploaded_by_user_id_by_relative_path)
+        migrated_any = False
+        for session_path in sorted(mount_root.iterdir(), key=lambda path: path.name.casefold()):
+            if session_path.name.startswith("."):
+                continue
+            if session_path.is_symlink():
+                self._validate_shared_blueprint_session_link(
+                    session_path=session_path,
+                    shared_session_path=shared_session_path,
+                )
+                continue
+            if not session_path.is_dir():
+                raise ValueError(f"Unsupported Satisfactory blueprint path: {session_path}")
+            session_name = validate_blueprint_session_name(session_path.name)
+            migrated_any = True
+            for child_path in sorted(session_path.iterdir(), key=lambda path: path.name.casefold()):
+                if child_path.name.startswith("."):
+                    continue
+                if not child_path.is_file():
+                    raise ValueError(f"Unsupported Satisfactory blueprint entry: {child_path}")
+                filename = normalise_existing_blueprint_filename(child_path.name)
+                target_path = shared_session_path / filename
+                self._merge_blueprint_file(source_path=child_path, target_path=target_path, session_name=session_name)
+                legacy_relative_path = f"{session_name}/{filename}"
+                shared_relative_path = f"{_SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME}/{filename}"
+                next_uploaded_by_relative_path = self._merge_blueprint_owner(
+                    uploaded_by_user_id_by_relative_path=next_uploaded_by_relative_path,
+                    legacy_relative_path=legacy_relative_path,
+                    shared_relative_path=shared_relative_path,
+                )
+            with contextlib.suppress(OSError):
+                session_path.rmdir()
+            if session_path.exists():
+                raise ValueError(f"Satisfactory blueprint session directory is not empty: {session_path}")
+            session_path.symlink_to(shared_session_path, target_is_directory=True)
+        return next_uploaded_by_relative_path if migrated_any else None
+
+    @staticmethod
+    def _merge_blueprint_file(*, source_path: Path, target_path: Path, session_name: str) -> None:
+        if not target_path.exists():
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.replace(target_path)
+            return
+        if source_path.stat().st_size != target_path.stat().st_size or source_path.read_bytes() != target_path.read_bytes():
+            raise FileExistsError(
+                f"Conflicting shared blueprint file for {target_path.name} while migrating session {session_name}."
+            )
+        source_path.unlink()
+
+    @staticmethod
+    def _merge_blueprint_owner(
+        *,
+        uploaded_by_user_id_by_relative_path: dict[str, int],
+        legacy_relative_path: str,
+        shared_relative_path: str,
+    ) -> dict[str, int]:
+        next_uploaded_by_relative_path = dict(uploaded_by_user_id_by_relative_path)
+        legacy_owner = next_uploaded_by_relative_path.pop(legacy_relative_path, None)
+        shared_owner = next_uploaded_by_relative_path.get(shared_relative_path)
+        if legacy_owner is None:
+            return next_uploaded_by_relative_path
+        if shared_owner is None:
+            next_uploaded_by_relative_path[shared_relative_path] = legacy_owner
+            return next_uploaded_by_relative_path
+        if shared_owner != legacy_owner:
+            raise ValueError(
+                f"Conflicting shared blueprint ownership for {shared_relative_path}: {shared_owner} != {legacy_owner}"
+            )
+        return next_uploaded_by_relative_path
+
+    def _known_blueprint_session_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        players = getattr(self, "_players", None)
+        state: SatisfactoryServerState | None = getattr(players, "state", None)
+        if state is not None:
+            if active_session_name := _validated_blueprint_session_name_or_none(state.active_session_name):
+                names.append(active_session_name)
+            if auto_load_session_name := _validated_blueprint_session_name_or_none(state.auto_load_session_name):
+                names.append(auto_load_session_name)
+        settings = getattr(self, "_settings", None)
+        if isinstance(settings, App_Settings):
+            setting = settings.get_setting("auto_load_session_name")
+            if setting is not None and isinstance(setting.value, str):
+                if configured_session_name := _validated_blueprint_session_name_or_none(setting.value):
+                    names.append(configured_session_name)
+        return tuple(dict.fromkeys(names))
+
+    def _ensure_shared_blueprint_session_link(self, session_name: str) -> None:
+        validated_session_name = validate_blueprint_session_name(session_name)
+        if validated_session_name == _SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME:
+            return
+        mount_root = self._blueprint_root_path()
+        shared_session_path = self._shared_blueprint_session_path()
+        session_path = mount_root / validated_session_name
+        if session_path.exists() or session_path.is_symlink():
+            self._validate_shared_blueprint_session_link(
+                session_path=session_path,
+                shared_session_path=shared_session_path,
+            )
+            return
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        session_path.symlink_to(shared_session_path, target_is_directory=True)
+
+    @staticmethod
+    def _validate_shared_blueprint_session_link(*, session_path: Path, shared_session_path: Path) -> None:
+        if not session_path.is_symlink():
+            raise ValueError(f"Satisfactory blueprint session path must be a symlink: {session_path}")
+        resolved_target = session_path.resolve()
+        if resolved_target != shared_session_path.resolve():
+            raise ValueError(
+                f"Satisfactory blueprint session link points to an unexpected target: "
+                f"{session_path} -> {resolved_target}"
+            )
+
+    async def _warm_bridge(self) -> None:
         for attempt in range(_API_READY_RETRIES):
             try:
                 state: SatisfactoryServerState = await self._bridge.query_server_state()
             except Exception as xcp:
                 if attempt == _API_READY_RETRIES - 1:
-                    log.warning(f"{self.friendly} API was not ready after startup: {xcp}")
-                    return False
+                    raise TimeoutError(f"{self.friendly} API did not become ready after startup.") from xcp
                 await asyncio.sleep(_API_READY_SLEEP_SECONDS)
             else:
                 self._players.set_state(state)
-                return True
-        return False
+                return
 
     def _sync_provider_text(self, state: SatisfactoryServerState) -> None:
         alt_text: str | None = state.active_session_name or state.auto_load_session_name
         if alt_text:
             self.cfg.provider_alt_text = alt_text
+        with contextlib.suppress(Exception):
+            for session_name in filter(None, (state.active_session_name, state.auto_load_session_name)):
+                self._ensure_shared_blueprint_session_link(cast(str, session_name))
 
     async def _match_version(self, line: str) -> None:
         if match := _SATISFACTORY_BUILD_RE.search(line):
@@ -1242,18 +2263,18 @@ class Satisfactory(App[Satisfactory_Config]):
         await self._tail.start(self._tail_matchers)
 
         self._running = True
-        bridge_ready: bool = await self._warm_bridge()
-        if bridge_ready:
-            try:
-                await self._settings.apply_current_values()
-            except Exception as xcp:
-                log.warning(f"{self.friendly} pending settings were not applied: {xcp}")
-            try:
-                await self._settings.refresh_from_server()
-            except Exception as xcp:
-                log.warning(f"{self.friendly} settings refresh failed after startup: {xcp}")
+        await self._warm_bridge()
+        try:
+            await self._settings.apply_current_values()
+        except Exception as xcp:
+            log.warning(f"{self.friendly} pending settings were not applied: {xcp}")
+        try:
+            await self._settings.refresh_from_server()
+        except Exception as xcp:
+            log.warning(f"{self.friendly} settings refresh failed after startup: {xcp}")
 
         await self._players.start()
+        self.register_enabled_activity_providers()
         return True
 
     async def _wait_for_exit(self, timeout_seconds: float) -> bool:
@@ -1262,14 +2283,17 @@ class Satisfactory(App[Satisfactory_Config]):
             await asyncio.sleep(0.5)
         return not self.check_running()
 
-    def _build_stop_save_name(self) -> str | None:
+    def _build_session_save_name(self, *, reason: str) -> str | None:
         state: SatisfactoryServerState | None = self._players.state
         if state is None or not state.is_game_running or not state.active_session_name:
             return None
         safe_session = re.sub(r"[^A-Za-z0-9._-]+", "-", state.active_session_name).strip("-")
         safe_session = safe_session or "satisfactory"
         timestamp: str = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        return f"{safe_session}-stop-{timestamp}"
+        return f"{safe_session}-{reason}-{timestamp}"
+
+    def _build_stop_save_name(self) -> str | None:
+        return self._build_session_save_name(reason="stop")
 
     async def _graceful_shutdown(self) -> bool:
         try:
@@ -1293,6 +2317,7 @@ class Satisfactory(App[Satisfactory_Config]):
         log.info(f"{__name__}.stop")
         self._running = False
         await self._players.stop()
+        self.deregister_activity_providers()
 
         graceful_stop_started = await self._graceful_shutdown()
         if graceful_stop_started:
@@ -1312,6 +2337,7 @@ class Satisfactory(App[Satisfactory_Config]):
         log.info(f"{__name__}.kill")
         self._running = False
         await self._players.stop()
+        self.deregister_activity_providers()
         if self._tail:
             await self._tail.stop()
         await self._terminate()

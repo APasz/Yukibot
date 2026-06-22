@@ -32,6 +32,7 @@ from .runtime_imports import (
     quote,
     required_app_mutation_level,
     required_app_mutation_scope,
+    required_mod_mutation_level,
 )
 from .service_base import ModWebServiceSupport
 from .types import (
@@ -49,6 +50,44 @@ if TYPE_CHECKING:
 
 
 class ModWebActionsMixin(ModWebServiceSupport):
+    @staticmethod
+    def _is_protected_mod(entry: NodeModEntry) -> bool:
+        return entry.mod_type in {ModType.COREMOD, ModType.BUILTIN}
+
+    def _resolve_mod_entry(self, *, model: ModWebPageModel, mod_name: str) -> NodeModEntry:
+        for entry in model.mods.mods:
+            if entry.name == mod_name:
+                return entry
+        raise ValueError(f"Unknown mod: {mod_name}")
+
+    def _user_can_mutate_mod(
+        self,
+        *,
+        user: ModWebUser,
+        entry: NodeModEntry,
+        action: NodeModMutationAction,
+    ) -> bool:
+        if self._is_builtin_mod(entry):
+            return False
+        required_level = required_mod_mutation_level(action, is_protected=self._is_protected_mod(entry))
+        return self._user_has_level(user, required_level)
+
+    def _available_mod_actions(
+        self,
+        *,
+        user: ModWebUser,
+        entry: NodeModEntry,
+    ) -> tuple[NodeModMutationAction, ...]:
+        ordered_actions: tuple[NodeModMutationAction, ...] = (
+            NodeModMutationAction.DISABLE if entry.enabled else NodeModMutationAction.ENABLE,
+            NodeModMutationAction.TOGGLE_COREMOD,
+            NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK,
+            NodeModMutationAction.DELETE,
+        )
+        return tuple(
+            action for action in ordered_actions if self._user_can_mutate_mod(user=user, entry=entry, action=action)
+        )
+
     def _remote_app_mutation(
         self,
         node: ModWebNodeLink,
@@ -181,8 +220,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
         action: NodeModMutationAction,
         user: ModWebUser,
     ) -> NodeModMutationResult:
-        if not self._user_has_level(user, Power_Level.sudo):
-            raise PermissionError("Sudo access is required for mod actions.")
+        entry = self._resolve_mod_entry(model=model, mod_name=mod_name)
+        if self._is_builtin_mod(entry):
+            raise PermissionError("Built-in mods cannot be changed from mod web.")
+        required_level = required_mod_mutation_level(action, is_protected=self._is_protected_mod(entry))
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required for this mod action.")
         if model.node_name == config.MOD_WEB_SERVER.node_name:
             app = self._resolve_app(model.app_name)
             return await self._node_api.mutate_mod(
@@ -542,7 +585,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         downloadable_text = "Yes" if entry.downloadable else "No"
         version_text: str = entry.version or "Unknown"
         block_text: str = entry.download_block_label or entry.download_block_reason or "None"
-        can_manage: bool = self._user_has_level(user, Power_Level.sudo) and not self._is_builtin_mod(entry)
+        available_actions = self._available_mod_actions(user=user, entry=entry)
 
         async def run_mod_action(action: NodeModMutationAction) -> None:
             try:
@@ -600,16 +643,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         self._render_mod_detail_item(ui=ui, label="Version", value=version_text)
                         self._render_mod_detail_item(ui=ui, label="Added", value=entry.added)
                         self._render_mod_detail_item(ui=ui, label="Blocked", value=block_text)
-                    if can_manage:
+                    if available_actions:
                         with ui.column().classes("gap-2"):
                             ui.label("Privileged Actions").classes("mod-stat-label")
                             with ui.row().classes("w-full gap-2 flex-wrap"):
-                                for action in (
-                                    NodeModMutationAction.DISABLE if entry.enabled else NodeModMutationAction.ENABLE,
-                                    NodeModMutationAction.TOGGLE_COREMOD,
-                                    NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK,
-                                    NodeModMutationAction.DELETE,
-                                ):
+                                for action in available_actions:
                                     on_click = (
                                         delete_confirm_dialog.open
                                         if action is NodeModMutationAction.DELETE

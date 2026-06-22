@@ -291,6 +291,11 @@ class ModWebServiceSupport:
     ) -> Callable[..., tuple[config.BotMetadataSnapshot, ...]]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_known_bot_snapshot_for_node"]
+    ) -> Callable[..., config.BotMetadataSnapshot | None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_login_node_status_badge_text"]) -> Callable[..., str]: ...
 
     @overload

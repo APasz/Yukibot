@@ -74,6 +74,8 @@ from node_api import (
     NodeConsoleActionParameter,
     NodeModEntry,
     NodeModList,
+    NodeModMutationAction,
+    NodeModMutationResult,
     NodeModSummary,
     NodeModUploadBatchResult,
     NodeSaveEntry,
@@ -950,6 +952,9 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("reconnectDelayMs", script)
         self.assertIn("socket.addEventListener('message'", script)
         self.assertIn("renderBadge(spec, spec.pending_text, spec.pending_class_name);", script)
+        self.assertIn("const confirmPresence = async (nodeName) => {", script)
+        self.assertIn("if (payload.node !== nodeName) {", script)
+        self.assertIn("socket.close();", script)
         self.assertIn("${spec.node_label}: ${latencyTextValue}", script)
         self.assertIn("textElement.textContent = text;", script)
         self.assertNotIn("_mod_web_latency_probe", script)
@@ -1099,6 +1104,56 @@ class ModWebTests(unittest.TestCase):
 
         with patch.object(ModWebService, "_known_bot_snapshots", return_value=(remote_snapshot,)):
             self.assertEqual(service._node_role_color_hex(node_name="erin"), "#dc2626")
+
+    def test_node_role_color_hex_falls_back_to_snapshot_presentation(self) -> None:
+        service: ModWebService = ModWebService()
+        service._manager = _manager_stub(bot=None, apps={})
+        remote_snapshot: BotMetadataSnapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="1350601198637551659",
+                label="Erin",
+                bot_profile=config.BotProfileName.ERIN,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="erin",
+                    public_base_url="http://erin.example:3180",
+                    node_api_base_url="http://erin.example:3180/api/node",
+                ),
+                presentation=config.BotMetadataPresentation(
+                    avatar_uri="https://cdn.example.com/erin.png",
+                    accent_color_hex="#dc2626",
+                ),
+            ),
+        )
+
+        with patch.object(ModWebService, "_known_bot_snapshots", return_value=(remote_snapshot,)):
+            self.assertEqual(service._node_role_color_hex(node_name="erin"), "#dc2626")
+
+    def test_node_bot_avatar_uri_falls_back_to_snapshot_presentation(self) -> None:
+        service: ModWebService = ModWebService()
+        service._manager = _manager_stub(bot=None, apps={})
+        remote_snapshot: BotMetadataSnapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="1350601198637551659",
+                label="Erin",
+                bot_profile=config.BotProfileName.ERIN,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="erin",
+                    public_base_url="http://erin.example:3180",
+                    node_api_base_url="http://erin.example:3180/api/node",
+                ),
+                presentation=config.BotMetadataPresentation(
+                    avatar_uri="https://cdn.example.com/erin.png",
+                    accent_color_hex="#dc2626",
+                ),
+            ),
+        )
+
+        with patch.object(ModWebService, "_known_bot_snapshots", return_value=(remote_snapshot,)):
+            self.assertEqual(service._node_bot_avatar_uri(node_name="erin"), "https://cdn.example.com/erin.png")
 
     def test_node_badge_style_colours_badge_surface_and_text(self) -> None:
         style: str = ModWebService._node_badge_style("#dc6b0f")
@@ -2430,6 +2485,51 @@ class ModWebTests(unittest.TestCase):
         build_mod_list.assert_not_awaited()
         build_app_runtime_summary.assert_awaited_once_with(app)
 
+    def test_build_local_app_page_data_awaits_save_list_for_save_support(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        app = cast(Any, SimpleNamespace(name="satisfactory_alpha"))
+        app_entry = NodeAppEntry(
+            name="satisfactory_alpha",
+            friendly="Satisfactory Alpha",
+            node="yuki",
+            running=True,
+            enabled=True,
+            supports_mods=False,
+            supports_configs=False,
+            supports_saves=True,
+        )
+        save_list = self._save_list(app_name="satisfactory_alpha")
+        runtime_summary = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version=None,
+            player_count=2,
+            player_capacity=8,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service._node_api, "build_app_entry", return_value=app_entry),
+            patch.object(service._node_api, "build_save_list", new=AsyncMock(return_value=save_list)) as build_save_list,
+            patch.object(service._node_api, "build_mod_list", new=AsyncMock()) as build_mod_list,
+            patch.object(
+                service._node_api,
+                "build_app_runtime_summary",
+                new=AsyncMock(return_value=runtime_summary),
+            ) as build_app_runtime_summary,
+        ):
+            page_data = asyncio.run(service._build_local_app_page_data(app, user=user))
+
+        self.assertIs(page_data.saves, save_list)
+        build_save_list.assert_awaited_once_with(app)
+        build_mod_list.assert_not_awaited()
+        build_app_runtime_summary.assert_awaited_once_with(app)
+
     def test_home_app_sections_format_remote_failures_for_people(self) -> None:
         service: ModWebService = ModWebService()
         user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
@@ -3352,6 +3452,12 @@ class ModWebTests(unittest.TestCase):
                 del value
                 return self
 
+            def style(
+                self, value: str | None = None, *, add: str | None = None, remove: str | None = None
+            ) -> "FakeContainer":
+                del value, add, remove
+                return self
+
             def __enter__(self) -> "FakeContainer":
                 return self
 
@@ -3421,6 +3527,22 @@ class ModWebTests(unittest.TestCase):
         class FakeHtml:
             def __init__(self, content: str) -> None:
                 self.content = content
+                self.class_value: str | None = None
+                self.style_values: list[tuple[str, str]] = []
+
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeHtml":
+                self.class_value = replace if replace is not None else value
+                return self
+
+            def style(
+                self, value: str | None = None, *, add: str | None = None, remove: str | None = None
+            ) -> "FakeHtml":
+                if add is not None:
+                    self.style_values.append(("add", add))
+                if remove is not None:
+                    self.style_values.append(("remove", remove))
+                del value
+                return self
 
             def set_content(self, content: str) -> None:
                 self.content = content
@@ -3440,6 +3562,8 @@ class ModWebTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.label_texts: list[str] = []
                 self.labels: list[FakeLabel] = []
+                self.html_contents: list[str] = []
+                self.html_elements: list[FakeHtml] = []
 
             def column(self) -> FakeContainer:
                 return FakeContainer()
@@ -3457,12 +3581,17 @@ class ModWebTests(unittest.TestCase):
                 return FakeTooltip()
 
             def html(self, content: str) -> FakeHtml:
-                return FakeHtml(content)
+                self.html_contents.append(content)
+                html = FakeHtml(content)
+                self.html_elements.append(html)
+                return html
 
         service = ModWebService()
         ui = FakeUi()
         hero_card = FakeCard()
-        static_badges = (_ModWebBadgeSpec(text="4 Mods", tone="black"),)
+        activity_providers = (
+            NodeAppActivityProviderEntry(provider_id="day", label="Day Counter", enabled=True),
+        )
         initial_stats = NodeAppRuntimeSummary(
             running=True,
             enabled=True,
@@ -3474,6 +3603,9 @@ class ModWebTests(unittest.TestCase):
             storage_free_bytes=None,
             storage_total_bytes=None,
             transition_state=NodeAppTransitionState.NONE,
+            activity_providers=(
+                NodeAppActivityProviderEntry(provider_id="day", label="Day Counter", enabled=True, current_value="D2"),
+            ),
         )
         updated_stats = NodeAppRuntimeSummary(
             running=False,
@@ -3486,6 +3618,9 @@ class ModWebTests(unittest.TestCase):
             storage_free_bytes=None,
             storage_total_bytes=None,
             transition_state=NodeAppTransitionState.STARTING,
+            activity_providers=(
+                NodeAppActivityProviderEntry(provider_id="day", label="Day Counter", enabled=True, current_value="D3"),
+            ),
         )
 
         apply_runtime = service._render_live_app_hero_runtime(
@@ -3494,24 +3629,20 @@ class ModWebTests(unittest.TestCase):
             app_name="minecraft_alpha",
             title="Minecraft Alpha",
             title_font_preset=AppTitleFont.DEFAULT,
-            static_badges=static_badges,
+            activity_providers=activity_providers,
             initial_app_stats=initial_stats,
         )
 
         self.assertEqual(hero_card.replaced_classes, "mod-card mod-card-hero w-full mod-app-hero-running")
         self.assertEqual(ui.label_texts[:3], ["Minecraft Alpha", "Status", "Running"])
-        self.assertEqual(
-            ui.label_texts,
-            ["Minecraft Alpha", "Status", "Running", "1.21.1", "Unavailable", "", "4 Mods"],
-        )
+        self.assertEqual(ui.label_texts, ["Minecraft Alpha", "Status", "Running", ""])
+        self.assertEqual(ui.html_contents, ["", "Day 2"])
 
         apply_runtime(updated_stats)
 
         self.assertEqual(hero_card.replaced_classes, "mod-card mod-card-hero w-full mod-app-hero-starting")
-        self.assertEqual(
-            ui.label_texts,
-            ["Minecraft Alpha", "Status", "Running", "1.21.1", "Unavailable", "", "4 Mods"],
-        )
+        self.assertEqual(ui.label_texts, ["Minecraft Alpha", "Status", "Running", ""])
+        self.assertEqual(ui.html_elements[1].content, "Day 2")
         self.assertEqual(ui.labels[2].text, "Starting")
 
     def test_render_page_disables_hero_runtime_polling_when_live_app_updates_are_subscribed(self) -> None:
@@ -7131,6 +7262,166 @@ class ModWebTests(unittest.TestCase):
             },
         )
 
+    def test_available_mod_actions_allow_admin_enable_disable_without_sudo_actions(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="admin", global_name=None, avatar_hash=None)
+        regular_entry = self._mod_entry(name="alpha.jar", enabled=True)
+        coremod_entry = self._mod_entry(name="core.jar", enabled=False, mod_type=ModType.COREMOD, coremod=True)
+
+        with patch.object(
+            service,
+            "_user_has_level",
+            side_effect=lambda _user, level: level in {Power_Level.user, Power_Level.admin},
+        ):
+            regular_actions = service._available_mod_actions(user=user, entry=regular_entry)
+            coremod_actions = service._available_mod_actions(user=user, entry=coremod_entry)
+
+        self.assertEqual(regular_actions, (NodeModMutationAction.DISABLE,))
+        self.assertEqual(coremod_actions, ())
+
+    def test_mutate_mod_allows_admin_enable_for_regular_mod(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=NodeModList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                summary=NodeModSummary(
+                    total_count=1,
+                    enabled_count=0,
+                    disabled_count=1,
+                    coremod_count=0,
+                    downloadable_count=1,
+                    non_downloadable_count=0,
+                ),
+                mods=(self._mod_entry(name="alpha.jar", enabled=False),),
+                app_stats=None,
+            ),
+            supports_chat=False,
+            chat_url=None,
+            map_url=None,
+            can_write_map_annotations=False,
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={"alpha.jar": "/mods/download/alpha.jar"},
+        )
+        user = ModWebUser(discord_id=42, username="admin", global_name=None, avatar_hash=None)
+        expected_result = NodeModMutationResult(
+            app_name=model.app_name,
+            app_friendly=model.app_friendly,
+            node=model.node_name,
+            mod_name="alpha.jar",
+            action=NodeModMutationAction.ENABLE,
+            message="Enabled alpha.jar.",
+            mod=self._mod_entry(name="alpha.jar", enabled=True),
+        )
+        service._node_api.mutate_mod = AsyncMock(return_value=expected_result)  # type: ignore[method-assign]
+        service._resolve_app = Mock(return_value=SimpleNamespace(name=model.app_name))  # type: ignore[method-assign]
+
+        with patch.object(
+            service,
+            "_user_has_level",
+            side_effect=lambda _user, level: level in {Power_Level.user, Power_Level.admin},
+        ):
+            result = asyncio.run(
+                service._mutate_mod(
+                    model=model,
+                    mod_name="alpha.jar",
+                    action=NodeModMutationAction.ENABLE,
+                    user=user,
+                )
+            )
+
+        service._node_api.mutate_mod.assert_awaited_once()
+        self.assertEqual(result, expected_result)
+
+    def test_mutate_mod_rejects_admin_delete_without_sudo(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=NodeModList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                summary=NodeModSummary(
+                    total_count=1,
+                    enabled_count=1,
+                    disabled_count=0,
+                    coremod_count=0,
+                    downloadable_count=1,
+                    non_downloadable_count=0,
+                ),
+                mods=(self._mod_entry(name="alpha.jar"),),
+                app_stats=None,
+            ),
+            supports_chat=False,
+            chat_url=None,
+            map_url=None,
+            can_write_map_annotations=False,
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={"alpha.jar": "/mods/download/alpha.jar"},
+        )
+        user = ModWebUser(discord_id=42, username="admin", global_name=None, avatar_hash=None)
+
+        with patch.object(
+            service,
+            "_user_has_level",
+            side_effect=lambda _user, level: level in {Power_Level.user, Power_Level.admin},
+        ):
+            with self.assertRaises(PermissionError) as raised:
+                asyncio.run(
+                    service._mutate_mod(
+                        model=model,
+                        mod_name="alpha.jar",
+                        action=NodeModMutationAction.DELETE,
+                        user=user,
+                    )
+                )
+
+        self.assertEqual(str(raised.exception), "Sudo access is required for this mod action.")
+
     def test_render_saves_editor_uses_settings_search_styling(self) -> None:
         class FakeContainer:
             def __enter__(self) -> "FakeContainer":
@@ -7534,13 +7825,7 @@ class ModWebTests(unittest.TestCase):
         details = ModWebService()._app_hero_runtime_details(stats)
 
         self.assertEqual(details.relay_badge, _ModWebBadgeSpec(text="Game <-> Chat", tone="grey"))
-        self.assertEqual(
-            [(badge.text, badge.tone) for badge in details.badges],
-            [
-                ("1.20.4", "black"),
-                ("12.0GiB", "grey"),
-            ],
-        )
+        self.assertEqual(details.version_badge, _ModWebBadgeSpec(text="1.20.4", tone="black"))
         self.assertEqual(details.player_count_badge, _ModWebBadgeSpec(text="3 / 20", tone="purple"))
         self.assertEqual(details.status_text, "Running")
         self.assertEqual(details.status_tone, "purple")
@@ -7667,6 +7952,92 @@ class ModWebTests(unittest.TestCase):
             ),
         )
 
+    def test_visible_app_activity_provider_badges_only_include_enabled_providers_with_values(self) -> None:
+        model = ModWebBasePageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            activity_providers=(
+                NodeAppActivityProviderEntry(provider_id="players", label="Player Count", enabled=True),
+                NodeAppActivityProviderEntry(provider_id="day", label="Day Counter", enabled=False),
+                NodeAppActivityProviderEntry(provider_id="stage", label="Stage", enabled=True),
+            ),
+        )
+        runtime_summary = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version="1.21.1",
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+            activity_providers=(
+                NodeAppActivityProviderEntry(provider_id="players", label="Player Count", enabled=True, current_value="3/20"),
+                NodeAppActivityProviderEntry(provider_id="day", label="Day Counter", enabled=False, current_value="D2"),
+                NodeAppActivityProviderEntry(provider_id="stage", label="Stage", enabled=True, current_value="T3"),
+            ),
+        )
+
+        badges = ModWebService._visible_app_activity_provider_badges(
+            app_stats=runtime_summary,
+            activity_providers=ModWebService._enabled_app_activity_providers(model),
+        )
+
+        self.assertEqual(
+            badges,
+            (
+                "Player Count: 3/20",
+                "Tier 3",
+            ),
+        )
+
+    def test_app_activity_provider_badge_markup_formats_stage_value(self) -> None:
+        self.assertEqual(
+            ModWebService._app_activity_provider_badge_markup(
+                provider_id="stage",
+                label="Stage",
+                current_value="T3: Schematic 3-2",
+            ),
+            "Tier 3: Schematic 3-2",
+        )
+
+    def test_app_activity_provider_badge_markup_formats_sevendays_time_and_blood_moon(self) -> None:
+        self.assertEqual(
+            ModWebService._app_activity_provider_badge_markup(
+                provider_id="time",
+                label="Game Time",
+                current_value="D14/H07",
+            ),
+            "Day 14/7",
+        )
+        self.assertEqual(
+            ModWebService._app_activity_provider_badge_markup(
+                provider_id="time",
+                label="Game Time",
+                current_value="!D14/H21",
+            ),
+            'Day <span class="mod-app-activity-alert">14</span>/21',
+        )
+
     def test_app_title_font_style_resolves_auto_preset_from_app_scope(self) -> None:
         minecraft_style = ModWebService._app_title_font_style(
             app_name="minecraft_alpha",
@@ -7742,6 +8113,30 @@ class ModWebTests(unittest.TestCase):
                 is_local_node=True,
             ),
             "black",
+        )
+
+    def test_app_page_node_presence_badge_spec_uses_black_for_alive_and_red_for_down(self) -> None:
+        badge_element = cast(Any, SimpleNamespace(id=17))
+
+        spec = ModWebService._app_page_node_presence_badge_spec(
+            node_name="erin",
+            badge_element=badge_element,
+            presence_stream_url="/mod-web/node-presence/erin",
+        )
+
+        self.assertIsNotNone(spec)
+        if spec is None:
+            self.fail("Expected a node presence badge spec.")
+        self.assertEqual(spec.pending_text, "erin")
+        self.assertEqual(spec.alive_text, "erin")
+        self.assertEqual(spec.down_text, "erin")
+        self.assertEqual(
+            spec.healthy_class_name,
+            "mod-badge black mod-app-corner-badge mod-app-node-badge",
+        )
+        self.assertEqual(
+            spec.unhealthy_class_name,
+            "mod-badge red mod-app-corner-badge mod-app-node-badge",
         )
 
     def test_register_timer_cleanup_cancels_timer_when_owner_is_deleted(self) -> None:

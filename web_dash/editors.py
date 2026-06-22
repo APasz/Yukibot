@@ -27,7 +27,6 @@ from .runtime_imports import (
     Access_Control,
     App_Manager,
     BadgeTone,
-    BotMetadataModWeb,
     Button,
     Callable,
     CodeMirror,
@@ -2110,7 +2109,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             )
             if model.node_name == config.MOD_WEB_SERVER.node_name:
                 app = self._resolve_app(model.app_name)
-                result = self._node_api.upload_save_path(
+                result = await self._node_api.upload_save_path(
                     app=app,
                     root_id=root_id,
                     source_path=temp_path,
@@ -2321,7 +2320,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             )
         if model.node_name == config.MOD_WEB_SERVER.node_name:
             app = self._resolve_app(model.app_name)
-            return self._node_api.delete_save_file(
+            return await self._node_api.delete_save_file(
                 app=app,
                 save_id=save_id,
                 actor_user_id=user.discord_id,
@@ -2444,21 +2443,25 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
     def _node_role_color_hex(self, *, node_name: str) -> str | None:
         bot: GatewayBot | None = self._mod_web_bot()
-        if bot is None:
+        if bot is not None:
+            target_user_id: int | None = self._node_bot_user_id(node_name=node_name, bot=bot)
+            if target_user_id is not None:
+                live_color = color_int_to_hex(
+                    cached_member_role_color(bot, guild_id=config.DISCORD_GUILD, user_id=target_user_id)
+                )
+                if live_color is not None:
+                    return live_color
+        snapshot = self._known_bot_snapshot_for_node(node_name=node_name)
+        if snapshot is None or snapshot.features.presentation is None:
             return None
-        target_user_id: int | None = self._node_bot_user_id(node_name=node_name, bot=bot)
-        if target_user_id is None:
-            return None
-        return color_int_to_hex(cached_member_role_color(bot, guild_id=config.DISCORD_GUILD, user_id=target_user_id))
+        return snapshot.features.presentation.accent_color_hex
 
     def _node_bot_user_id(self, *, node_name: str, bot: GatewayBot) -> int | None:
         if node_name.casefold() == config.MOD_WEB_SERVER.node_name.casefold():
             me: OwnUser | None = bot.get_me()
             return int(me.id) if me is not None else None
-        for snapshot in self._known_bot_snapshots():
-            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
-            if mod_web is None or mod_web.node_name.casefold() != node_name.casefold():
-                continue
+        snapshot = self._known_bot_snapshot_for_node(node_name=node_name)
+        if snapshot is not None:
             return int(hikari.Snowflake(snapshot.profile.id))
         return None
 
@@ -3008,6 +3011,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _console_action_source_badge_tone(result: NodeConsoleActionExecutionResult) -> BadgeTone:
+        if result.source.value == "api":
+            return "purple"
         if result.source.value == "rcon":
             return "purple"
         if result.source.value == "telnet":

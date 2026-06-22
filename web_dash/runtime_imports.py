@@ -133,6 +133,7 @@ from node_api import (
     RelayTTSQueue,
     required_app_mutation_level,
     required_app_mutation_scope,
+    required_mod_mutation_level,
 )
 from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
 
@@ -292,6 +293,7 @@ __all__: tuple[str, ...] = (
     "requests",
     "required_app_mutation_level",
     "required_app_mutation_scope",
+    "required_mod_mutation_level",
     "steam_update_preset_for_scope",
     "tempfile",
     "threading",

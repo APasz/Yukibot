@@ -51,6 +51,7 @@ from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, C
 from map_annotations import MapAnnotationDraft
 from node_api import (
     NodeApiService,
+    NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppMutationAction,
     NodeAppMutationResult,
@@ -86,6 +87,7 @@ from node_api import (
     RemoteRelayTTSForwarder,
     required_app_mutation_level,
     required_app_mutation_scope,
+    required_mod_mutation_level,
 )
 from node_auth import NodeApiScope, verify_node_token
 
@@ -539,6 +541,28 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(str(raised.exception.detail), "Minecraft Alpha is not running.")
+
+    def test_execute_console_action_maps_runtime_api_unavailable_to_503(self) -> None:
+        action = ConsoleAction(
+            key="save_all",
+            label="Save All",
+            description="Flush world state to disk.",
+            power_level=Power_Level.user,
+            execute=AsyncMock(side_effect=RuntimeError("Minecraft Alpha API is unavailable.")),
+        )
+        app = _build_console_action_app(actions=(action,), running=True)
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                service.execute_console_action(app=app, action_key="save_all", raw_value=None, actor_user_id=42)
+            )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(str(raised.exception.detail), "Console action failed: Minecraft Alpha API is unavailable.")
 
     def test_read_console_stdout_returns_recent_tail_and_truncation_state(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1352,7 +1376,7 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
         )
-        result = NodeApiService().build_save_list(app)
+        result = asyncio.run(NodeApiService().build_save_list(app))
 
         self.assertIsInstance(result, NodeSaveList)
         self.assertEqual(result.roots[0].id, "world")
@@ -1373,6 +1397,19 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(Path(response.path), save_path)
         self.assertEqual(response.filename, "world.zip")
 
+    def test_build_save_download_response_maps_not_running_to_409(self) -> None:
+        app = SimpleNamespace(
+            name="satisfactory_alpha",
+            friendly="Satisfactory",
+            download_save_content=AsyncMock(side_effect=RuntimeError("Satisfactory is not running.")),
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(NodeApiService().build_save_download_response(app=cast(Any, app), save_id="saves/world.sav"))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(str(raised.exception.detail), "Satisfactory is not running.")
+
     def test_upload_save_path_returns_save_mutation_result(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1392,20 +1429,48 @@ class NodeApiTests(unittest.TestCase):
                 name="factorio_lab",
                 friendly="Factorio Lab",
                 supports_save_uploads=True,
-                upload_save_file=Mock(return_value=uploaded),
+                upload_save_file_async=AsyncMock(return_value=uploaded),
             )
 
-            result = NodeApiService().upload_save_path(
-                app=cast(Any, app),
-                root_id="saves",
-                source_path=source,
-                upload_name="incoming.zip",
-                actor_user_id=42,
+            result = asyncio.run(
+                NodeApiService().upload_save_path(
+                    app=cast(Any, app),
+                    root_id="saves",
+                    source_path=source,
+                    upload_name="incoming.zip",
+                    actor_user_id=42,
+                )
             )
 
         self.assertIsInstance(result, NodeSaveMutationResult)
         self.assertEqual(result.save.id, "saves/incoming.zip")
         self.assertIn("Uploaded save", result.message)
+
+    def test_upload_save_path_maps_runtime_api_unavailable_to_503(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "incoming.sav"
+            source.write_bytes(b"save-data")
+            app = SimpleNamespace(
+                name="satisfactory_alpha",
+                friendly="Satisfactory",
+                supports_save_uploads=True,
+                upload_save_file_async=AsyncMock(side_effect=RuntimeError("Satisfactory save API is unavailable.")),
+            )
+
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(
+                    NodeApiService().upload_save_path(
+                        app=cast(Any, app),
+                        root_id="saves",
+                        source_path=source,
+                        upload_name="incoming.sav",
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertEqual(str(raised.exception.detail), "Save upload failed: Satisfactory save API is unavailable.")
 
     def test_build_blueprint_list_marks_delete_permission_from_owner_and_sudo(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1453,20 +1518,20 @@ class NodeApiTests(unittest.TestCase):
             result: NodeBlueprintList = NodeApiService().build_blueprint_list(app, actor_user_id=101)
             round_trip = NodeBlueprintList.from_mapping(result.to_mapping())
 
-        self.assertEqual(result.default_session_name, "Session Current")
-        self.assertEqual(round_trip.default_session_name, "Session Current")
+        self.assertEqual(result.default_session_name, "Shared")
+        self.assertEqual(round_trip.default_session_name, "Shared")
 
     def test_build_blueprint_list_blocks_main_delete_when_config_has_different_owner(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app = _build_blueprint_app(root)
-            module_path = root / "blueprints" / "Session Alpha" / "module.sbp"
-            config_path = root / "blueprints" / "Session Alpha" / "module.sbpcfg"
+            module_path = root / "blueprints-shared" / "Shared" / "module.sbp"
+            config_path = root / "blueprints-shared" / "Shared" / "module.sbpcfg"
             module_path.parent.mkdir(parents=True, exist_ok=True)
             module_path.write_text("module", encoding="utf-8")
             config_path.write_text("config", encoding="utf-8")
-            app._blueprint_ownership_store.record_upload(relative_path="Session Alpha/module.sbp", actor_user_id=101)
-            app._blueprint_ownership_store.record_upload(relative_path="Session Alpha/module.sbpcfg", actor_user_id=202)
+            app._blueprint_ownership_store.record_upload(relative_path="Shared/module.sbp", actor_user_id=101)
+            app._blueprint_ownership_store.record_upload(relative_path="Shared/module.sbpcfg", actor_user_id=202)
 
             service = NodeApiService()
             acl = Mock()
@@ -1487,7 +1552,7 @@ class NodeApiTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app = _build_blueprint_app(root)
-            legacy_path = root / "blueprints" / "Session Legacy" / "Legacy .sbp"
+            legacy_path = root / "blueprints-shared" / "Shared" / "Legacy .sbp"
             legacy_path.parent.mkdir(parents=True, exist_ok=True)
             legacy_path.write_text("module", encoding="utf-8")
 
@@ -1499,7 +1564,7 @@ class NodeApiTests(unittest.TestCase):
             user_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=101)
             sudo_list: NodeBlueprintList = service.build_blueprint_list(app, actor_user_id=999)
 
-        self.assertEqual(user_list.blueprints[0].relative_path, "Session Legacy/Legacy .sbp")
+        self.assertEqual(user_list.blueprints[0].relative_path, "Shared/Legacy .sbp")
         self.assertFalse(user_list.blueprints[0].can_delete)
         self.assertTrue(sudo_list.blueprints[0].can_delete)
 
@@ -1558,7 +1623,7 @@ class NodeApiTests(unittest.TestCase):
             )
 
         self.assertIsInstance(uploaded, NodeBlueprintMutationResult)
-        self.assertEqual(uploaded.blueprint.relative_path, "Session Alpha/module.sbp")
+        self.assertEqual(uploaded.blueprint.relative_path, "Shared/module.sbp")
         self.assertIsNotNone(uploaded.blueprint.config_file)
         self.assertIn("Uploaded blueprint", uploaded.message)
         self.assertIn("with config", uploaded.message)
@@ -1721,8 +1786,8 @@ class NodeApiTests(unittest.TestCase):
             name="factorio_lab",
             friendly="Factorio Lab",
             supports_save_rename=True,
-            list_save_files=Mock(return_value=(current,)),
-            relocate_save_file=Mock(return_value=renamed),
+            list_save_files_async=AsyncMock(return_value=(current,)),
+            relocate_save_file_async=AsyncMock(return_value=renamed),
         )
 
         result = asyncio.run(
@@ -1736,7 +1801,7 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertIsInstance(result, NodeSaveMutationResult)
         self.assertEqual(result.save.id, "saves/new.zip")
-        app.relocate_save_file.assert_called_once_with(
+        app.relocate_save_file_async.assert_awaited_once_with(
             save_id="saves/old.zip",
             destination_root_id="saves",
             destination_relative_path="new.zip",
@@ -1757,19 +1822,21 @@ class NodeApiTests(unittest.TestCase):
             name="sevendays_alpha",
             friendly="7D2D Alpha",
             supports_save_delete=True,
-            delete_save_file=Mock(return_value=deleted),
+            delete_save_file_async=AsyncMock(return_value=deleted),
         )
 
-        result = NodeApiService().delete_save_file(
-            app=cast(Any, app),
-            save_id="world/world",
-            actor_user_id=42,
+        result = asyncio.run(
+            NodeApiService().delete_save_file(
+                app=cast(Any, app),
+                save_id="world/world",
+                actor_user_id=42,
+            )
         )
 
         self.assertIsInstance(result, NodeSaveMutationResult)
         self.assertEqual(result.save.id, "world/world")
         self.assertTrue(result.save.can_delete)
-        app.delete_save_file.assert_called_once_with(file_id="world/world")
+        app.delete_save_file_async.assert_awaited_once_with(file_id="world/world")
 
     def test_update_setting_and_save_settings_use_attached_settings_manager(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2615,6 +2682,45 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(getattr(raised.exception, "status_code"), 403)
 
+    def test_required_mod_mutation_level_allows_admin_toggle_for_regular_mods(self) -> None:
+        self.assertEqual(required_mod_mutation_level(NodeModMutationAction.ENABLE), Power_Level.admin)
+        self.assertEqual(required_mod_mutation_level(NodeModMutationAction.DISABLE), Power_Level.admin)
+        self.assertEqual(
+            required_mod_mutation_level(NodeModMutationAction.ENABLE, is_protected=True),
+            Power_Level.sudo,
+        )
+        self.assertEqual(required_mod_mutation_level(NodeModMutationAction.DELETE), Power_Level.sudo)
+
+    def test_mutate_mod_enable_requires_admin_for_regular_mods(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mod_path = Path(temp_dir) / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            mod = _TestMod(Mod_Config(name="example.jar", directory=Path(temp_dir), enabled=False))
+            updated = _TestMod(Mod_Config(name="example.jar", directory=Path(temp_dir), enabled=True))
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = mod
+            manager.set_enabled = AsyncMock(return_value=updated)
+            app = _build_app(manager)
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+
+            result = asyncio.run(
+                service.mutate_mod(
+                    app=app,
+                    mod_name="example.jar",
+                    action=NodeModMutationAction.ENABLE,
+                    actor_user_id=42,
+                )
+            )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.admin)
+        manager.set_enabled.assert_awaited_once_with(mod, True, override_coremod=False)
+        self.assertEqual(result.action, NodeModMutationAction.ENABLE)
+        self.assertEqual(result.message, "Enabled example.jar.")
+
     def test_mutate_mod_enable_updates_manager_with_coremod_override(self) -> None:
         with TemporaryDirectory() as temp_dir:
             mod_path = Path(temp_dir) / "example.jar"
@@ -2644,7 +2750,7 @@ class NodeApiTests(unittest.TestCase):
                 )
             )
 
-        acl.perm_check.assert_awaited_once()
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
         manager.set_enabled.assert_awaited_once_with(mod, True, override_coremod=True)
         self.assertEqual(result.action, NodeModMutationAction.ENABLE)
         self.assertEqual(result.message, "Enabled example.jar.")
@@ -3581,6 +3687,32 @@ class NodeApiTests(unittest.TestCase):
         summary = asyncio.run(service.build_live_app_runtime_summary(app))
 
         self.assertEqual(summary.runtime_fault, app.runtime_fault)
+
+    def test_build_live_app_runtime_summary_includes_activity_provider_values(self) -> None:
+        class _ActivityProvider(AppActivityProvider):
+            metadata = AppActivityProviderMetadata(provider_id="day", label="Day Counter")
+
+            async def get(self) -> str | None:
+                return "D2"
+
+        app = _build_app(Mock())
+        app.check_running = Mock(return_value=True)  # type: ignore[method-assign]
+        app.set_activity_providers((_ActivityProvider(app),))
+        service = NodeApiService()
+
+        summary = asyncio.run(service.build_live_app_runtime_summary(app))
+
+        self.assertEqual(
+            summary.activity_providers,
+            (
+                NodeAppActivityProviderEntry(
+                    provider_id="day",
+                    label="Day Counter",
+                    enabled=True,
+                    current_value="D2",
+                ),
+            ),
+        )
 
     def test_subscribe_local_app_runtime_notifies_initial_and_changed_state(self) -> None:
         async def exercise() -> None:

@@ -186,12 +186,15 @@ class AppActivityProviderEntry:
     provider_id: str
     label: str
     enabled: bool
+    current_value: str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider_id.strip():
             raise ValueError("App activity provider id must not be empty.")
         if not self.label.strip():
             raise ValueError("App activity provider label must not be empty.")
+        if self.current_value is not None and not self.current_value.strip():
+            raise ValueError("App activity provider current value must not be blank.")
 
 
 class App(Generic[ConfigT], ABC):
@@ -462,6 +465,41 @@ class App(Generic[ConfigT], ABC):
             for provider in self.activity_providers
         )
 
+    async def activity_provider_entries_with_values(self) -> tuple[AppActivityProviderEntry, ...]:
+        base_entries = self.activity_provider_entries
+        if not base_entries or not self.check_running():
+            return base_entries
+        current_values = await asyncio.gather(
+            *(self._activity_provider_current_value(provider) for provider in self.activity_providers)
+        )
+        return tuple(
+            AppActivityProviderEntry(
+                provider_id=entry.provider_id,
+                label=entry.label,
+                enabled=entry.enabled,
+                current_value=current_value,
+            )
+            for entry, current_value in zip(base_entries, current_values, strict=True)
+        )
+
+    async def _activity_provider_current_value(self, provider: AppActivityProvider) -> str | None:
+        if not self.activity_provider_enabled(provider):
+            return None
+        try:
+            raw_value = await provider.get()
+        except Exception as xcp:
+            log.warning(
+                "App activity provider value failed: app=%s provider=%s error=%s",
+                self.name,
+                provider.provider_id,
+                xcp,
+            )
+            return None
+        if raw_value is None:
+            return None
+        current_value = raw_value.strip()
+        return current_value or None
+
     def register_enabled_activity_providers(self) -> None:
         for provider in self.activity_providers:
             if self.activity_provider_enabled(provider):
@@ -711,9 +749,16 @@ class App(Generic[ConfigT], ABC):
     def list_save_files(self) -> tuple[AppSaveEntry, ...]:
         return list_app_save_files(self.save_file_roots)
 
+    async def list_save_files_async(self) -> tuple[AppSaveEntry, ...]:
+        return self.list_save_files()
+
     def resolve_save_file(self, file_id: str) -> Path:
         _root, path, _relative_path = resolve_app_save_path(self.save_file_roots, file_id)
         return path
+
+    async def download_save_content(self, file_id: str) -> tuple[str, bytes] | None:
+        del file_id
+        return None
 
     @property
     def supports_save_uploads(self) -> bool:
@@ -736,6 +781,9 @@ class App(Generic[ConfigT], ABC):
     def upload_save_file(self, *, root_id: str, upload_name: str, source_path: Path) -> AppSaveEntry:
         raise ValueError(f"{self.friendly} does not support save uploads.")
 
+    async def upload_save_file_async(self, *, root_id: str, upload_name: str, source_path: Path) -> AppSaveEntry:
+        return self.upload_save_file(root_id=root_id, upload_name=upload_name, source_path=source_path)
+
     def relocate_save_file(
         self,
         *,
@@ -745,8 +793,24 @@ class App(Generic[ConfigT], ABC):
     ) -> AppSaveEntry:
         raise ValueError(f"{self.friendly} does not support save relocation.")
 
+    async def relocate_save_file_async(
+        self,
+        *,
+        save_id: str,
+        destination_root_id: str,
+        destination_relative_path: str,
+    ) -> AppSaveEntry:
+        return self.relocate_save_file(
+            save_id=save_id,
+            destination_root_id=destination_root_id,
+            destination_relative_path=destination_relative_path,
+        )
+
     def delete_save_file(self, *, file_id: str) -> AppSaveEntry:
         raise ValueError(f"{self.friendly} does not support save deletion.")
+
+    async def delete_save_file_async(self, *, file_id: str) -> AppSaveEntry:
+        return self.delete_save_file(file_id=file_id)
 
     @property
     def supports_blueprints(self) -> bool:

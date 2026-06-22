@@ -2372,6 +2372,9 @@ class ModWebTheme:
                 .mod-badge.red {{ background: #3a1117 !important; border-color: #dc2626; color: #fecaca !important; }}
                 .mod-badge.warn {{ background: #22161a !important; border-color: #7f1d1d; color: #fca5a5 !important; }}
                 .mod-badge.grey {{ background: #18181f !important; border-color: #3f3f46; color: #d4d4d8 !important; }}
+                .mod-badge .mod-app-activity-alert {{
+                    color: #f87171 !important;
+                }}
                 .mod-badge-icon-label {{
                     gap: 0.34rem;
                 }}
@@ -3497,6 +3500,7 @@ class ModWebTheme:
                 }}
                 .mod-action:hover {{ filter: brightness(1.14); transform: translateY(-1px); }}
                 @media (max-width: 960px) {{
+                    .mod-user-header-tray-shell {{ min-height: 0 !important; }}
                     .mod-hero-header {{ flex-wrap: wrap !important; }}
                     .mod-hero-header-main {{ flex-basis: 100%; }}
                     .mod-app-hero-status {{

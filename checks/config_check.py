@@ -598,6 +598,10 @@ class BotConfigurationTests(unittest.TestCase):
                 public_base_url="http://yuki.example:3180",
                 node_api_base_url="http://yuki.example:3180/api/node",
             ),
+            presentation=config.BotMetadataPresentation(
+                avatar_uri=" https://cdn.example.com/yuki.png?size=128 ",
+                accent_color_hex=" #7C3AED ",
+            ),
         )
 
         self.assertEqual(snapshot.profile.id, "123456789012345678")
@@ -605,6 +609,13 @@ class BotConfigurationTests(unittest.TestCase):
         self.assertIs(snapshot.profile.bot_profile, config.BotProfileName.YUKI)
         self.assertEqual(snapshot.features.oauth, config.PersistedOAuthLinks(guild="https://example.com/guild"))
         self.assertEqual(snapshot.features.mod_web.node_name if snapshot.features.mod_web is not None else None, "yuki")
+        self.assertEqual(
+            snapshot.features.presentation,
+            config.BotMetadataPresentation(
+                avatar_uri="https://cdn.example.com/yuki.png?size=128",
+                accent_color_hex="#7c3aed",
+            ),
+        )
 
     def test_sync_remote_bot_metadata_posts_structured_snapshot(self) -> None:
         snapshot = config.build_local_bot_metadata_snapshot(

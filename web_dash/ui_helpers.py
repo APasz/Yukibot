@@ -373,6 +373,29 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         connection.socket.send(JSON.stringify({{type: 'ping', sample_id: sampleId}}));
                     }});
                 }};
+                const confirmPresence = async (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    const spec = getSpec(nodeName);
+                    if (!connection || !spec || !connection.socket || connection.socket.readyState !== WebSocket.OPEN) {{
+                        return false;
+                    }}
+                    return await new Promise((resolve) => {{
+                        const sampleId = `${{Date.now()}}-${{Math.random().toString(16).slice(2)}}`;
+                        const timeoutHandle = window.setTimeout(() => {{
+                            delete connection.pendingSamples[sampleId];
+                            resolve(false);
+                        }}, latencyTimeoutMs);
+                        connection.pendingSamples[sampleId] = {{
+                            timeoutHandle,
+                            resolve: () => {{
+                                window.clearTimeout(timeoutHandle);
+                                delete connection.pendingSamples[sampleId];
+                                resolve(true);
+                            }},
+                        }};
+                        connection.socket.send(JSON.stringify({{type: 'ping', sample_id: sampleId}}));
+                    }});
+                }};
                 const renderAliveState = async (nodeName, latencyTextValue) => {{
                     const connection = controllerState.connectionsByNode[nodeName];
                     const spec = getSpec(nodeName);
@@ -460,8 +483,8 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                             closeConnection(nodeName);
                             return;
                         }}
-                        connection.lastText = latestSpec.show_latency ? latestSpec.pending_text : latestSpec.alive_text;
-                        connection.lastClassName = latestSpec.healthy_class_name;
+                        connection.lastText = latestSpec.pending_text;
+                        connection.lastClassName = latestSpec.pending_class_name;
                         renderBadge(latestSpec, connection.lastText, connection.lastClassName);
                         rejectPendingSamples(connection);
                         if (connection.latencyIntervalId) {{
@@ -472,6 +495,12 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                             connection.latencyIntervalId = window.setInterval(() => {{
                                 void runLatencySample(nodeName);
                             }}, latencyRefreshIntervalMs);
+                        }} else {{
+                            void confirmPresence(nodeName).then((confirmed) => {{
+                                if (confirmed) {{
+                                    void renderAliveState(nodeName, null);
+                                }}
+                            }});
                         }}
                     }});
                     socket.addEventListener('message', (event) => {{
@@ -482,6 +511,10 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                             return;
                         }}
                         if (!payload || typeof payload !== 'object') {{
+                            return;
+                        }}
+                        if (payload.node !== nodeName) {{
+                            socket.close();
                             return;
                         }}
                         const sampleId = payload.sample_id;

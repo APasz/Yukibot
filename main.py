@@ -18,9 +18,9 @@ import _sys
 import config
 from _activity import Activity_Manager, Provider_CPU, Provider_DISK, Provider_RAM
 from _authority_server import AuthorityServer
-from _discord import DC_Relay, Distils, Resolutator
+from _discord import DC_Relay, Distils, Resolutator, cached_member_role_color, color_int_to_hex
 from _file import File_Utils
-from _manager import App_Manager, Provider_Player, Provider_Process
+from _manager import AppStartBlockerKind, App_Manager, Provider_Player, Provider_Process
 from _security import Access_Control
 from _sys import Stats_System
 from _utils import File_Cleaner, Utilities
@@ -68,7 +68,8 @@ activities: list[type[Activity_Provider]] = [
     Provider_DISK,
 ]
 start_time = datetime.now()
-_RESTART_AUTO_LAUNCH_DELAY_SECONDS = 7.0
+_RESTART_AUTO_LAUNCH_DELAY_SECONDS = 0.0
+_PORTAL_AUTHORITY_REFRESH_INTERVAL_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +97,69 @@ def _consume_restart_auto_launch_selection(app_manager: App_Manager) -> RestartA
     return RestartAutoLaunchSelection(apps=tuple(selected_apps), error_lines=tuple(error_lines))
 
 
+def _restart_auto_launch_sort_key(app_manager: App_Manager, app: App) -> tuple[int, str]:
+    blocker = app_manager.start_blocker(app)
+    if blocker is None:
+        return (0, app.friendly.casefold())
+    if blocker.kind is AppStartBlockerKind.ALREADY_RUNNING:
+        return (2, app.friendly.casefold())
+    return (1, app.friendly.casefold())
+
+
+def _restart_auto_launch_priority(app: App) -> tuple[int, int, int, int, str]:
+    startup_points = app.cfg.resource_points.startup_points
+    running_points = app.cfg.resource_points.running
+    startup_cpu_delta = startup_points.cpu_points - running_points.cpu_points
+    startup_ram_delta = startup_points.ram_points - running_points.ram_points
+    return (
+        -startup_points.cpu_points,
+        -startup_points.ram_points,
+        -startup_cpu_delta,
+        -startup_ram_delta,
+        app.friendly.casefold(),
+    )
+
+
+def _restart_auto_launch_fits_after_ready(
+    app_manager: App_Manager,
+    candidate: App,
+    *,
+    active_apps: tuple[App, ...],
+) -> bool:
+    if any(active_app.scope == candidate.scope for active_app in active_apps):
+        return False
+
+    capacity = app_manager.node_capacity()
+    active_cpu_points = sum(active_app.cfg.resource_points.running.cpu_points for active_app in active_apps)
+    active_ram_points = sum(active_app.cfg.resource_points.running.ram_points for active_app in active_apps)
+    startup_points = candidate.cfg.resource_points.startup_points
+    return (
+        active_cpu_points + startup_points.cpu_points <= capacity.cpu_points_available
+        and active_ram_points + startup_points.ram_points <= capacity.ram_points_available
+    )
+
+
+def _plan_restart_auto_launch_sequence(app_manager: App_Manager, auto_apps: tuple[App, ...]) -> tuple[App, ...]:
+    queued_apps = tuple(app for app in auto_apps if not app.check_running())
+    if not queued_apps:
+        return ()
+
+    active_apps = app_manager.running_apps()
+
+    def _search(active: tuple[App, ...], remaining: tuple[App, ...]) -> tuple[App, ...]:
+        best_sequence: tuple[App, ...] = ()
+        for candidate in sorted(remaining, key=_restart_auto_launch_priority):
+            if not _restart_auto_launch_fits_after_ready(app_manager, candidate, active_apps=active):
+                continue
+            next_remaining = tuple(app for app in remaining if app is not candidate)
+            sequence = (candidate, *_search((*active, candidate), next_remaining))
+            if len(sequence) > len(best_sequence):
+                best_sequence = sequence
+        return best_sequence
+
+    return _search(active_apps, queued_apps)
+
+
 async def _launch_restart_auto_apps(
     app_manager: App_Manager,
     auto_apps: tuple[App, ...],
@@ -105,12 +169,48 @@ async def _launch_restart_auto_apps(
     if not auto_apps:
         return
     auto_app_names = ", ".join(app.friendly for app in auto_apps)
-    log.info("Auto-launch scheduled for %s in %.1fs", auto_app_names, delay_seconds)
-    await asyncio.sleep(delay_seconds)
-    for auto_app in auto_apps:
+    if delay_seconds > 0:
+        log.info("Auto-launch scheduled for %s in %.1fs", auto_app_names, delay_seconds)
+        await asyncio.sleep(delay_seconds)
+    else:
+        log.info("Auto-launch starting for %s", auto_app_names)
+
+    remaining_apps: list[App] = list(auto_apps)
+    error_lines: list[str] = []
+    while remaining_apps:
+        already_running_apps = tuple(app for app in remaining_apps if app.check_running())
+        for already_running_app in already_running_apps:
+            log.info("Skipping auto-launch for %s because it is already running.", already_running_app.friendly)
+            remaining_apps.remove(already_running_app)
+        if not remaining_apps:
+            break
+
+        planned_sequence = _plan_restart_auto_launch_sequence(app_manager, tuple(remaining_apps))
+        if planned_sequence:
+            auto_app = planned_sequence[0]
+            remaining_apps.remove(auto_app)
+        else:
+            remaining_apps.sort(key=lambda app: _restart_auto_launch_sort_key(app_manager, app))
+            auto_app = remaining_apps.pop(0)
+        blocker = app_manager.start_blocker(auto_app)
+        if blocker is not None:
+            if blocker.kind is AppStartBlockerKind.ALREADY_RUNNING:
+                log.info("Skipping auto-launch for %s because it is already running.", auto_app.friendly)
+                continue
+            error_lines.append(blocker.message)
+            log.warning("Skipping auto-launch for %s because startup is blocked: %s", auto_app.friendly, blocker.message)
+            continue
         log.info("Auto-launching: %s", auto_app.friendly)
-        await app_manager.launch(auto_app)
+        try:
+            await app_manager.launch(auto_app)
+        except Exception as xcp:
+            error_lines.append(str(xcp))
+            log.exception("Auto-launch failed for %s", auto_app.friendly)
+            continue
         log.info("Auto-launched: %s", auto_app.friendly)
+
+    if error_lines:
+        raise RuntimeError("\n".join(error_lines))
 
 
 def _build_startup_notice(
@@ -213,12 +313,21 @@ def _clear_managed_files_once(
 
 async def _run_portal() -> None:
     log.info("Starting portal profile")
+    log.info(
+        "Portal authority config: mode=%s endpoint=%s token=%s",
+        config.DATA_AUTHORITY_MODE.value,
+        config.DATA_AUTHORITY_ENDPOINT.base_url if config.DATA_AUTHORITY_ENDPOINT is not None else "None",
+        "set" if config.DATA_AUTHORITY_TOKEN else "missing",
+    )
     acl = Access_Control()
     mod_web = ModWebService()
     await mod_web.start(acl=acl)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    refresh_task: asyncio.Task[None] | None = None
+    if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
+        refresh_task = asyncio.create_task(_portal_authority_refresh_loop(acl=acl, stop_event=stop_event))
 
     def _request_stop() -> None:
         log.info("Stopping portal profile")
@@ -229,7 +338,37 @@ async def _run_portal() -> None:
         with suppress(NotImplementedError):
             loop.add_signal_handler(signum, _request_stop)
 
-    await stop_event.wait()
+    try:
+        await stop_event.wait()
+    finally:
+        if refresh_task is not None:
+            refresh_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await refresh_task
+
+
+async def _refresh_portal_remote_state(acl: Access_Control) -> None:
+    if config.DATA_AUTHORITY_MODE is not config.DataAuthorityMode.REMOTE:
+        return
+    await asyncio.to_thread(acl.reload)
+    try:
+        await asyncio.to_thread(config.fetch_remote_bot_registry)
+    except Exception as xcp:
+        log.warning("Portal bot registry refresh failed; keeping cached node metadata: %s", xcp)
+
+
+async def _portal_authority_refresh_loop(
+    *,
+    acl: Access_Control,
+    stop_event: asyncio.Event,
+    interval_seconds: float = _PORTAL_AUTHORITY_REFRESH_INTERVAL_SECONDS,
+) -> None:
+    while not stop_event.is_set():
+        await _refresh_portal_remote_state(acl)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
 
 
 def main():
@@ -495,6 +634,19 @@ def main():
             log.warning("Skipping bot metadata sync because the current bot user is unavailable")
             return
 
+        display_avatar_url = getattr(me, "display_avatar_url", None)
+        avatar_uri = str(display_avatar_url) if display_avatar_url is not None else None
+        accent_color_hex = color_int_to_hex(
+            cached_member_role_color(bot, guild_id=config.DISCORD_GUILD, user_id=me.id)
+        )
+        presentation = (
+            config.BotMetadataPresentation(
+                avatar_uri=avatar_uri,
+                accent_color_hex=accent_color_hex,
+            )
+            if avatar_uri is not None or accent_color_hex is not None
+            else None
+        )
         snapshot = config.build_local_bot_metadata_snapshot(
             bot_id=me.id,
             label=me.display_name or me.username,
@@ -505,6 +657,7 @@ def main():
                 public_base_url=config.MOD_WEB_SERVER.public_base_url,
                 node_api_base_url=config.MOD_WEB_SERVER.node_api_base_url,
             ),
+            presentation=presentation,
         )
         if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.LOCAL:
             try:

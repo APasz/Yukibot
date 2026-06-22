@@ -220,7 +220,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             )
         )
         saves: NodeSaveList | None = (
-            self._node_api.build_save_list(app) if app_entry.supports_saves and can_manage_app else None
+            await self._node_api.build_save_list(app) if app_entry.supports_saves and can_manage_app else None
         )
         blueprints: NodeBlueprintList | None = (
             self._node_api.build_blueprint_list(app, actor_user_id=user.discord_id)
@@ -610,6 +610,15 @@ class ModWebModelsMixin(ModWebServiceSupport):
         if key == config.ACTIVE_BOT_PROFILE.name.value.casefold():
             return config.ACTIVE_BOT_PROFILE.name.value.title()
         return node_name
+
+    def _known_bot_snapshot_for_node(self, *, node_name: str) -> config.BotMetadataSnapshot | None:
+        key: str = node_name.casefold()
+        for snapshot in self._known_bot_snapshots():
+            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
+            if mod_web is None or mod_web.node_name.casefold() != key:
+                continue
+            return snapshot
+        return None
 
     def _remote_node_link(self, node_name: str) -> ModWebNodeLink:
         key: str = node_name.casefold()

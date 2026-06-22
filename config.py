@@ -530,9 +530,44 @@ class BotMetadataModWeb(BaseModel):
         return text
 
 
+class BotMetadataPresentation(BaseModel):
+    avatar_uri: str | None = None
+    accent_color_hex: str | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("avatar_uri")
+    @classmethod
+    def _validate_avatar_uri(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            raise ValueError("bot metadata avatar URI must not be empty.")
+        parsed = urlsplit(text)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("bot metadata avatar URI must use http or https.")
+        if not parsed.netloc:
+            raise ValueError("bot metadata avatar URI must include a host.")
+        return text
+
+    @field_validator("accent_color_hex")
+    @classmethod
+    def _validate_accent_color_hex(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            raise ValueError("bot metadata accent color must not be empty.")
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", text) is None:
+            raise ValueError("bot metadata accent color must be a hex color in #rrggbb format.")
+        return text.casefold()
+
+
 class BotMetadataFeatures(BaseModel):
     oauth: PersistedOAuthLinks | None = None
     mod_web: BotMetadataModWeb | None = None
+    presentation: BotMetadataPresentation | None = None
 
 
 class BotMetadataSnapshot(BaseModel):
@@ -958,6 +993,7 @@ def build_local_bot_metadata_snapshot(
     bot_profile: BotProfileName,
     oauth: PersistedOAuthLinks,
     mod_web: BotMetadataModWeb | None = None,
+    presentation: BotMetadataPresentation | None = None,
 ) -> BotMetadataSnapshot:
     return BotMetadataSnapshot(
         profile=BotMetadataProfile(
@@ -965,7 +1001,7 @@ def build_local_bot_metadata_snapshot(
             label=label,
             bot_profile=bot_profile,
         ),
-        features=BotMetadataFeatures(oauth=oauth, mod_web=mod_web),
+        features=BotMetadataFeatures(oauth=oauth, mod_web=mod_web, presentation=presentation),
     )
 
 

@@ -310,6 +310,7 @@ class NodeAppActivityProviderEntry:
     provider_id: str
     label: str
     enabled: bool
+    current_value: str | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppActivityProviderEntry":
@@ -317,6 +318,7 @@ class NodeAppActivityProviderEntry:
             provider_id=_required_string(payload, "provider_id"),
             label=_required_string(payload, "label"),
             enabled=_required_bool(payload, "enabled"),
+            current_value=_optional_string(payload, "current_value"),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -324,6 +326,7 @@ class NodeAppActivityProviderEntry:
             "provider_id": self.provider_id,
             "label": self.label,
             "enabled": self.enabled,
+            "current_value": self.current_value,
         }
 
 
@@ -713,6 +716,22 @@ class NodeModMutationAction(StrEnum):
     TOGGLE_COREMOD = "toggle_coremod"
     TOGGLE_DOWNLOAD_BLOCK = "toggle_download_block"
     DELETE = "delete"
+
+
+def required_mod_mutation_level(
+    action: NodeModMutationAction,
+    *,
+    is_protected: bool = False,
+) -> Power_Level:
+    if action in {NodeModMutationAction.ENABLE, NodeModMutationAction.DISABLE}:
+        return Power_Level.sudo if is_protected else Power_Level.admin
+    if action in {
+        NodeModMutationAction.TOGGLE_COREMOD,
+        NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK,
+        NodeModMutationAction.DELETE,
+    }:
+        return Power_Level.sudo
+    raise ValueError(f"Unsupported mod mutation action: {action}")
 
 
 class NodeModMutationRequest(BaseModel):
@@ -1107,6 +1126,7 @@ class NodeAppRuntimeSummary:
     runtime_fault: AppRuntimeFault | None = None
     transition_state: NodeAppTransitionState = NodeAppTransitionState.NONE
     connected_player_names: tuple[str, ...] = ()
+    activity_providers: tuple[NodeAppActivityProviderEntry, ...] = ()
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeAppRuntimeSummary:
@@ -1123,6 +1143,7 @@ class NodeAppRuntimeSummary:
         storage_total_bytes = _optional_int(payload, "storage_total_bytes")
         footprint_bytes = _optional_int(payload, "footprint_bytes")
         raw_runtime_fault = payload.get("runtime_fault")
+        raw_activity_providers = payload.get("activity_providers", ())
 
         if not isinstance(running, bool):
             raise ValueError("Node app runtime summary running is invalid.")
@@ -1139,6 +1160,10 @@ class NodeAppRuntimeSummary:
             raise ValueError("Node app runtime summary relay_support is invalid.") from xcp
         if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
             raise ValueError("Node app runtime summary runtime_fault is invalid.")
+        if not isinstance(raw_activity_providers, list | tuple):
+            raise ValueError("Node app runtime summary activity_providers is invalid.")
+        if any(not isinstance(provider_payload, Mapping) for provider_payload in raw_activity_providers):
+            raise ValueError("Node app runtime summary activity_providers is invalid.")
 
         return cls(
             running=running,
@@ -1156,6 +1181,10 @@ class NodeAppRuntimeSummary:
             if raw_runtime_fault is not None
             else None,
             connected_player_names=connected_player_names,
+            activity_providers=tuple(
+                NodeAppActivityProviderEntry.from_mapping(cast(Mapping[str, object], provider_payload))
+                for provider_payload in raw_activity_providers
+            ),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1173,6 +1202,7 @@ class NodeAppRuntimeSummary:
             "storage_total_bytes": self.storage_total_bytes,
             "footprint_bytes": self.footprint_bytes,
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
+            "activity_providers": [provider.to_mapping() for provider in self.activity_providers],
         }
 
 
@@ -3582,7 +3612,7 @@ class NodeApiService:
             traffic_log.info("Node API save list request: node=%s app=%s", self.node_name, app_name)
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_READ,))
             app = self._resolve_app(app_name)
-            return self.build_save_list(app).to_mapping()
+            return (await self.build_save_list(app)).to_mapping()
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/saves/{{save_id:path}}/download")
         async def _download_save(
@@ -3590,7 +3620,7 @@ class NodeApiService:
             save_id: str,
             request: Request,
             access_token: str | None = None,
-        ) -> FileResponse:
+        ) -> Response:
             traffic_log.info(
                 "Node API save download request: node=%s app=%s save=%s", self.node_name, app_name, save_id
             )
@@ -3718,7 +3748,7 @@ class NodeApiService:
                 scopes=(NodeApiScope.SAVES_WRITE,),
                 verified_grant=grant,
             )
-            result: NodeSaveMutationResult = self.delete_save_file(
+            result: NodeSaveMutationResult = await self.delete_save_file(
                 app=app,
                 save_id=save_id,
                 actor_user_id=actor_user_id,
@@ -4132,6 +4162,7 @@ class NodeApiService:
                     provider_id=entry.provider_id,
                     label=entry.label,
                     enabled=entry.enabled,
+                    current_value=entry.current_value,
                 )
                 for entry in activity_provider_entries
             ),
@@ -4589,6 +4620,7 @@ class NodeApiService:
         storage_free_bytes: int | None = None
         storage_total_bytes: int | None = None
         footprint_bytes: int | None = None
+        activity_providers: tuple[NodeAppActivityProviderEntry, ...] = ()
         if include_storage:
             try:
                 system_stats = Stats_System()
@@ -4606,6 +4638,18 @@ class NodeApiService:
             except Exception as xcp:
                 if not (config.IS_SHUTTINGDOWN and _is_executor_shutdown_error(xcp)):
                     log.warning("Node API footprint stats failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
+        try:
+            activity_providers = tuple(
+                NodeAppActivityProviderEntry(
+                    provider_id=entry.provider_id,
+                    label=entry.label,
+                    enabled=entry.enabled,
+                    current_value=entry.current_value,
+                )
+                for entry in await app.activity_provider_entries_with_values()
+            )
+        except Exception as xcp:
+            log.warning("Node API activity provider snapshot failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
 
         version = app.version_display
         if version == "none":
@@ -4625,6 +4669,7 @@ class NodeApiService:
             footprint_bytes=footprint_bytes,
             runtime_fault=getattr(app, "runtime_fault", None),
             connected_player_names=connected_player_names,
+            activity_providers=activity_providers,
         )
 
     async def build_live_app_runtime_summary(self, app: App) -> NodeAppRuntimeSummary:
@@ -6005,8 +6050,8 @@ class NodeApiService:
         )
         return FileResponse(path=archive_path, filename=archive_path.name)
 
-    def build_save_list(self, app: App) -> NodeSaveList:
-        saves: tuple[AppSaveEntry, ...] = app.list_save_files()
+    async def build_save_list(self, app: App) -> NodeSaveList:
+        saves: tuple[AppSaveEntry, ...] = await app.list_save_files_async()
         save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
         traffic_log.info("Node API built save list: node=%s app=%s saves=%s", self.node_name, app.name, len(saves))
         return NodeSaveList(
@@ -6019,7 +6064,33 @@ class NodeApiService:
             saves=tuple[NodeSaveEntry, ...](self._save_entry(save, can_delete=save_can_delete) for save in saves),
         )
 
-    async def build_save_download_response(self, *, app: App, save_id: str) -> FileResponse:
+    async def build_save_download_response(self, *, app: App, save_id: str) -> Response:
+        try:
+            custom_download: tuple[str, bytes] | None = await app.download_save_content(save_id)
+        except FileNotFoundError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise self._runtime_http_exception(app=app, action="Save download", error=xcp) from xcp
+        except Exception as xcp:
+            raise _http_exception(500, f"Save download failed: {xcp}") from xcp
+        if custom_download is not None:
+            filename, content = custom_download
+            traffic_log.info(
+                "Node API sending save content: node=%s app=%s save=%s filename=%s bytes=%s",
+                self.node_name,
+                app.name,
+                save_id,
+                filename,
+                len(content),
+            )
+            return Response(
+                content=content,
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
         try:
             save_path: Path = app.resolve_save_file(save_id)
         except FileNotFoundError as xcp:
@@ -6066,7 +6137,7 @@ class NodeApiService:
 
         temp_path: Path = await self._persist_upload_to_temp(upload)
         try:
-            return self.upload_save_path(
+            return await self.upload_save_path(
                 app=app,
                 root_id=root_id,
                 source_path=temp_path,
@@ -6076,7 +6147,7 @@ class NodeApiService:
         finally:
             temp_path.unlink(missing_ok=True)
 
-    def upload_save_path(
+    async def upload_save_path(
         self,
         *,
         app: App,
@@ -6089,7 +6160,7 @@ class NodeApiService:
             raise _http_exception(409, f"{app.friendly} does not support save uploads.")
         save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
         try:
-            updated: AppSaveEntry = app.upload_save_file(
+            updated: AppSaveEntry = await app.upload_save_file_async(
                 root_id=root_id, upload_name=upload_name, source_path=source_path
             )
         except FileNotFoundError as xcp:
@@ -6098,6 +6169,8 @@ class NodeApiService:
             raise _http_exception(409, str(xcp)) from xcp
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise self._runtime_http_exception(app=app, action="Save upload", error=xcp) from xcp
         except Exception as xcp:
             raise _http_exception(500, f"Save upload failed: {xcp}") from xcp
 
@@ -6241,13 +6314,15 @@ class NodeApiService:
             raise _http_exception(400, "Save name must not be empty.")
 
         try:
-            current_save: AppSaveEntry = next(save for save in app.list_save_files() if save.id == save_id)
+            current_save: AppSaveEntry = next(save for save in await app.list_save_files_async() if save.id == save_id)
         except StopIteration as xcp:
             raise _http_exception(404, f"Unknown save file: {save_id}") from xcp
+        except RuntimeError as xcp:
+            raise self._runtime_http_exception(app=app, action="Save rename", error=xcp) from xcp
 
         destination_relative_path: str = PurePosixPath(current_save.relative_path).with_name(resolved_name).as_posix()
         try:
-            updated: AppSaveEntry = app.relocate_save_file(
+            updated: AppSaveEntry = await app.relocate_save_file_async(
                 save_id=save_id,
                 destination_root_id=current_save.root_id,
                 destination_relative_path=destination_relative_path,
@@ -6258,6 +6333,8 @@ class NodeApiService:
             raise _http_exception(409, str(xcp)) from xcp
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise self._runtime_http_exception(app=app, action="Save rename", error=xcp) from xcp
         except Exception as xcp:
             raise _http_exception(500, f"Save rename failed: {xcp}") from xcp
 
@@ -6277,7 +6354,7 @@ class NodeApiService:
             save=self._save_entry(updated, can_delete=save_can_delete),
         )
 
-    def delete_save_file(
+    async def delete_save_file(
         self,
         *,
         app: App,
@@ -6288,11 +6365,13 @@ class NodeApiService:
             raise _http_exception(409, f"{app.friendly} does not support save deletion.")
         save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
         try:
-            deleted: AppSaveEntry = app.delete_save_file(file_id=save_id)
+            deleted: AppSaveEntry = await app.delete_save_file_async(file_id=save_id)
         except FileNotFoundError as xcp:
             raise _http_exception(404, str(xcp)) from xcp
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise self._runtime_http_exception(app=app, action="Save delete", error=xcp) from xcp
         except Exception as xcp:
             raise _http_exception(500, f"Save delete failed: {xcp}") from xcp
 
@@ -6310,6 +6389,15 @@ class NodeApiService:
             message=f"Deleted save `{deleted.label}` from {app.friendly}.",
             save=self._save_entry(deleted, can_delete=save_can_delete),
         )
+
+    @staticmethod
+    def _runtime_http_exception(*, app: App, action: str, error: RuntimeError) -> Exception:
+        detail = str(error)
+        if detail == f"{app.friendly} is not running.":
+            return _http_exception(409, detail)
+        if detail.endswith("API is unavailable.") or detail.endswith("save API is unavailable."):
+            return _http_exception(503, f"{action} failed: {detail}")
+        return _http_exception(409, detail)
 
     def build_blueprint_list(self, app: App, *, actor_user_id: int) -> NodeBlueprintList:
         if not app.supports_blueprints:
@@ -6647,9 +6735,7 @@ class NodeApiService:
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
         except RuntimeError as xcp:
-            if str(xcp) == f"{app.friendly} is not running.":
-                raise _http_exception(409, str(xcp)) from xcp
-            raise _http_exception(500, f"Console action failed: {xcp}") from xcp
+            raise self._runtime_http_exception(app=app, action="Console action", error=xcp) from xcp
         except Exception as xcp:
             raise _http_exception(500, f"Console action failed: {xcp}") from xcp
 
@@ -6684,6 +6770,15 @@ class NodeApiService:
             manager: Mod_Manager = app.has_mod_manager
             await manager.reload_mods()
             mod: Mod = manager.get(mod_name)
+            override_protected_mod: bool = mod.is_protected and action in {
+                NodeModMutationAction.ENABLE,
+                NodeModMutationAction.DISABLE,
+                NodeModMutationAction.DELETE,
+            }
+            await self._require_acl().perm_check(
+                actor_user_id,
+                required_mod_mutation_level(action, is_protected=override_protected_mod),
+            )
             result_message: str
             result_mod_entry: NodeModEntry | None
 
@@ -6692,7 +6787,7 @@ class NodeApiService:
                 updated_mod: Mod = await manager.set_enabled(
                     mod,
                     True,
-                    override_coremod=await self._override_coremod_if_needed(actor_user_id=actor_user_id, mod=mod),
+                    override_coremod=override_protected_mod,
                 )
                 result_message = f"Enabled {updated_mod.friendly}."
                 result_mod_entry = self._mod_entry(updated_mod)
@@ -6701,12 +6796,11 @@ class NodeApiService:
                 updated_mod = await manager.set_enabled(
                     mod,
                     False,
-                    override_coremod=await self._override_coremod_if_needed(actor_user_id=actor_user_id, mod=mod),
+                    override_coremod=override_protected_mod,
                 )
                 result_message = f"Disabled {updated_mod.friendly}."
                 result_mod_entry = self._mod_entry(updated_mod)
             elif action is NodeModMutationAction.TOGGLE_COREMOD:
-                await self._require_actor_sudo(actor_user_id)
                 if mod.is_builtin:
                     raise _http_exception(409, "Built-in mods cannot be converted to or from coremods.")
                 updated_mod = await manager.set_coremod(mod, not mod.is_coremod_type)
@@ -6716,7 +6810,6 @@ class NodeApiService:
                 result_message = f"Coremod {coremod_text} for {updated_mod.friendly}."
                 result_mod_entry = self._mod_entry(updated_mod)
             elif action is NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
-                await self._require_actor_sudo(actor_user_id)
                 reason: ModDownloadBlockReason | None = (
                     ModDownloadBlockReason.SERVER_ONLY if mod.downloadable else mod.default_download_block_reason()
                 )
@@ -6730,7 +6823,7 @@ class NodeApiService:
                 require_app_stopped_for_mod_mutation(app)
                 await manager.remove(
                     mod,
-                    override_coremod=await self._override_coremod_if_needed(actor_user_id=actor_user_id, mod=mod),
+                    override_coremod=override_protected_mod,
                 )
                 result_message = f"Deleted {mod.friendly}."
                 result_mod_entry = None
@@ -7276,9 +7369,6 @@ class NodeApiService:
             raise _http_exception(503, "Mod web permissions are not available.")
         return self._acl
 
-    async def _require_actor_sudo(self, actor_user_id: int) -> None:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
-
     @staticmethod
     def _validated_upload_filename(filename: str, *, kind: str) -> str:
         resolved = filename.strip()
@@ -7355,12 +7445,6 @@ class NodeApiService:
                 handle.write(chunk)
         await upload.close()
         return temp_path
-
-    async def _override_coremod_if_needed(self, *, actor_user_id: int, mod: Mod) -> bool:
-        if not mod.is_protected:
-            return False
-        await self._require_actor_sudo(actor_user_id)
-        return True
 
     def _running_blocker_name(self, app: App) -> str | None:
         manager = self._require_manager()

@@ -46,6 +46,7 @@ from .runtime_imports import (
     Label,
     LiteralString,
     ModWebUser,
+    NodeAppActivityProviderEntry,
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
@@ -66,6 +67,7 @@ from .runtime_imports import (
     app_scope_from_name,
     assert_never,
     asyncio,
+    cast,
     config,
     escape,
     json,
@@ -91,6 +93,7 @@ from .types import (
     _ModWebChatSurfaceConfig,
     _ModWebKillControlState,
     _ModWebModToolbarBindings,
+    _ModWebNodePresenceBadgeSpec,
     _ModWebRuntimeToolbarBindings,
     _ModWebStartStopControlState,
     _ModWebTabActionSpec,
@@ -264,6 +267,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 hero_corner_bindings = self._render_app_hero_corner_badges(
                     ui=ui,
                     node_name=model.node_name,
+                    top_badges=self._app_page_hero_badges(model),
                     initial_system_summary=initial_system_summary,
                     initial_app_stats=model.app_stats,
                     is_local_node=local_app is not None,
@@ -276,7 +280,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                             app_name=model.app_name,
                             title=model.app_friendly,
                             title_font_preset=model.app_title_font_preset,
-                            static_badges=self._app_page_hero_badges(model),
+                            activity_providers=self._enabled_app_activity_providers(model),
                             initial_app_stats=model.app_stats,
                             refresh_async_app_stats=hero_runtime_refresh,
                         )
@@ -366,6 +370,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 hero_corner_bindings = self._render_app_hero_corner_badges(
                     ui=ui,
                     node_name=model.node_name,
+                    top_badges=self._app_page_hero_badges(model),
                     initial_system_summary=initial_system_summary,
                     initial_app_stats=model.app_stats,
                     is_local_node=local_app is not None,
@@ -378,7 +383,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                             app_name=model.app_name,
                             title=model.app_friendly,
                             title_font_preset=model.app_title_font_preset,
-                            static_badges=self._app_page_hero_badges(model),
+                            activity_providers=self._enabled_app_activity_providers(model),
                             initial_app_stats=model.app_stats,
                             refresh_async_app_stats=hero_runtime_refresh,
                         )
@@ -448,12 +453,11 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         if app_stats is None:
             relay_badge = _ModWebBadgeSpec(text="Unknown", tone="grey")
             version_badge = _ModWebBadgeSpec(text="Unknown", tone="black")
-            storage_badge = _ModWebBadgeSpec(text="Unavailable", tone="grey")
             return _ModWebAppHeroRuntimeDetails(
                 status_text="Unknown",
                 status_tone="grey",
                 relay_badge=relay_badge,
-                badges=(version_badge, storage_badge),
+                version_badge=version_badge,
             )
 
         if app_stats.transition_state is NodeAppTransitionState.STOPPING:
@@ -479,17 +483,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             status_tone = "warn"
 
         relay_badge = _ModWebBadgeSpec(text=f"{app_stats.relay_support.display_value}", tone="grey")
-        badges: list[_ModWebBadgeSpec] = [
-            _ModWebBadgeSpec(text=f"{app_stats.version or 'Unknown'}", tone="black"),
-            _ModWebBadgeSpec(
-                text=(
-                    f"{self._app_footprint_value(app_stats.footprint_bytes)}"
-                    if app_stats.footprint_bytes is not None
-                    else "Unavailable"
-                ),
-                tone="grey",
-            ),
-        ]
+        version_badge = _ModWebBadgeSpec(text=f"{app_stats.version or 'Unknown'}", tone="black")
         player_count_badge: _ModWebBadgeSpec | None = None
         if app_stats.player_count is not None and app_stats.player_capacity is not None:
             player_tone = "purple" if app_stats.player_count > 0 else "grey"
@@ -501,12 +495,72 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             status_text=status_text,
             status_tone=status_tone,
             relay_badge=relay_badge,
-            badges=tuple[_ModWebBadgeSpec, ...](badges),
+            version_badge=version_badge,
             player_count_badge=player_count_badge,
         )
 
     def _app_page_hero_badges(self, model: ModWebBasePageModel) -> tuple[_ModWebBadgeSpec, ...]:
         return self._app_resource_point_badges(model)
+
+    @staticmethod
+    def _enabled_app_activity_providers(model: ModWebBasePageModel) -> tuple[NodeAppActivityProviderEntry, ...]:
+        return tuple(provider for provider in model.activity_providers if provider.enabled)
+
+    @classmethod
+    def _visible_app_activity_provider_badges(
+        cls,
+        *,
+        app_stats: NodeAppRuntimeSummary | None,
+        activity_providers: tuple[NodeAppActivityProviderEntry, ...],
+    ) -> tuple[str, ...]:
+        if app_stats is None or not app_stats.running:
+            return ()
+        runtime_providers_by_id: dict[str, NodeAppActivityProviderEntry] = {
+            provider.provider_id.casefold(): provider
+            for provider in app_stats.activity_providers
+            if provider.enabled and provider.current_value is not None
+        }
+        badges: list[str] = []
+        for provider in activity_providers:
+            runtime_provider = runtime_providers_by_id.get(provider.provider_id.casefold())
+            if runtime_provider is None or runtime_provider.current_value is None:
+                continue
+            badges.append(
+                cls._app_activity_provider_badge_markup(
+                    provider_id=runtime_provider.provider_id,
+                    label=runtime_provider.label,
+                    current_value=runtime_provider.current_value,
+                )
+            )
+        return tuple(badges)
+
+    @staticmethod
+    def _app_activity_provider_badge_markup(*, provider_id: str, label: str, current_value: str) -> str:
+        if provider_id.casefold() == "day" and current_value.startswith("D") and current_value[1:].isdigit():
+            return escape(f"Day {int(current_value[1:])}")
+        if provider_id.casefold() == "stage":
+            tier_prefix = current_value
+            schematic_name = ""
+            if ":" in current_value:
+                tier_prefix, schematic_name = (part.strip() for part in current_value.split(":", 1))
+            if tier_prefix.startswith("T") and tier_prefix[1:].isdigit():
+                tier_text = f"Tier {int(tier_prefix[1:])}"
+                if schematic_name:
+                    return escape(f"{tier_text}: {schematic_name}")
+                return escape(tier_text)
+        if provider_id.casefold() == "time":
+            is_blood_moon = current_value.startswith("!")
+            raw_value = current_value[1:] if is_blood_moon else current_value
+            if raw_value.startswith("D") and "/H" in raw_value:
+                day_text, hour_text = raw_value[1:].split("/H", 1)
+                if day_text.isdigit() and hour_text.isdigit():
+                    day_markup = (
+                        f'<span class="mod-app-activity-alert">{escape(str(int(day_text)))}</span>'
+                        if is_blood_moon
+                        else escape(str(int(day_text)))
+                    )
+                    return f"Day {day_markup}/{escape(str(int(hour_text)))}"
+        return escape(f"{label}: {current_value}")
 
     @classmethod
     def _app_resource_point_badges(cls, model: ModWebBasePageModel) -> tuple[_ModWebBadgeSpec, ...]:
@@ -572,21 +626,31 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         *,
         ui: ModWebUi,
         node_name: str,
+        top_badges: tuple[_ModWebBadgeSpec, ...],
         initial_system_summary: NodeSystemSummary | None,
         initial_app_stats: NodeAppRuntimeSummary | None,
         is_local_node: bool,
     ) -> _ModWebAppHeroCornerBindings:
         initial_runtime_details = self._app_hero_runtime_details(initial_app_stats)
+        presence_stream_url = self._app_page_node_presence_stream_url(
+            node_name=node_name,
+            is_local_node=is_local_node,
+        )
+        initial_node_badge_tone: BadgeTone = (
+            "black"
+            if presence_stream_url is not None
+            else self._app_page_node_badge_tone(
+                node_name=node_name,
+                system_summary=initial_system_summary,
+                is_local_node=is_local_node,
+            )
+        )
         with ui.element("div").classes("mod-app-node-badge-wrap"):
             with ui.row().classes("mod-app-node-badge-row"):
                 node_badge = self._badge(
                     ui=ui,
                     text=node_name,
-                    tone=self._app_page_node_badge_tone(
-                        node_name=node_name,
-                        system_summary=initial_system_summary,
-                        is_local_node=is_local_node,
-                    ),
+                    tone=initial_node_badge_tone,
                     extra_classes="mod-app-corner-badge mod-app-node-badge",
                 )
                 if color_hex := self._node_role_color_hex(node_name=node_name):
@@ -597,8 +661,29 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     tone=initial_runtime_details.relay_badge.tone,
                     extra_classes="mod-app-corner-badge",
                 )
+                version_badge = self._badge(
+                    ui=ui,
+                    text=initial_runtime_details.version_badge.text,
+                    tone=initial_runtime_details.version_badge.tone,
+                    extra_classes="mod-app-corner-badge",
+                )
+                for badge in top_badges:
+                    self._badge_spec(ui=ui, badge=badge, extra_classes="mod-app-corner-badge")
+        node_badge_spec = self._app_page_node_presence_badge_spec(
+            node_name=node_name,
+            badge_element=node_badge,
+            presence_stream_url=presence_stream_url,
+        )
+        if node_badge_spec is not None:
+            self._run_node_presence_badges_javascript(
+                ui=ui,
+                badge_specs=(node_badge_spec,),
+                controller_key="modWebAppHeroNodePresence",
+            )
 
         def _apply_node_summary(system_summary: NodeSystemSummary | None) -> None:
+            if node_badge_spec is not None:
+                return
             self._set_badge_state(
                 node_badge,
                 node_name,
@@ -618,6 +703,12 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 runtime_details.relay_badge.tone,
                 extra_classes="mod-app-corner-badge",
             )
+            self._set_badge_state(
+                version_badge,
+                runtime_details.version_badge.text,
+                runtime_details.version_badge.tone,
+                extra_classes="mod-app-corner-badge",
+            )
 
         return _ModWebAppHeroCornerBindings(
             apply_node_summary=_apply_node_summary,
@@ -635,6 +726,41 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         if system_summary is not None or is_local_node:
             return "black"
         return "red"
+
+    def _app_page_node_presence_stream_url(self, *, node_name: str, is_local_node: bool) -> str | None:
+        if is_local_node:
+            return self._current_node_link().presence_stream_url
+        return self._remote_node_link(node_name).presence_stream_url
+
+    @classmethod
+    def _app_page_node_presence_badge_spec(
+        cls,
+        *,
+        node_name: str,
+        badge_element: Label,
+        presence_stream_url: str | None,
+    ) -> _ModWebNodePresenceBadgeSpec | None:
+        if presence_stream_url is None:
+            return None
+        badge_element_id = getattr(badge_element, "id", None)
+        if not isinstance(badge_element_id, int):
+            return None
+        extra_classes = "mod-app-corner-badge mod-app-node-badge"
+        healthy_class_name = cls._badge_class_name(tone="black", extra_classes=extra_classes)
+        return _ModWebNodePresenceBadgeSpec(
+            node_name=node_name,
+            badge_element_id=badge_element_id,
+            text_element_id=None,
+            node_label=node_name,
+            pending_text=node_name,
+            alive_text=node_name,
+            down_text=node_name,
+            presence_stream_url=presence_stream_url,
+            pending_class_name=healthy_class_name,
+            healthy_class_name=healthy_class_name,
+            unhealthy_class_name=cls._badge_class_name(tone="red", extra_classes=extra_classes),
+            show_latency=False,
+        )
 
     @staticmethod
     def _app_scope_from_name(app_name: str) -> str | None:
@@ -683,7 +809,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         app_name: str,
         title: str,
         title_font_preset: str,
-        static_badges: tuple[_ModWebBadgeSpec, ...],
+        activity_providers: tuple[NodeAppActivityProviderEntry, ...],
         initial_app_stats: NodeAppRuntimeSummary | None,
         refresh_async_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]] | None = None,
     ) -> Callable[[NodeAppRuntimeSummary | None], None]:
@@ -703,10 +829,8 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     status_value_label = ui.label(initial_runtime_details.status_text).classes(
                         f"mod-app-hero-status-value mod-app-hero-status-value-{initial_runtime_details.status_tone}"
                     )
-            with ui.row().classes(f"{self._hero_badge_row_classes(fill=True)} w-full"):
-                runtime_badge_labels: tuple[Label, ...] = tuple(
-                    self._badge(ui=ui, text=badge.text, tone=badge.tone) for badge in initial_runtime_details.badges
-                )
+            runtime_badge_row = ui.row().classes(f"{self._hero_badge_row_classes(fill=True)} w-full")
+            with runtime_badge_row:
                 player_badge = self._badge(
                     ui=ui,
                     text=initial_runtime_details.player_count_badge.text
@@ -732,9 +856,19 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         or ""
                     ),
                 )
-                self._set_optional_badge_state(player_badge, initial_runtime_details.player_count_badge)
-                for badge in static_badges:
-                    self._badge_spec(ui=ui, badge=badge)
+                initial_activity_badges = self._visible_app_activity_provider_badges(
+                    app_stats=initial_app_stats,
+                    activity_providers=activity_providers,
+                )
+                activity_badge_labels: tuple[Html, ...] = tuple(
+                    cast(
+                        Html,
+                        ui.html(initial_activity_badges[index] if index < len(initial_activity_badges) else "").classes(
+                            self._badge_class_name(tone="black")
+                        ),
+                    )
+                    for index, _provider in enumerate(activity_providers)
+                )
 
         def _apply_runtime(app_stats: NodeAppRuntimeSummary | None) -> None:
             hero_card.classes(replace=self._app_hero_card_classes(app_stats))
@@ -743,12 +877,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             status_value_label.classes(
                 replace=f"mod-app-hero-status-value mod-app-hero-status-value-{runtime_details.status_tone}"
             )
-            for runtime_badge_label, runtime_badge in zip(
-                runtime_badge_labels,
-                runtime_details.badges,
-                strict=True,
-            ):
-                self._set_badge_state(runtime_badge_label, runtime_badge.text, runtime_badge.tone)
             self._set_optional_badge_state(player_badge, runtime_details.player_count_badge)
             self._set_html_tooltip_state(
                 player_badge_tooltip,
@@ -760,8 +888,26 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                 )
                 or "",
             )
+            visible_activity_badges = self._visible_app_activity_provider_badges(
+                app_stats=app_stats,
+                activity_providers=activity_providers,
+            )
+            for activity_badge_label, activity_badge in zip(
+                activity_badge_labels,
+                visible_activity_badges,
+                strict=False,
+            ):
+                activity_badge_label.set_content(activity_badge)
+                activity_badge_label.update()
+                self._set_element_visibility(activity_badge_label, visible=True)
+            for activity_badge_label in activity_badge_labels[len(visible_activity_badges) :]:
+                self._set_element_visibility(activity_badge_label, visible=False)
+            self._set_element_visibility(
+                runtime_badge_row,
+                visible=runtime_details.player_count_badge is not None or bool(visible_activity_badges),
+            )
 
-        hero_card.classes(replace=self._app_hero_card_classes(initial_app_stats))
+        _apply_runtime(initial_app_stats)
         if refresh_async_app_stats is None:
             return _apply_runtime
         refresh_async: AsyncRefresh = self._build_async_refreshable_updater(
@@ -775,6 +921,13 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         )
         self._register_timer_cleanup(ui=ui, timer=refresh_timer)
         return _apply_runtime
+
+    @staticmethod
+    def _set_element_visibility(element: Label | Element, *, visible: bool) -> None:
+        if visible:
+            element.style(remove="display: none;")
+            return
+        element.style(add="display: none;")
 
     def _page_section_badges(
         self,

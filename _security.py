@@ -66,7 +66,10 @@ class Access_Control:
     )
 
     def __init__(self, pointer: Path | None = None):
-        self.pointer = pointer or Path("users.json")
+        if pointer is None and config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
+            self.pointer = config.authority_cache_path(config.AuthorityResource.USERS)
+        else:
+            self.pointer = pointer or Path("users.json")
         self._roles: dict[int, Power_Level] = {}
         self._guests_enabled = getattr(config, "GUESTS_ALLOWED", True)
         self.reload()

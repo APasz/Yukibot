@@ -14,6 +14,7 @@ T_co = TypeVar("T_co", covariant=True)
 
 class ConsoleResponseSource(enum.StrEnum):
     NONE = "none"
+    API = "api"
     RCON = "rcon"
     TELNET = "telnet"
 

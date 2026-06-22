@@ -1720,9 +1720,9 @@ class Receiver(AM_Receiver):
 
 
 class Matchers:
-    def __init__(self, app: SevenDays):
-        self.app = app
-        self._last_telnet = datetime.now()
+    def __init__(self, app: SevenDays) -> None:
+        self.app: SevenDays = app
+        self._last_telnet: datetime = datetime.now()
         app._tail_matchers.add(self.match_version)
         app._tail_matchers.add(self.match_ready)
         app._tail_matchers.add(self.match_transiant)
@@ -1742,7 +1742,7 @@ class Matchers:
                 log.info("%s matched 7D2D ready line: %s", self.app.name, line)
                 self.app._server_ready.set()
 
-    async def match_transiant(self, line: str):
+    async def match_transiant(self, line: str) -> None:
         if match := _SEVENDAYS_TRANSIENT_RE.search(line):
             player = match.group(1)
             action = str(match.group(2)).lower()
@@ -1754,7 +1754,7 @@ class Matchers:
                 if self.app.relay_notice_player_left_enabled is False:
                     return
                 notice_action = PlayerSessionAction.LEFT
-            notice = PlayerSessionNotice(
+            notice: PlayerSessionNotice = PlayerSessionNotice(
                 action=notice_action,
                 source=RelayNoticeSource.APP_LOG,
             )
@@ -1768,7 +1768,7 @@ class Matchers:
                 )
             )
 
-    async def match_chat(self, line: str):
+    async def match_chat(self, line: str) -> None:
         player = None
         if match := _SEVENDAYS_CHAT_RE.search(line):
             player = str(match.group(1)).strip("\r\n ")
@@ -1782,7 +1782,7 @@ class Matchers:
             return
         if match := _SEVENDAYS_DEATH_RE.search(line):
             player = match.group("player")
-            notice = GameDeathNotice(
+            notice: GameDeathNotice = GameDeathNotice(
                 death_kind=GameDeathKind.UNKNOWN,
                 detail_text="died",
                 source=RelayNoticeSource.APP_LOG,

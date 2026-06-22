@@ -4,7 +4,9 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+import config
 from _security import Access_Control, Power_Level
 
 
@@ -156,6 +158,19 @@ class SecurityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "already has User access"):
                 acl.grant_visitor(100, 200)
+
+    def test_remote_access_control_uses_authority_cache_path_by_default(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "cache" / "users.json"
+            with (
+                patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
+                patch.object(config, "authority_cache_path", return_value=cache_path),
+                patch.object(config, "load_authority_json", return_value={}) as load_authority_json,
+            ):
+                acl = Access_Control()
+
+        self.assertEqual(acl.pointer, cache_path)
+        load_authority_json.assert_called_once_with(config.AuthorityResource.USERS, cache_path)
 
 
 if __name__ == "__main__":
