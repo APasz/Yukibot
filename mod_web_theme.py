@@ -187,7 +187,7 @@ class ModWebTheme:
                 .mod-card-hero {{
                     border: 3px solid transparent !important;
                     background:
-                        linear-gradient(90deg, rgba(139, 92, 246, 0.18), transparent 32%) padding-box,
+                        linear-gradient(90deg, var(--mod-hero-border-glow, rgba(139, 92, 246, 0.18)), transparent 32%) padding-box,
                         linear-gradient(135deg, rgba(9, 9, 13, 0.98), rgba(15, 15, 21, 0.98)) padding-box,
                         linear-gradient(
                             180deg,

@@ -575,16 +575,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
             for section in _current_sections():
                 if section.is_simulated_down:
                     continue
-                if section.node.is_current:
-                    unsubscribe = self._node_api.subscribe_local_node_state(
-                        _node_state_callback(section.node)
-                    )
-                else:
-                    unsubscribe: Callable[[], None] = self._create_remote_node_state_subscription(
-                        node=section.node,
-                        user=user,
-                        on_update=_node_state_callback(section.node),
-                    )
+                unsubscribe = self._create_remote_node_state_subscription(
+                    node=section.node,
+                    user=user,
+                    on_update=_node_state_callback(section.node),
+                )
                 unsubscribes.append(unsubscribe)
 
             def _cleanup_live_updates() -> None:
@@ -1531,23 +1526,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             )
         )
 
-    @staticmethod
-    def _is_current_node_name(node_name: str) -> bool:
-        return node_name.strip().casefold() == config.MOD_WEB_SERVER.node_name.strip().casefold()
-
     async def _refresh_runtime_model(self, *, model: ModWebBasePageModel, user: ModWebUser) -> ModWebBasePageModel:
-        if self._is_current_node_name(model.node_name):
-            app: ManagedApp = self._resolve_app(model.app_name)
-            app_entry = self._node_api.build_app_entry(app)
-            app_stats: NodeAppRuntimeSummary = await self._node_api.build_app_runtime_summary(app)
-            return self._model_with_runtime_state(
-                model,
-                app_stats=app_stats,
-                app_start_blocked=self._app_start_blocked_local(app),
-                update_info=app_entry.update_info,
-                update_status=app_entry.update_status,
-            )
-
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         app_entry, app_stats, system_summary = await asyncio.gather(
             self._remote_app_entry_async(node, model.app_name, user),
@@ -1571,55 +1550,35 @@ class ModWebHomeMixin(ModWebServiceSupport):
         )
 
     def _app_link_from_entry(self, *, entry: NodeAppEntry, user: ModWebUser, node_name: str) -> ModWebAppLink:
-        is_current_node: bool = node_name.casefold() == config.MOD_WEB_SERVER.node_name.casefold()
-        if is_current_node:
-            url = self.app_path(entry.name)
-            api_url = (
-                self._node_api.list_mods_url(entry.name, base_url=_SAME_ORIGIN_NODE_API_BASE)
-                if entry.supports_mods
-                else None
-            )
-            configs_api_url = (
-                self._node_api.list_configs_url(entry.name, base_url=_SAME_ORIGIN_NODE_API_BASE)
-                if entry.supports_configs and self._user_has_level(user, entry.config_read_level)
-                else None
-            )
-            saves_api_url = (
-                self._node_api.list_saves_url(entry.name, base_url=_SAME_ORIGIN_NODE_API_BASE)
-                if entry.supports_saves
-                else None
-            )
-            settings_api_url = (
-                self._node_api.list_settings_url(entry.name, base_url=_SAME_ORIGIN_NODE_API_BASE)
-                if entry.supports_settings
-                else None
-            )
-            chat_url = self.app_chat_path(entry.name) if entry.supports_chat else None
-        else:
-            encoded_node_name: str = quote(node_name, safe="")
-            encoded_app_name: str = quote(entry.name, safe="")
-            url: str = self.node_app_path(node_name, entry.name)
-            api_url: str | None = (
-                f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{encoded_node_name}/apps/{encoded_app_name}/mods"
-                if entry.supports_mods
-                else None
-            )
-            configs_api_url: str | None = (
-                f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{encoded_node_name}/apps/{encoded_app_name}/configs"
-                if entry.supports_configs and self._user_has_level(user, entry.config_read_level)
-                else None
-            )
-            saves_api_url: str | None = (
-                f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{encoded_node_name}/apps/{encoded_app_name}/saves"
-                if entry.supports_saves
-                else None
-            )
-            settings_api_url: str | None = (
-                f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{encoded_node_name}/apps/{encoded_app_name}/settings"
-                if entry.supports_settings
-                else None
-            )
-            chat_url: str | None = self.node_app_chat_path(node_name, entry.name) if entry.supports_chat else None
+        color_hex = self._resolved_app_color_hex(
+            app_name=entry.name,
+            scope=entry.scope,
+            color_hex=entry.color_hex,
+        )
+        encoded_node_name: str = quote(node_name, safe="")
+        encoded_app_name: str = quote(entry.name, safe="")
+        url: str = self.node_app_path(node_name, entry.name)
+        api_url: str | None = (
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{encoded_node_name}/apps/{encoded_app_name}/mods"
+            if entry.supports_mods
+            else None
+        )
+        configs_api_url: str | None = (
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{encoded_node_name}/apps/{encoded_app_name}/configs"
+            if entry.supports_configs and self._user_has_level(user, entry.config_read_level)
+            else None
+        )
+        saves_api_url: str | None = (
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{encoded_node_name}/apps/{encoded_app_name}/saves"
+            if entry.supports_saves
+            else None
+        )
+        settings_api_url: str | None = (
+            f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{encoded_node_name}/apps/{encoded_app_name}/settings"
+            if entry.supports_settings
+            else None
+        )
+        chat_url: str | None = self.node_app_chat_path(node_name, entry.name) if entry.supports_chat else None
         return self._app_link_with_tabs(
             ModWebAppLink(
                 name=entry.name,
@@ -1627,7 +1586,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 node_name=node_name,
                 running=entry.running,
                 enabled=entry.enabled,
-                color_hex=entry.color_hex,
+                color_hex=color_hex,
                 supports_mods=entry.supports_mods,
                 supports_configs=entry.supports_configs,
                 supports_saves=entry.supports_saves,

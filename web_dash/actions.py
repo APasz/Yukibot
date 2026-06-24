@@ -226,14 +226,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
         required_level = required_mod_mutation_level(action, is_protected=self._is_protected_mod(entry))
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required for this mod action.")
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await self._node_api.mutate_mod(
-                app=app,
-                mod_name=mod_name,
-                action=action,
-                actor_user_id=user.discord_id,
-            )
         node = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_mod_mutation, node, model.app_name, mod_name, action, user)
 
@@ -341,31 +333,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
         required_level: Power_Level = required_app_mutation_level(action)
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required for this app action.")
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app: ManagedApp = self._resolve_app(model.app_name)
-            return await self._node_api.mutate_app(
-                app=app,
-                action=action,
-                actor_user_id=user.discord_id,
-                friendly_name=friendly_name,
-                title_font_preset=title_font_preset,
-                notes=notes,
-                lifecycle_notice_started=lifecycle_notice_started,
-                lifecycle_notice_stopped=lifecycle_notice_stopped,
-                lifecycle_notice_crashed=lifecycle_notice_crashed,
-                relay_notice_player_session=relay_notice_player_session,
-                relay_notice_player_death=relay_notice_player_death,
-                relay_notice_progress=relay_notice_progress,
-                relay_advancements_enabled=relay_advancements_enabled,
-                disabled_activity_provider_ids=disabled_activity_provider_ids,
-                running_cpu_points=running_cpu_points,
-                running_ram_points=running_ram_points,
-                startup_cpu_points=startup_cpu_points,
-                startup_ram_points=startup_ram_points,
-                steam_update_enabled=steam_update_enabled,
-                steam_update_selected_branch=steam_update_selected_branch,
-                update_branch_id=update_branch_id,
-            )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(
             self._remote_app_mutation,
@@ -396,21 +363,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
 
     async def _node_capacity(self, *, node_name: str, user: ModWebUser) -> config.NodeCapacityProfile:
         self._require_user_level(user=user, required_level=Power_Level.root)
-        if node_name == config.MOD_WEB_SERVER.node_name:
-            manager = self._manager
-            if manager is None:
-                raise RuntimeError("App manager is not available yet.")
-            return manager.node_capacity()
         node = self._remote_node_link(node_name)
         return await asyncio.to_thread(self._remote_node_capacity, node, user)
 
     async def _node_font_sources(self, *, node_name: str, user: ModWebUser) -> config.NodeFontSourceSettings:
         self._require_user_level(user=user, required_level=Power_Level.root)
-        if node_name == config.MOD_WEB_SERVER.node_name:
-            manager = self._manager
-            if manager is None:
-                raise RuntimeError("App manager is not available yet.")
-            return manager.node_font_sources()
         node = self._remote_node_link(node_name)
         return await asyncio.to_thread(self._remote_node_font_sources, node, user)
 
@@ -422,9 +379,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
         capacity: config.NodeCapacityProfile,
     ) -> NodeCapacityMutationResult:
         self._require_user_level(user=user, required_level=Power_Level.root)
-        if node_name == config.MOD_WEB_SERVER.node_name:
-            result = await self._node_api.mutate_node_capacity(capacity=capacity, actor_user_id=user.discord_id)
-            return result
         node = self._remote_node_link(node_name)
         return await asyncio.to_thread(self._remote_update_node_capacity, node, capacity, user)
 
@@ -436,8 +390,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
         settings: config.NodeFontSourceSettings,
     ) -> NodeFontSourceSettingsMutationResult:
         self._require_user_level(user=user, required_level=Power_Level.root)
-        if node_name == config.MOD_WEB_SERVER.node_name:
-            return await self._node_api.mutate_node_font_sources(settings=settings, actor_user_id=user.discord_id)
         node = self._remote_node_link(node_name)
         return await asyncio.to_thread(self._remote_update_node_font_sources, node, settings, user)
 

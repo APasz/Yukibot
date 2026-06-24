@@ -315,6 +315,11 @@ class ModWebChatMixin(ModWebServiceSupport):
             if app_entry is not None
             else await self._remote_app_entry_async(node, app_name, user)
         )
+        resolved_app_color_hex = self._resolved_app_color_hex(
+            app_name=resolved_app_entry.name,
+            scope=resolved_app_entry.scope,
+            color_hex=resolved_app_entry.color_hex,
+        )
         if not resolved_app_entry.supports_chat:
             raise ValueError(f"{resolved_app_entry.friendly} does not expose a chat relay.")
 
@@ -338,7 +343,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             panel=panel,
             node_name=node.node_name,
             app_friendly=resolved_app_entry.friendly,
-            app_color_hex=resolved_app_entry.color_hex,
+            app_color_hex=resolved_app_color_hex,
             app_stats=initial_app_stats,
             hero_badges=(_ModWebBadgeSpec(text=initial_app_stats.relay_support.display_value, tone="grey"),),
             refresh_app_stats=_refresh_app_stats if include_runtime_updates else None,
@@ -520,29 +525,12 @@ class ModWebChatMixin(ModWebServiceSupport):
         return ChatEvent.from_mapping(payload)
 
     async def _render_chat_page(self, *, ui: ModWebUi, app_name: str, request: Request) -> None:
-        user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
-        if user is None:
-            return
-        try:
-            app = self._resolve_app(app_name)
-        except Exception as xcp:
-            log.exception("Mod web chat page render failed: app=%s", app_name)
-            self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
-            return
-        try:
-            chat_surface = await self._local_chat_surface_config(app=app, request=request, user=user)
-        except ValueError as xcp:
-            self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
-            return
-        except Exception as xcp:
-            log.exception("Mod web chat page render failed: app=%s", app_name)
-            self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
-            return
-
-        self._apply_theme(ui=ui)
-        with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
-            self._render_user_header(ui=ui, user=user)
-            self._render_chat_page_card(ui=ui, chat_surface=chat_surface)
+        await self._render_remote_chat_page(
+            ui=ui,
+            node_name=self._default_mod_web_node_name(),
+            app_name=app_name,
+            request=request,
+        )
 
     async def _render_remote_chat_page(self, *, ui: ModWebUi, node_name: str, app_name: str, request: Request) -> None:
         user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)

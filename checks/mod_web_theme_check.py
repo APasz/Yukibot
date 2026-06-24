@@ -165,7 +165,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-chat-message:hover", css)
         self.assertIn(".mod-chat-message:first-child::before", css)
         self.assertIn("rgba(113, 113, 122, 0.08) 48%", css)
-        self.assertIn("linear-gradient(90deg, rgba(139, 92, 246, 0.18), transparent 32%) padding-box", css)
+        self.assertIn(
+            "linear-gradient(90deg, var(--mod-hero-border-glow, rgba(139, 92, 246, 0.18)), transparent 32%) padding-box",
+            css,
+        )
         self.assertIn("var(--mod-hero-border-fade, var(--mod-border)) 100%", css)
         self.assertIn("scroll-behavior: auto", css)
         self.assertIn("position: relative;", css)

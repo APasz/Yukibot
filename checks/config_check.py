@@ -33,6 +33,30 @@ class ConfigLoggingTests(unittest.TestCase):
                 self.assertIn(filename, file_names)
                 self.assertFalse(logger.propagate)
 
+    def test_known_warning_filter_suppresses_websocket_deprecation_noise(self) -> None:
+        warning_filter = config.SuppressKnownWarningsFilter()
+        warning_record = logging.LogRecord(
+            name="py.warnings",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="websockets.server.WebSocketServerProtocol is deprecated",
+            args=(),
+            exc_info=None,
+        )
+        regular_record = logging.LogRecord(
+            name="py.warnings",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="some other warning",
+            args=(),
+            exc_info=None,
+        )
+
+        self.assertFalse(warning_filter.filter(warning_record))
+        self.assertTrue(warning_filter.filter(regular_record))
+
 
 class AppVersionTests(unittest.TestCase):
     def test_display_value_includes_steam_manifest_metadata(self) -> None:

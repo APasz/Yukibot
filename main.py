@@ -631,7 +631,10 @@ def main():
 
         me = bot.get_me()
         if me is None:
-            log.warning("Skipping bot metadata sync because the current bot user is unavailable")
+            if initial:
+                log.info("Deferring initial bot metadata sync until the current bot user is available")
+            else:
+                log.warning("Skipping bot metadata sync because the current bot user is unavailable")
             return
 
         display_avatar_url = getattr(me, "display_avatar_url", None)

@@ -132,16 +132,16 @@ class ModWebService(
         return mod_web_avatars._user_avatar_fallback_svg_data_uri(level)
 
     def app_url(self, app_name: str) -> str:
-        return f"{config.MOD_WEB_SERVER.public_base_url}/mod-web/mods/{quote(app_name, safe='')}"
+        return f"{config.MOD_WEB_SERVER.public_base_url}{self.app_path(app_name)}"
 
     def app_path(self, app_name: str) -> str:
-        return f"/mod-web/mods/{quote(app_name, safe='')}"
+        return self.node_app_path(self._default_mod_web_node_name(), app_name)
 
     def app_chat_url(self, app_name: str) -> str:
         return f"{config.MOD_WEB_SERVER.public_base_url}{self.app_chat_path(app_name)}"
 
     def app_chat_path(self, app_name: str) -> str:
-        return f"/mod-web/chat/{quote(app_name, safe='')}"
+        return self.node_app_chat_path(self._default_mod_web_node_name(), app_name)
 
     def node_app_path(self, node_name: str, app_name: str) -> str:
         return mod_web_node_app_path(node_name, app_name)

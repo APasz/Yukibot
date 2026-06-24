@@ -44,6 +44,12 @@ ASYNCIO_ISCOROUTINEFUNCTION_DEPRECATION = (
     "'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; "
     "use inspect.iscoroutinefunction() instead"
 )
+_IGNORED_PYTHON_WARNING_MESSAGE_SNIPPETS: tuple[str, ...] = (
+    ASYNCIO_ISCOROUTINEFUNCTION_DEPRECATION,
+    "websockets.legacy is deprecated; see",
+    "websockets.server.WebSocketServerProtocol is deprecated",
+    "remove second argument of ws_handler",
+)
 LOGGER_TRAFFIC: str = "traffic"
 LOGGER_TTS: str = "tts"
 LOGGER_AUDIT: str = "audit"
@@ -54,6 +60,21 @@ DEFAULT_DATA_AUTHORITY_BIND_PORT: int = 8081
 warnings.filterwarnings(
     action="ignore",
     message=r"'asyncio\.iscoroutinefunction' is deprecated and slated for removal in Python 3\.16; use inspect\.iscoroutinefunction\(\) instead",
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    action="ignore",
+    message=r"websockets\.legacy is deprecated; see .*",
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    action="ignore",
+    message=r"websockets\.server\.WebSocketServerProtocol is deprecated",
+    category=DeprecationWarning,
+)
+warnings.filterwarnings(
+    action="ignore",
+    message=r"remove second argument of ws_handler",
     category=DeprecationWarning,
 )
 
@@ -120,7 +141,8 @@ class SuppressKnownWarningsFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.name != "py.warnings":
             return True
-        return ASYNCIO_ISCOROUTINEFUNCTION_DEPRECATION not in record.getMessage()
+        message = record.getMessage()
+        return not any(snippet in message for snippet in _IGNORED_PYTHON_WARNING_MESSAGE_SNIPPETS)
 
 class AppScopes(enum.StrEnum):
     minecraft = "minecraft"

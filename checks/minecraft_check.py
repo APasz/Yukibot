@@ -12,6 +12,7 @@ from unittest.mock import patch
 import config
 from _relay_embeds import build_app_lifecycle_embed
 from apps._config import Mod_Config, ModDownloadBlockReason, ModType
+from apps import minecraft
 from apps.minecraft import (
     Activities as MinecraftActivities,
 )
@@ -227,6 +228,39 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
             self.assertFalse(changed)
             self.assertFalse(target_path.exists())
 
+    def test_sync_kubejs_yuki_log_script_uses_embedded_fallback_when_resource_is_missing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=state is not False,
+                            )
+                        )
+                    ]
+                ),
+            )
+
+            with patch.object(
+                minecraft,
+                "_KUBEJS_YUKI_LOG_SOURCE_PATH",
+                directory / "missing" / "yuki_log.js",
+            ):
+                changed = app._sync_kubejs_yuki_log_script()
+            target_path = directory / "kubejs" / "server_scripts" / "yuki_log.js"
+
+            self.assertTrue(changed)
+            self.assertTrue(target_path.exists())
+            self.assertIn("[YUKI_MC_EVENT]", target_path.read_text(encoding="utf-8"))
+
     def test_load_squaremap_web_address_accepts_quoted_value_with_comment(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.yml"
@@ -297,7 +331,13 @@ class MinecraftActivityTests(unittest.IsolatedAsyncioTestCase):
         app = SimpleNamespace(
             activity_manager=activity_manager,
             _cancel_background_task=cancel_background_task,
+            providers=[],
         )
+        app.set_activity_providers = lambda providers: setattr(app, "providers", list(providers))
+        app.register_enabled_activity_providers = lambda: [activity_manager.register(provider) for provider in app.providers]
+        app.deregister_activity_providers = lambda: [
+            activity_manager.deregister(provider) for provider in app.providers
+        ]
         activities = MinecraftActivities(cast(Any, app))
         provider = activities.providers[0]
         provider.task_funcs = [background_worker]

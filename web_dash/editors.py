@@ -737,22 +737,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return
 
         try:
-            if model.node_name == config.MOD_WEB_SERVER.node_name:
-                local_app = self._resolve_app(model.app_name)
-                unsubscribe_stdout = self._subscribe_local_app_console_stdout(
-                    app=local_app,
-                    max_lines=_CONSOLE_STDOUT_MAX_LINES,
-                    on_update=_queue_stdout_snapshot,
-                )
-            else:
-                node = self._remote_node_link(model.node_name)
-                unsubscribe_stdout = self._create_remote_console_stdout_subscription(
-                    node=node,
-                    app_name=model.app_name,
-                    max_lines=_CONSOLE_STDOUT_MAX_LINES,
-                    user=user,
-                    on_update=_queue_stdout_snapshot,
-                )
+            node = self._remote_node_link(model.node_name)
+            unsubscribe_stdout = self._create_remote_console_stdout_subscription(
+                node=node,
+                app_name=model.app_name,
+                max_lines=_CONSOLE_STDOUT_MAX_LINES,
+                user=user,
+                on_update=_queue_stdout_snapshot,
+            )
         except Exception as xcp:
             _update_stdout_feed_text(f"Stdout stream unavailable: {xcp}", force_scroll=True)
         else:
@@ -1857,20 +1849,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _download_base_url(model: ModWebPageModel) -> str:
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            return f"{_SAME_ORIGIN_NODE_API_BASE}/apps/{quote(model.app_name, safe='')}/mods/download"
         return (
             f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(model.node_name, safe='')}"
             f"/apps/{quote(model.app_name, safe='')}/mods/download"
         )
 
     def _save_download_url(self, *, model: ModWebBasePageModel, save: NodeSaveEntry, user: ModWebUser) -> str:
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            return self._node_api.save_download_url(
-                model.app_name,
-                save.id,
-                base_url=_SAME_ORIGIN_NODE_API_BASE,
-            )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return self._remote_download_url(
             node=node,
@@ -1882,12 +1866,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         )
 
     def _config_root_download_url(self, *, model: ModWebBasePageModel, root_id: str, user: ModWebUser) -> str:
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            return self._node_api.config_root_download_url(
-                model.app_name,
-                root_id,
-                base_url=_SAME_ORIGIN_NODE_API_BASE,
-            )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return self._remote_download_url(
             node=node,
@@ -1910,9 +1888,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             raise PermissionError(
                 f"{required_level.name.title()} access is required to read config files for {model.app_friendly}."
             )
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await asyncio.to_thread(self._node_api.read_config_file, app=app, config_id=config_id)
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_config_content, node, model.app_name, config_id, user)
 
@@ -1927,11 +1902,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not self._user_has_level(user, model.config_write_level):
             raise PermissionError(
                 f"{model.config_write_level.name.title()} access is required to write config files for {model.app_friendly}."
-            )
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await asyncio.to_thread(
-                self._node_api.write_config_file, app=app, config_id=config_id, content=content
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_config_write, node, model.app_name, config_id, content, user)
@@ -2047,25 +2017,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 transfer_ids=transfer_ids,
                 detail_text=f"Installing mods for {model.app_friendly}.",
             )
-            if model.node_name == config.MOD_WEB_SERVER.node_name:
-                app = self._resolve_app(model.app_name)
-                result = await self._node_api.upload_mod_paths(
-                    app=app,
-                    upload_sources=tuple(
-                        NodeModUploadSource(source_path=source_path, upload_name=upload_name)
-                        for upload_name, source_path in resolved_uploads
-                    ),
-                    actor_user_id=user.discord_id,
-                )
-            else:
-                node = self._remote_node_link(model.node_name)
-                result = await asyncio.to_thread(
-                    self._remote_mod_uploads,
-                    node,
-                    model.app_name,
-                    tuple(resolved_uploads),
-                    user,
-                )
+            node = self._remote_node_link(model.node_name)
+            result = await asyncio.to_thread(
+                self._remote_mod_uploads,
+                node,
+                model.app_name,
+                tuple(resolved_uploads),
+                user,
+            )
         except Exception as xcp:
             for transfer_id in transfer_ids:
                 self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Mod upload failed: {xcp}")
@@ -2107,26 +2066,16 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 transfer_ids=transfer_ids,
                 detail_text=f"Applying save to {model.app_friendly}.",
             )
-            if model.node_name == config.MOD_WEB_SERVER.node_name:
-                app = self._resolve_app(model.app_name)
-                result = await self._node_api.upload_save_path(
-                    app=app,
-                    root_id=root_id,
-                    source_path=temp_path,
-                    upload_name=upload_file.name,
-                    actor_user_id=user.discord_id,
-                )
-            else:
-                node = self._remote_node_link(model.node_name)
-                result = await asyncio.to_thread(
-                    self._remote_save_upload,
-                    node,
-                    model.app_name,
-                    root_id,
-                    temp_path,
-                    upload_file.name,
-                    user,
-                )
+            node = self._remote_node_link(model.node_name)
+            result = await asyncio.to_thread(
+                self._remote_save_upload,
+                node,
+                model.app_name,
+                root_id,
+                temp_path,
+                upload_file.name,
+                user,
+            )
         except Exception as xcp:
             for transfer_id in transfer_ids:
                 self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Save upload failed: {xcp}")
@@ -2173,34 +2122,22 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 transfer_ids=transfer_ids,
                 detail_text=f"Applying blueprint files to {model.app_friendly}.",
             )
-            if model.node_name == config.MOD_WEB_SERVER.node_name:
-                app = self._resolve_app(model.app_name)
-                result = self._node_api.upload_blueprint_path(
-                    app=app,
-                    session_name=session_name,
-                    source_path=temp_paths[upload_pair.module_filename],
-                    upload_name=upload_pair.module_filename,
-                    actor_user_id=user.discord_id,
-                    config_source_path=config_source_path,
-                    config_upload_name=upload_pair.config_filename,
-                )
-            else:
-                node = self._remote_node_link(model.node_name)
-                result = await asyncio.to_thread(
-                    self._remote_blueprint_upload,
-                    node,
-                    model.app_name,
-                    session_name,
-                    tuple[tuple[str, Path], ...](
-                        (filename, temp_paths[filename])
-                        for filename in (
-                            (upload_pair.module_filename,)
-                            if upload_pair.config_filename is None
-                            else (upload_pair.module_filename, upload_pair.config_filename)
-                        )
-                    ),
-                    user,
-                )
+            node = self._remote_node_link(model.node_name)
+            result = await asyncio.to_thread(
+                self._remote_blueprint_upload,
+                node,
+                model.app_name,
+                session_name,
+                tuple[tuple[str, Path], ...](
+                    (filename, temp_paths[filename])
+                    for filename in (
+                        (upload_pair.module_filename,)
+                        if upload_pair.config_filename is None
+                        else (upload_pair.module_filename, upload_pair.config_filename)
+                    )
+                ),
+                user,
+            )
         except Exception as xcp:
             for transfer_id in transfer_ids:
                 self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Blueprint upload failed: {xcp}")
@@ -2225,13 +2162,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     ) -> NodeBlueprintMutationResult:
         if not self._user_has_level(user, Power_Level.user):
             raise PermissionError(f"User access is required to delete blueprints for {model.app_friendly}.")
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return self._node_api.delete_blueprint_file(
-                app=app,
-                blueprint_id=blueprint_id,
-                actor_user_id=user.discord_id,
-            )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_blueprint_delete, node, model.app_name, blueprint_id, user)
 
@@ -2296,14 +2226,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             raise PermissionError(
                 f"{model.save_write_level.name.title()} access is required to rename saves for {model.app_friendly}."
             )
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await self._node_api.rename_save_file(
-                app=app,
-                save_id=save_id,
-                new_name=new_name,
-                actor_user_id=user.discord_id,
-            )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_save_rename, node, model.app_name, save_id, new_name, user)
 
@@ -2318,13 +2240,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             raise PermissionError(
                 f"{model.save_write_level.name.title()} access is required to delete saves for {model.app_friendly}."
             )
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await self._node_api.delete_save_file(
-                app=app,
-                save_id=save_id,
-                actor_user_id=user.discord_id,
-            )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_save_delete, node, model.app_name, save_id, user)
 
@@ -2336,14 +2251,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         value: str,
         user: ModWebUser,
     ) -> NodeSettingMutationResult:
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await self._node_api.update_setting(
-                app=app,
-                setting_key=setting_key,
-                value=value,
-                actor_user_id=user.discord_id,
-            )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_setting_write, node, model.app_name, setting_key, value, user)
 
@@ -2353,9 +2260,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         model: ModWebBasePageModel,
         user: ModWebUser,
     ) -> NodeSettingsActionResult:
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await self._node_api.save_settings(app=app, actor_user_id=user.discord_id)
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_settings_save, node, model.app_name, user)
 
@@ -2365,9 +2269,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         model: ModWebBasePageModel,
         user: ModWebUser,
     ) -> NodeSettingsActionResult:
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await self._node_api.reload_settings(app=app, actor_user_id=user.discord_id)
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_settings_reload, node, model.app_name, user)
 
@@ -2379,9 +2280,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     ) -> NodeConsoleActionList | None:
         if model.console_actions is None:
             return None
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return self._node_api.build_console_action_list(app=app, actor_user_id=user.discord_id)
         node = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(self._remote_console_action_list, node, model.app_name, user)
 
@@ -2393,14 +2291,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         raw_value: str | None,
         user: ModWebUser,
     ) -> NodeConsoleActionExecutionResult:
-        if model.node_name == config.MOD_WEB_SERVER.node_name:
-            app = self._resolve_app(model.app_name)
-            return await self._node_api.execute_console_action(
-                app=app,
-                action_key=action_key,
-                raw_value=raw_value,
-                actor_user_id=user.discord_id,
-            )
         node = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(
             self._remote_execute_console_action,
@@ -2424,19 +2314,31 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         for config_entry in model.configs.configs:
             if config_entry.id == config_id:
                 return config_entry.read_power_level
-        if model.node_name != config.MOD_WEB_SERVER.node_name:
-            return model.config_read_level
+        return model.config_read_level
+
+    @staticmethod
+    def _hex_color_to_rgba(color_hex: str, *, alpha: float) -> str:
+        if len(color_hex) != 7 or not color_hex.startswith("#"):
+            raise ValueError(f"Expected #rrggbb color, got {color_hex!r}.")
+        if alpha < 0 or alpha > 1:
+            raise ValueError(f"Alpha must be between 0 and 1, got {alpha!r}.")
         try:
-            app = self._resolve_app(model.app_name)
-            return app.config_file_read_level_for_id(config_id)
-        except ValueError:
-            return model.config_read_level
+            red = int(color_hex[1:3], 16)
+            green = int(color_hex[3:5], 16)
+            blue = int(color_hex[5:7], 16)
+        except ValueError as xcp:
+            raise ValueError(f"Expected #rrggbb color, got {color_hex!r}.") from xcp
+        return f"rgba({red}, {green}, {blue}, {alpha:.2f})"
 
     @staticmethod
     def _hero_card_style(color_hex: str | None) -> str:
         if color_hex is None:
             return ""
-        return f"--mod-hero-border: {color_hex}; --mod-hero-border-fade: var(--mod-border);"
+        return (
+            f"--mod-hero-border: {color_hex}; "
+            f"--mod-hero-border-glow: {ModWebEditorsMixin._hex_color_to_rgba(color_hex, alpha=0.18)}; "
+            "--mod-hero-border-fade: var(--mod-border);"
+        )
 
     def _primary_guild_bot_role_color_hex(self) -> str | None:
         return self._node_role_color_hex(node_name=config.MOD_WEB_SERVER.node_name)

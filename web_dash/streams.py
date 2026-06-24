@@ -583,7 +583,10 @@ class ModWebStreamsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _remote_websocket_url(*, node: ModWebNodeLink, path: str) -> str:
-        api_url = urlsplit(node.api_base_url.rstrip("/"))
+        resolved_api_base_url = node.api_base_url.rstrip("/")
+        api_url = urlsplit(resolved_api_base_url)
+        if not api_url.scheme and resolved_api_base_url.startswith("/"):
+            api_url = urlsplit(f"{config.MOD_WEB_SERVER.public_base_url.rstrip('/')}{resolved_api_base_url}")
         if api_url.scheme == "https":
             websocket_scheme = "wss"
         elif api_url.scheme == "http":

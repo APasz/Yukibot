@@ -63,6 +63,7 @@ from .runtime_imports import (
     Timer,
     Utilities,
     aiohttp,
+    app_scope_from_name,
     asyncio,
     cast,
     config,
@@ -71,9 +72,11 @@ from .runtime_imports import (
     quote,
     read_json_object,
     requests,
+    replace,
     tempfile,
     time,
     urlencode,
+    urlsplit,
     urlunsplit,
 )
 from .service_base import ModWebServiceSupport
@@ -115,6 +118,16 @@ class ModWebModelsMixin(ModWebServiceSupport):
         "/mod-web/dev/",
     )
     _NODE_SCOPED_PATH_PREFIX: str = "/mod-web/nodes/"
+    _DEFAULT_APP_COLOR_HEX: str = "#96212B"
+    _APP_COLOR_HEX_BY_SCOPE: dict[str, str] = {
+        "base": "#6B7280",
+        "beammp": "#F97316",
+        "ets": "#2563EB",
+        "factorio": "#DC6B0F",
+        "minecraft": "#22C55E",
+        "satisfactory": "#F59E0B",
+        "sevendays": "#B91C1C",
+    }
 
     @staticmethod
     def _dev_cluster_node_links() -> tuple[ModWebNodeLink, ...]:
@@ -191,16 +204,64 @@ class ModWebModelsMixin(ModWebServiceSupport):
             return None
         return mod_web.node_name
 
+    @classmethod
+    def _default_mod_web_node_name(cls) -> str:
+        return cls._portal_default_node_name() or config.MOD_WEB_SERVER.node_name
+
+    @staticmethod
+    def _absolute_node_api_base_url(api_base_url: str) -> str:
+        parsed = urlsplit(api_base_url)
+        if parsed.scheme and parsed.netloc:
+            return api_base_url.rstrip("/")
+        if api_base_url.startswith("/"):
+            return f"{config.MOD_WEB_SERVER.public_base_url.rstrip('/')}{api_base_url.rstrip('/')}"
+        raise RuntimeError(f"Node API base URL must be absolute or root-relative, got {api_base_url!r}.")
+
+    @classmethod
+    def _resolved_app_color_hex(
+        cls,
+        *,
+        app_name: str,
+        scope: str | None,
+        color_hex: str | None,
+    ) -> str | None:
+        normalised_color_hex: str | None = None if color_hex is None else color_hex.strip() or None
+        if normalised_color_hex is not None and normalised_color_hex.casefold() != cls._DEFAULT_APP_COLOR_HEX.casefold():
+            return normalised_color_hex
+        resolved_scope: str | None = None
+        if isinstance(scope, str) and scope.strip():
+            resolved_scope = scope.strip().casefold()
+        else:
+            resolved_scope = app_scope_from_name(app_name)
+            if resolved_scope is not None:
+                resolved_scope = resolved_scope.casefold()
+        if resolved_scope is None:
+            return normalised_color_hex
+        return cls._APP_COLOR_HEX_BY_SCOPE.get(resolved_scope, normalised_color_hex)
+
+    @classmethod
+    def _resolved_remote_app_entry(cls, entry: NodeAppEntry) -> NodeAppEntry:
+        resolved_color_hex = cls._resolved_app_color_hex(
+            app_name=entry.name,
+            scope=entry.scope,
+            color_hex=entry.color_hex,
+        )
+        if resolved_color_hex == entry.color_hex:
+            return entry
+        return replace(entry, color_hex=resolved_color_hex)
+
     def _current_node_link(self) -> ModWebNodeLink:
+        node_name = config.MOD_WEB_SERVER.node_name
+        api_base_url = self._absolute_node_api_base_url(config.MOD_WEB_SERVER.node_api_base_url)
         return ModWebNodeLink(
-            node_name=config.MOD_WEB_SERVER.node_name,
+            node_name=node_name,
             label=self._current_node_label(),
-            url=self.index_path(),
-            api_base_url=_SAME_ORIGIN_NODE_API_BASE,
-            api_url=self._node_api.apps_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
+            url=mod_web_node_path(node_name),
+            api_base_url=api_base_url,
+            api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
             is_current=True,
-            latency_probe_url=self._node_api.ping_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
-            presence_stream_url=self._node_api.presence_stream_url(base_url=_SAME_ORIGIN_NODE_API_BASE),
+            latency_probe_url=self._node_api.ping_url(base_url=api_base_url),
+            presence_stream_url=self._node_api.presence_stream_url(base_url=api_base_url),
         )
 
     @staticmethod
@@ -696,8 +757,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
         key: str = node_name.casefold()
         for node in self._node_links():
             if node.node_name.casefold() == key:
-                if node.is_current:
-                    raise _http_exception(400, f"{node.node_name} is the current node; use the local node API.")
                 return node
         raise _http_exception(404, f"Unknown node: {node_name}")
 
@@ -730,21 +789,25 @@ class ModWebModelsMixin(ModWebServiceSupport):
             raise RuntimeError("Remote node apps response did not include an apps list.")
         apps: list[NodeAppEntry] = []
         for raw_app in cast(Iterable[object], raw_apps):
-            apps.append(NodeAppEntry.from_mapping(_json_object(raw_app, context="Remote node apps response entry")))
+            apps.append(
+                ModWebModelsMixin._resolved_remote_app_entry(
+                    NodeAppEntry.from_mapping(_json_object(raw_app, context="Remote node apps response entry"))
+                )
+            )
         return tuple[NodeAppEntry, ...](sorted(apps, key=lambda app: app.friendly.casefold()))
 
     def _remote_app_entry(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeAppEntry:
         key: str = app_name.casefold()
         for entry in self._remote_apps(node, user):
             if entry.name.casefold() == key:
-                return entry
+                return self._resolved_remote_app_entry(entry)
         raise RuntimeError(f"Remote node did not expose app {app_name!r}.")
 
     async def _remote_app_entry_async(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeAppEntry:
         key: str = app_name.casefold()
         for entry in await self._remote_apps_async(node, user):
             if entry.name.casefold() == key:
-                return entry
+                return self._resolved_remote_app_entry(entry)
         raise RuntimeError(f"Remote node did not expose app {app_name!r}.")
 
     def _remote_mod_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeModList:
@@ -770,7 +833,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
         )
-        url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/upload"
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/upload"
         opened_handles: list[BinaryIO] = []
         try:
             request_files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
@@ -848,7 +912,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.SAVES_WRITE,),
             user=user,
         )
-        url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/saves/upload"
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/saves/upload"
         try:
             with upload_path.open("rb") as handle:
                 response: Response = requests.post(
@@ -885,7 +950,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.BLUEPRINTS_WRITE,),
             user=user,
         )
-        url: str = f"{node.api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/blueprints/upload"
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/blueprints/upload"
         opened_handles: list[BinaryIO] = []
         try:
             request_files: list[tuple[str, tuple[str, BinaryIO, str]]] = []
@@ -1196,7 +1262,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> dict[str, object]:
         token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
-        url: str = f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
             if method == "GET":
                 response = requests.get(
@@ -1252,7 +1319,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> dict[str, object]:
         token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
-        url: str = f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
             async with aiohttp.ClientSession(timeout=self._aiohttp_client_timeout(timeout)) as session:
                 if method == "GET":
@@ -1289,7 +1357,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> tuple[bytes, str | None, tuple[tuple[str, str], ...]]:
         token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
-        url: str = f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
             async with aiohttp.ClientSession(timeout=self._aiohttp_client_timeout(timeout)) as session:
                 async with session.get(url, headers={"Authorization": f"Bearer {token}"}) as response:
@@ -1380,7 +1449,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         query_with_token: dict[str, object] = dict[str, object](query)
         query_with_token["access_token"] = token
-        return f"{node.api_base_url.rstrip('/')}/{path.lstrip('/')}?{urlencode(query_with_token, doseq=True)}"
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        return f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}?{urlencode(query_with_token, doseq=True)}"
 
     def _remote_token(
         self,
@@ -1777,12 +1847,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     node=section.node,
                     app_count=len(section.app_links),
                     system_summary=None,
-                )
-            elif section.node.is_current:
-                summaries[index] = ModWebHomeNodeSummary(
-                    node=section.node,
-                    app_count=len(section.app_links),
-                    system_summary=self._node_api.build_system_summary(),
                 )
             else:
                 remote_jobs.append((index, section))

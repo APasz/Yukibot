@@ -253,6 +253,77 @@ _KUBEJS_YUKI_LOG_SCRIPT_NAME = "yuki_log.js"
 _KUBEJS_YUKI_LOG_SOURCE_PATH = (
     Path(__file__).resolve().parents[2] / "resources" / "minecraft" / "kubejs" / _KUBEJS_YUKI_LOG_SCRIPT_NAME
 )
+_KUBEJS_YUKI_LOG_FALLBACK_SOURCE = """var PREFIX = '[YUKI_MC_EVENT] '
+
+function emit(type, data) {
+    var out = {}
+
+    out.type = String(type)
+    out.time = Date.now()
+
+    for (var key in data) {
+        if (data.hasOwnProperty(key)) {
+            out[key] = data[key]
+        }
+    }
+
+    console.info(PREFIX + JSON.stringify(out))
+}
+
+function playerName(player) {
+    if (player.username) return String(player.username)
+    if (player.name && player.name.string) return String(player.name.string)
+    return String(player)
+}
+
+function playerUUID(player) {
+    if (player.uuid) return String(player.uuid)
+    return ''
+}
+
+PlayerEvents.loggedIn(function (event) {
+    emit('player_join', {
+        player: playerName(event.player),
+        uuid: playerUUID(event.player)
+    })
+})
+
+PlayerEvents.loggedOut(function (event) {
+    emit('player_leave', {
+        player: playerName(event.player),
+        uuid: playerUUID(event.player)
+    })
+})
+
+PlayerEvents.chat(function (event) {
+    emit('chat', {
+        player: playerName(event.player),
+        uuid: playerUUID(event.player),
+        message: String(event.message)
+    })
+})
+
+PlayerEvents.advancement(function (event) {
+    emit('advancement', {
+        player: playerName(event.player),
+        uuid: playerUUID(event.player),
+        advancement: String(event.advancement)
+    })
+})
+
+EntityEvents.death(function (event) {
+    var entity = event.entity
+
+    if (!entity) return
+    if (String(entity.type) != 'minecraft:player') return
+
+    emit('player_death', {
+        player: playerName(entity),
+        uuid: playerUUID(entity),
+        source: String(event.source)
+    })
+})
+"""
 _KUBEJS_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
 _KUBEJS_SCRIPT_LOADED_RE = re.compile(
     r"\[KubeJS Server/\]:\s+Loaded script server_scripts:yuki_log\.js\b",
@@ -1007,6 +1078,18 @@ def _detect_minecraft_mod_base_name(name: str) -> str:
 def _detect_minecraft_mod_friendly(name: str) -> str:
     base_name = _detect_minecraft_mod_base_name(name)
     return humanise_mod_identifier(base_name, split_single_camel=True)
+
+
+def _bundled_kubejs_yuki_log_script_source() -> str:
+    try:
+        return _KUBEJS_YUKI_LOG_SOURCE_PATH.read_text(config.STR_ENCODE)
+    except OSError as xcp:
+        log.info(
+            "Bundled KubeJS relay script unavailable at %s; using embedded fallback: %s",
+            _KUBEJS_YUKI_LOG_SOURCE_PATH,
+            xcp,
+        )
+        return _KUBEJS_YUKI_LOG_FALLBACK_SOURCE
 
 
 def _is_kubejs_mod_name(name: str) -> bool:
@@ -1797,11 +1880,7 @@ class Minecraft(App[Minecraft_Config]):
     def _sync_kubejs_yuki_log_script(self) -> bool:
         if not self._has_enabled_kubejs_mod():
             return False
-        try:
-            script_content = _KUBEJS_YUKI_LOG_SOURCE_PATH.read_text(config.STR_ENCODE)
-        except OSError as xcp:
-            log.warning("Failed to read bundled KubeJS relay script for %s: %s", self.name, xcp)
-            return False
+        script_content = _bundled_kubejs_yuki_log_script_source()
         script_path = self._kubejs_yuki_log_path()
         try:
             script_path.parent.mkdir(parents=True, exist_ok=True)

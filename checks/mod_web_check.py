@@ -1234,6 +1234,7 @@ class ModWebTests(unittest.TestCase):
             patch.object(ModWebService, "_node_links", return_value=(local_node, remote_node)),
             patch.object(ModWebService, "_probe_node_status") as probe_node_status,
         ):
+            probe_node_status.side_effect = [ModWebNodeStatus(node=local_node, alive=True)]
             statuses = service._login_node_statuses(simulated_down_node_names=("erin",))
 
         self.assertEqual(
@@ -1248,7 +1249,7 @@ class ModWebTests(unittest.TestCase):
                 ),
             ),
         )
-        probe_node_status.assert_not_called()
+        probe_node_status.assert_called_once_with(local_node)
 
     def test_friendly_remote_node_error_text_hides_connection_details(self) -> None:
         try:
@@ -2002,9 +2003,9 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual([link.node_name for link in links], ["yuki", "erin"])
         self.assertEqual(links[0].label, "Yuki")
         self.assertTrue(links[0].is_current)
-        self.assertEqual(links[0].url, "/")
-        self.assertEqual(links[0].latency_probe_url, "/api/node/ping")
-        self.assertEqual(links[0].presence_stream_url, "/api/node/presence/stream")
+        self.assertEqual(links[0].url, "/mod-web/nodes/yuki")
+        self.assertEqual(links[0].latency_probe_url, "http://yuki.example:3180/api/node/ping")
+        self.assertEqual(links[0].presence_stream_url, "http://yuki.example:3180/api/node/presence/stream")
         self.assertEqual(links[1].url, "/mod-web/nodes/erin")
         self.assertEqual(links[1].api_base_url, "http://erin.example:3180/api/node")
         self.assertEqual(links[1].api_url, "/api/node-proxy/erin/apps")
@@ -2162,65 +2163,97 @@ class ModWebTests(unittest.TestCase):
 
     def test_app_links_include_dedicated_chat_link_for_local_chat_relay_apps(self) -> None:
         service: ModWebService = ModWebService()
-        app: SimpleNamespace = SimpleNamespace(
+        user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        entry = NodeAppEntry(
             name="minecraft_alpha",
             friendly="Minecraft Alpha",
-            cfg=SimpleNamespace(enabled=True),
-            manage_embed_color=0x22C55E,
-            public_map_url=None,
-            mods=None,
-            supports_config_files=False,
-            supports_save_files=False,
-            supports_save_uploads=False,
-            supports_save_rename=False,
-            supports_settings=False,
-            supports_chat_relay=True,
-            lowest_config_file_read_level=Power_Level.user,
-            config_file_write_level=Power_Level.admin,
-            save_file_write_level=Power_Level.sudo,
-            check_running=Mock(return_value=False),
+            node="yuki",
+            running=False,
+            enabled=True,
+            supports_mods=False,
+            supports_configs=False,
+            supports_chat=True,
+            color_hex="#22C55E",
         )
-        service.set_manager(_manager_stub(apps={"minecraft_alpha": app}))
-        user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
 
-        links: tuple[ModWebAppLink, ...] = asyncio.run(service._app_links(user))
+        with patch.object(ModWebService, "_remote_apps_async", AsyncMock(return_value=(entry,))):
+            links: tuple[ModWebAppLink, ...] = asyncio.run(service._app_links(user))
 
         self.assertEqual(len(links), 1)
         self.assertTrue(links[0].enabled)
         self.assertEqual(links[0].color_hex, "#22C55E")
         self.assertTrue(links[0].supports_chat)
-        self.assertEqual(links[0].chat_url, "/mod-web/chat/minecraft_alpha")
+        self.assertEqual(links[0].chat_url, "/mod-web/nodes/yuki/chat/minecraft_alpha")
         self.assertIsNone(links[0].player_count)
 
     def test_app_links_include_player_count_for_running_local_apps(self) -> None:
         service: ModWebService = ModWebService()
-        app: SimpleNamespace = SimpleNamespace(
+        user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        entry = NodeAppEntry(
             name="minecraft_alpha",
             friendly="Minecraft Alpha",
-            cfg=SimpleNamespace(enabled=True),
-            manage_embed_color=0x22C55E,
-            public_map_url=None,
-            mods=None,
-            supports_config_files=False,
-            supports_save_files=False,
-            supports_save_uploads=False,
-            supports_save_rename=False,
-            supports_settings=False,
-            supports_chat_relay=True,
-            lowest_config_file_read_level=Power_Level.user,
-            config_file_write_level=Power_Level.admin,
-            save_file_write_level=Power_Level.sudo,
-            check_running=Mock(return_value=True),
-            player_count=AsyncMock(return_value=(4, 12)),
+            node="yuki",
+            running=True,
+            enabled=True,
+            supports_mods=False,
+            supports_configs=False,
+            supports_chat=True,
+            color_hex="#22C55E",
+            player_count=4,
+            player_capacity=12,
         )
-        service.set_manager(_manager_stub(apps={"minecraft_alpha": app}))
-        user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
 
-        links: tuple[ModWebAppLink, ...] = asyncio.run(service._app_links(user))
+        with patch.object(ModWebService, "_remote_apps_async", AsyncMock(return_value=(entry,))):
+            links: tuple[ModWebAppLink, ...] = asyncio.run(service._app_links(user))
 
         self.assertEqual(len(links), 1)
         self.assertEqual(links[0].player_count, 4)
         self.assertEqual(links[0].player_capacity, 12)
+
+    def test_app_links_resolve_missing_remote_app_color_from_scope(self) -> None:
+        service: ModWebService = ModWebService()
+        user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        entry = NodeAppEntry(
+            name="minecraft_alpha",
+            friendly="Minecraft Alpha",
+            node="yuki",
+            running=False,
+            enabled=True,
+            supports_mods=False,
+            supports_configs=False,
+            supports_chat=True,
+            color_hex=None,
+            scope="minecraft",
+        )
+
+        with patch.object(ModWebService, "_remote_apps_async", AsyncMock(return_value=(entry,))):
+            links: tuple[ModWebAppLink, ...] = asyncio.run(service._app_links(user))
+
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0].color_hex, "#22C55E")
+
+    def test_remote_apps_from_payload_replaces_generic_default_app_color(self) -> None:
+        payload: dict[str, object] = {
+            "apps": [
+                {
+                    "name": "satisfactory_prime",
+                    "friendly": "Satisfactory Prime",
+                    "node": "erin",
+                    "running": False,
+                    "enabled": True,
+                    "supports_mods": False,
+                    "supports_configs": False,
+                    "supports_chat": False,
+                    "scope": "satisfactory",
+                    "color_hex": "#96212B",
+                }
+            ]
+        }
+
+        entries = ModWebService._remote_apps_from_payload(payload)
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].color_hex, "#F59E0B")
 
     def test_remote_app_links_include_dedicated_chat_link_for_remote_chat_relay_apps(self) -> None:
         service: ModWebService = ModWebService()
@@ -2644,8 +2677,7 @@ class ModWebTests(unittest.TestCase):
 
         with (
             patch.object(ModWebService, "_node_links", return_value=(local_node, remote_node)),
-            patch.object(ModWebService, "_app_links", new=AsyncMock(return_value=())),
-            patch.object(ModWebService, "_remote_app_links", new=AsyncMock(side_effect=remote_failure)),
+            patch.object(ModWebService, "_remote_app_links", new=AsyncMock(side_effect=((), remote_failure))),
         ):
             sections = asyncio.run(service._home_app_sections(user))
 
@@ -2675,7 +2707,7 @@ class ModWebTests(unittest.TestCase):
 
         with (
             patch.object(ModWebService, "_node_links", return_value=(local_node,)),
-            patch.object(ModWebService, "_app_links", new=AsyncMock(side_effect=local_failure)),
+            patch.object(ModWebService, "_remote_app_links", new=AsyncMock(side_effect=local_failure)),
         ):
             sections = asyncio.run(service._home_app_sections(user))
 
@@ -2712,7 +2744,6 @@ class ModWebTests(unittest.TestCase):
 
         with (
             patch.object(ModWebService, "_node_links", return_value=(local_node, remote_node)),
-            patch.object(ModWebService, "_app_links", new=AsyncMock(return_value=())),
             patch.object(ModWebService, "_remote_app_links", new=AsyncMock()) as remote_app_links,
         ):
             sections = asyncio.run(service._home_app_sections(user, simulated_down_node_names=("erin",)))
@@ -2727,7 +2758,7 @@ class ModWebTests(unittest.TestCase):
                 is_simulated_down=True,
             ),
         )
-        remote_app_links.assert_not_called()
+        remote_app_links.assert_awaited_once_with(local_node, user)
 
     def test_home_app_sections_short_circuit_simulated_current_node(self) -> None:
         service: ModWebService = ModWebService()
@@ -2743,7 +2774,7 @@ class ModWebTests(unittest.TestCase):
 
         with (
             patch.object(ModWebService, "_node_links", return_value=(local_node,)),
-            patch.object(ModWebService, "_app_links", new=AsyncMock()) as app_links,
+            patch.object(ModWebService, "_remote_app_links", new=AsyncMock()) as remote_app_links,
         ):
             sections = asyncio.run(service._home_app_sections(user, simulated_down_node_names=("yuki",)))
 
@@ -2758,7 +2789,7 @@ class ModWebTests(unittest.TestCase):
                 ),
             ),
         )
-        app_links.assert_not_called()
+        remote_app_links.assert_not_called()
 
     def test_home_app_card_target_uses_app_page_for_visitors(self) -> None:
         service: ModWebService = ModWebService()
@@ -7546,14 +7577,11 @@ class ModWebTests(unittest.TestCase):
             message="Enabled alpha.jar.",
             mod=self._mod_entry(name="alpha.jar", enabled=True),
         )
-        service._node_api.mutate_mod = AsyncMock(return_value=expected_result)  # type: ignore[method-assign]
-        service._resolve_app = Mock(return_value=SimpleNamespace(name=model.app_name))  # type: ignore[method-assign]
-
         with patch.object(
             service,
             "_user_has_level",
             side_effect=lambda _user, level: level in {Power_Level.user, Power_Level.admin},
-        ):
+        ), patch.object(service, "_remote_mod_mutation", return_value=expected_result) as remote_mod_mutation:
             result = asyncio.run(
                 service._mutate_mod(
                     model=model,
@@ -7563,7 +7591,7 @@ class ModWebTests(unittest.TestCase):
                 )
             )
 
-        service._node_api.mutate_mod.assert_awaited_once()
+        remote_mod_mutation.assert_called_once()
         self.assertEqual(result, expected_result)
 
     def test_mutate_mod_rejects_admin_delete_without_sudo(self) -> None:
@@ -8312,7 +8340,6 @@ class ModWebTests(unittest.TestCase):
             ModWebService()._app_page_node_badge_tone(
                 node_name="erin",
                 system_summary=None,
-                is_local_node=False,
             ),
             "red",
         )
@@ -8320,9 +8347,8 @@ class ModWebTests(unittest.TestCase):
             ModWebService()._app_page_node_badge_tone(
                 node_name="yuki",
                 system_summary=None,
-                is_local_node=True,
             ),
-            "black",
+            "red",
         )
 
     def test_app_page_node_presence_badge_spec_uses_black_for_alive_and_red_for_down(self) -> None:
@@ -9303,9 +9329,17 @@ class ModWebTests(unittest.TestCase):
     def test_hero_card_style_uses_app_color_when_available(self) -> None:
         self.assertEqual(
             ModWebService._hero_card_style("#22C55E"),
-            "--mod-hero-border: #22C55E; --mod-hero-border-fade: var(--mod-border);",
+            (
+                "--mod-hero-border: #22C55E; "
+                "--mod-hero-border-glow: rgba(34, 197, 94, 0.18); "
+                "--mod-hero-border-fade: var(--mod-border);"
+            ),
         )
         self.assertEqual(ModWebService._hero_card_style(None), "")
+
+    def test_hex_color_to_rgba_rejects_invalid_hex_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Expected #rrggbb color"):
+            ModWebService._hex_color_to_rgba("22C55E", alpha=0.18)
 
     def test_page_tabs_use_capability_order_for_mod_pages(self) -> None:
         service = ModWebService()
@@ -10557,7 +10591,6 @@ class ModWebTests(unittest.TestCase):
                 update_info=update_info,
                 update_status=next_status,
             ),
-            local_app=None,
             last_system_summary=None,
         )
 

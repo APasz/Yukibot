@@ -137,7 +137,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         *,
         model: ModWebBasePageModel,
         event: NodeAppStateStreamEvent,
-        local_app: App | None,
         last_system_summary: NodeSystemSummary | None,
     ) -> tuple[ModWebBasePageModel, NodeSystemSummary | None]:
         next_app_stats: NodeAppRuntimeSummary | None = self._merged_runtime_summary(
@@ -148,14 +147,11 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         )
         next_update_info = event.update_info if (event.is_initial or event.update_changed) else model.update_info
         next_update_status = event.update_status if (event.is_initial or event.update_changed) else model.update_status
-        if local_app is not None:
-            app_start_blocked = self._app_start_blocked_local(local_app)
-        else:
-            app_start_blocked: bool = self._app_start_blocked_remote(
-                app_name=model.app_name,
-                app_stats=next_app_stats,
-                start_blocked_app_ids=() if next_system_summary is None else next_system_summary.start_blocked_app_ids,
-            )
+        app_start_blocked: bool = self._app_start_blocked_remote(
+            app_name=model.app_name,
+            app_stats=next_app_stats,
+            start_blocked_app_ids=() if next_system_summary is None else next_system_summary.start_blocked_app_ids,
+        )
         return (
             self._model_with_runtime_state(
                 model,
@@ -263,7 +259,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             Callable[[], None],
         ]
         | None = None,
-        local_app: App | None = None,
         initial_system_summary: NodeSystemSummary | None = None,
         chat_surface: _ModWebChatSurfaceConfig | None = None,
     ) -> None:
@@ -285,7 +280,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     top_badges=self._app_page_hero_badges(model),
                     initial_system_summary=initial_system_summary,
                     initial_app_stats=model.app_stats,
-                    is_local_node=local_app is not None,
                 )
                 with ui.column().classes(self._app_page_hero_shell_classes()):
                     apply_app_hero_runtime: Callable[[NodeAppRuntimeSummary | None], None] = (
@@ -333,7 +327,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     current_model, last_system_summary = self._apply_live_app_state_update(
                         model=current_model,
                         event=event,
-                        local_app=local_app,
                         last_system_summary=last_system_summary,
                     )
                     hero_corner_bindings.apply_node_summary(last_system_summary)
@@ -370,7 +363,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
             Callable[[], None],
         ]
         | None = None,
-        local_app: App | None = None,
         initial_system_summary: NodeSystemSummary | None = None,
         chat_surface: _ModWebChatSurfaceConfig | None = None,
     ) -> None:
@@ -392,7 +384,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     top_badges=self._app_page_hero_badges(model),
                     initial_system_summary=initial_system_summary,
                     initial_app_stats=model.app_stats,
-                    is_local_node=local_app is not None,
                 )
                 with ui.column().classes(self._app_page_hero_shell_classes()):
                     apply_app_hero_runtime: Callable[[NodeAppRuntimeSummary | None], None] = (
@@ -443,7 +434,6 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                     current_model, last_system_summary = self._apply_live_app_state_update(
                         model=current_model,
                         event=event,
-                        local_app=local_app,
                         last_system_summary=last_system_summary,
                     )
                     hero_corner_bindings.apply_node_summary(last_system_summary)
@@ -652,20 +642,15 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         top_badges: tuple[_ModWebBadgeSpec, ...],
         initial_system_summary: NodeSystemSummary | None,
         initial_app_stats: NodeAppRuntimeSummary | None,
-        is_local_node: bool,
     ) -> _ModWebAppHeroCornerBindings:
         initial_runtime_details = self._app_hero_runtime_details(initial_app_stats)
-        presence_stream_url = self._app_page_node_presence_stream_url(
-            node_name=node_name,
-            is_local_node=is_local_node,
-        )
+        presence_stream_url = self._app_page_node_presence_stream_url(node_name=node_name)
         initial_node_badge_tone: BadgeTone = (
             "black"
             if presence_stream_url is not None
             else self._app_page_node_badge_tone(
                 node_name=node_name,
                 system_summary=initial_system_summary,
-                is_local_node=is_local_node,
             )
         )
         with ui.element("div").classes("mod-app-node-badge-wrap"):
@@ -707,16 +692,15 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         def _apply_node_summary(system_summary: NodeSystemSummary | None) -> None:
             if node_badge_spec is not None:
                 return
-            self._set_badge_state(
-                node_badge,
-                node_name,
-                self._app_page_node_badge_tone(
-                    node_name=node_name,
-                    system_summary=system_summary,
-                    is_local_node=is_local_node,
-                ),
-                extra_classes="mod-app-corner-badge mod-app-node-badge",
-            )
+                self._set_badge_state(
+                    node_badge,
+                    node_name,
+                    self._app_page_node_badge_tone(
+                        node_name=node_name,
+                        system_summary=system_summary,
+                    ),
+                    extra_classes="mod-app-corner-badge mod-app-node-badge",
+                )
 
         def _apply_app_stats(app_stats: NodeAppRuntimeSummary | None) -> None:
             runtime_details = self._app_hero_runtime_details(app_stats)
@@ -743,16 +727,13 @@ class ModWebAppPageMixin(ModWebServiceSupport):
         *,
         node_name: str,
         system_summary: NodeSystemSummary | None,
-        is_local_node: bool,
     ) -> BadgeTone:
         del node_name
-        if system_summary is not None or is_local_node:
+        if system_summary is not None:
             return "black"
         return "red"
 
-    def _app_page_node_presence_stream_url(self, *, node_name: str, is_local_node: bool) -> str | None:
-        if is_local_node:
-            return self._current_node_link().presence_stream_url
+    def _app_page_node_presence_stream_url(self, *, node_name: str) -> str | None:
         return self._remote_node_link(node_name).presence_stream_url
 
     @classmethod

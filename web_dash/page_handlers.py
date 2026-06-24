@@ -64,15 +64,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         log.info("Mod web startup event received")
 
     async def _app_links(self, user: ModWebUser) -> tuple[ModWebAppLink, ...]:
-        entries = await self._node_api.list_apps()
-        return tuple(
-            self._app_link_from_entry(
-                entry=entry,
-                user=user,
-                node_name=config.MOD_WEB_SERVER.node_name,
-            )
-            for entry in entries
-        )
+        current_node = self._current_node_link()
+        return await self._remote_app_links(current_node, user)
 
     async def _remote_app_links(self, node: ModWebNodeLink, user: ModWebUser) -> tuple[ModWebAppLink, ...]:
         entries = await self._remote_apps_async(node, user)
@@ -84,45 +77,32 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         *,
         simulated_down_node_names: tuple[str, ...] = (),
     ) -> tuple[ModWebNodeAppSection, ...]:
-        sections: list[ModWebNodeAppSection] = []
-        remote_nodes: list[ModWebNodeLink] = []
+        sections: list[ModWebNodeAppSection | None] = [None] * len(self._node_links())
+        remote_nodes: list[tuple[int, ModWebNodeLink]] = []
         simulated_down_keys: set[str] = {node_name.casefold() for node_name in simulated_down_node_names}
-        for node in self._node_links():
+        for index, node in enumerate(self._node_links()):
             if node.node_name.casefold() in simulated_down_keys:
-                sections.append(self._simulated_remote_node_section(node))
+                sections[index] = self._simulated_remote_node_section(node)
                 continue
-            if node.is_current:
-                try:
-                    sections.append(ModWebNodeAppSection(node=node, app_links=await self._app_links(user)))
-                except Exception as xcp:
-                    if not (self._shutting_down or config.IS_SHUTTINGDOWN):
-                        log.warning("Local mod web home node unavailable: node=%s error=%s", node.node_name, xcp)
-                    sections.append(
-                        ModWebNodeAppSection(
-                            node=node,
-                            app_links=(),
-                            error=self._friendly_remote_node_error_text(xcp),
-                        )
-                    )
-            else:
-                remote_nodes.append(node)
+            remote_nodes.append((index, node))
 
-        async def _remote_section(node: ModWebNodeLink) -> ModWebNodeAppSection:
+        async def _remote_section(index: int, node: ModWebNodeLink) -> tuple[int, ModWebNodeAppSection]:
             if node.node_name.casefold() in simulated_down_keys:
-                return self._simulated_remote_node_section(node)
+                return index, self._simulated_remote_node_section(node)
             try:
-                return ModWebNodeAppSection(node=node, app_links=await self._remote_app_links(node, user))
+                return index, ModWebNodeAppSection(node=node, app_links=await self._remote_app_links(node, user))
             except Exception as xcp:
                 if not (self._shutting_down or config.IS_SHUTTINGDOWN):
                     log.warning("Remote mod web home node unavailable: node=%s error=%s", node.node_name, xcp)
-                return ModWebNodeAppSection(
+                return index, ModWebNodeAppSection(
                     node=node,
                     app_links=(),
                     error=self._friendly_remote_node_error_text(xcp),
                 )
 
-        sections.extend(await asyncio.gather(*(_remote_section(node) for node in remote_nodes)))
-        return tuple(sections)
+        for index, section in await asyncio.gather(*(_remote_section(index, node) for index, node in remote_nodes)):
+            sections[index] = section
+        return tuple(cast(tuple[ModWebNodeAppSection, ...], tuple(sections)))
 
     def _login_node_statuses(self, *, simulated_down_node_names: tuple[str, ...] = ()) -> tuple[ModWebNodeStatus, ...]:
         statuses: list[ModWebNodeStatus] = []
@@ -131,14 +111,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             if node.node_name.casefold() in simulated_down_keys:
                 statuses.append(self._simulated_remote_node_status(node))
                 continue
-            if node.is_current:
-                statuses.append(ModWebNodeStatus(node=node, alive=True))
-                continue
             statuses.append(self._probe_node_status(node))
         return tuple(statuses)
 
     def _probe_node_status(self, node: ModWebNodeLink) -> ModWebNodeStatus:
-        url = node.latency_probe_url or f"{node.api_base_url.rstrip('/')}/ping"
+        url = node.latency_probe_url or f"{self._absolute_node_api_base_url(node.api_base_url).rstrip('/')}/ping"
         try:
             response = requests.get(url, timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT)
         except requests.RequestException as xcp:
@@ -170,98 +147,12 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         )
 
     async def _render_mods_page(self, *, ui: ModWebUi, app_name: str, request: Request) -> None:
-        user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
-        if user is None:
-            return
-        try:
-            app = self._resolve_app(app_name)
-        except Exception as xcp:
-            log.exception("Mod web page render failed: app=%s", app_name)
-            self._render_error_page(ui=ui, title="Page unavailable", detail=str(xcp), app_name=app_name)
-            return
-        try:
-            page_data = await self._build_local_app_page_data(app, user=user)
-            if page_data.app_entry.supports_mods:
-                model = self._page_model_from_local_page_data(
-                    page_data,
-                    can_manage_app=self._user_has_level(user, Power_Level.user),
-                )
-                chat_surface = (
-                    await self._local_chat_surface_config(
-                        app=app,
-                        request=request,
-                        user=user,
-                        app_stats=model.app_stats,
-                        include_runtime_updates=False,
-                    )
-                    if model.supports_chat
-                    else None
-                )
-
-                async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
-                    return await self._node_api.build_app_runtime_summary(app)
-
-                async def _refresh_runtime_model() -> ModWebBasePageModel:
-                    return await self._refresh_runtime_model(model=model, user=user)
-
-                def _subscribe_app_state(
-                    on_update: Callable[[NodeAppStateStreamEvent], None],
-                ) -> Callable[[], None]:
-                    return self._subscribe_local_app_state(app=app, on_update=on_update)
-
-                self._render_page(
-                    ui=ui,
-                    model=model,
-                    user=user,
-                    current_url=self._request_path(request),
-                    refresh_async_app_stats=_refresh_app_stats,
-                    refresh_async_runtime_model=_refresh_runtime_model,
-                    subscribe_app_state_updates=_subscribe_app_state,
-                    local_app=app,
-                    chat_surface=chat_surface,
-                )
-            else:
-                model = self._overview_model_from_local_page_data(
-                    page_data,
-                    can_manage_app=self._user_has_level(user, Power_Level.user),
-                )
-                chat_surface = (
-                    await self._local_chat_surface_config(
-                        app=app,
-                        request=request,
-                        user=user,
-                        app_stats=model.app_stats,
-                        include_runtime_updates=False,
-                    )
-                    if model.supports_chat
-                    else None
-                )
-
-                async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
-                    return await self._node_api.build_app_runtime_summary(app)
-
-                async def _refresh_runtime_model() -> ModWebBasePageModel:
-                    return await self._refresh_runtime_model(model=model, user=user)
-
-                def _subscribe_app_state(
-                    on_update: Callable[[NodeAppStateStreamEvent], None],
-                ) -> Callable[[], None]:
-                    return self._subscribe_local_app_state(app=app, on_update=on_update)
-
-                self._render_overview_page(
-                    ui=ui,
-                    model=model,
-                    user=user,
-                    current_url=self._request_path(request),
-                    refresh_async_app_stats=_refresh_app_stats,
-                    refresh_async_runtime_model=_refresh_runtime_model,
-                    subscribe_app_state_updates=_subscribe_app_state,
-                    local_app=app,
-                    chat_surface=chat_surface,
-                )
-        except Exception as xcp:
-            log.exception("Mod web app page render failed: app=%s", app_name)
-            self._render_error_page(ui=ui, title="Page unavailable", detail=str(xcp), app_name=app_name)
+        await self._render_node_mods_page(
+            ui=ui,
+            node_name=self._default_mod_web_node_name(),
+            app_name=app_name,
+            request=request,
+        )
 
     async def _render_node_page(self, *, ui: ModWebUi, node_name: str, request: Request) -> None:
         user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.user)
@@ -284,15 +175,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             latest = await self._remote_node_system_summary_async(node, user)
             return self._build_system_title_stats(latest)
 
-        subscribe_node_state_updates: Callable[[Callable[[NodeStateStreamEvent], None]], Callable[[], None]] | None
-        if node.is_current:
-            subscribe_node_state_updates = self._node_api.subscribe_local_node_state
-        else:
-            subscribe_node_state_updates = lambda on_update: self._create_remote_node_state_subscription(
-                node=node,
-                user=user,
-                on_update=on_update,
-            )
+        subscribe_node_state_updates = lambda on_update: self._create_remote_node_state_subscription(
+            node=node,
+            user=user,
+            on_update=on_update,
+        )
 
         self._render_node_apps_page(
             ui=ui,
@@ -317,6 +204,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             return
         try:
             app_entry = await self._remote_app_entry_async(node, app_name, user)
+            resolved_app_color_hex = self._resolved_app_color_hex(
+                app_name=app_entry.name,
+                scope=app_entry.scope,
+                color_hex=app_entry.color_hex,
+            )
             can_manage_app = self._user_has_level(user, Power_Level.user)
             can_read_configs = app_entry.supports_configs and self._user_has_level(user, app_entry.config_read_level)
             load_warnings: list[ModWebPageLoadWarning] = []
@@ -429,7 +321,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     ),
                     update_info=app_entry.update_info,
                     update_status=app_entry.update_status,
-                    app_color_hex=app_entry.color_hex,
+                    app_color_hex=resolved_app_color_hex,
                     resource_points=app_entry.resource_points,
                     app_title_font_preset=app_entry.title_font_preset,
                     app_notes=app_entry.notes,
@@ -564,7 +456,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     node=node,
                     app_name=app_entry.name,
                     app_friendly=app_entry.friendly,
-                    app_color_hex=app_entry.color_hex,
+                    app_color_hex=resolved_app_color_hex,
                     supports_configs=app_entry.supports_configs,
                     config_read_level=app_entry.config_read_level,
                     config_write_level=app_entry.config_write_level,
