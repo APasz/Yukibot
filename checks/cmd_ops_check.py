@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import lightbulb
 import pytest
 
 import cmd_ops
@@ -94,3 +95,46 @@ async def test_restart_command_invocation_passes_auto_restart_flag_to_helper() -
         True,
         True,
     )
+
+
+class _FakeDiContext:
+    def __init__(self, voice_tts: object, music: object | None) -> None:
+        self._voice_tts = voice_tts
+        self._music = music
+
+    async def __aenter__(self) -> "_FakeDiContext":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+    async def get(self, cls: object) -> object:
+        if cls is cmd_ops.VoiceTTSService:
+            return self._voice_tts
+        if cls is cmd_ops.MusicService and self._music is not None:
+            return self._music
+        raise LookupError(cls)
+
+
+@pytest.mark.anyio
+async def test_reset_voice_runtime_responds_without_runtime_stats() -> None:
+    voice_tts = SimpleNamespace(reset_runtime=AsyncMock())
+    music = SimpleNamespace(
+        active_guild_ids=Mock(return_value=[111, 222]),
+        reset_runtime=AsyncMock(),
+    )
+    di_context = _FakeDiContext(voice_tts=voice_tts, music=music)
+    ctx = SimpleNamespace(
+        client=SimpleNamespace(
+            di=SimpleNamespace(enter_context=Mock(return_value=di_context)),
+        ),
+        respond=AsyncMock(),
+    )
+
+    await cmd_ops.reset_voice_runtime(ctx)
+
+    ctx.client.di.enter_context.assert_called_once_with(lightbulb.di.Contexts.DEFAULT)
+    music.active_guild_ids.assert_called_once_with()
+    music.reset_runtime.assert_awaited_once_with()
+    voice_tts.reset_runtime.assert_awaited_once_with(extra_guild_ids=[111, 222])
+    ctx.respond.assert_awaited_once_with("Voice restart complete.")

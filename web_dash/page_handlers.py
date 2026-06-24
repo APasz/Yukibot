@@ -31,12 +31,34 @@ from .types import (
     ModWebBasePageModel,
     ModWebNodeAppSection,
     ModWebNodeLink,
+    ModWebPageLoadWarning,
     ModWebNodeStatus,
     ModWebTitleStat,
 )
 
 
 class ModWebPageHandlersMixin(ModWebServiceSupport):
+    async def _safe_remote_optional_page_section(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        section_label: str,
+        fallback: object,
+        load_warnings: list[ModWebPageLoadWarning],
+        operation: Callable[[], object],
+    ) -> object:
+        try:
+            return await asyncio.to_thread(operation)
+        except Exception as xcp:
+            self._warn_page_section_load_failure(
+                context=f"Remote mod web app page: node={node.node_name} app={app_name} section={section_label}",
+                section_label=section_label,
+                error=xcp,
+                load_warnings=load_warnings,
+            )
+            return fallback
+
     def _on_startup(self) -> None:
         self._startup_signal.set()
         log.info("Mod web startup event received")
@@ -297,34 +319,70 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             app_entry = await self._remote_app_entry_async(node, app_name, user)
             can_manage_app = self._user_has_level(user, Power_Level.user)
             can_read_configs = app_entry.supports_configs and self._user_has_level(user, app_entry.config_read_level)
+            load_warnings: list[ModWebPageLoadWarning] = []
+            empty_configs = self._empty_config_list(
+                app_name=app_entry.name,
+                app_friendly=app_entry.friendly,
+                node_name=node.node_name,
+            )
             configs_job = (
-                asyncio.to_thread(self._remote_config_list, node, app_name, user)
-                if can_read_configs
-                else asyncio.sleep(
-                    0,
-                    result=self._empty_config_list(
-                        app_name=app_entry.name, app_friendly=app_entry.friendly, node_name=node.node_name
-                    ),
+                self._safe_remote_optional_page_section(
+                    node=node,
+                    app_name=app_name,
+                    section_label="Configs",
+                    fallback=empty_configs,
+                    load_warnings=load_warnings,
+                    operation=lambda: self._remote_config_list(node, app_name, user),
                 )
+                if can_read_configs
+                else asyncio.sleep(0, result=empty_configs)
             )
             if app_entry.supports_mods:
                 saves_job = (
-                    asyncio.to_thread(self._remote_save_list, node, app_name, user)
+                    self._safe_remote_optional_page_section(
+                        node=node,
+                        app_name=app_name,
+                        section_label="Saves",
+                        fallback=None,
+                        load_warnings=load_warnings,
+                        operation=lambda: self._remote_save_list(node, app_name, user),
+                    )
                     if app_entry.supports_saves and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
                 blueprints_job = (
-                    asyncio.to_thread(self._remote_blueprint_list, node, app_name, user)
+                    self._safe_remote_optional_page_section(
+                        node=node,
+                        app_name=app_name,
+                        section_label="Blueprints",
+                        fallback=None,
+                        load_warnings=load_warnings,
+                        operation=lambda: self._remote_blueprint_list(node, app_name, user),
+                    )
                     if app_entry.supports_blueprints and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
                 settings_job = (
-                    asyncio.to_thread(self._remote_setting_list, node, app_name, user)
+                    self._safe_remote_optional_page_section(
+                        node=node,
+                        app_name=app_name,
+                        section_label="Settings",
+                        fallback=None,
+                        load_warnings=load_warnings,
+                        operation=lambda: self._remote_setting_list(node, app_name, user),
+                    )
                     if app_entry.supports_settings and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
                 console_actions_job = (
-                    asyncio.to_thread(self._remote_console_action_list, node, app_name, user)
+                    self._safe_remote_optional_page_section(
+                        node=node,
+                        app_name=app_name,
+                        section_label="Console",
+                        fallback=None,
+                        load_warnings=load_warnings,
+                        operation=lambda: self._remote_console_action_list(node, app_name, user),
+                    )
                     if app_entry.supports_console_actions and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
@@ -385,6 +443,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     relay_advancements_enabled=app_entry.relay_advancements_enabled,
                     relay_advancement_term=app_entry.relay_advancement_term,
                     activity_providers=app_entry.activity_providers,
+                    load_warnings=tuple(load_warnings),
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=mods.app_name,
                         app_stats=mods.app_stats,
@@ -434,22 +493,50 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 )
             else:
                 saves_job = (
-                    asyncio.to_thread(self._remote_save_list, node, app_name, user)
+                    self._safe_remote_optional_page_section(
+                        node=node,
+                        app_name=app_name,
+                        section_label="Saves",
+                        fallback=None,
+                        load_warnings=load_warnings,
+                        operation=lambda: self._remote_save_list(node, app_name, user),
+                    )
                     if app_entry.supports_saves and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
                 blueprints_job = (
-                    asyncio.to_thread(self._remote_blueprint_list, node, app_name, user)
+                    self._safe_remote_optional_page_section(
+                        node=node,
+                        app_name=app_name,
+                        section_label="Blueprints",
+                        fallback=None,
+                        load_warnings=load_warnings,
+                        operation=lambda: self._remote_blueprint_list(node, app_name, user),
+                    )
                     if app_entry.supports_blueprints and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
                 settings_job = (
-                    asyncio.to_thread(self._remote_setting_list, node, app_name, user)
+                    self._safe_remote_optional_page_section(
+                        node=node,
+                        app_name=app_name,
+                        section_label="Settings",
+                        fallback=None,
+                        load_warnings=load_warnings,
+                        operation=lambda: self._remote_setting_list(node, app_name, user),
+                    )
                     if app_entry.supports_settings and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
                 console_actions_job = (
-                    asyncio.to_thread(self._remote_console_action_list, node, app_name, user)
+                    self._safe_remote_optional_page_section(
+                        node=node,
+                        app_name=app_name,
+                        section_label="Console",
+                        fallback=None,
+                        load_warnings=load_warnings,
+                        operation=lambda: self._remote_console_action_list(node, app_name, user),
+                    )
                     if app_entry.supports_console_actions and can_manage_app
                     else asyncio.sleep(0, result=None)
                 )
@@ -512,6 +599,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     relay_advancements_enabled=app_entry.relay_advancements_enabled,
                     relay_advancement_term=app_entry.relay_advancement_term,
                     activity_providers=app_entry.activity_providers,
+                    load_warnings=tuple(load_warnings),
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=app_entry.name,
                         app_stats=app_stats,

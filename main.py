@@ -20,7 +20,7 @@ from _activity import Activity_Manager, Provider_CPU, Provider_DISK, Provider_RA
 from _authority_server import AuthorityServer
 from _discord import DC_Relay, Distils, Resolutator, cached_member_role_color, color_int_to_hex
 from _file import File_Utils
-from _manager import AppStartBlockerKind, App_Manager, Provider_Player, Provider_Process
+from _manager import App_Manager, AppStartBlockerKind, Provider_Player, Provider_Process
 from _security import Access_Control
 from _sys import Stats_System
 from _utils import File_Cleaner, Utilities
@@ -31,7 +31,7 @@ from cmd_dashboard import CMD_Dashboard, DashboardEditorService
 from cmd_misc import group_misc
 from cmd_music import MusicService, group_music
 from cmd_online import CMD_Online, OnlineEditorService
-from cmd_ops import available_restart_targets, group_ops, reset_voice_runtime_services, voice_runtime_reset_lines
+from cmd_ops import available_restart_targets, group_ops, reset_voice_runtime_services
 from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, VoiceTTSService, group_voice
 from config import Activity_Provider, Name_Cache
 from font_assets import font_assets
@@ -737,12 +737,11 @@ def main():
             if voice_tts is None:
                 log.warning("Skipping scheduled voice restart because the voice service is unavailable")
                 return
-            summary = await reset_voice_runtime_services(voice_tts, music)
+            await reset_voice_runtime_services(voice_tts, music)
             completion_notice = maintenance.build_restart_completed_notice(
                 effective_target=effective_target,
                 matched_targets=due_targets,
                 scheduled_for=scheduled_for,
-                summary_lines=voice_runtime_reset_lines(summary),
             )
             await _post_started_channel_notice(bot, completion_notice, error_context="MAINTENANCE COMPLETE MESSAGE")
             return

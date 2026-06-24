@@ -993,7 +993,12 @@ class DC_Bound(Message):
         super().__init__(content, player, files, relay_embed=relay_embed, notice=notice)
         self.app = app
         if player_id is None:
-            self.player_resolution = Name_Cache().resolve_name(str(player), app.scope)
+            self.player_resolution = Name_Cache().resolve_name(
+                str(player),
+                app.scope,
+                platforms=getattr(app, "name_platforms", ()),
+                preferred_platform=getattr(app, "preferred_name_platform", None),
+            )
             self.player_id = self.player_resolution.user_id
         else:
             if isinstance(player_id, bool):
@@ -1062,14 +1067,19 @@ class App_Bound(Message):
 
     def content_for_app(self, app: "App") -> str:
         base_content = self.demojise_discord(self._string)
+        platforms = getattr(app, "name_platforms", ())
+        preferred_platform = getattr(app, "preferred_name_platform", None)
 
         def replace_mention(match: re.Match[str]) -> str:
             mentioned_user_id = int(match.group(1))
-            return app.name_cache.relay_mention_name(
+            resolved_name = app.name_cache.relay_mention_name(
                 mentioned_user_id,
                 scope=app.scope,
+                platforms=platforms,
+                preferred_platform=preferred_platform,
                 preferred_guild_id=self.source_guild_id,
             )
+            return f"@{resolved_name}"
 
         return DISCORD_USER_MENTION_REGEX.sub(replace_mention, base_content)
 
@@ -1532,6 +1542,19 @@ class DC_Relay(metaclass=Singleton):
 
     async def _active_app_chat_routes(self, app: "App") -> tuple[DiscordTextRoute, ...]:
         return await self._active_discord_text_routes(self._app_chat_channels(app))
+
+    def _discord_guild_name(self, guild_id: hikari.Snowflakeish | None) -> str | None:
+        if guild_id is None:
+            return None
+        manager = getattr(self, "manager", None)
+        bot = getattr(manager, "bot", None) if manager is not None else None
+        cache = getattr(bot, "cache", None) if bot is not None else None
+        get_guild = getattr(cache, "get_guild", None) if cache is not None else None
+        guild = get_guild(int(hikari.Snowflake(guild_id))) if callable(get_guild) else None
+        guild_name = getattr(guild, "name", None)
+        if isinstance(guild_name, str) and guild_name.strip():
+            return guild_name
+        return None
 
     async def _is_active_app_chat_channel(self, app: "App", channel_id: hikari.Snowflakeish) -> bool:
         channel_snowflake = hikari.Snowflake(channel_id)
@@ -2050,11 +2073,15 @@ class DC_Relay(metaclass=Singleton):
         )
         app_scope = getattr(app, "scope", None)
         scoped_app = app_scope if isinstance(app_scope, str) else None
+        app_platforms = getattr(app, "name_platforms", ())
+        preferred_platform = getattr(app, "preferred_name_platform", None)
         author_display = (
             self.names.relay_display_name(
                 author_id,
                 str(author_id),
                 scope=scoped_app,
+                platforms=app_platforms,
+                preferred_platform=preferred_platform,
                 preferred_guild_id=message.source_guild_id,
             )
             if author_id is not None
@@ -2067,6 +2094,7 @@ class DC_Relay(metaclass=Singleton):
         )
         source_channel_id = int(message.chan.id) if getattr(message.chan, "id", None) is not None else None
         source_label = message.chan.name if getattr(message.chan, "name", None) else None
+        source_guild_name = self._discord_guild_name(message.source_guild_id)
         return ChatEvent(
             room_id=app.name,
             source=ChatEndpointId.discord_channel(source_channel_id or 0),
@@ -2085,6 +2113,7 @@ class DC_Relay(metaclass=Singleton):
             reference=message.reference,
             notice=message.notice,
             source_guild_id=int(message.source_guild_id) if message.source_guild_id is not None else None,
+            source_guild_name=source_guild_name,
             source_channel_id=source_channel_id,
             source_message_id=int(message.source_message_id) if message.source_message_id is not None else None,
             source_label=source_label,
@@ -2225,14 +2254,17 @@ class DC_Relay(metaclass=Singleton):
         author = getattr(message, "author", None)
         member = getattr(message, "member", None)
         author_id = getattr(author, "id", None)
-        fallback = (
-            getattr(member, "display_name", None)
-            or getattr(author, "global_name", None)
-            or getattr(author, "display_name", None)
-            or getattr(author, "username", None)
-        )
+        fallback = self.names.discord_identity_label(
+            getattr(author, "global_name", None),
+            getattr(author, "username", None),
+        ) or getattr(author, "display_name", None) or getattr(member, "display_name", None)
         if isinstance(author_id, int | str | hikari.Snowflake):
-            return self.names.cached_display_name(int(author_id), str(fallback or author_id), preferred_guild_id=guild_id)
+            del guild_id
+            return self.names.discord_display_name(
+                int(author_id),
+                str(fallback or author_id),
+                fallback_display_name=str(fallback or author_id),
+            )
         if isinstance(fallback, str) and fallback.strip():
             return fallback
         return "Unknown"
@@ -2325,6 +2357,13 @@ class DC_Relay(metaclass=Singleton):
         )
         if tracked_reference is not None:
             return tracked_reference
+        referenced_author = getattr(resolved_referenced_message, "author", None)
+        referenced_author_id = getattr(referenced_author, "id", None)
+        discord_user_id = (
+            int(hikari.Snowflake(referenced_author_id))
+            if isinstance(referenced_author_id, int | str | hikari.Snowflake)
+            else None
+        )
         author_display_name = self._discord_message_author_display_name(resolved_referenced_message, guild_id=guild_id)
         content = self._chat_reference_content_for_discord_message(resolved_referenced_message)
         event_id = str(resolved_referenced_message.id)
@@ -2332,6 +2371,7 @@ class DC_Relay(metaclass=Singleton):
             author_display_name=author_display_name,
             content=content,
             event_id=event_id,
+            discord_user_id=discord_user_id,
         )
 
     async def publish_web_chat(
@@ -2442,6 +2482,7 @@ class DC_Relay(metaclass=Singleton):
             reference_kind=reference_kind,
             reference=reference,
             source_guild_id=source_guild_id,
+            source_guild_name=self._discord_guild_name(source_guild_id),
             source_label="Web dashboard",
         )
         await self._deliver_chat_event(event)
@@ -2486,19 +2527,9 @@ class DC_Relay(metaclass=Singleton):
 
     def _discord_author_fallback_name(self, event: ChatEvent, app: "App | None") -> str:
         if event.author.discord_user_id is not None:
-            app_scope = getattr(app, "scope", None) if app is not None else None
-            scope = app_scope if isinstance(app_scope, str) else None
-            if app is not None:
-                name_cache = cast(object | None, getattr(app, "name_cache", None))
-                get_game_alias = getattr(name_cache, "get_game_alias", None)
-                if callable(get_game_alias) and scope is not None:
-                    alias = cast(Callable[[int, str], str | None], get_game_alias)(event.author.discord_user_id, scope)
-                    if alias:
-                        return alias
             return self.names.discord_fallback_name(
                 event.author.discord_user_id,
                 "user",
-                scope=scope,
                 fallback_display_name=event.author.display_name,
             )
         return event.author.display_name
@@ -2509,10 +2540,14 @@ class DC_Relay(metaclass=Singleton):
             return event.author.display_name
         app_scope = getattr(app, "scope", None)
         scope = app_scope if isinstance(app_scope, str) else None
+        app_platforms = getattr(app, "name_platforms", ())
+        preferred_platform = getattr(app, "preferred_name_platform", None)
         return self.names.relay_display_name(
             discord_user_id,
             event.author.display_name,
             scope=scope,
+            platforms=app_platforms,
+            preferred_platform=preferred_platform,
             preferred_guild_id=event.source_guild_id,
         )
 
@@ -2568,7 +2603,9 @@ class DC_Relay(metaclass=Singleton):
         player_plate = await self._playerplate_for_event(event, guild_id=guild_id, app=app)
         notice = event.resolved_notice()
         relay_embed = self._relay_embed_payload_for_event(event, app=app)
-        reference_prefix = self._discord_reference_prefix(event) if include_reference_prefix else None
+        reference_prefix = (
+            await self._discord_reference_prefix(event, guild_id=guild_id, app=app) if include_reference_prefix else None
+        )
         if notice is not None:
             if relay_embed is not None:
                 if notice_hides_body_content(notice):
@@ -2587,7 +2624,14 @@ class DC_Relay(metaclass=Singleton):
 
         app_scope = getattr(app, "scope", None) if app is not None else None
         scope = app_scope if isinstance(app_scope, str) else None
-        parsed_content, mentions = self.names.parse_mentions(event.content, scope=scope)
+        app_platforms = getattr(app, "name_platforms", ()) if app is not None else ()
+        preferred_platform = getattr(app, "preferred_name_platform", None) if app is not None else None
+        parsed_content, mentions = self.names.parse_mentions(
+            event.content,
+            scope=scope,
+            platforms=app_platforms,
+            preferred_platform=preferred_platform,
+        )
         body = parsed_content
         if reference_prefix is not None:
             body = f"{reference_prefix} {body}".strip() if body else reference_prefix
@@ -2600,17 +2644,46 @@ class DC_Relay(metaclass=Singleton):
             )
         return text, mentions
 
-    @staticmethod
-    def _discord_reference_prefix(event: ChatEvent) -> str | None:
+    async def _discord_reference_prefix(
+        self,
+        event: ChatEvent,
+        *,
+        guild_id: hikari.Snowflakeish | None,
+        app: "App | None",
+    ) -> str | None:
         if event.reference_kind is ChatReferenceKind.REPLY:
             if event.reference is not None:
-                return f"reply to <{event.reference.author_display_name}>;"
+                reference_author = await self._discord_reference_author_plate(event.reference, guild_id=guild_id)
+                return f"reply to {reference_author};"
             return "reply;"
         if event.reference_kind is ChatReferenceKind.FORWARD:
             if event.reference is not None:
-                return f"forwarded from <{event.reference.author_display_name}>;"
+                reference_author = await self._discord_reference_author_plate(event.reference, guild_id=guild_id)
+                return f"forwarded from {reference_author};"
             return "forwarded;"
         return None
+
+    async def _discord_reference_author_plate(
+        self,
+        reference: ChatMessageReference,
+        *,
+        guild_id: hikari.Snowflakeish | None,
+    ) -> str:
+        discord_user_id = reference.discord_user_id
+        if discord_user_id is None:
+            match = DISCORD_USER_MENTION_REGEX.fullmatch(reference.author_display_name.strip())
+            if match is not None:
+                discord_user_id = int(match.group(1))
+        if discord_user_id is not None and await self._chat_author_is_member_of_guild(discord_user_id, guild_id):
+            return f"<<@{discord_user_id}>>"
+        if discord_user_id is not None:
+            resolved_name = self.names.discord_fallback_name(
+                discord_user_id,
+                "user",
+                fallback_display_name=reference.author_display_name,
+            )
+            return f"<{resolved_name}>"
+        return f"<{reference.author_display_name}>"
 
     @staticmethod
     def _discord_text_for_embed_event(

@@ -122,6 +122,21 @@ class SuppressKnownWarningsFilter(logging.Filter):
             return True
         return ASYNCIO_ISCOROUTINEFUNCTION_DEPRECATION not in record.getMessage()
 
+class AppScopes(enum.StrEnum):
+    minecraft = "minecraft"
+    sevendays = "sevendays"
+    beammp = "beammp"
+    ets = "ets"
+    factorio = "factorio"
+    satisfactory = "satisfactory"
+
+
+class ID_Platforms(enum.StrEnum):
+    steam = "Steam"
+    minecraft = "Minecraft"
+    microsoft = "Microsoft"
+    epic_games = "Epic Games"
+
 
 class Currency(enum.StrEnum):
     AUD = enum.auto()
@@ -2152,6 +2167,24 @@ class NameResolutionResult:
     candidate_ids: tuple[int, ...] = ()
 
 
+class PersonaSurface(enum.StrEnum):
+    APP = "app"
+    DISCORD = "discord"
+    WEB = "web"
+
+
+@dataclass(frozen=True, slots=True)
+class Persona:
+    discord_id: hikari.Snowflake | None
+    discord_username: str | None
+    discord_global: str | None
+    discord_nicks: dict[hikari.Snowflake, str]
+    scopes: dict[str, str]
+    web_override: str | None
+    discord_override: str | None
+    aliases: tuple[str, ...]
+
+
 class Name_Cache(metaclass=Singleton):
     def __init__(self):
         self.pointer = DISCORD_NAMES
@@ -2238,6 +2271,34 @@ class Name_Cache(metaclass=Singleton):
 
     def _sync_known_names(self, user: UserNames) -> None:
         user.names = self._derived_known_names(user)
+
+    @classmethod
+    def _persona_from_entry(cls, user_id: int, user: UserNames) -> Persona:
+        scope_aliases = {
+            scope.casefold(): alias
+            for scope, alias_data in user.games.items()
+            if (alias := cls._normalised_optional_text(alias_data[0], label=f"{scope} alias")) is not None
+        }
+        return Persona(
+            discord_id=hikari.Snowflake(user_id),
+            discord_username=user.account,
+            discord_global=user.global_name,
+            discord_nicks={
+                hikari.Snowflake(guild_id): nickname
+                for guild_id, nickname in user.guild_names.items()
+                if nickname
+            },
+            scopes=scope_aliases,
+            web_override=user.display_overrides.web,
+            discord_override=user.display_overrides.discord,
+            aliases=tuple(alias for alias in cls._sorted_name_values(user.nicknames) if alias),
+        )
+
+    def persona(self, user_id: int) -> Persona | None:
+        user = self.by_id.get(user_id)
+        if user is None:
+            return None
+        return self._persona_from_entry(user_id, user)
 
     def _normalise_user(self, user: UserNames) -> bool:
         before = user.model_dump(mode="json")
@@ -2916,20 +2977,22 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
         default: str = "user",
     ) -> str:
-        user: UserNames | None = self.by_id.get(user_id)
-        if scope and user is not None:
-            alias_data: tuple[str | None, str | None] | None = user.games.get(scope.lower())
-            if alias_data is not None and alias_data[0]:
-                return alias_data[0]
-
-        resolved: str = self.cached_display_name(
-            user_id,
-            default,
-            preferred_guild_id=preferred_guild_id,
-            category=DisplayNameCategory.DISCORD,
+        del preferred_guild_id
+        persona = self.persona(user_id)
+        if persona is None:
+            return default
+        resolved = self._resolve_surface_name(
+            persona,
+            surface=PersonaSurface.APP,
+            scope=scope,
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+            default=default,
         )
         return resolved if resolved is not None else default
 
@@ -2941,6 +3004,8 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
     ) -> str | None: ...
 
@@ -2952,6 +3017,8 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
     ) -> str: ...
 
@@ -2962,11 +3029,129 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
     ) -> str | None:
-        if scope is not None and (game_alias := self.get_game_alias(user_id, scope)) is not None:
-            return game_alias
-        return self.cached_display_name(user_id, default, preferred_guild_id=preferred_guild_id)
+        del preferred_guild_id
+        persona = self.persona(user_id)
+        if persona is None:
+            return default
+        return self._resolve_surface_name(
+            persona,
+            surface=PersonaSurface.APP,
+            scope=scope,
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+            default=default,
+        )
+
+    @overload
+    def web_display_name(
+        self,
+        user_id: int,
+        default: None,
+        /,
+        *,
+        scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
+    ) -> str | None: ...
+
+    @overload
+    def web_display_name(
+        self,
+        user_id: int,
+        default: str = "Unknown",
+        /,
+        *,
+        scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
+    ) -> str: ...
+
+    def web_display_name(
+        self,
+        user_id: int,
+        default: str | None = "Unknown",
+        /,
+        *,
+        scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
+    ) -> str | None:
+        persona = self.persona(user_id)
+        if persona is None:
+            return default
+        return self._resolve_surface_name(
+            persona,
+            surface=PersonaSurface.WEB,
+            scope=scope,
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+            default=default,
+        )
+
+    def web_mention_name(
+        self,
+        user_id: int,
+        /,
+        *,
+        scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
+        default: str = "user",
+    ) -> str:
+        persona = self.persona(user_id)
+        if persona is None:
+            return default
+        resolved = self._resolve_surface_name(
+            persona,
+            surface=PersonaSurface.WEB,
+            scope=scope,
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+            default=default,
+        )
+        return resolved if resolved is not None else default
+
+    @overload
+    def discord_display_name(
+        self,
+        user_id: int,
+        default: None,
+        /,
+        *,
+        fallback_display_name: str | None = None,
+    ) -> str | None: ...
+
+    @overload
+    def discord_display_name(
+        self,
+        user_id: int,
+        default: str = "user",
+        /,
+        *,
+        fallback_display_name: str | None = None,
+    ) -> str: ...
+
+    def discord_display_name(
+        self,
+        user_id: int,
+        default: str | None = "user",
+        /,
+        *,
+        fallback_display_name: str | None = None,
+    ) -> str | None:
+        persona = self.persona(user_id)
+        if persona is None:
+            return fallback_display_name or default
+        return self._resolve_surface_name(
+            persona,
+            surface=PersonaSurface.DISCORD,
+            default=default,
+            fallback_display_name=fallback_display_name,
+        )
 
     @overload
     def discord_fallback_name(
@@ -2999,27 +3184,114 @@ class Name_Cache(metaclass=Singleton):
         scope: str | None = None,
         fallback_display_name: str | None = None,
     ) -> str | None:
-        if scope is not None and (game_alias := self.get_game_alias(user_id, scope)) is not None:
-            return game_alias
-
-        user = self.by_id.get(user_id)
-        if user is not None and user.account:
-            return user.account
-
+        del scope
         fallback_name = self._normalised_optional_text(
             fallback_display_name,
             label="discord fallback display name",
         )
-        if fallback_name is not None:
-            return fallback_name
-
-        if user is not None and user.global_name:
-            return user.global_name
-        return default
+        return self.discord_display_name(
+            user_id,
+            default,
+            fallback_display_name=fallback_name,
+        )
 
     @staticmethod
     def _sorted_name_values(values: set[str]) -> list[str]:
         return sorted(values, key=str.casefold)
+
+    @classmethod
+    def _normalised_scope_candidates(
+        cls,
+        *,
+        scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
+    ) -> tuple[str, ...]:
+        ordered: list[str] = []
+
+        def add(raw_value: object | None) -> None:
+            if raw_value is None:
+                return
+            value = str(raw_value).strip().lower()
+            if value and value not in ordered:
+                ordered.append(value)
+
+        add(scope)
+        add(preferred_platform)
+        for platform in platforms:
+            add(platform)
+        return tuple(ordered)
+
+    @staticmethod
+    def discord_identity_label(global_name: str | None, username: str | None) -> str | None:
+        if global_name and username and global_name.casefold() != username.casefold():
+            return f"{global_name} [{username}]"
+        return global_name or username
+
+    @classmethod
+    def _persona_scope_alias(
+        cls,
+        persona: Persona,
+        *,
+        scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
+    ) -> str | None:
+        for candidate in cls._normalised_scope_candidates(
+            scope=scope,
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+        ):
+            alias = persona.scopes.get(candidate)
+            if alias:
+                return alias
+        return None
+
+    @classmethod
+    def _resolve_surface_name(
+        cls,
+        persona: Persona,
+        *,
+        surface: PersonaSurface,
+        scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
+        default: str | None = None,
+        fallback_display_name: str | None = None,
+    ) -> str | None:
+        scope_alias = cls._persona_scope_alias(
+            persona,
+            scope=scope,
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+        )
+        discord_identity = cls.discord_identity_label(persona.discord_global, persona.discord_username)
+        manual_alias = persona.aliases[0] if persona.aliases else None
+
+        if surface is PersonaSurface.APP:
+            return (
+                scope_alias
+                or persona.web_override
+                or persona.discord_global
+                or persona.discord_username
+                or manual_alias
+                or default
+            )
+
+        if surface is PersonaSurface.WEB:
+            return (
+                persona.web_override
+                or scope_alias
+                or discord_identity
+                or manual_alias
+                or fallback_display_name
+                or default
+            )
+
+        if surface is PersonaSurface.DISCORD:
+            return discord_identity or persona.web_override or manual_alias or fallback_display_name or default
+
+        raise ValueError(f"Unsupported persona surface `{surface}`.")
 
     @staticmethod
     def _preferred_guild_display_name(
@@ -3073,17 +3345,11 @@ class Name_Cache(metaclass=Singleton):
 
         if category is not None and (override := user.display_overrides.get_for_category(category)):
             return override
-        if preferred_name := self._preferred_guild_display_name(user, preferred_guild_id):
-            return preferred_name
-        if user.global_name:
-            return user.global_name
-        if user.account:
-            return user.account
-        if user.names:
-            return self._sorted_name_values(user.names)[0]
-        if user.nicknames:
-            return self._sorted_name_values(user.nicknames)[0]
-        return default
+        del preferred_guild_id
+        persona = self._persona_from_entry(user_id, user)
+        if category is DisplayNameCategory.WEB:
+            return self._resolve_surface_name(persona, surface=PersonaSurface.WEB, default=default)
+        return self._resolve_surface_name(persona, surface=PersonaSurface.DISCORD, default=default)
 
     def _resolve_candidate_result(
         self,
@@ -3121,12 +3387,26 @@ class Name_Cache(metaclass=Singleton):
         name: str,
         scope: str | None = None,
         *,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
         prefer_global_name: bool = False,
     ) -> NameResolutionResult:
         if scope:
             candidate_ids: set[int] = self._resolve_game_alias_ids(name, scope)
             result: NameResolutionResult = self._resolve_candidate_result(
                 candidate_ids, name, prefer_global_name=prefer_global_name
+            )
+            if result.status is not NameResolutionStatus.NOT_FOUND:
+                return result
+        for platform_scope in self._normalised_scope_candidates(
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+        ):
+            candidate_ids = self._resolve_game_alias_ids(name, platform_scope)
+            result = self._resolve_candidate_result(
+                candidate_ids,
+                name,
+                prefer_global_name=prefer_global_name,
             )
             if result.status is not NameResolutionStatus.NOT_FOUND:
                 return result
@@ -3142,8 +3422,22 @@ class Name_Cache(metaclass=Singleton):
                 return NameResolutionResult(NameResolutionStatus.UNIQUE, ident)
         return alias_result
 
-    def resolve_to_id(self, name: str, scope: str | None = None, *, prefer_global_name: bool = False) -> int | None:
-        return self.resolve_name(name, scope, prefer_global_name=prefer_global_name).user_id
+    def resolve_to_id(
+        self,
+        name: str,
+        scope: str | None = None,
+        *,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
+        prefer_global_name: bool = False,
+    ) -> int | None:
+        return self.resolve_name(
+            name,
+            scope,
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+            prefer_global_name=prefer_global_name,
+        ).user_id
 
     def _resolve_game_alias_ids(self, alias: str, scope: str | None) -> set[int]:
         matching_ids: set[int] = set()
@@ -3249,6 +3543,9 @@ class Name_Cache(metaclass=Singleton):
             self._sync_known_names(entry)
             for name in entry.names | entry.nicknames:
                 self.by_alias.setdefault(name.lower(), set()).add(uid)
+            for override in (entry.display_overrides.discord, entry.display_overrides.web):
+                if override:
+                    self.by_alias.setdefault(override.lower(), set()).add(uid)
             for platform, raw_id in entry.platform_ids.items():
                 try:
                     platform_key = self._norm_platform_key(platform)
@@ -3270,6 +3567,8 @@ class Name_Cache(metaclass=Singleton):
         replace: bool = True,
         *,
         scope: str | None = None,
+        platforms: Iterable[object] = (),
+        preferred_platform: object | None = None,
     ) -> tuple[str, set[int]]:
         """
         Parse @name mentions in the input text.
@@ -3282,7 +3581,12 @@ class Name_Cache(metaclass=Singleton):
 
         def repl(match) -> str | Any:
             name = match.group(1)
-            uid: int | None = self.resolve_to_id(name, scope=scope)
+            uid: int | None = self.resolve_to_id(
+                name,
+                scope=scope,
+                platforms=platforms,
+                preferred_platform=preferred_platform,
+            )
             if uid:
                 mentions.add(uid)
                 return f"<@{uid}>" if replace else match.group(0)

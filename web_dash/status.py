@@ -42,10 +42,12 @@ from .runtime_imports import (
     ChatEndpointId,
     ChatEndpointKind,
     ChatEvent,
+    ChatHub,
     ChatLink,
     ChatMediaProvider,
     ChatMessageReference,
     ChatReferenceKind,
+    Iterable,
     Label,
     LiteralString,
     ModWebUser,
@@ -973,7 +975,8 @@ class ModWebStatusMixin(ModWebServiceSupport):
         ).classes(f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm")
 
     def _build_fake_chat_preview_panel(self, *, ui: ModWebUi) -> Callable[[], None]:
-        app_options: dict[str, str] = self._fake_chat_preview_app_options()
+        context_options: dict[str, str] = self._fake_chat_preview_app_options()
+        send_target_options: dict[str, str] = self._fake_chat_preview_send_target_options()
         source_options: dict[str, ChatEndpointKind] = {
             "Game": ChatEndpointKind.APP,
             "Discord": ChatEndpointKind.DISCORD_CHANNEL,
@@ -1010,10 +1013,15 @@ class ModWebStatusMixin(ModWebServiceSupport):
             "Reply": ChatReferenceKind.REPLY,
             "Forward": ChatReferenceKind.FORWARD,
         }
-        initial_app_label: str | None = next(iter(app_options), None)
-        initial_app_name: str | None = app_options.get(initial_app_label) if initial_app_label is not None else None
+        initial_app_label: str | None = next(iter(context_options), None)
+        initial_publish_target_label: str | None = next(iter(send_target_options), None)
+        initial_app_name: str | None = (
+            context_options.get(initial_app_label)
+            if initial_app_label is not None
+            else send_target_options.get(initial_publish_target_label)
+        )
         state: _ModWebFakeChatPreviewState = _ModWebFakeChatPreviewState(app_name=initial_app_name)
-        publish_target_label: str | None = initial_app_label
+        publish_target_label: str | None = initial_publish_target_label
         initial_source_label: str = next(
             label for label, option in source_options.items() if option is state.source_kind
         )
@@ -1048,6 +1056,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     self._render_chat_event_group(
                         ui=ui,
                         group=_ModWebChatEventGroup(head_event=preview_event, events=(preview_event,)),
+                        room_id=preview_event.room_id,
                         can_reply=False,
                         on_reply=ignore_preview_reply,
                     )
@@ -1059,7 +1068,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
             if value is None:
                 state.app_name = None
             else:
-                state.app_name = app_options.get(str(value).strip())
+                state.app_name = context_options.get(str(value).strip())
             _refresh_preview()
 
         def _update_source_kind(value: object) -> None:
@@ -1184,7 +1193,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
             if publish_target_label is None:
                 ui.notify("Select a target chat hub first.", type="warning")
                 return
-            target_room_id: str | None = app_options.get(publish_target_label)
+            target_room_id: str | None = send_target_options.get(publish_target_label)
             if target_room_id is None:
                 ui.notify("Selected chat hub is invalid.", type="negative")
                 return
@@ -1210,7 +1219,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                         )
                     with ui.grid(columns=2).classes("w-full gap-3"):
                         ui.select(
-                            list[str](app_options),
+                            list[str](context_options),
                             value=initial_app_label,
                             label="App Context",
                             on_change=_handle_app_name_change,
@@ -1370,7 +1379,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     with ui.row().classes("mod-fake-chat-footer w-full"):
                         with ui.row().classes("items-end gap-2 flex-wrap"):
                             ui.select(
-                                list[str](app_options),
+                                list[str](send_target_options),
                                 value=publish_target_label,
                                 label="Send To Hub",
                                 on_change=_handle_publish_target_change,
@@ -1380,7 +1389,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                             send_button: Button = ui.button("Send for Real", on_click=_publish_preview_event).classes(
                                 "mod-list-button"
                             )
-                            if self._chat_relay is None or not app_options:
+                            if self._chat_relay is None or not send_target_options:
                                 send_button.disable()
                         ui.button("Close", on_click=preview_dialog.close).classes("mod-list-button secondary")
         return preview_dialog.open
@@ -1390,7 +1399,44 @@ class ModWebStatusMixin(ModWebServiceSupport):
         ui.button("Fake Chat", on_click=open_panel).classes(f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm")
 
     def _fake_chat_preview_app_options(self) -> dict[str, str]:
-        return {f"{app.friendly} ({app.name})": app.name for app in self._managed_apps() if app.supports_chat_relay}
+        managed_room_ids = [app.name for app in self._managed_apps()]
+        managed_room_id_set = set(managed_room_ids)
+        room_ids = managed_room_ids + [
+            room_id for room_id in ChatHub().bound_room_ids() if room_id not in managed_room_id_set
+        ]
+        return self._fake_chat_preview_room_options(room_ids)
+
+    def _fake_chat_preview_send_target_options(self) -> dict[str, str]:
+        bound_room_ids = ChatHub().bound_room_ids()
+        if bound_room_ids:
+            return self._fake_chat_preview_room_options(bound_room_ids)
+
+        relay_room_ids = [app.name for app in self._managed_apps() if app.supports_chat_relay]
+        if relay_room_ids:
+            return self._fake_chat_preview_room_options(relay_room_ids)
+
+        return self._fake_chat_preview_room_options(app.name for app in self._managed_apps())
+
+    def _fake_chat_preview_room_options(self, room_ids: Iterable[str]) -> dict[str, str]:
+        options: list[tuple[str, str]] = []
+        seen_room_ids: set[str] = set()
+        for raw_room_id in room_ids:
+            room_id = raw_room_id.strip()
+            if not room_id or room_id in seen_room_ids:
+                continue
+            seen_room_ids.add(room_id)
+            options.append((self._fake_chat_preview_room_label(room_id), room_id))
+        options.sort(key=lambda item: (item[0].casefold(), item[1].casefold()))
+        return {label: room_id for label, room_id in options}
+
+    def _fake_chat_preview_room_label(self, room_id: str) -> str:
+        app = self._chat_room_app(room_id)
+        if app is None:
+            return room_id
+        friendly = getattr(app, "friendly", None)
+        if isinstance(friendly, str) and friendly.strip():
+            return f"{friendly.strip()} ({room_id})"
+        return room_id
 
     def _build_fake_chat_preview_event(self, state: _ModWebFakeChatPreviewState) -> ChatEvent:
         return self._build_fake_chat_preview_event_for_room(state, room_id=state.app_name or "preview_room")

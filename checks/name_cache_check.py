@@ -177,7 +177,7 @@ class NameCacheTests(unittest.TestCase):
             self.assertEqual(cache.by_id[1].names, {"user-name", "global-name"})
             self.assertIsNone(cache.resolve_to_id("guild-name"))
 
-    def test_cached_display_name_prefers_primary_guild_name(self) -> None:
+    def test_cached_display_name_prefers_discord_identity_over_guild_names(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = _make_cache(Path(tmp) / "discord_names.json")
             cache.by_id[1] = config.UserNames(
@@ -187,8 +187,8 @@ class NameCacheTests(unittest.TestCase):
                 guild_names={int(config.DISCORD_GUILD): "primary-name", 200: "other-name"},
             )
 
-            self.assertEqual(cache.cached_display_name(1), "primary-name")
-            self.assertEqual(cache.cached_display_name(1, preferred_guild_id=200), "other-name")
+            self.assertEqual(cache.cached_display_name(1), "global-name [user-name]")
+            self.assertEqual(cache.cached_display_name(1, preferred_guild_id=200), "global-name [user-name]")
 
     def test_cached_display_name_can_use_discord_override(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -205,8 +205,8 @@ class NameCacheTests(unittest.TestCase):
                 cache.cached_display_name(1, category=config.DisplayNameCategory.DISCORD, preferred_guild_id=100),
                 "Relay Name",
             )
-            self.assertEqual(cache.cached_display_name(1, preferred_guild_id=100), "guild-name")
-            self.assertEqual(cache.relay_mention_name(1, preferred_guild_id=100), "Relay Name")
+            self.assertEqual(cache.cached_display_name(1, preferred_guild_id=100), "global-name [user-name]")
+            self.assertEqual(cache.relay_mention_name(1, preferred_guild_id=100), "global-name")
 
     def test_relay_mention_name_prefers_scope_alias(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -251,7 +251,7 @@ class NameCacheTests(unittest.TestCase):
 
         self.assertIsNone(resolved)
 
-    def test_relay_mention_name_falls_back_to_preferred_guild_display_name(self) -> None:
+    def test_relay_mention_name_falls_back_to_discord_global_name(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = _make_cache(Path(tmp) / "discord_names.json")
             cache.by_id[1] = config.UserNames(
@@ -263,9 +263,9 @@ class NameCacheTests(unittest.TestCase):
 
             resolved = cache.relay_mention_name(1, scope="minecraft", preferred_guild_id=200)
 
-        self.assertEqual(resolved, "guild-two")
+        self.assertEqual(resolved, "global-name")
 
-    def test_relay_display_name_falls_back_to_preferred_guild_display_name(self) -> None:
+    def test_relay_display_name_ignores_guild_names_when_scope_alias_is_missing(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = _make_cache(Path(tmp) / "discord_names.json")
             cache.by_id[1] = config.UserNames(
@@ -277,9 +277,38 @@ class NameCacheTests(unittest.TestCase):
 
             resolved = cache.relay_display_name(1, scope="minecraft", preferred_guild_id=200)
 
-        self.assertEqual(resolved, "guild-two")
+        self.assertEqual(resolved, "global-name")
 
-    def test_discord_fallback_name_prefers_username_after_scope_alias(self) -> None:
+    def test_web_display_name_prefers_web_override_before_scope_and_discord_identity(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="global-name",
+                names={"user-name", "global-name", "guild-name"},
+                guild_names={100: "guild-name"},
+                games={"steam": ("SteamName", None)},
+                display_overrides=config.DisplayNameOverrides(web="Portal Name"),
+            )
+
+            resolved = cache.web_display_name(1, scope="minecraft", platforms=("steam",))
+
+        self.assertEqual(resolved, "Portal Name")
+
+    def test_relay_display_name_prefers_platform_alias_after_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(
+                account="user-name",
+                global_name="global-name",
+                games={"steam": ("SteamName", None)},
+            )
+
+            resolved = cache.relay_display_name(1, scope="minecraft", platforms=("steam",))
+
+        self.assertEqual(resolved, "SteamName")
+
+    def test_discord_fallback_name_prefers_combined_discord_identity(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = _make_cache(Path(tmp) / "discord_names.json")
             cache.by_id[1] = config.UserNames(
@@ -290,7 +319,7 @@ class NameCacheTests(unittest.TestCase):
 
             resolved = cache.discord_fallback_name(1, scope="minecraft", fallback_display_name="nameB")
 
-        self.assertEqual(resolved, "nameA")
+        self.assertEqual(resolved, "nameB [nameA]")
 
     def test_command_resolution_prefers_unique_global_name_when_alias_is_ambiguous(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -519,6 +548,22 @@ class NameCacheTests(unittest.TestCase):
             cache._rebuild_aliases()
 
             parsed_text, mentions = cache.parse_mentions("hello @Alice", scope="minecraft")
+
+            self.assertEqual(parsed_text, "hello <@7>")
+            self.assertEqual(mentions, {7})
+
+    def test_parse_mentions_resolves_platform_aliases_to_discord_mentions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[7] = config.UserNames(
+                games={"steam": ("SteamAlice", None)},
+            )
+            cache._rebuild_aliases()
+
+            parsed_text, mentions = cache.parse_mentions(
+                "hello @SteamAlice",
+                platforms=("steam",),
+            )
 
             self.assertEqual(parsed_text, "hello <@7>")
             self.assertEqual(mentions, {7})

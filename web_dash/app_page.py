@@ -83,6 +83,7 @@ from .service_base import ModWebServiceSupport
 from .types import (
     ModDownloadKind,
     ModWebAppSectionKind,
+    ModWebPageLoadWarning,
     ModWebAppTabDefinition,
     ModWebBasePageModel,
     ModWebOverviewPageModel,
@@ -117,6 +118,20 @@ def _leaflet_vendor_asset(file_name: str) -> str:
 
 
 class ModWebAppPageMixin(ModWebServiceSupport):
+    def _render_page_load_warnings(
+        self,
+        *,
+        ui: ModWebUi,
+        load_warnings: tuple[ModWebPageLoadWarning, ...],
+    ) -> None:
+        if not load_warnings:
+            return
+        with ui.column().classes("w-full gap-3"):
+            for warning in load_warnings:
+                with ui.card().classes("w-full border border-amber-500/40 bg-[#23160a] text-amber-100"):
+                    ui.label(warning.title).classes("text-sm font-semibold uppercase tracking-[0.22em] text-amber-300")
+                    ui.label(warning.detail).classes("text-sm leading-6 text-amber-50/90")
+
     def _apply_live_app_state_update(
         self,
         *,
@@ -291,6 +306,10 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         user=user,
                         refresh_async_runtime_model=refresh_async_runtime_model,
                     )
+            self._render_page_load_warnings(
+                ui=ui,
+                load_warnings=getattr(model, "load_warnings", ()),
+            )
             tabs: tuple[ModWebAppTabDefinition, ...] = self._page_tabs(model)
             apply_section_runtime_model: Callable[[ModWebBasePageModel], None] | None = (
                 self._render_tabbed_page_sections(
@@ -394,6 +413,10 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         user=user,
                         refresh_async_runtime_model=refresh_async_runtime_model,
                     )
+            self._render_page_load_warnings(
+                ui=ui,
+                load_warnings=getattr(model, "load_warnings", ()),
+            )
             tabs: tuple[ModWebAppTabDefinition, ...] = self._page_tabs(model)
             if not tabs:
                 apply_section_runtime_model = None
@@ -559,7 +582,7 @@ class ModWebAppPageMixin(ModWebServiceSupport):
                         if is_blood_moon
                         else escape(str(int(day_text)))
                     )
-                    return f"Day {day_markup}/{escape(str(int(hour_text)))}"
+                    return f"Day {day_markup} Hour {escape(str(int(hour_text)))}"
         return escape(f"{label}: {current_value}")
 
     @classmethod

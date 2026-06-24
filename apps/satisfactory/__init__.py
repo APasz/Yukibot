@@ -107,6 +107,10 @@ _SATISFACTORY_CONNECTION_REMOVED_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 _SATISFACTORY_FOREIGN_ID_RE: Pattern[str] = re.compile(r"RepData=\[(?P<foreign_id>[^\]]+)\]", re.IGNORECASE)
+_SATISFACTORY_SAVE_DATETIME_RE: Pattern[str] = re.compile(
+    r"^(?P<year>\d{4})\.(?P<month>\d{2})\.(?P<day>\d{2})-"
+    r"(?P<hour>\d{2})\.(?P<minute>\d{2})\.(?P<second>\d{2})$"
+)
 _SML_UPLUGIN_FILES: tuple[Path, Path] = (
     Path("FactoryGame") / "Mods" / "SML" / "SML.uplugin",
     Path("Mods") / "SML" / "SML.uplugin",
@@ -768,6 +772,32 @@ class SatisfactorySaveHeader(BaseModel):
             raise ValueError("save metadata text field must not be empty")
         return text
 
+    @field_validator("save_date_time", mode="before")
+    def normalise_save_date_time(cls, raw: object) -> datetime | object:
+        if isinstance(raw, datetime):
+            return raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+
+        text: str = str(raw).strip()
+        if not text:
+            raise ValueError("save date time must not be empty")
+
+        match: re.Match[str] | None = _SATISFACTORY_SAVE_DATETIME_RE.fullmatch(text)
+        if match is None:
+            return raw
+
+        try:
+            return datetime(
+                int(match.group("year")),
+                int(match.group("month")),
+                int(match.group("day")),
+                int(match.group("hour")),
+                int(match.group("minute")),
+                int(match.group("second")),
+                tzinfo=timezone.utc,
+            )
+        except ValueError as xcp:
+            raise ValueError("save date time must be a valid Satisfactory timestamp") from xcp
+
     def to_app_save_entry(self) -> AppSaveEntry:
         relative_path = f"{self.session_name}/{self.save_name}"
         return AppSaveEntry(
@@ -935,7 +965,7 @@ class SatisfactoryAPIClient(AsyncSatisfactoryAPI):
                     return SatisfactoryAPIResponse(success=True, data=result.get("data"))
                 if content_type == "application/octet-stream":
                     return SatisfactoryAPIResponse(success=True, data=await response.read())
-                return SatisfactoryAPIResponse(success=True, data=await response.text())
+                return SatisfactoryAPIResponse(success=True, data=await response.read())
 
 
 class SatisfactoryBridge:
@@ -1492,7 +1522,7 @@ def _normalise_active_schematic_label(raw: str | None) -> str | None:
     return text or None
 
 
-class Provider_SatisfactoryDay(AppActivityProvider):
+class Provider_SatisfactoryDay(AppActivityProvider["Satisfactory"]):
     metadata = AppActivityProviderMetadata(provider_id="day", label="Day Counter")
 
     async def get(self) -> str | None:
@@ -1502,7 +1532,7 @@ class Provider_SatisfactoryDay(AppActivityProvider):
         return f"D{state.total_game_duration // 86400}"
 
 
-class Provider_SatisfactoryStage(AppActivityProvider):
+class Provider_SatisfactoryStage(AppActivityProvider["Satisfactory"]):
     metadata = AppActivityProviderMetadata(provider_id="stage", label="Stage")
 
     async def get(self) -> str | None:
@@ -1520,7 +1550,7 @@ class Provider_SatisfactoryStage(AppActivityProvider):
         return ": ".join(status_parts)
 
 
-def _build_satisfactory_activity_providers(app: "Satisfactory") -> tuple[AppActivityProvider, ...]:
+def _build_satisfactory_activity_providers(app: "Satisfactory") -> tuple[AppActivityProvider["Satisfactory"], ...]:
     return (
         Provider_SatisfactoryDay(app),
         Provider_SatisfactoryStage(app),
@@ -1695,6 +1725,8 @@ class SatisfactoryPlayerSessionMatcher:
 class Satisfactory(App[Satisfactory_Config]):
     cfg_cls: type[Satisfactory_Config] = Satisfactory_Config
     relay_notice_player_session_supported = True
+    name_platforms: tuple[str, ...] = ("steam", "egs")
+    preferred_name_platform: str | None = "steam"
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: Satisfactory_Config):
         self.manage_embed_color = 0xF59E0B

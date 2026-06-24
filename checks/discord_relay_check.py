@@ -608,7 +608,7 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(getattr(payload, "player"), "FactorioAlice")
         self.assertEqual(
             cast(_NamesStub, cast(Any, relay).names).relay_display_name_calls,
-            [(42, "Tester", "factorio", 100)],
+            [(42, "Tester", "factorio", (), None, 100)],
         )
 
     async def test_send_chat_event_to_app_uses_scoped_relay_name_for_sevendays(self) -> None:
@@ -643,7 +643,7 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(getattr(payload, "content"), "hello")
         self.assertEqual(
             cast(_NamesStub, cast(Any, relay).names).relay_display_name_calls,
-            [(42, "Tester", "sevendays", 100)],
+            [(42, "Tester", "sevendays", (), None, 100)],
         )
 
     async def test_send_chat_event_to_app_keeps_parsed_links_when_event_links_are_empty(self) -> None:
@@ -781,7 +781,7 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(getattr(payload, "content"), "FactorioAlice joined Factorio Lab")
         self.assertEqual(
             cast(_NamesStub, cast(Any, relay).names).relay_display_name_calls,
-            [(42, "Tester", "factorio", 100)],
+            [(42, "Tester", "factorio", (), None, 100)],
         )
         self.assertIs(getattr(payload, "notice"), notice)
 
@@ -796,15 +796,24 @@ class _NamesStub:
         discord_fallback_name: str | None = None,
     ) -> None:
         self.names: list[object] = []
-        self.parse_mention_calls: list[tuple[str, str | None]] = []
-        self.relay_display_name_calls: list[tuple[object, str, str | None, object | None]] = []
+        self.parse_mention_calls: list[tuple[str, str | None, tuple[object, ...], object | None]] = []
+        self.relay_display_name_calls: list[
+            tuple[object, str, str | None, tuple[object, ...], object | None, object | None]
+        ] = []
         self._parsed_text = parsed_text
         self._parsed_mentions = set() if parsed_mentions is None else set(parsed_mentions)
         self._relay_display_name = relay_display_name
         self._discord_fallback_name = discord_fallback_name
 
-    def parse_mentions(self, text: str, *, scope: str | None = None) -> tuple[str, set[int]]:
-        self.parse_mention_calls.append((text, scope))
+    def parse_mentions(
+        self,
+        text: str,
+        *,
+        scope: str | None = None,
+        platforms: tuple[object, ...] = (),
+        preferred_platform: object | None = None,
+    ) -> tuple[str, set[int]]:
+        self.parse_mention_calls.append((text, scope, platforms, preferred_platform))
         return self._parsed_text or text, set(self._parsed_mentions)
 
     def set_names(self, user: object) -> None:
@@ -820,15 +829,29 @@ class _NamesStub:
         del user_id, preferred_guild_id
         return fallback
 
+    def discord_display_name(
+        self,
+        user_id: object,
+        fallback: str,
+        *,
+        fallback_display_name: str | None = None,
+    ) -> str:
+        del user_id
+        return fallback_display_name or fallback
+
     def relay_display_name(
         self,
         user_id: object,
         fallback: str,
         *,
         scope: str | None = None,
+        platforms: tuple[object, ...] = (),
+        preferred_platform: object | None = None,
         preferred_guild_id: object | None = None,
     ) -> str:
-        self.relay_display_name_calls.append((user_id, fallback, scope, preferred_guild_id))
+        self.relay_display_name_calls.append(
+            (user_id, fallback, scope, platforms, preferred_platform, preferred_guild_id)
+        )
         return self._relay_display_name or fallback
 
     def discord_fallback_name(
@@ -865,6 +888,29 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         event = relay._event_from_app_bound(message, cast(Any, app))
 
         self.assertEqual(event.author.display_name, "AliceGame")
+
+    async def test_event_from_app_bound_preserves_discord_guild_name(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay).names = _NamesStub(relay_display_name="AliceGame")
+        cast(Any, relay).manager = SimpleNamespace(
+            bot=SimpleNamespace(
+                cache=SimpleNamespace(
+                    get_guild=lambda guild_id: SimpleNamespace(name="Friends") if int(guild_id) == 100 else None
+                )
+            )
+        )
+        channel = hikari.TextableChannel(
+            app=cast(Any, object()),
+            id=hikari.Snowflake(321),
+            name="relay-chat",
+            type=1,
+        )
+        message = App_Bound(channel, "hello", 42, source_guild_id=hikari.Snowflake(100))
+        app = SimpleNamespace(name="minecraft_alpha", scope="minecraft")
+
+        event = relay._event_from_app_bound(message, cast(Any, app))
+
+        self.assertEqual(event.source_guild_name, "Friends")
 
     async def test_event_from_app_bound_uses_minecraft_head_for_known_discord_user(self) -> None:
         relay = object.__new__(DC_Relay)
@@ -1012,7 +1058,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=hikari.Snowflake(123))
 
-        self.assertEqual(text, "<AliceGame> hello")
+        self.assertEqual(text, "<Alice> hello")
         self.assertEqual(mentions, set())
 
     async def test_discord_text_uses_username_without_alias_or_membership(self) -> None:
@@ -1060,7 +1106,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(text, "<<@42>> hello <@77>")
         self.assertEqual(mentions, {77})
-        self.assertEqual(cast(Any, relay).names.parse_mention_calls, [("hello @bob", "minecraft")])
+        self.assertEqual(cast(Any, relay).names.parse_mention_calls, [("hello @bob", "minecraft", (), None)])
 
     async def test_discord_text_uses_system_plate_for_system_author(self) -> None:
         relay = object.__new__(DC_Relay)
@@ -1106,7 +1152,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=hikari.Snowflake(123))
 
-        self.assertEqual(text, "<AliceGame> reply to <Yoko>; hello")
+        self.assertEqual(text, "<Web Alice> reply to <Yoko>; hello")
         self.assertEqual(mentions, set())
 
     async def test_discord_text_skips_reply_prefix_when_native_reply_is_used(self) -> None:
@@ -1135,7 +1181,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             include_reference_prefix=False,
         )
 
-        self.assertEqual(text, "<AliceGame> hello")
+        self.assertEqual(text, "<Web Alice> hello")
         self.assertEqual(mentions, set())
 
     def test_embedify_event_keeps_explicit_embed_without_generating_media_embeds(self) -> None:

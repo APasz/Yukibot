@@ -122,6 +122,7 @@ from web_dash.types import (
     ModWebNotificationTrayItemKind,
     ModWebNotificationTrayItemState,
     ModWebOverviewPageModel,
+    ModWebPageLoadWarning,
     ModWebPageModel,
     ModWebSearchOption,
     ModWebSettingControlKind,
@@ -2530,6 +2531,90 @@ class ModWebTests(unittest.TestCase):
         build_mod_list.assert_not_awaited()
         build_app_runtime_summary.assert_awaited_once_with(app)
 
+    def test_build_local_app_page_data_keeps_page_available_when_save_list_fails(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        app = cast(Any, SimpleNamespace(name="satisfactory_alpha"))
+        app_entry = NodeAppEntry(
+            name="satisfactory_alpha",
+            friendly="Satisfactory Alpha",
+            node="yuki",
+            running=True,
+            enabled=True,
+            supports_mods=False,
+            supports_configs=False,
+            supports_saves=True,
+        )
+        runtime_summary = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version=None,
+            player_count=2,
+            player_capacity=8,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service._node_api, "build_app_entry", return_value=app_entry),
+            patch.object(
+                service._node_api,
+                "build_save_list",
+                new=AsyncMock(side_effect=RuntimeError("Satisfactory API is unavailable.")),
+            ) as build_save_list,
+            patch.object(service._node_api, "build_mod_list", new=AsyncMock()) as build_mod_list,
+            patch.object(
+                service._node_api,
+                "build_app_runtime_summary",
+                new=AsyncMock(return_value=runtime_summary),
+            ) as build_app_runtime_summary,
+        ):
+            page_data = asyncio.run(service._build_local_app_page_data(app, user=user))
+
+        self.assertIsNone(page_data.saves)
+        self.assertEqual(page_data.app_stats, runtime_summary)
+        self.assertEqual(
+            page_data.load_warnings,
+            (ModWebPageLoadWarning(title="Saves unavailable", detail="Satisfactory API is unavailable."),),
+        )
+        build_save_list.assert_awaited_once_with(app)
+        build_mod_list.assert_not_awaited()
+        build_app_runtime_summary.assert_awaited_once_with(app)
+
+    def test_safe_remote_optional_page_section_returns_fallback_and_warning(self) -> None:
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example.invalid",
+            api_url="/mod-web/api/nodes/erin/apps",
+            is_current=False,
+            latency_probe_url="https://erin.example.invalid/ping",
+            presence_stream_url="https://erin.example.invalid/presence/stream",
+        )
+        load_warnings: list[ModWebPageLoadWarning] = []
+
+        result = asyncio.run(
+            service._safe_remote_optional_page_section(
+                node=node,
+                app_name="satisfactory_alpha",
+                section_label="Saves",
+                fallback=None,
+                load_warnings=load_warnings,
+                operation=lambda: (_ for _ in ()).throw(RuntimeError("Satisfactory API is unavailable.")),
+            )
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            load_warnings,
+            [ModWebPageLoadWarning(title="Saves unavailable", detail="Satisfactory API is unavailable.")],
+        )
+
     def test_home_app_sections_format_remote_failures_for_people(self) -> None:
         service: ModWebService = ModWebService()
         user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
@@ -3691,6 +3776,7 @@ class ModWebTests(unittest.TestCase):
                     app_name="minecraft_alpha",
                     app_friendly="Minecraft Alpha",
                     app_title_font_preset=AppTitleFont.DEFAULT,
+                    activity_providers=(),
                     node_name="yuki",
                 ),
             ),
@@ -4027,7 +4113,7 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(service._user_can_use_fake_chat_preview(root_user))
         self.assertFalse(service._user_can_use_fake_chat_preview(normal_user))
 
-    def test_fake_chat_preview_app_options_include_chat_apps_in_friendly_order(self) -> None:
+    def test_fake_chat_preview_app_options_include_managed_apps_and_bound_rooms_in_friendly_order(self) -> None:
         service = ModWebService()
         service.set_manager(
             _manager_stub(
@@ -4039,13 +4125,60 @@ class ModWebTests(unittest.TestCase):
             )
         )
 
-        options = service._fake_chat_preview_app_options()
+        with patch.object(ChatHub(), "bound_room_ids", return_value=("guest_lobby",)):
+            options = service._fake_chat_preview_app_options()
 
         self.assertEqual(
             options,
             {
                 "Alpha (alpha)": "alpha",
                 "beta (beta)": "beta",
+                "guest_lobby": "guest_lobby",
+                "Zeta (zeta)": "zeta",
+            },
+        )
+
+    def test_fake_chat_preview_send_target_options_prefer_bound_rooms(self) -> None:
+        service = ModWebService()
+        service.set_manager(
+            _manager_stub(
+                apps={
+                    "alpha": SimpleNamespace(name="alpha", friendly="Alpha", supports_chat_relay=True),
+                    "zeta": SimpleNamespace(name="zeta", friendly="Zeta", supports_chat_relay=False),
+                }
+            )
+        )
+
+        with patch.object(ChatHub(), "bound_room_ids", return_value=("alpha", "guest_lobby")):
+            options = service._fake_chat_preview_send_target_options()
+
+        self.assertEqual(
+            options,
+            {
+                "Alpha (alpha)": "alpha",
+                "guest_lobby": "guest_lobby",
+            },
+        )
+
+    def test_fake_chat_preview_send_target_options_fall_back_to_all_managed_apps_when_none_relay(self) -> None:
+        service = ModWebService()
+        service.set_manager(
+            _manager_stub(
+                apps={
+                    "zeta": SimpleNamespace(name="zeta", friendly="Zeta", supports_chat_relay=False),
+                    "alpha": SimpleNamespace(name="alpha", friendly="Alpha", supports_chat_relay=False),
+                }
+            )
+        )
+
+        with patch.object(ChatHub(), "bound_room_ids", return_value=()):
+            options = service._fake_chat_preview_send_target_options()
+
+        self.assertEqual(
+            options,
+            {
+                "Alpha (alpha)": "alpha",
+                "Zeta (zeta)": "zeta",
             },
         )
 
@@ -4567,11 +4700,11 @@ class ModWebTests(unittest.TestCase):
                 }
             )
         )
-        relay_mention_name = Mock(side_effect=lambda user_id, **_: f"user-{user_id}")
+        web_mention_name = Mock(side_effect=lambda user_id, **_: f"user-{user_id}")
 
         with patch(
             "web_dash.chat.config.Name_Cache",
-            return_value=SimpleNamespace(relay_mention_name=relay_mention_name),
+            return_value=SimpleNamespace(web_mention_name=web_mention_name),
         ):
             resolved = service._resolve_chat_markup_mentions(
                 "hi <@42> and @43",
@@ -4581,10 +4714,10 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(resolved, "hi @user-42 and @user-43")
         self.assertEqual(
-            relay_mention_name.call_args_list,
+            web_mention_name.call_args_list,
             [
-                call(42, scope="minecraft", preferred_guild_id=99, default="42"),
-                call(43, scope="minecraft", preferred_guild_id=99, default="43"),
+                call(42, scope="minecraft", platforms=(), preferred_platform=None, default="42"),
+                call(43, scope="minecraft", platforms=(), preferred_platform=None, default="43"),
             ],
         )
 
@@ -4697,16 +4830,22 @@ class ModWebTests(unittest.TestCase):
             ),
             source_guild_id=99,
         )
-        relay_display_name = Mock(return_value="Yoko")
+        web_display_name = Mock(return_value="Yoko")
 
         with patch(
             "web_dash.chat.config.Name_Cache",
-            return_value=SimpleNamespace(relay_display_name=relay_display_name),
+            return_value=SimpleNamespace(web_display_name=web_display_name),
         ):
             resolved = service._chat_event_author_display_name(event)
 
         self.assertEqual(resolved, "Yoko")
-        relay_display_name.assert_called_once_with(42, "42", scope="minecraft", preferred_guild_id=99)
+        web_display_name.assert_called_once_with(
+            42,
+            "42",
+            scope="minecraft",
+            platforms=(),
+            preferred_platform=None,
+        )
 
     def test_chat_reference_label_resolves_raw_discord_mentions(self) -> None:
         service = ModWebService()
@@ -4717,11 +4856,11 @@ class ModWebTests(unittest.TestCase):
                 }
             )
         )
-        relay_mention_name = Mock(return_value="Yoko")
+        web_display_name = Mock(return_value="Yoko")
 
         with patch(
             "web_dash.chat.config.Name_Cache",
-            return_value=SimpleNamespace(relay_mention_name=relay_mention_name),
+            return_value=SimpleNamespace(web_display_name=web_display_name),
         ):
             label = service._chat_reference_label(
                 ChatReferenceKind.REPLY,
@@ -4731,7 +4870,13 @@ class ModWebTests(unittest.TestCase):
             )
 
         self.assertEqual(label, "Replying to Yoko")
-        relay_mention_name.assert_called_once_with(42, scope="minecraft", preferred_guild_id=99, default="42")
+        web_display_name.assert_called_once_with(
+            42,
+            "42",
+            scope="minecraft",
+            platforms=(),
+            preferred_platform=None,
+        )
 
     def test_chat_event_badges_include_join_notice_badge(self) -> None:
         event = ChatEvent(
@@ -4862,6 +5007,21 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(service._chat_event_source_label(event), "Friends.relay-main")
 
+    def test_discord_chat_source_label_uses_serialized_guild_name_without_manager_context(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.discord_channel("123"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Yoko"),
+            content="hello",
+            source_guild_id=1,
+            source_guild_name="Friends",
+            source_channel_id=123,
+            source_label="relay-main",
+        )
+
+        self.assertEqual(service._chat_event_source_label(event), "Friends")
+
     def test_discord_chat_source_label_falls_back_to_channel_name_without_manager_context(self) -> None:
         service = ModWebService()
         event = ChatEvent(
@@ -4874,6 +5034,56 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(service._chat_event_source_label(event), "relay-main")
+
+    def test_app_chat_source_label_uses_game_badge_text(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="hello",
+        )
+
+        self.assertEqual(service._chat_event_source_label(event), "GAME")
+
+    def test_app_chat_source_label_uses_source_instance_name_in_other_room(self) -> None:
+        service = ModWebService()
+        service._manager = _manager_stub(
+            apps={
+                "sevendays_1": SimpleNamespace(name="sevendays_1", friendly="7D2D-1"),
+                "sevendays_2": SimpleNamespace(name="sevendays_2", friendly="7D2D-2"),
+            }
+        )
+        event = ChatEvent(
+            room_id="sevendays_2",
+            source=ChatEndpointId.app("sevendays_1"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="hello",
+        )
+
+        self.assertEqual(service._chat_event_source_label(event, room_id="sevendays_2"), "7D2D-1")
+
+    def test_app_chat_source_label_falls_back_to_source_room_id_in_other_room_without_manager_context(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="sevendays_2",
+            source=ChatEndpointId.app("sevendays_1"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="hello",
+        )
+
+        self.assertEqual(service._chat_event_source_label(event, room_id="sevendays_2"), "sevendays_1")
+
+    def test_web_chat_source_label_uses_web_badge_text(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.web_session("session-1"),
+            author=ChatAuthor(kind=ChatAuthorKind.WEB_USER, display_name="Yoko"),
+            content="hello",
+        )
+
+        self.assertEqual(service._chat_event_source_label(event), "WEB")
 
     def test_system_chat_source_label_overrides_app_source(self) -> None:
         service = ModWebService()
@@ -5087,7 +5297,7 @@ class ModWebTests(unittest.TestCase):
         unsubscribe_mock.assert_called_once_with("minecraft_alpha", "room-subscription")
         runtime_unsubscribe.assert_called_once_with()
 
-    def test_local_chat_panel_config_send_message_uses_scoped_relay_display_name(self) -> None:
+    def test_local_chat_panel_config_send_message_uses_scoped_web_display_name(self) -> None:
         service = ModWebService()
         service._local_chat_snapshot = Mock(
             return_value=NodeChatRoomSnapshot(
@@ -5120,7 +5330,7 @@ class ModWebTests(unittest.TestCase):
 
         with patch(
             "web_dash.service.config.Name_Cache",
-            return_value=SimpleNamespace(relay_display_name=Mock(return_value="AliceGame")),
+            return_value=SimpleNamespace(web_display_name=Mock(return_value="AliceGame")),
         ):
             send_message = panel.send_message
             assert send_message is not None
@@ -8027,7 +8237,7 @@ class ModWebTests(unittest.TestCase):
                 label="Game Time",
                 current_value="D14/H07",
             ),
-            "Day 14/7",
+            "Day 14 Hour 7",
         )
         self.assertEqual(
             ModWebService._app_activity_provider_badge_markup(
@@ -8035,7 +8245,7 @@ class ModWebTests(unittest.TestCase):
                 label="Game Time",
                 current_value="!D14/H21",
             ),
-            'Day <span class="mod-app-activity-alert">14</span>/21',
+            'Day <span class="mod-app-activity-alert">14</span> Hour 21',
         )
 
     def test_app_title_font_style_resolves_auto_preset_from_app_scope(self) -> None:

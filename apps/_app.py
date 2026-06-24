@@ -10,7 +10,7 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,6 +46,7 @@ from config import Activity_Manager, Name_Cache
 log = logging.getLogger(__name__)
 
 ConfigT = TypeVar("ConfigT", bound=App_Config, default=Any)
+AppProviderT = TypeVar("AppProviderT", bound="App[Any]")
 
 
 class AM_Receiver(Protocol):
@@ -151,13 +152,13 @@ class AppActivityProviderMetadata:
             raise ValueError("App activity provider label must not be empty.")
 
 
-class AppActivityProvider:
+class AppActivityProvider(ABC, Generic[AppProviderT]):
     metadata: ClassVar[AppActivityProviderMetadata]
     silent: bool = config.SILENT_DEBUG
     prio: int = 50
     activity_field: config.DiscordActivityField | None = None
     activity_scope_name: str | None = None
-    task_funcs: tuple[Callable[[], Awaitable[None]], ...]
+    task_funcs: tuple[Callable[[], Coroutine[object, object, None]], ...]
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
@@ -167,8 +168,8 @@ class AppActivityProvider:
         if not isinstance(metadata, AppActivityProviderMetadata):
             raise TypeError(f"{cls.__name__} must define AppActivityProviderMetadata in metadata.")
 
-    def __init__(self, app: "App[Any]") -> None:
-        self.app = app
+    def __init__(self, app: AppProviderT) -> None:
+        self.app: AppProviderT = app
         self.activity_scope_name = getattr(app, "name", None)
         self.task_funcs = tuple(getattr(self, "task_funcs", ()))
 
@@ -179,6 +180,10 @@ class AppActivityProvider:
     @property
     def label(self) -> str:
         return self.metadata.label
+
+    @abstractmethod
+    async def get(self) -> str | None:
+        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +210,8 @@ class App(Generic[ConfigT], ABC):
     name: str
     friendly: str
     scope: str
+    name_platforms: tuple[str, ...] = ()
+    preferred_name_platform: str | None = None
     proc_name: str
     proc_cmd: list[str]
     directory: Path
@@ -233,7 +240,7 @@ class App(Generic[ConfigT], ABC):
     chat_channel_overrides: tuple[hikari.Snowflake, ...] = ()
     chat_channel_source: RelayChannelSource = RelayChannelSource.NONE
     activity_manager: Activity_Manager
-    providers: list[AppActivityProvider]
+    providers: list[AppActivityProvider[Any]]
     manage_embed_color: int = 0x96212B
     relay_advancement_terms: RelayAdvancementTerms = RelayAdvancementTerms()
     relay_notice_player_session_supported: bool = False
@@ -265,6 +272,12 @@ class App(Generic[ConfigT], ABC):
         self.name = cfg.name
         self.friendly = cfg.friendly_name or cfg.name.title()
         self.scope = cfg.scope
+        configured_platforms = tuple(str(platform).strip().lower() for platform in self.name_platforms if str(platform).strip())
+        if cfg.steam_update is not None and "steam" not in configured_platforms:
+            configured_platforms = (*configured_platforms, "steam")
+        self.name_platforms = configured_platforms
+        if self.preferred_name_platform is None and cfg.steam_update is not None:
+            self.preferred_name_platform = "steam"
         self.directory = cfg.directory
         self.chat_channel = hikari.Snowflake(cfg.chat_channel) if cfg.chat_channel else None
         self.chat_channels = tuple[Snowflake, ...](hikari.Snowflake(channel_id) for channel_id in cfg.chat_channels)
@@ -422,22 +435,22 @@ class App(Generic[ConfigT], ABC):
             return
         self._instance_config_change_handler(self)
 
-    def set_activity_providers(self, providers: Sequence[AppActivityProvider]) -> None:
+    def set_activity_providers(self, providers: Sequence[AppActivityProvider[Any]]) -> None:
         self.providers = list(providers)
 
     @property
-    def activity_providers(self) -> tuple[AppActivityProvider, ...]:
+    def activity_providers(self) -> tuple[AppActivityProvider[Any], ...]:
         app_providers = getattr(self, "providers", None)
         if isinstance(app_providers, list | tuple):
-            return tuple(cast(AppActivityProvider, provider) for provider in app_providers)
+            return tuple(cast(AppActivityProvider[Any], provider) for provider in app_providers)
         return ()
 
     @classmethod
-    def activity_provider_id(cls, provider: AppActivityProvider) -> str:
+    def activity_provider_id(cls, provider: AppActivityProvider[Any]) -> str:
         return provider.provider_id
 
     @classmethod
-    def activity_provider_label(cls, provider: AppActivityProvider) -> str:
+    def activity_provider_label(cls, provider: AppActivityProvider[Any]) -> str:
         return provider.label
 
     @property
@@ -450,7 +463,7 @@ class App(Generic[ConfigT], ABC):
             if isinstance(provider_id, str) and provider_id.casefold() in known_ids
         )
 
-    def activity_provider_enabled(self, provider: AppActivityProvider) -> bool:
+    def activity_provider_enabled(self, provider: AppActivityProvider[Any]) -> bool:
         provider_id = self.activity_provider_id(provider)
         return provider_id.casefold() not in {item.casefold() for item in self.disabled_activity_provider_ids}
 
@@ -482,7 +495,7 @@ class App(Generic[ConfigT], ABC):
             for entry, current_value in zip(base_entries, current_values, strict=True)
         )
 
-    async def _activity_provider_current_value(self, provider: AppActivityProvider) -> str | None:
+    async def _activity_provider_current_value(self, provider: AppActivityProvider[Any]) -> str | None:
         if not self.activity_provider_enabled(provider):
             return None
         try:

@@ -657,6 +657,7 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(cache_payload["advanced_game_settings"]["no_power"], False)
 
     async def test_refresh_and_apply_round_trip_through_bridge(self) -> None:
+        self._running = True
         await self.settings.refresh_from_server()
         self.assertEqual(self._setting("auto_load_session_name").value, "SERVER-SESSION")
         self.assertIs(self._setting("FG.DSAutoPause").value, False)
@@ -665,7 +666,6 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._setting("FG.SetGamePhase").value, 2)
         self.assertEqual(self._setting("admin_password").value, "secret")
 
-        self._running = True
         self._setting("auto_load_session_name").update("BETA")
         self._setting("FG.DSAutoPause").update("true")
         self._setting("FG.AutosaveInterval").update("120")
@@ -801,6 +801,31 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.set_game_phase, 6)
         self.assertEqual(snapshot.give_items, "Cable 200")
         self.assertIs(snapshot.unlock_instant_alt_recipes, False)
+
+    def test_session_enumeration_snapshot_parses_satisfactory_save_timestamps(self) -> None:
+        snapshot = SatisfactorySessionEnumerationSnapshot.from_api_payload(
+            {
+                "sessions": [
+                    {
+                        "sessionName": "SERVER-SESSION",
+                        "saveHeaders": [
+                            {
+                                "saveName": "SERVER-SESSION_autosave_0.sav",
+                                "sessionName": "SERVER-SESSION",
+                                "saveDateTime": "2026.06.23-20.15.54",
+                            }
+                        ],
+                    }
+                ],
+                "currentSessionIndex": 0,
+            }
+        )
+
+        self.assertEqual(len(snapshot.sessions), 1)
+        self.assertEqual(
+            snapshot.sessions[0].save_headers[0].save_date_time,
+            datetime(2026, 6, 23, 20, 15, 54, tzinfo=timezone.utc),
+        )
 
     async def test_save_files_are_listed_via_https_api(self) -> None:
         app = self._console_app()

@@ -88,8 +88,20 @@ class ModWebService(
         return override or user.display_name
 
     @staticmethod
-    def _web_chat_author_display_name(user: ModWebUser, *, scope: str | None) -> str:
-        return config.Name_Cache().relay_display_name(user.discord_id, user.display_name, scope=scope)
+    def _web_chat_author_display_name(
+        user: ModWebUser,
+        *,
+        scope: str | None,
+        platforms: tuple[str, ...] = (),
+        preferred_platform: str | None = None,
+    ) -> str:
+        return config.Name_Cache().web_display_name(
+            user.discord_id,
+            user.display_name,
+            scope=scope,
+            platforms=platforms,
+            preferred_platform=preferred_platform,
+        )
 
     @staticmethod
     def _discord_avatar_uri(user: ModWebUser) -> str | None:

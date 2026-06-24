@@ -2433,12 +2433,8 @@ class Activities:
         self.app = app
         self._time_task: asyncio.Task[None] | None = None
         self._running = False
-        self.providers = [Provider_Day(app)]
-        set_activity_providers = getattr(self.app, "set_activity_providers", None)
-        if callable(set_activity_providers):
-            set_activity_providers(self.providers)
-        else:
-            self.app.providers = self.providers
+        self.providers: list[AppActivityProvider[Minecraft]] = [Provider_Day(app)]
+        self.app.set_activity_providers(self.providers)
         self.tasks: set[asyncio.Task[None]] = set()
 
     async def start(self):
@@ -2446,30 +2442,20 @@ class Activities:
         if self.tasks:
             return
         self._running = True
-        register_enabled_activity_providers = getattr(self.app, "register_enabled_activity_providers", None)
-        if callable(register_enabled_activity_providers):
-            register_enabled_activity_providers()
-        else:
-            for provider in self.providers:
-                self.app.activity_manager.register(provider)
+        self.app.register_enabled_activity_providers()
         for prov in self.providers:
             self.tasks.update(asyncio.create_task(func()) for func in prov.task_funcs)
 
     async def stop(self):
         self._running = False
-        deregister_activity_providers = getattr(self.app, "deregister_activity_providers", None)
-        if callable(deregister_activity_providers):
-            deregister_activity_providers()
-        else:
-            for provider in self.providers:
-                self.app.activity_manager.deregister(provider)
+        self.app.deregister_activity_providers()
         tasks = tuple(self.tasks)
         self.tasks.clear()
         for task in tasks:
             await self.app._cancel_background_task(task, label="activity task")
 
 
-class Provider_Day(AppActivityProvider):
+class Provider_Day(AppActivityProvider[Minecraft]):
     metadata = AppActivityProviderMetadata(provider_id="day", label="Day Counter")
 
     def __init__(self, app: Minecraft):

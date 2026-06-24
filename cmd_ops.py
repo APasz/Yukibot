@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import hikari
 import lightbulb
@@ -95,57 +94,14 @@ async def restart_host_or_bot(
     await _sys.restart(ctx, bot, manager, restart_type.value, silent)
 
 
-@dataclass(frozen=True, slots=True)
-class VoiceRuntimeResetSummary:
-    session_count: int
-    track_count: int
-    managed_source_count: int
-    outstanding_job_count: int
-    active_connection_count: int
-    targeted_guild_count: int
-    backoff_count: int
-    worker_restarted: bool
-
-
 async def reset_voice_runtime_services(
     voice_tts: VoiceTTSService,
     music: MusicService | None,
-) -> VoiceRuntimeResetSummary:
+) -> None:
     music_guild_ids = music.active_guild_ids() if music else []
-    music_result = await music.reset_runtime() if music else None
-    voice_result = await voice_tts.reset_runtime(extra_guild_ids=music_guild_ids)
-    return VoiceRuntimeResetSummary(
-        session_count=music_result.session_count if music_result else 0,
-        track_count=music_result.track_count if music_result else 0,
-        managed_source_count=music_result.managed_source_count if music_result else 0,
-        outstanding_job_count=voice_result.outstanding_job_count,
-        active_connection_count=voice_result.active_connection_count,
-        targeted_guild_count=voice_result.targeted_guild_count,
-        backoff_count=voice_result.backoff_count,
-        worker_restarted=voice_result.worker_restarted,
-    )
-
-
-def voice_runtime_reset_lines(summary: VoiceRuntimeResetSummary) -> list[str]:
-    lines = ["Voice layer reset complete."]
-    if summary.session_count or summary.track_count or summary.managed_source_count:
-        lines.extend(
-            [
-                f"music sessions dropped: `{summary.session_count}`",
-                f"music queued tracks cleared: `{summary.track_count}`",
-                f"managed music sources cleaned: `{summary.managed_source_count}`",
-            ]
-        )
-    lines.extend(
-        [
-            f"TTS outstanding jobs cleared: `{summary.outstanding_job_count}`",
-            f"voice connections reset: `{summary.active_connection_count}`",
-            f"voice guilds targeted: `{summary.targeted_guild_count}`",
-            f"TTS connect backoffs cleared: `{summary.backoff_count}`",
-            f"TTS worker running: `{'yes' if summary.worker_restarted else 'no'}`",
-        ]
-    )
-    return lines
+    if music:
+        await music.reset_runtime()
+    await voice_tts.reset_runtime(extra_guild_ids=music_guild_ids)
 
 
 async def reset_voice_runtime(ctx: lightbulb.Context) -> None:
@@ -156,9 +112,8 @@ async def reset_voice_runtime(ctx: lightbulb.Context) -> None:
         except Exception:
             music = None
 
-    summary = await reset_voice_runtime_services(voice_tts, music)
-    lines = voice_runtime_reset_lines(summary)
-    await ctx.respond("\n".join(lines))
+    await reset_voice_runtime_services(voice_tts, music)
+    await ctx.respond("Voice restart complete.")
 
 
 @group_ops.register

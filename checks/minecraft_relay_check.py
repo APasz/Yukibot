@@ -45,8 +45,14 @@ from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeS
 
 class _NamesStub:
     @staticmethod
-    def parse_mentions(text: str, *, scope: str | None = None) -> tuple[str, set[int]]:
-        del scope
+    def parse_mentions(
+        text: str,
+        *,
+        scope: str | None = None,
+        platforms: tuple[object, ...] = (),
+        preferred_platform: object | None = None,
+    ) -> tuple[str, set[int]]:
+        del scope, platforms, preferred_platform
         return text, set()
 
     @staticmethod
@@ -58,6 +64,16 @@ class _NamesStub:
     ) -> str:
         del user_id, preferred_guild_id
         return fallback
+
+    @staticmethod
+    def discord_display_name(
+        user_id: hikari.Snowflakeish | None,
+        fallback: str,
+        *,
+        fallback_display_name: str | None = None,
+    ) -> str:
+        del user_id
+        return fallback_display_name or fallback
 
     @staticmethod
     def discord_fallback_name(
@@ -77,9 +93,11 @@ class _NamesStub:
         /,
         *,
         scope: str | None = None,
+        platforms: tuple[object, ...] = (),
+        preferred_platform: object | None = None,
         preferred_guild_id: hikari.Snowflakeish | None = None,
     ) -> str:
-        del user_id, scope, preferred_guild_id
+        del user_id, scope, platforms, preferred_platform, preferred_guild_id
         return default
 
 
@@ -1317,10 +1335,12 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         app.name_cache.relay_mention_name.assert_called_once_with(
             456,
             scope="minecraft",
+            platforms=(),
+            preferred_platform=None,
             preferred_guild_id=hikari.Snowflake(123),
         )
         sent_command = app._relay.send.await_args.args[0]
-        self.assertIn("<Erin> hi AliceGame ", sent_command)
+        self.assertIn("<Erin> hi @AliceGame ", sent_command)
 
     def test_minecraft_supports_relay_system_notices(self) -> None:
         app = object.__new__(Minecraft)

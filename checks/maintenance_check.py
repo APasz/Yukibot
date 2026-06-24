@@ -140,6 +140,19 @@ class MaintenanceServiceTests(unittest.TestCase):
             ),
         )
 
+    def test_build_restart_completed_notice_without_summary_lines_renders_plain_notice(self) -> None:
+        notice = MaintenanceService.build_restart_completed_notice(
+            effective_target=RestartTarget.VOICE,
+            matched_targets=(RestartTarget.VOICE,),
+            scheduled_for=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
+        )
+
+        self.assertEqual(notice.stage, MaintenanceStage.COMPLETED)
+        self.assertEqual(
+            render_system_notice_text(notice),
+            "Scheduled maintenance completed: `voice` at `04:30`.\nMatched targets: `voice`",
+        )
+
     def test_due_restart_warnings_emit_configured_warning_then_one_minute_warning_once(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "configuration.json"

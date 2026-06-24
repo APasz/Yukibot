@@ -414,6 +414,7 @@ class ChatMessageReference:
     author_display_name: str
     content: str
     event_id: str | None = None
+    discord_user_id: int | None = None
 
     def __post_init__(self) -> None:
         if not self.author_display_name.strip():
@@ -422,13 +423,23 @@ class ChatMessageReference:
             raise ValueError("Chat reference content must not be empty.")
         if self.event_id is not None and not self.event_id.strip():
             raise ValueError("Chat reference event id must not be empty.")
+        if self.discord_user_id is not None and (
+            isinstance(self.discord_user_id, bool) or not isinstance(self.discord_user_id, int)
+        ):
+            raise ValueError("Chat reference discord user id must be an integer.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "ChatMessageReference":
+        raw_discord_user_id = payload.get("discord_user_id")
+        if raw_discord_user_id is not None and (
+            isinstance(raw_discord_user_id, bool) or not isinstance(raw_discord_user_id, int)
+        ):
+            raise ValueError("discord_user_id is invalid.")
         return cls(
             author_display_name=_required_string(payload, "author_display_name"),
             content=_required_text(payload, "content"),
             event_id=_optional_string(payload, "event_id"),
+            discord_user_id=raw_discord_user_id,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -436,6 +447,7 @@ class ChatMessageReference:
             "author_display_name": self.author_display_name,
             "content": self.content,
             "event_id": self.event_id,
+            "discord_user_id": self.discord_user_id,
         }
 
 
@@ -454,6 +466,7 @@ class ChatEvent:
     notice: RelayNotice | None = None
     embed: ChatEmbed | None = None
     source_guild_id: int | None = None
+    source_guild_name: str | None = None
     source_channel_id: int | None = None
     source_message_id: int | None = None
     source_label: str | None = None
@@ -488,6 +501,7 @@ class ChatEvent:
             author_display_name=self.author.display_name,
             content=preview_content,
             event_id=self.id,
+            discord_user_id=self.author.discord_user_id,
         )
 
     @classmethod
@@ -571,6 +585,7 @@ class ChatEvent:
             notice=relay_notice_from_mapping(raw_notice) if raw_notice is not None else None,
             embed=ChatEmbed.from_mapping(raw_embed) if raw_embed is not None else None,
             source_guild_id=raw_source_guild_id,
+            source_guild_name=_optional_string(payload, "source_guild_name"),
             source_channel_id=raw_source_channel_id,
             source_message_id=raw_source_message_id,
             source_label=_optional_string(payload, "source_label"),
@@ -591,6 +606,7 @@ class ChatEvent:
             "notice": relay_notice_to_mapping(self.notice) if self.notice is not None else None,
             "embed": self.embed.to_mapping() if self.embed is not None else None,
             "source_guild_id": self.source_guild_id,
+            "source_guild_name": self.source_guild_name,
             "source_channel_id": self.source_channel_id,
             "source_message_id": self.source_message_id,
             "source_label": self.source_label,
@@ -640,6 +656,11 @@ class ChatHub(metaclass=Singleton):
             len(tuple(history)),
         )
         self._notify_room_subscribers(room_id)
+
+    def bound_room_ids(self) -> tuple[str, ...]:
+        with self._lock:
+            room_ids = tuple(sorted(self._room_endpoints, key=str.casefold))
+        return room_ids
 
     def rooms_for_endpoint(self, endpoint_id: ChatEndpointId) -> tuple[str, ...]:
         with self._lock:

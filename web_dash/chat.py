@@ -120,6 +120,10 @@ class ModWebChatMixin(ModWebServiceSupport):
         app_scope: str | None,
         include_runtime_updates: bool = True,
     ) -> _ModWebChatPanelConfig:
+        app = self._chat_room_app(room_id)
+        app_platforms = tuple(str(platform) for platform in getattr(app, "name_platforms", ()))
+        preferred_platform = cast(str | None, getattr(app, "preferred_name_platform", None))
+
         async def _refresh_snapshot() -> NodeChatRoomSnapshot:
             return self._local_chat_snapshot(room_id)
 
@@ -154,7 +158,12 @@ class ModWebChatMixin(ModWebServiceSupport):
                 return await chat_relay.publish_web_chat(
                     room_id=room_id,
                     session_id=session_id,
-                    author_display_name=self._web_chat_author_display_name(user, scope=app_scope),
+                    author_display_name=self._web_chat_author_display_name(
+                        user,
+                        scope=app_scope,
+                        platforms=app_platforms,
+                        preferred_platform=preferred_platform,
+                    ),
                     author_id=str(user.discord_id),
                     discord_user_id=user.discord_id,
                     content=request.content,
@@ -180,6 +189,10 @@ class ModWebChatMixin(ModWebServiceSupport):
         app_scope: str | None,
         include_runtime_updates: bool = True,
     ) -> _ModWebChatPanelConfig:
+        app = self._chat_room_app(app_name)
+        app_platforms = tuple(str(platform) for platform in getattr(app, "name_platforms", ()))
+        preferred_platform = cast(str | None, getattr(app, "preferred_name_platform", None))
+
         async def _refresh_snapshot() -> NodeChatRoomSnapshot:
             return await asyncio.to_thread(self._remote_chat_snapshot, node, app_name, user)
 
@@ -191,7 +204,12 @@ class ModWebChatMixin(ModWebServiceSupport):
                 session_id,
                 user,
                 request,
-                self._web_chat_author_display_name(user, scope=app_scope),
+                self._web_chat_author_display_name(
+                    user,
+                    scope=app_scope,
+                    platforms=app_platforms,
+                    preferred_platform=preferred_platform,
+                ),
             )
 
         def _subscribe_updates(on_update: Callable[[_ModWebChatPanelSignal], None]) -> Callable[[], None]:
@@ -804,6 +822,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                 self._render_chat_event_group(
                     ui=ui,
                     group=event_group,
+                    room_id=chat_panel.initial_snapshot.room_id,
                     can_reply=can_send,
                     on_reply=set_reply_target,
                 )
@@ -1639,6 +1658,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         *,
         ui: ModWebUi,
         group: _ModWebChatEventGroup,
+        room_id: str,
         can_reply: bool,
         on_reply: Callable[[ChatEvent], None],
     ) -> None:
@@ -1664,7 +1684,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                                 )
                             self._badge(
                                 ui=ui,
-                                text=self._chat_event_source_label(head_event),
+                                text=self._chat_event_source_label(head_event, room_id=room_id),
                                 tone=self._chat_event_tone(head_event),
                                 extra_classes="mod-chat-source-badge",
                             )
@@ -1879,6 +1899,8 @@ class ModWebChatMixin(ModWebServiceSupport):
         if not text:
             return text
         scope = self._chat_room_scope(room_id)
+        platforms = self._chat_room_platforms(room_id)
+        preferred_platform = self._chat_room_preferred_platform(room_id)
         name_cache = config.Name_Cache()
 
         def replace_user_mention(match: re.Match[str]) -> str:
@@ -1886,10 +1908,11 @@ class ModWebChatMixin(ModWebServiceSupport):
             if raw_user_id is None:
                 raise ValueError("Chat mention match is missing a Discord user ID.")
             user_id = int(raw_user_id)
-            display_name = name_cache.relay_mention_name(
+            display_name = name_cache.web_mention_name(
                 user_id,
                 scope=scope,
-                preferred_guild_id=preferred_guild_id,
+                platforms=platforms,
+                preferred_platform=preferred_platform,
                 default=str(user_id),
             )
             return f"{prefix}{display_name}"
@@ -1927,10 +1950,18 @@ class ModWebChatMixin(ModWebServiceSupport):
         room_id: str,
         preferred_guild_id: int | None,
     ) -> str:
+        discord_user_id = reference.discord_user_id
+        if discord_user_id is None:
+            match = _CHAT_MARKUP_DISCORD_MENTION_RE.fullmatch(reference.author_display_name.strip())
+            if match is not None:
+                raw_user_id = match.group("discord_user_id") or match.group("raw_discord_user_id")
+                if raw_user_id is not None:
+                    discord_user_id = int(raw_user_id)
         return self._chat_identity_display_name(
             display_name=reference.author_display_name,
             room_id=room_id,
             preferred_guild_id=preferred_guild_id,
+            discord_user_id=discord_user_id,
         )
 
     def _chat_identity_display_name(
@@ -1943,13 +1974,16 @@ class ModWebChatMixin(ModWebServiceSupport):
     ) -> str:
         if not display_name:
             return display_name
-        if discord_user_id is not None and self._is_raw_chat_discord_mention(display_name, discord_user_id):
+        if discord_user_id is not None:
             scope = self._chat_room_scope(room_id)
-            return config.Name_Cache().relay_display_name(
+            platforms = self._chat_room_platforms(room_id)
+            preferred_platform = self._chat_room_preferred_platform(room_id)
+            return config.Name_Cache().web_display_name(
                 discord_user_id,
-                str(discord_user_id),
+                display_name if not self._is_raw_chat_discord_mention(display_name, discord_user_id) else str(discord_user_id),
                 scope=scope,
-                preferred_guild_id=preferred_guild_id,
+                platforms=platforms,
+                preferred_platform=preferred_platform,
             )
         return self._resolve_chat_display_mentions(
             display_name,
@@ -2579,16 +2613,32 @@ class ModWebChatMixin(ModWebServiceSupport):
             return "Crashed", "red"
         return "Stopped", "grey"
 
-    def _chat_event_source_label(self, event: ChatEvent) -> str:
+    def _chat_event_source_label(self, event: ChatEvent, *, room_id: str | None = None) -> str:
         if event.author.kind is ChatAuthorKind.SYSTEM:
             return "SYSTEM"
         if event.source.kind is ChatEndpointKind.APP:
-            return "Game"
+            return self._app_chat_event_source_label(event, room_id=room_id)
         if event.source.kind is ChatEndpointKind.DISCORD_CHANNEL:
             return self._discord_chat_event_source_label(event)
         if event.source.kind is ChatEndpointKind.WEB_SESSION:
-            return "Web"
+            return "WEB"
         return event.source.kind.value.replace("_", " ").title()
+
+    def _app_chat_event_source_label(self, event: ChatEvent, *, room_id: str | None = None) -> str:
+        source_room_id = event.source.value
+        current_room_id = room_id or event.room_id
+        if source_room_id.casefold() == current_room_id.casefold():
+            return "GAME"
+        return self._chat_room_label(source_room_id)
+
+    def _chat_room_label(self, room_id: str) -> str:
+        app: object | None = self._chat_room_app(room_id)
+        if app is None:
+            return room_id
+        friendly = getattr(app, "friendly", None)
+        if isinstance(friendly, str) and friendly.strip():
+            return friendly.strip()
+        return room_id
 
     def _discord_chat_event_source_label(self, event: ChatEvent) -> str:
         guild_name: str | None = self._discord_chat_event_guild_name(event)
@@ -2601,6 +2651,8 @@ class ModWebChatMixin(ModWebServiceSupport):
         return guild_name
 
     def _discord_chat_event_guild_name(self, event: ChatEvent) -> str | None:
+        if event.source_guild_name is not None and event.source_guild_name.strip():
+            return event.source_guild_name
         guild_id: int | None = event.source_guild_id
         if guild_id is None:
             source_channel: object | None = self._discord_chat_source_channel(event)
@@ -2746,6 +2798,21 @@ class ModWebChatMixin(ModWebServiceSupport):
         if isinstance(scope, str) and scope.strip():
             return scope
         return None
+
+    def _chat_room_platforms(self, room_id: str) -> tuple[str, ...]:
+        app: object | None = self._chat_room_app(room_id)
+        raw_platforms = getattr(app, "name_platforms", ()) if app is not None else ()
+        if not isinstance(raw_platforms, tuple | list):
+            return ()
+        return tuple(str(platform).strip().lower() for platform in raw_platforms if str(platform).strip())
+
+    def _chat_room_preferred_platform(self, room_id: str) -> str | None:
+        app: object | None = self._chat_room_app(room_id)
+        preferred_platform = getattr(app, "preferred_name_platform", None) if app is not None else None
+        if not isinstance(preferred_platform, str):
+            return None
+        value = preferred_platform.strip().lower()
+        return value or None
 
     @staticmethod
     def _chat_room_channel_ids(app: object) -> tuple[int, ...]:

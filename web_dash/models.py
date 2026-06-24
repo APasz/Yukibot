@@ -83,6 +83,7 @@ from .types import (
     ModWebNodeLink,
     ModWebOverviewPageModel,
     ModWebPageModel,
+    ModWebPageLoadWarning,
     ModWebTitleStat,
     ModWebTitleStatLine,
 )
@@ -104,6 +105,7 @@ class _LocalAppPageData:
     app_start_blocked: bool
     mods: NodeModList | None
     app_stats: NodeAppRuntimeSummary | None
+    load_warnings: tuple[ModWebPageLoadWarning, ...] = ()
 
 
 class ModWebModelsMixin(ModWebServiceSupport):
@@ -205,40 +207,103 @@ class ModWebModelsMixin(ModWebServiceSupport):
     def _node_app_api_url(node: ModWebNodeLink, app_name: str) -> str:
         return f"{node.api_url.rstrip('/')}/{quote(app_name, safe='')}"
 
+    @staticmethod
+    def _page_load_warning(*, section_label: str, error: BaseException) -> ModWebPageLoadWarning:
+        detail: str = str(error).strip() or type(error).__name__
+        return ModWebPageLoadWarning(
+            title=f"{section_label} unavailable",
+            detail=detail,
+        )
+
+    def _warn_page_section_load_failure(
+        self,
+        *,
+        context: str,
+        section_label: str,
+        error: BaseException,
+        load_warnings: list[ModWebPageLoadWarning],
+    ) -> None:
+        if not (self._shutting_down or config.IS_SHUTTINGDOWN):
+            log.warning("%s section load failed: %s", context, error)
+        load_warnings.append(self._page_load_warning(section_label=section_label, error=error))
+
     async def _build_local_app_page_data(self, app: App, *, user: ModWebUser) -> _LocalAppPageData:
         can_manage_app: bool = self._user_has_level(user, Power_Level.user)
         app_entry: NodeAppEntry = self._node_api.build_app_entry(app)
         supports_configs: bool = app_entry.supports_configs
         config_read_level: Power_Level = app_entry.config_read_level
-        configs: NodeConfigList = (
-            self._node_api.build_config_list(app, actor_user_id=user.discord_id)
-            if supports_configs and self._user_has_level(user, config_read_level)
-            else self._empty_config_list(
-                app_name=app_entry.name,
-                app_friendly=app_entry.friendly,
-                node_name=app_entry.node,
-            )
+        load_warnings: list[ModWebPageLoadWarning] = []
+        empty_configs = self._empty_config_list(
+            app_name=app_entry.name,
+            app_friendly=app_entry.friendly,
+            node_name=app_entry.node,
         )
-        saves: NodeSaveList | None = (
-            await self._node_api.build_save_list(app) if app_entry.supports_saves and can_manage_app else None
-        )
-        blueprints: NodeBlueprintList | None = (
-            self._node_api.build_blueprint_list(app, actor_user_id=user.discord_id)
-            if app_entry.supports_blueprints and can_manage_app
-            else None
-        )
-        settings: NodeSettingList | None = (
-            self._node_api.build_setting_list(app=app, actor_user_id=user.discord_id)
-            if app_entry.supports_settings
-            else None
-            if can_manage_app
-            else None
-        )
-        console_actions: NodeConsoleActionList | None = (
-            self._node_api.build_console_action_list(app=app, actor_user_id=user.discord_id)
-            if app_entry.supports_console_actions and can_manage_app
-            else None
-        )
+        context: str = f"Local mod web app page: app={app_entry.name}"
+        if supports_configs and self._user_has_level(user, config_read_level):
+            try:
+                configs = self._node_api.build_config_list(app, actor_user_id=user.discord_id)
+            except Exception as xcp:
+                self._warn_page_section_load_failure(
+                    context=context,
+                    section_label="Configs",
+                    error=xcp,
+                    load_warnings=load_warnings,
+                )
+                configs = empty_configs
+        else:
+            configs = empty_configs
+        if app_entry.supports_saves and can_manage_app:
+            try:
+                saves = await self._node_api.build_save_list(app)
+            except Exception as xcp:
+                self._warn_page_section_load_failure(
+                    context=context,
+                    section_label="Saves",
+                    error=xcp,
+                    load_warnings=load_warnings,
+                )
+                saves = None
+        else:
+            saves = None
+        if app_entry.supports_blueprints and can_manage_app:
+            try:
+                blueprints = self._node_api.build_blueprint_list(app, actor_user_id=user.discord_id)
+            except Exception as xcp:
+                self._warn_page_section_load_failure(
+                    context=context,
+                    section_label="Blueprints",
+                    error=xcp,
+                    load_warnings=load_warnings,
+                )
+                blueprints = None
+        else:
+            blueprints = None
+        if app_entry.supports_settings and can_manage_app:
+            try:
+                settings = self._node_api.build_setting_list(app=app, actor_user_id=user.discord_id)
+            except Exception as xcp:
+                self._warn_page_section_load_failure(
+                    context=context,
+                    section_label="Settings",
+                    error=xcp,
+                    load_warnings=load_warnings,
+                )
+                settings = None
+        else:
+            settings = None
+        if app_entry.supports_console_actions and can_manage_app:
+            try:
+                console_actions = self._node_api.build_console_action_list(app=app, actor_user_id=user.discord_id)
+            except Exception as xcp:
+                self._warn_page_section_load_failure(
+                    context=context,
+                    section_label="Console",
+                    error=xcp,
+                    load_warnings=load_warnings,
+                )
+                console_actions = None
+        else:
+            console_actions = None
         app_start_blocked: bool = self._app_start_blocked_local(app)
         if app_entry.supports_mods:
             mods: NodeModList | None = await self._node_api.build_mod_list(app)
@@ -257,6 +322,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             app_start_blocked=app_start_blocked,
             mods=mods,
             app_stats=app_stats,
+            load_warnings=tuple(load_warnings),
         )
 
     def _page_model_from_local_page_data(
@@ -314,6 +380,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_advancements_enabled=page_data.app_entry.relay_advancements_enabled,
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
             activity_providers=page_data.app_entry.activity_providers,
+            load_warnings=page_data.load_warnings,
         )
 
     def _overview_model_from_local_page_data(
@@ -366,6 +433,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_advancements_enabled=page_data.app_entry.relay_advancements_enabled,
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
             activity_providers=page_data.app_entry.activity_providers,
+            load_warnings=page_data.load_warnings,
         )
 
     async def _build_page_model(self, app: App, *, user: ModWebUser) -> ModWebPageModel:
@@ -420,6 +488,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_advancements_enabled: bool | None = None,
         relay_advancement_term: str | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
+        load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
     ) -> ModWebPageModel:
         app_api_url: str = self._node_app_api_url(node, mods.app_name)
         return cast(
@@ -464,6 +533,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_advancements_enabled=relay_advancements_enabled,
                     relay_advancement_term=relay_advancement_term,
                     activity_providers=activity_providers,
+                    load_warnings=load_warnings,
                     download_all_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'false'})}",
                     download_enabled_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'true'})}",
                     mod_download_urls={
@@ -516,6 +586,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_advancements_enabled: bool | None = None,
         relay_advancement_term: str | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
+        load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
     ) -> ModWebOverviewPageModel:
         app_api_url: str = self._node_app_api_url(node, app_name)
         return cast(
@@ -560,6 +631,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_advancements_enabled=relay_advancements_enabled,
                     relay_advancement_term=relay_advancement_term,
                     activity_providers=activity_providers,
+                    load_warnings=load_warnings,
                 ),
             ),
         )

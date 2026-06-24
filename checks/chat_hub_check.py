@@ -63,6 +63,23 @@ class ChatHubTests(unittest.TestCase):
         self.assertEqual(hub.rooms_for_endpoint(endpoint.id), ())
         self.assertEqual(hub.history(room_id), ())
 
+    def test_bound_room_ids_return_sorted_bound_rooms(self) -> None:
+        hub = ChatHub()
+        first_room_id = "zeta_room"
+        second_room_id = "alpha_room"
+        endpoint = ChatEndpoint(ChatEndpointId.discord_channel("123"), "Discord 123")
+        hub.clear_room(first_room_id)
+        hub.clear_room(second_room_id)
+
+        try:
+            hub.bind(first_room_id, endpoint)
+            hub.bind(second_room_id, endpoint)
+
+            self.assertEqual(hub.bound_room_ids(), (second_room_id, first_room_id))
+        finally:
+            hub.clear_room(first_room_id)
+            hub.clear_room(second_room_id)
+
     def test_room_subscription_notifies_for_bind_publish_and_clear(self) -> None:
         hub = ChatHub()
         room_id = "minecraft_alpha"
@@ -181,6 +198,7 @@ class ChatHubTests(unittest.TestCase):
             ),
             embed=ChatEmbed(title="Relay", description="Forwarded", color=0x336699),
             source_guild_id=789,
+            source_guild_name="Friends",
             source_channel_id=123,
             source_message_id=456789,
             source_label="Guild",
