@@ -457,6 +457,31 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
                 config_source_path=config_upload_path,
             )
 
+    def test_blueprint_upload_rolls_back_files_when_ownership_write_fails(self) -> None:
+        app = self._blueprint_app()
+        upload_path = self.temp_path / "Awesome.sbp"
+        upload_path.write_text("module", encoding="utf-8")
+        config_upload_path = self.temp_path / "Awesome.sbpcfg"
+        config_upload_path.write_text("config", encoding="utf-8")
+
+        with (
+            patch.object(app._blueprint_ownership_store, "record_upload_batch", side_effect=OSError("disk full")),
+            self.assertRaises(OSError),
+        ):
+            app.upload_blueprint_file(
+                session_name="Session Alpha",
+                upload_name="Awesome.sbp",
+                source_path=upload_path,
+                actor_user_id=101,
+                config_upload_name="Awesome.sbpcfg",
+                config_source_path=config_upload_path,
+            )
+
+        self.assertFalse((self.temp_path / "blueprints-shared" / "Shared" / "Awesome.sbp").exists())
+        self.assertFalse((self.temp_path / "blueprints-shared" / "Shared" / "Awesome.sbpcfg").exists())
+        self.assertEqual(app.list_blueprint_files(), ())
+        self.assertEqual(app._blueprint_ownership_store.uploaded_by_user_id_by_relative_path(), {})
+
     def test_default_blueprint_session_name_is_shared(self) -> None:
         app = self._blueprint_app()
         app._players = SimpleNamespace(  # type: ignore[attr-defined]
@@ -542,6 +567,45 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ownership["Shared/Migrated.sbp"], 101)
         self.assertEqual(ownership["Shared/Migrated.sbpcfg"], 101)
         self.assertNotIn("Session Gamma/Migrated.sbp", ownership)
+
+    def test_blueprint_ownership_store_preserves_existing_index_when_replace_fails(self) -> None:
+        store_path = self.temp_path / "ownership.json"
+        store = SatisfactoryBlueprintOwnershipStore(store_path)
+        store.record_upload(relative_path="Shared/Original.sbp", actor_user_id=101)
+
+        original_text = store_path.read_text(encoding="utf-8")
+
+        with patch("pathlib.Path.replace", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            store.record_upload(relative_path="Shared/Second.sbp", actor_user_id=202)
+
+        self.assertEqual(store_path.read_text(encoding="utf-8"), original_text)
+        self.assertFalse(store_path.with_name(f"{store_path.name}.tmp").exists())
+        self.assertEqual(
+            store.uploaded_by_user_id_by_relative_path(),
+            {"Shared/Original.sbp": 101},
+        )
+
+    def test_blueprint_ownership_store_migrates_legacy_entries_without_clobbering_shared_entries(self) -> None:
+        store = SatisfactoryBlueprintOwnershipStore(self.temp_path / "ownership.json")
+        store.record_upload(relative_path="Session Gamma/Migrated.sbp", actor_user_id=101)
+        store.record_upload(relative_path="Session Gamma/Migrated.sbpcfg", actor_user_id=101)
+        store.record_upload(relative_path="Shared/Current.sbp", actor_user_id=202)
+
+        store.migrate_legacy_relative_paths(
+            legacy_to_shared_relative_path={
+                "Session Gamma/Migrated.sbp": "Shared/Migrated.sbp",
+                "Session Gamma/Migrated.sbpcfg": "Shared/Migrated.sbpcfg",
+            }
+        )
+
+        self.assertEqual(
+            store.uploaded_by_user_id_by_relative_path(),
+            {
+                "Shared/Current.sbp": 202,
+                "Shared/Migrated.sbp": 101,
+                "Shared/Migrated.sbpcfg": 101,
+            },
+        )
 
     async def test_player_session_matcher_emits_join_and_leave_notices(self) -> None:
         matcher = SatisfactoryPlayerSessionMatcher(self._player_session_app())

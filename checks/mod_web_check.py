@@ -33,6 +33,19 @@ from apps._updater import (
     AppUpdateState,
     AppUpdateStatus,
 )
+from apps.minecraft import (
+    Minecraft,
+    MinecraftCookingRecipe,
+    MinecraftItemRegistrySnapshot,
+    MinecraftRecipeBook,
+    MinecraftRecipeKind,
+    MinecraftRecipeIngredient,
+    MinecraftRecipeItemStack,
+    MinecraftRecipeRemoval,
+    MinecraftRecipeRemovalFilter,
+    MinecraftShapedRecipe,
+    MinecraftShapelessRecipe,
+)
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
     ChatAttachment,
@@ -72,6 +85,11 @@ from node_api import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleActionParameter,
+    NodeMinecraftItemRegistryState,
+    NodeMinecraftRecipeMutationAction,
+    NodeMinecraftRecipeMutationResult,
+    NodeMinecraftRecipeBookState,
+    NodeMinecraftRecipeWorkspaceState,
     NodeModEntry,
     NodeModList,
     NodeModMutationAction,
@@ -102,6 +120,14 @@ from relay_notices import (
     RelayNoticeSource,
 )
 from web_dash.backend import ModWebDashboardBackend
+from web_dash.app_page import (
+    _MinecraftRecipeDragPayload,
+    _MinecraftRecipeEditorIngredientKind,
+    _MinecraftRecipeEditorIngredientState,
+    _MinecraftRecipeEditorOperation,
+    _MinecraftRecipeEditorSelection,
+    _MinecraftRecipeEditorState,
+)
 from web_dash.links import current_node_app_url
 from web_dash.models import _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
 from web_dash.nicegui_protocols import ModWebUi
@@ -116,6 +142,10 @@ from web_dash.types import (
     ModWebBasePageModel,
     ModWebConfigEditorShape,
     ModWebHomeNodeSummary,
+    ModWebMinecraftItemRegistrySummary,
+    ModWebMinecraftRecipeBookSummary,
+    ModWebSevenDaysSandboxOptionEntry,
+    ModWebSevenDaysSandboxOptionsSummary,
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
@@ -334,20 +364,24 @@ class ModWebTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _mod_list(*, app_name: str = "minecraft_alpha") -> NodeModList:
+    def _mod_list(
+        *,
+        app_name: str = "minecraft_alpha",
+        mods: tuple[NodeModEntry, ...] = (),
+    ) -> NodeModList:
         return NodeModList(
             app_name=app_name,
             app_friendly="Minecraft Alpha",
             node="yuki",
             summary=NodeModSummary(
-                total_count=0,
-                enabled_count=0,
-                disabled_count=0,
-                coremod_count=0,
-                downloadable_count=0,
-                non_downloadable_count=0,
+                total_count=len(mods),
+                enabled_count=sum(1 for mod in mods if mod.enabled),
+                disabled_count=sum(1 for mod in mods if not mod.enabled),
+                coremod_count=sum(1 for mod in mods if mod.coremod),
+                downloadable_count=sum(1 for mod in mods if mod.downloadable),
+                non_downloadable_count=sum(1 for mod in mods if not mod.downloadable),
             ),
-            mods=(),
+            mods=mods,
             app_stats=None,
         )
 
@@ -9378,6 +9412,901 @@ class ModWebTests(unittest.TestCase):
             ["mods", "configs", "settings", "saves", "console"],
         )
 
+    def test_page_tabs_include_hidden_minecraft_recipes_when_enabled_kubejs_exists(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=True,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=True,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=self._save_list(),
+            app_stats=None,
+            app_start_blocked=False,
+            settings=self._setting_list(),
+            console_actions=self._console_action_list(),
+            mods=self._mod_list(
+                mods=(
+                    self._mod_entry(name="kubejs-forge-2001.6.5-build.26.jar"),
+                    self._mod_entry(name="kubejs-create-1.0.0.jar"),
+                )
+            ),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+        )
+
+        tabs = service._page_tabs(model)
+        recipes_tab = next(tab for tab in tabs if tab.tab_id == "recipes")
+
+        self.assertEqual(
+            [tab.tab_id for tab in tabs],
+            ["mods", "configs", "settings", "saves", "recipes", "console"],
+        )
+        self.assertFalse(recipes_tab.show_on_app_card)
+
+    def test_page_tabs_omit_minecraft_recipes_without_enabled_kubejs(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=self._console_action_list(),
+            mods=self._mod_list(
+                mods=(self._mod_entry(name="kubejs-forge-2001.6.5-build.26.jar", enabled=False),)
+            ),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+        )
+
+        tabs = service._page_tabs(model)
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "console"])
+
+    def test_page_tabs_include_hidden_sevendays_sandbox_when_dataset_exists(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="sevendays_alpha",
+            app_friendly="7D2D Alpha",
+            app_color_hex="#B91C1C",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(app_name="sevendays_alpha", app_friendly="7D2D Alpha", node="yuki", configs=()),
+            saves=None,
+            app_stats=NodeAppRuntimeSummary(
+                running=False,
+                enabled=True,
+                version="3.0:259",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+            ),
+            app_start_blocked=False,
+            settings=None,
+            console_actions=self._console_action_list(),
+            mods=self._mod_list(app_name="sevendays_alpha", mods=()),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+            sevendays_sandbox_options=ModWebSevenDaysSandboxOptionsSummary(
+                data_path=".yukibot/sandbox_options.json",
+                file_exists=True,
+                options=(
+                    ModWebSevenDaysSandboxOptionEntry(
+                        section="General",
+                        key="BlockDamage",
+                        value_index=10,
+                        value_label="200%",
+                        default_index=7,
+                        default_label="100%",
+                    ),
+                ),
+            ),
+        )
+
+        tabs = service._page_tabs(model)
+        sandbox_tab = next(tab for tab in tabs if tab.tab_id == "sandbox")
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "sandbox", "console"])
+        self.assertFalse(sandbox_tab.show_on_app_card)
+
+    def test_page_tabs_include_sevendays_sandbox_for_supported_version_without_dataset(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="sevendays_alpha",
+            app_friendly="7D2D Alpha",
+            app_color_hex="#B91C1C",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(app_name="sevendays_alpha", app_friendly="7D2D Alpha", node="yuki", configs=()),
+            saves=None,
+            app_stats=NodeAppRuntimeSummary(
+                running=False,
+                enabled=True,
+                version="3.0:259",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+            ),
+            app_start_blocked=False,
+            settings=None,
+            console_actions=self._console_action_list(),
+            mods=self._mod_list(app_name="sevendays_alpha", mods=()),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+            sevendays_sandbox_options=ModWebSevenDaysSandboxOptionsSummary(
+                data_path=".yukibot/sandbox_options.json",
+                file_exists=False,
+            ),
+        )
+
+        tabs = service._page_tabs(model)
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "sandbox", "console"])
+
+    def test_page_tabs_include_sevendays_sandbox_when_only_snapshot_version_is_available(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="sevendays_alpha",
+            app_friendly="7D2D Alpha",
+            app_color_hex="#B91C1C",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(app_name="sevendays_alpha", app_friendly="7D2D Alpha", node="yuki", configs=()),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=self._console_action_list(),
+            mods=self._mod_list(app_name="sevendays_alpha", mods=()),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+            sevendays_sandbox_options=ModWebSevenDaysSandboxOptionsSummary(
+                data_path=".yukibot/sandbox_options.json",
+                file_exists=True,
+                app_version="3.0:259",
+            ),
+        )
+
+        tabs = service._page_tabs(model)
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "sandbox", "console"])
+
+    def test_page_tabs_include_sevendays_sandbox_when_scope_is_explicit(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="sevendays1",
+            app_friendly="7D2D-1",
+            app_color_hex="#B91C1C",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(app_name="sevendays1", app_friendly="7D2D-1", node="yuki", configs=()),
+            saves=None,
+            app_stats=NodeAppRuntimeSummary(
+                running=False,
+                enabled=True,
+                version="3.0.0:259",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+            ),
+            app_start_blocked=False,
+            settings=None,
+            console_actions=self._console_action_list(),
+            app_scope="sevendays",
+            mods=self._mod_list(app_name="sevendays1", mods=()),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+            sevendays_sandbox_options=ModWebSevenDaysSandboxOptionsSummary(
+                data_path=".yukibot/sandbox_options.json",
+                file_exists=True,
+                app_version="3.0.0:259",
+            ),
+        )
+
+        tabs = service._page_tabs(model)
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "sandbox", "console"])
+
+    def test_page_tabs_omit_sevendays_sandbox_below_supported_build(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="sevendays_alpha",
+            app_friendly="7D2D Alpha",
+            app_color_hex="#B91C1C",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(app_name="sevendays_alpha", app_friendly="7D2D Alpha", node="yuki", configs=()),
+            saves=None,
+            app_stats=NodeAppRuntimeSummary(
+                running=False,
+                enabled=True,
+                version="3.0:258",
+                player_count=None,
+                player_capacity=None,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+            ),
+            app_start_blocked=False,
+            settings=None,
+            console_actions=self._console_action_list(),
+            mods=self._mod_list(app_name="sevendays_alpha", mods=()),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+            sevendays_sandbox_options=ModWebSevenDaysSandboxOptionsSummary(
+                data_path=".yukibot/sandbox_options.json",
+                file_exists=True,
+            ),
+        )
+
+        tabs = service._page_tabs(model)
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "console"])
+
+    def test_sevendays_sandbox_options_markup_groups_options(self) -> None:
+        markup = ModWebService._sevendays_sandbox_options_markup(
+            ModWebSevenDaysSandboxOptionsSummary(
+                data_path=".yukibot/sandbox_options.json",
+                file_exists=True,
+                options=(
+                    ModWebSevenDaysSandboxOptionEntry(
+                        section="General",
+                        key="BlockDamage",
+                        value_index=10,
+                        value_label="200%",
+                        default_index=7,
+                        default_label="100%",
+                    ),
+                ),
+            )
+        )
+
+        self.assertIn("General", markup)
+        self.assertIn("BlockDamage", markup)
+        self.assertIn("10/200%", markup)
+
+    def test_minecraft_recipe_summary_reads_persisted_recipe_book(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.save_kubejs_recipe_book(
+                MinecraftRecipeBook(
+                    mutations=(
+                        MinecraftShapelessRecipe(
+                            output=MinecraftRecipeItemStack("minecraft:gravel"),
+                            ingredients=(MinecraftRecipeIngredient.item("minecraft:flint", count=3),),
+                            recipe_id="kubejs:flint_to_gravel",
+                        ),
+                        MinecraftRecipeRemoval(
+                            MinecraftRecipeRemovalFilter(recipe_id="minecraft:stick"),
+                        ),
+                    )
+                )
+            )
+
+            summary = ModWebService()._minecraft_recipe_summary(cast(Any, app))
+
+            self.assertIsNotNone(summary)
+            assert summary is not None
+            self.assertEqual(summary.data_path, ".yukibot/recipes.json")
+            self.assertEqual(summary.script_path, "kubejs/server_scripts/yuki_recipes.js")
+            self.assertEqual([entry.kind_label for entry in summary.entries], ["Shapeless", "Remove"])
+            self.assertEqual(summary.entries[0].title, "minecraft:gravel")
+            self.assertEqual(summary.entries[0].recipe_id, "kubejs:flint_to_gravel")
+            self.assertEqual(summary.entries[1].title, "minecraft:stick")
+
+    def test_minecraft_item_registry_summary_reads_persisted_item_registry(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            item_registry_path = directory / ".yukibot" / "registries" / "items.json"
+            item_registry_path.parent.mkdir(parents=True)
+            item_registry_path.write_text(
+                json.dumps(
+                    MinecraftItemRegistrySnapshot(
+                        generated_at_epoch_ms=1234567890,
+                        item_ids=("minecraft:dirt", "minecraft:stone"),
+                    ).to_mapping()
+                ),
+                encoding="utf-8",
+            )
+
+            summary = ModWebService()._minecraft_item_registry_summary(cast(Any, app))
+
+            self.assertIsNotNone(summary)
+            assert summary is not None
+            self.assertEqual(summary.data_path, ".yukibot/registries/items.json")
+            self.assertTrue(summary.file_exists)
+            self.assertEqual(summary.generated_at_epoch_ms, 1234567890)
+            self.assertEqual(summary.item_ids, ("minecraft:dirt", "minecraft:stone"))
+
+    def test_minecraft_recipes_body_markup_handles_empty_error_and_entries(self) -> None:
+        unavailable_markup = ModWebService._minecraft_recipes_body_markup(None)
+        empty_markup = ModWebService._minecraft_recipes_body_markup(
+            ModWebMinecraftRecipeBookSummary(
+                data_path=".yukibot/recipes.json",
+                script_path="kubejs/server_scripts/yuki_recipes.js",
+            )
+        )
+        error_markup = ModWebService._minecraft_recipes_body_markup(
+            ModWebMinecraftRecipeBookSummary(
+                data_path=".yukibot/recipes.json",
+                script_path="kubejs/server_scripts/yuki_recipes.js",
+                load_error="<broken>",
+            )
+        )
+        entry_markup = ModWebService._minecraft_recipes_body_markup(
+            ModWebMinecraftRecipeBookSummary(
+                data_path=".yukibot/recipes.json",
+                script_path="kubejs/server_scripts/yuki_recipes.js",
+                entries=(
+                    ModWebService._minecraft_recipe_entry(
+                        MinecraftShapelessRecipe(
+                            output=MinecraftRecipeItemStack("minecraft:gravel"),
+                            ingredients=(MinecraftRecipeIngredient.item("minecraft:flint", count=3),),
+                            recipe_id="kubejs:flint_to_gravel",
+                        )
+                    ),
+                ),
+            )
+        )
+
+        self.assertIn("not available", unavailable_markup)
+        self.assertIn("No managed recipes yet", empty_markup)
+        self.assertIn("&lt;broken&gt;", error_markup)
+        self.assertIn("minecraft:gravel", entry_markup)
+        self.assertIn("kubejs:flint_to_gravel", entry_markup)
+
+    def test_minecraft_item_registry_markup_handles_missing_error_and_entries(self) -> None:
+        unavailable_markup = ModWebService._minecraft_item_registry_markup(None)
+        error_markup = ModWebService._minecraft_item_registry_markup(
+            ModWebMinecraftItemRegistrySummary(
+                data_path=".yukibot/registries/items.json",
+                file_exists=True,
+                load_error="<broken>",
+            )
+        )
+        loaded_markup = ModWebService._minecraft_item_registry_markup(
+            ModWebMinecraftItemRegistrySummary(
+                data_path=".yukibot/registries/items.json",
+                file_exists=True,
+                generated_at_epoch_ms=1234567890,
+                item_ids=("minecraft:dirt", "minecraft:stone"),
+            )
+        )
+
+        self.assertIn("not available", unavailable_markup)
+        self.assertIn("&lt;broken&gt;", error_markup)
+        self.assertIn("2 items", loaded_markup)
+        self.assertIn("1234567890", loaded_markup)
+
+    def test_minecraft_known_item_ids_ignores_missing_and_error_summaries(self) -> None:
+        self.assertEqual(ModWebService._minecraft_known_item_ids(None), ())
+        self.assertEqual(
+            ModWebService._minecraft_known_item_ids(
+                ModWebMinecraftItemRegistrySummary(
+                    data_path=".yukibot/registries/items.json",
+                    load_error="broken",
+                )
+            ),
+            (),
+        )
+        self.assertEqual(
+            ModWebService._minecraft_known_item_ids(
+                ModWebMinecraftItemRegistrySummary(
+                    data_path=".yukibot/registries/items.json",
+                    file_exists=True,
+                    item_ids=("minecraft:dirt", "minecraft:stone"),
+                )
+            ),
+            ("minecraft:dirt", "minecraft:stone"),
+        )
+
+    def test_minecraft_recipe_editor_supports_cooking_extras(self) -> None:
+        editor_state = _MinecraftRecipeEditorState(
+            operation=_MinecraftRecipeEditorOperation.ADD,
+            kind=MinecraftRecipeKind.SMELTING,
+            recipe_id="kubejs:smelt_gravel",
+            output_item_id="minecraft:gravel",
+            output_count=2,
+            cooking_input_ingredient=_MinecraftRecipeEditorIngredientState.item("minecraft:cobblestone"),
+            cooking_experience_text="0.35",
+            cooking_time_ticks_text="160",
+            selected_slot=_MinecraftRecipeEditorSelection.cooking_input(),
+        )
+
+        mutation = ModWebService._minecraft_recipe_mutation_from_editor(editor_state)
+
+        self.assertIsInstance(mutation, MinecraftCookingRecipe)
+        assert isinstance(mutation, MinecraftCookingRecipe)
+        self.assertEqual(mutation.experience, 0.35)
+        self.assertEqual(mutation.cooking_time_ticks, 160)
+
+    def test_minecraft_recipe_editor_supports_removal_filters_and_loading(self) -> None:
+        mutation = MinecraftRecipeRemoval(
+            filter=MinecraftRecipeRemovalFilter(
+                recipe_id="minecraft:iron_ingot_from_blasting",
+                output=MinecraftRecipeIngredient.item("minecraft:iron_ingot"),
+                input=MinecraftRecipeIngredient.tag("c:iron_ores"),
+                recipe_type=MinecraftRecipeKind.BLASTING,
+                mod_id="minecraft",
+            )
+        )
+        editor_state = _MinecraftRecipeEditorState()
+
+        ModWebService._load_minecraft_recipe_editor_state(editor_state, mutation, mutation_index=4)
+
+        self.assertEqual(editor_state.operation, _MinecraftRecipeEditorOperation.REMOVE)
+        self.assertEqual(editor_state.editing_recipe_index, 4)
+        self.assertEqual(editor_state.removal_recipe_id, "minecraft:iron_ingot_from_blasting")
+        self.assertEqual(editor_state.removal_output_filter.editor_text, "minecraft:iron_ingot")
+        self.assertEqual(editor_state.removal_input_filter.editor_text, "#c:iron_ores")
+        self.assertEqual(editor_state.removal_recipe_type_text, MinecraftRecipeKind.BLASTING.value)
+        self.assertEqual(editor_state.removal_mod_id, "minecraft")
+
+        rebuilt_mutation = ModWebService._minecraft_recipe_mutation_from_editor(editor_state)
+
+        self.assertEqual(rebuilt_mutation.to_mapping(), mutation.to_mapping())
+
+    def test_minecraft_recipe_editor_supports_tag_ingredients(self) -> None:
+        editor_state = _MinecraftRecipeEditorState(
+            operation=_MinecraftRecipeEditorOperation.ADD,
+            kind=MinecraftRecipeKind.SHAPED,
+            recipe_id="kubejs:tagged_recipe",
+            output_item_id="minecraft:stick",
+            output_count=1,
+            shaped_ingredients=[
+                _MinecraftRecipeEditorIngredientState.tag("minecraft:planks"),
+                _MinecraftRecipeEditorIngredientState.empty(),
+                _MinecraftRecipeEditorIngredientState.empty(),
+                _MinecraftRecipeEditorIngredientState.empty(),
+                _MinecraftRecipeEditorIngredientState.item("minecraft:coal"),
+                _MinecraftRecipeEditorIngredientState.empty(),
+                _MinecraftRecipeEditorIngredientState.empty(),
+                _MinecraftRecipeEditorIngredientState.empty(),
+                _MinecraftRecipeEditorIngredientState.empty(),
+            ],
+            selected_slot=_MinecraftRecipeEditorSelection.shaped(0),
+        )
+
+        mutation = ModWebService._minecraft_recipe_mutation_from_editor(editor_state)
+
+        self.assertIsInstance(mutation, MinecraftShapedRecipe)
+        assert isinstance(mutation, MinecraftShapedRecipe)
+        self.assertEqual(mutation.pattern, ("A ", " B"))
+        self.assertEqual(mutation.key["A"].kind.value, "tag")
+        self.assertEqual(mutation.key["A"].resource_id, "minecraft:planks")
+
+    def test_minecraft_recipe_drag_payload_can_fill_item_and_tag_slots(self) -> None:
+        editor_state = _MinecraftRecipeEditorState(
+            selected_slot=_MinecraftRecipeEditorSelection.output(),
+        )
+
+        ModWebService._apply_minecraft_recipe_drag_payload_to_selection(
+            editor_state,
+            selection=_MinecraftRecipeEditorSelection.shapeless(2),
+            payload=_MinecraftRecipeDragPayload(
+                kind=_MinecraftRecipeEditorIngredientKind.TAG,
+                resource_id="c:ingots/iron",
+            ),
+        )
+        ModWebService._apply_minecraft_recipe_drag_payload_to_selection(
+            editor_state,
+            selection=_MinecraftRecipeEditorSelection.output(),
+            payload=_MinecraftRecipeDragPayload(
+                kind=_MinecraftRecipeEditorIngredientKind.ITEM,
+                resource_id="minecraft:iron_ingot",
+            ),
+        )
+
+        self.assertEqual(editor_state.shapeless_ingredients[2].editor_text, "#c:ingots/iron")
+        self.assertEqual(editor_state.output_item_id, "minecraft:iron_ingot")
+
+    def test_minecraft_recipe_drag_payload_rejects_tag_outputs(self) -> None:
+        editor_state = _MinecraftRecipeEditorState()
+
+        with self.assertRaisesRegex(ValueError, "Recipe outputs must be concrete items."):
+            ModWebService._apply_minecraft_recipe_drag_payload_to_selection(
+                editor_state,
+                selection=_MinecraftRecipeEditorSelection.output(),
+                payload=_MinecraftRecipeDragPayload(
+                    kind=_MinecraftRecipeEditorIngredientKind.TAG,
+                    resource_id="c:ingots/iron",
+                ),
+            )
+
+    def test_remote_minecraft_recipe_summaries_parse_remote_workspace_payload(self) -> None:
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        workspace_state = NodeMinecraftRecipeWorkspaceState(
+            recipe_book=NodeMinecraftRecipeBookState(
+                data_path=".yukibot/recipes.json",
+                script_path="kubejs/server_scripts/yuki_recipes.js",
+                payload=MinecraftRecipeBook(
+                    mutations=(
+                        MinecraftShapelessRecipe(
+                            output=MinecraftRecipeItemStack("minecraft:gravel"),
+                            ingredients=(MinecraftRecipeIngredient.item("minecraft:flint", count=3),),
+                            recipe_id="kubejs:flint_to_gravel",
+                        ),
+                    )
+                ).to_mapping(),
+            ),
+            item_registry=NodeMinecraftItemRegistryState(
+                data_path=".yukibot/registries/items.json",
+                file_exists=True,
+                payload=MinecraftItemRegistrySnapshot(
+                    generated_at_epoch_ms=1234567890,
+                    item_ids=("minecraft:dirt", "minecraft:stone"),
+                ).to_mapping(),
+            ),
+        )
+        service._remote_json = Mock(return_value=workspace_state.to_mapping())  # type: ignore[method-assign]
+
+        recipe_summary, item_registry_summary = service._remote_minecraft_recipe_summaries(
+            node,
+            "minecraft_alpha",
+            user,
+        )
+
+        self.assertEqual(recipe_summary.data_path, ".yukibot/recipes.json")
+        self.assertEqual(recipe_summary.script_path, "kubejs/server_scripts/yuki_recipes.js")
+        self.assertEqual(recipe_summary.entries[0].recipe_id, "kubejs:flint_to_gravel")
+        self.assertEqual(item_registry_summary.data_path, ".yukibot/registries/items.json")
+        self.assertTrue(item_registry_summary.file_exists)
+        self.assertEqual(item_registry_summary.item_ids, ("minecraft:dirt", "minecraft:stone"))
+
+    def test_append_minecraft_recipe_mutation_posts_to_node_api(self) -> None:
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        mutation = MinecraftShapelessRecipe(
+            output=MinecraftRecipeItemStack("minecraft:gravel"),
+            ingredients=(MinecraftRecipeIngredient.item("minecraft:flint"),),
+            recipe_id="kubejs:flint_to_gravel",
+        )
+        payload = NodeMinecraftRecipeMutationResult(
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            node="erin",
+            message="Saved Minecraft recipe change for Minecraft Alpha.",
+            workspace=NodeMinecraftRecipeWorkspaceState(
+                recipe_book=NodeMinecraftRecipeBookState(
+                    data_path=".yukibot/recipes.json",
+                    script_path="kubejs/server_scripts/yuki_recipes.js",
+                    payload=MinecraftRecipeBook(mutations=(mutation,)).to_mapping(),
+                ),
+                item_registry=NodeMinecraftItemRegistryState(
+                    data_path=".yukibot/registries/items.json",
+                    file_exists=True,
+                    payload=MinecraftItemRegistrySnapshot.empty().to_mapping(),
+                ),
+            ),
+        ).to_mapping()
+        acl = Access_Control()
+        acl._roles[42] = Power_Level.sudo
+        service.set_acl(acl)
+        service._remote_node_link = Mock(return_value=node)  # type: ignore[method-assign]
+        service._remote_json = Mock(return_value=payload)  # type: ignore[method-assign]
+
+        result = asyncio.run(
+            service._append_minecraft_recipe_mutation(
+                model=cast(
+                    ModWebPageModel,
+                    cast(
+                        object,
+                        SimpleNamespace(
+                            node_name="erin",
+                            app_name="minecraft_alpha",
+                        ),
+                    ),
+                ),
+                mutation=mutation,
+                user=user,
+            )
+        )
+
+        self.assertEqual(result.message, "Saved Minecraft recipe change for Minecraft Alpha.")
+        service._remote_json.assert_called_once()
+        call_kwargs = service._remote_json.call_args.kwargs
+        self.assertEqual(call_kwargs["node"], node)
+        self.assertEqual(call_kwargs["app_name"], "minecraft_alpha")
+        self.assertEqual(call_kwargs["path"], "/apps/minecraft_alpha/minecraft/recipes/mutations")
+        self.assertEqual(call_kwargs["scopes"], (NodeApiScope.APP_MANAGE,))
+        self.assertEqual(call_kwargs["user"], user)
+        self.assertEqual(call_kwargs["method"], "POST")
+        self.assertEqual(
+            call_kwargs["json_payload"],
+            {"action": NodeMinecraftRecipeMutationAction.ADD.value, "mutation": mutation.to_mapping()},
+        )
+
+    def test_render_node_mods_page_passes_minecraft_recipe_summaries_to_remote_page_model(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            app_entry = NodeAppEntry(
+                name="minecraft_alpha",
+                friendly="Minecraft Alpha",
+                node="erin",
+                running=False,
+                enabled=True,
+                supports_mods=True,
+                supports_configs=False,
+                scope="minecraft",
+            )
+            mods = self._mod_list(
+                app_name="minecraft_alpha",
+                mods=(self._mod_entry(name="kubejs-forge-2001.6.5-build.26.jar"),),
+            )
+            recipe_summary = ModWebMinecraftRecipeBookSummary(
+                data_path=".yukibot/recipes.json",
+                script_path="kubejs/server_scripts/yuki_recipes.js",
+            )
+            item_registry_summary = ModWebMinecraftItemRegistrySummary(
+                data_path=".yukibot/registries/items.json",
+                file_exists=True,
+                item_ids=("minecraft:stone",),
+            )
+            render_page = Mock()
+
+            service._authorised_page_user = Mock(return_value=user)  # type: ignore[method-assign]
+            service._remote_node_link = Mock(return_value=node)  # type: ignore[method-assign]
+            service._remote_app_entry_async = AsyncMock(return_value=app_entry)  # type: ignore[method-assign]
+            service._remote_mod_list = Mock(return_value=mods)  # type: ignore[method-assign]
+            service._remote_node_system_summary_or_none_async = AsyncMock(return_value=None)  # type: ignore[method-assign]
+            service._remote_minecraft_recipe_summaries = Mock(  # type: ignore[method-assign]
+                return_value=(recipe_summary, item_registry_summary)
+            )
+            service._render_page = render_page  # type: ignore[method-assign]
+            service._request_path = Mock(return_value="/mod-web/nodes/erin/mods/minecraft_alpha")  # type: ignore[method-assign]
+
+            await service._render_node_mods_page(
+                ui=cast(ModWebUi, cast(object, SimpleNamespace())),
+                node_name="erin",
+                app_name="minecraft_alpha",
+                request=cast(Any, SimpleNamespace()),
+            )
+
+            model = cast(ModWebPageModel, render_page.call_args.kwargs["model"])
+            self.assertEqual(model.minecraft_recipes, recipe_summary)
+            self.assertEqual(model.minecraft_item_registry, item_registry_summary)
+
+        asyncio.run(exercise())
+
+    def test_minecraft_recipe_form_builds_shapeless_mutation(self) -> None:
+        mutation = ModWebService._minecraft_recipe_mutation_from_form(
+            kind_value="shapeless",
+            recipe_id="kubejs:flint_to_gravel",
+            output_item="minecraft:gravel",
+            output_count="1",
+            ingredients_text="3x minecraft:flint",
+            pattern_text="",
+            key_text="",
+        )
+
+        self.assertIsInstance(mutation, MinecraftShapelessRecipe)
+        assert isinstance(mutation, MinecraftShapelessRecipe)
+        self.assertEqual(mutation.output.kubejs_value, "minecraft:gravel")
+        self.assertEqual(tuple(ingredient.kubejs_value for ingredient in mutation.ingredients), ("3x minecraft:flint",))
+        self.assertEqual(mutation.recipe_id, "kubejs:flint_to_gravel")
+
+    def test_minecraft_recipe_form_builds_shaped_mutation(self) -> None:
+        mutation = ModWebService._minecraft_recipe_mutation_from_form(
+            kind_value="shaped",
+            recipe_id="",
+            output_item="minecraft:blast_furnace",
+            output_count="1",
+            ingredients_text="",
+            pattern_text="III\nIFI\nSSS",
+            key_text="I=minecraft:iron_ingot\nF=minecraft:furnace\nS=minecraft:smooth_stone",
+        )
+
+        self.assertEqual(mutation.render_kubejs(), (
+            'event.shaped("minecraft:blast_furnace", ["III", "IFI", "SSS"], '
+            '{"F": "minecraft:furnace", "I": "minecraft:iron_ingot", "S": "minecraft:smooth_stone"})'
+        ))
+
+    def test_minecraft_recipe_form_rejects_invalid_count(self) -> None:
+        with self.assertRaisesRegex(ValueError, "positive integers"):
+            ModWebService._minecraft_recipe_mutation_from_form(
+                kind_value="shapeless",
+                recipe_id="",
+                output_item="minecraft:gravel",
+                output_count="one",
+                ingredients_text="minecraft:flint",
+                pattern_text="",
+                key_text="",
+            )
+
+    def test_render_minecraft_recipes_section_is_read_only_for_remote_user(self) -> None:
+        class FakeContextElement:
+            def __enter__(self) -> "FakeContextElement":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+                del exc_type, exc, tb
+
+            def classes(self, value: str) -> "FakeContextElement":
+                del value
+                return self
+
+        class FakeHtmlElement:
+            def classes(self, value: str) -> "FakeHtmlElement":
+                del value
+                return self
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.html_fragments: list[str] = []
+
+            def html(self, content: str) -> FakeHtmlElement:
+                self.html_fragments.append(content)
+                return FakeHtmlElement()
+
+            def tabs(self, *args: object, **kwargs: object) -> FakeContextElement:
+                del args, kwargs
+                return FakeContextElement()
+
+            def tab(self, *args: object, **kwargs: object) -> FakeContextElement:
+                del args, kwargs
+                return FakeContextElement()
+
+            def tab_panels(self, *args: object, **kwargs: object) -> FakeContextElement:
+                del args, kwargs
+                return FakeContextElement()
+
+            def tab_panel(self, *args: object, **kwargs: object) -> FakeContextElement:
+                del args, kwargs
+                return FakeContextElement()
+
+            def element(self, *args: object, **kwargs: object) -> FakeContextElement:
+                del args, kwargs
+                return FakeContextElement()
+
+        service = ModWebService()
+        ui = FakeUi()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        model = ModWebPageModel(
+            node_name="erin",
+            app_name="minecraft_all_fabric",
+            app_friendly="Minecraft All Fabric",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_all_fabric",
+                app_friendly="Minecraft All Fabric",
+                node="erin",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=self._mod_list(
+                app_name="minecraft_all_fabric",
+                mods=(self._mod_entry(name="kubejs-fabric-2001.6.5-build.26.jar"),),
+            ),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+        )
+        tab = ModWebAppTabDefinition.custom(
+            tab_id="recipes",
+            label="Recipes",
+            page_order=425,
+            app_card_order=675,
+            app_card_tone="black",
+            render_handler_name="_render_minecraft_recipes_section",
+        )
+
+        service._render_minecraft_recipes_section(ui=cast(ModWebUi, cast(object, ui)), model=model, user=user, tab=tab)
+
+        markup = "\n".join(ui.html_fragments)
+        self.assertIn("Recipe book data is not available for this node yet.", markup)
+        self.assertIn("read-only for non-sudo accounts", markup)
+
     def test_page_tabs_include_map_when_same_origin_map_api_is_available(self) -> None:
         service = ModWebService()
         model = ModWebOverviewPageModel(
@@ -9843,7 +10772,7 @@ class ModWebTests(unittest.TestCase):
                     downloadable_count=0,
                     non_downloadable_count=1,
                 ),
-                mods=(cast(Any, SimpleNamespace(name="squaremap")),),
+                mods=(self._mod_entry(name="squaremap"),),
                 app_stats=None,
             ),
             download_all_url="/mods/download",

@@ -1599,6 +1599,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 player_capacity=entry.player_capacity,
                 connected_player_names=entry.connected_player_names,
                 runtime_fault=entry.runtime_fault,
+                app_scope=entry.scope,
                 saves_api_url=saves_api_url,
                 settings_api_url=settings_api_url,
                 map_url=entry.map_url,

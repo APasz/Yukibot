@@ -417,6 +417,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             stdout_height_value = next_height_value
             _set_stdout_feed_height(next_height_value)
 
+        from nicegui.context import context as nicegui_context
+
+        notify_client = nicegui_context.client
+
+        def _notify(message: str, *, tone: str) -> None:
+            with notify_client:
+                ui.notify(message, type=tone)
+
         async def run_selected_action() -> None:
             nonlocal action_in_flight, current_console_actions, last_result, last_result_action_key
             if action_in_flight:
@@ -425,13 +433,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if action is None:
                 return
             if not self._console_action_can_execute(action=action, app_stats=current_model.app_stats):
-                ui.notify(
+                _notify(
                     self._console_action_status_text(
                         action=action,
                         app_friendly=current_model.app_friendly,
                         app_stats=current_model.app_stats,
                     ),
-                    type="warning",
+                    tone="warning",
                 )
                 return
             action_in_flight = True
@@ -455,7 +463,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         action.key,
                         xcp,
                     )
-                    ui.notify(f"Console action failed: {xcp}", type="negative")
+                    _notify(f"Console action failed: {xcp}", tone="negative")
                     return
                 try:
                     refreshed_actions: NodeConsoleActionList | None = await self._read_console_action_list(
@@ -474,7 +482,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         current_console_actions = refreshed_actions
                 last_result = result
                 last_result_action_key = action.key
-                ui.notify(result.summary, type="positive" if result.success else "warning")
+                _notify(result.summary, tone="positive" if result.success else "warning")
             finally:
                 action_in_flight = False
                 refresh_console_body(force=True)

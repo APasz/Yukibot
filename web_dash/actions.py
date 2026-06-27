@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from apps.minecraft import MinecraftRecipeMutation
+
 from .constants import (
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
@@ -22,6 +24,8 @@ from .runtime_imports import (
     NodeAppTransitionState,
     NodeCapacityMutationResult,
     NodeFontSourceSettingsMutationResult,
+    NodeMinecraftRecipeMutationAction,
+    NodeMinecraftRecipeMutationResult,
     NodeModEntry,
     NodeModMutationAction,
     NodeModMutationResult,
@@ -157,6 +161,33 @@ class ModWebActionsMixin(ModWebServiceSupport):
             timeout=timeout_seconds,
         )
         return NodeAppMutationResult.from_mapping(payload)
+
+    def _remote_minecraft_recipe_mutation(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        action: NodeMinecraftRecipeMutationAction,
+        mutation_index: int | None,
+        mutation: MinecraftRecipeMutation | None,
+        user: ModWebUser,
+        timeout_seconds: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> NodeMinecraftRecipeMutationResult:
+        json_payload: dict[str, object] = {"action": action.value}
+        if mutation_index is not None:
+            json_payload["mutation_index"] = mutation_index
+        if mutation is not None:
+            json_payload["mutation"] = mutation.to_mapping()
+        payload: dict[str, object] = self._remote_json(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/minecraft/recipes/mutations",
+            scopes=(NodeApiScope.APP_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload=json_payload,
+            timeout=timeout_seconds,
+        )
+        return NodeMinecraftRecipeMutationResult.from_mapping(payload)
 
     def _remote_node_capacity(self, node: ModWebNodeLink, user: ModWebUser) -> config.NodeCapacityProfile:
         payload: dict[str, object] = self._remote_json(
@@ -358,6 +389,70 @@ class ModWebActionsMixin(ModWebServiceSupport):
             steam_update_enabled,
             steam_update_selected_branch,
             update_branch_id,
+            timeout_seconds,
+        )
+
+    async def _append_minecraft_recipe_mutation(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        mutation: MinecraftRecipeMutation,
+        user: ModWebUser,
+        timeout_seconds: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> NodeMinecraftRecipeMutationResult:
+        self._require_user_level(user=user, required_level=Power_Level.sudo)
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        return await asyncio.to_thread(
+            self._remote_minecraft_recipe_mutation,
+            node,
+            model.app_name,
+            NodeMinecraftRecipeMutationAction.ADD,
+            None,
+            mutation,
+            user,
+            timeout_seconds,
+        )
+
+    async def _replace_minecraft_recipe_mutation(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        mutation_index: int,
+        mutation: MinecraftRecipeMutation,
+        user: ModWebUser,
+        timeout_seconds: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> NodeMinecraftRecipeMutationResult:
+        self._require_user_level(user=user, required_level=Power_Level.sudo)
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        return await asyncio.to_thread(
+            self._remote_minecraft_recipe_mutation,
+            node,
+            model.app_name,
+            NodeMinecraftRecipeMutationAction.REPLACE,
+            mutation_index,
+            mutation,
+            user,
+            timeout_seconds,
+        )
+
+    async def _delete_minecraft_recipe_mutation(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        mutation_index: int,
+        user: ModWebUser,
+        timeout_seconds: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> NodeMinecraftRecipeMutationResult:
+        self._require_user_level(user=user, required_level=Power_Level.sudo)
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        return await asyncio.to_thread(
+            self._remote_minecraft_recipe_mutation,
+            node,
+            model.app_name,
+            NodeMinecraftRecipeMutationAction.DELETE,
+            mutation_index,
+            None,
+            user,
             timeout_seconds,
         )
 

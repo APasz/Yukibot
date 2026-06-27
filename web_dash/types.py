@@ -74,6 +74,11 @@ class ModWebNotificationTrayItemState(Enum):
     ERROR = "error"
 
 
+class ModWebMinecraftRecipeOperationKind(Enum):
+    ADD = "add"
+    REMOVE = "remove"
+
+
 @dataclass(frozen=True, slots=True)
 class _ModWebNotificationTrayItem:
     kind: ModWebNotificationTrayItemKind
@@ -144,6 +149,122 @@ class _ModWebAppRuntimeState:
     player_capacity: int | None
     connected_player_names: tuple[str, ...]
     runtime_fault: AppRuntimeFault | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebMinecraftRecipeEntry:
+    operation: ModWebMinecraftRecipeOperationKind
+    kind_label: str
+    title: str
+    detail: str
+    recipe_id: str | None = None
+
+    def __post_init__(self) -> None:
+        kind_label = self.kind_label.strip()
+        title = self.title.strip()
+        detail = self.detail.strip()
+        if not kind_label:
+            raise ValueError("Minecraft recipe entries require a kind label.")
+        if not title:
+            raise ValueError("Minecraft recipe entries require a title.")
+        if not detail:
+            raise ValueError("Minecraft recipe entries require detail text.")
+        object.__setattr__(self, "kind_label", kind_label)
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "detail", detail)
+        if self.recipe_id is not None:
+            recipe_id = self.recipe_id.strip()
+            object.__setattr__(self, "recipe_id", recipe_id or None)
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebMinecraftRecipeBookSummary:
+    data_path: str
+    script_path: str
+    entries: tuple[ModWebMinecraftRecipeEntry, ...] = ()
+    mutation_mappings: tuple[dict[str, object], ...] = ()
+    load_error: str | None = None
+
+    def __post_init__(self) -> None:
+        data_path = self.data_path.strip()
+        script_path = self.script_path.strip()
+        if not data_path:
+            raise ValueError("Minecraft recipe book summaries require a data path.")
+        if not script_path:
+            raise ValueError("Minecraft recipe book summaries require a script path.")
+        object.__setattr__(self, "data_path", data_path)
+        object.__setattr__(self, "script_path", script_path)
+        object.__setattr__(
+            self,
+            "mutation_mappings",
+            tuple(dict(mapping) for mapping in self.mutation_mappings),
+        )
+        if len(self.mutation_mappings) != len(self.entries) and self.mutation_mappings:
+            raise ValueError("Minecraft recipe book summaries require aligned entries and mutation mappings.")
+        if self.load_error is not None:
+            load_error = self.load_error.strip()
+            object.__setattr__(self, "load_error", load_error or None)
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebMinecraftItemRegistrySummary:
+    data_path: str
+    item_ids: tuple[str, ...] = ()
+    file_exists: bool = False
+    generated_at_epoch_ms: int | None = None
+    load_error: str | None = None
+
+    def __post_init__(self) -> None:
+        data_path = self.data_path.strip()
+        if not data_path:
+            raise ValueError("Minecraft item registry summaries require a data path.")
+        object.__setattr__(self, "data_path", data_path)
+        if self.generated_at_epoch_ms is not None:
+            if self.generated_at_epoch_ms < 0:
+                raise ValueError("Minecraft item registry summary timestamps must not be negative.")
+        normalised_item_ids = tuple(item_id.strip() for item_id in self.item_ids if item_id.strip())
+        object.__setattr__(self, "item_ids", normalised_item_ids)
+        if self.load_error is not None:
+            load_error = self.load_error.strip()
+            object.__setattr__(self, "load_error", load_error or None)
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebSevenDaysSandboxOptionEntry:
+    section: str
+    key: str
+    value_index: int
+    value_label: str
+    default_index: int
+    default_label: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("section", "key", "value_label", "default_label"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"7D2D sandbox option {field_name} must be a non-empty string.")
+            object.__setattr__(self, field_name, value.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class ModWebSevenDaysSandboxOptionsSummary:
+    data_path: str
+    file_exists: bool
+    generated_at: str | None = None
+    sandbox_code: str | None = None
+    app_version: str | None = None
+    options: tuple[ModWebSevenDaysSandboxOptionEntry, ...] = ()
+    load_error: str | None = None
+
+    def __post_init__(self) -> None:
+        data_path = self.data_path.strip()
+        if not data_path:
+            raise ValueError("7D2D sandbox options summaries require a data path.")
+        object.__setattr__(self, "data_path", data_path)
+        object.__setattr__(self, "generated_at", self.generated_at.strip() if self.generated_at else None)
+        object.__setattr__(self, "sandbox_code", self.sandbox_code.strip() if self.sandbox_code else None)
+        object.__setattr__(self, "app_version", self.app_version.strip() if self.app_version else None)
+        object.__setattr__(self, "load_error", self.load_error.strip() if self.load_error else None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +455,7 @@ class ModWebAppLink:
     player_capacity: int | None = None
     connected_player_names: tuple[str, ...] = ()
     runtime_fault: AppRuntimeFault | None = None
+    app_scope: str | None = field(default=None, kw_only=True)
     saves_api_url: str | None = None
     settings_api_url: str | None = None
     map_url: str | None = field(default=None, kw_only=True)
@@ -448,6 +570,11 @@ class ModWebBasePageModel:
     relay_advancement_term: str | None = field(default=None, kw_only=True)
     activity_providers: tuple[NodeAppActivityProviderEntry, ...] = field(default=(), kw_only=True)
     load_warnings: tuple["ModWebPageLoadWarning", ...] = field(default=(), kw_only=True)
+    app_scope: str | None = field(default=None, kw_only=True)
+    minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = field(default=None, kw_only=True)
+    minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = field(default=None, kw_only=True)
+    minecraft_item_icon_api_url: str | None = field(default=None, kw_only=True)
+    sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = field(default=None, kw_only=True)
     tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
 
 
@@ -538,14 +665,21 @@ class ModWebAppTabContext:
     app_name: str
     app_friendly: str
     app_version: str | None = None
+    app_scope: str | None = None
     mod_names: tuple[str, ...] = ()
+    enabled_mod_names: tuple[str, ...] = ()
     settings: tuple[ModWebAppTabSettingSnapshot, ...] = ()
     supports_map: bool = False
     supports_blueprints: bool = False
+    supports_sevendays_sandbox_options: bool = False
 
     def has_mod(self, mod_name: str) -> bool:
         target_name: str = mod_name.strip().casefold()
         return any(candidate.casefold() == target_name for candidate in self.mod_names)
+
+    def has_enabled_mod(self, mod_name: str) -> bool:
+        target_name: str = mod_name.strip().casefold()
+        return any(candidate.casefold() == target_name for candidate in self.enabled_mod_names)
 
     def setting_value(self, setting_key: str) -> str | None:
         target_key: str = setting_key.strip().casefold()
@@ -796,6 +930,8 @@ __all__: tuple[str, ...] = (
     "ModWebOverviewPageModel",
     "ModWebPageModel",
     "ModWebSearchOption",
+    "ModWebSevenDaysSandboxOptionEntry",
+    "ModWebSevenDaysSandboxOptionsSummary",
     "ModWebSettingControlKind",
     "ModWebTitleStat",
     "ModWebTitleStatLine",

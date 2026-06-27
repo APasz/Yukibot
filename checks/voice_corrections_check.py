@@ -633,6 +633,15 @@ class VoiceCorrectionTests(unittest.TestCase):
         self.assertEqual(runtime._message_speech_input("hello", attachment_count=1), "hello")
         self.assertEqual(runtime._message_speech_input("", attachment_count=0, sticker_count=1), "sticker")
         self.assertEqual(runtime._message_speech_input("", attachment_count=1, sticker_count=1), "attachment, sticker")
+        self.assertEqual(
+            runtime._message_speech_input(
+                "",
+                attachment_count=0,
+                sticker_count=2,
+                sticker_names=(":party_parrot:",),
+            ),
+            ":party_parrot:, sticker",
+        )
         self.assertEqual(runtime._message_speech_input("", attachment_count=0), "")
         self.assertEqual(runtime._message_speech_input("hello", attachment_count=0, is_reply=True), "is reply... hello")
         self.assertEqual(
@@ -648,6 +657,22 @@ class VoiceCorrectionTests(unittest.TestCase):
             ),
             "is forwarded... check this... forwarded body, attachment, sticker",
         )
+
+    def test_sticker_names_are_normalised_into_emoji_style_speech_fragments(self) -> None:
+        runtime = _CorrectionRuntime(catalog=TextCorrectionCatalog())
+
+        self.assertEqual(
+            runtime._sticker_speech_fragments(
+                (
+                    SimpleNamespace(name="Party Parrot!!!"),
+                    SimpleNamespace(name="blob-dance"),
+                    SimpleNamespace(name="   "),
+                    SimpleNamespace(),
+                )
+            ),
+            (":party_parrot:", ":blob-dance:"),
+        )
+        self.assertEqual(runtime._normalise_for_speech(":party_parrot:").render(), "party parrot")
 
     def test_forwarded_snapshot_content_includes_content_and_extras(self) -> None:
         runtime = _CorrectionRuntime(catalog=TextCorrectionCatalog())
@@ -669,7 +694,10 @@ class VoiceCorrectionTests(unittest.TestCase):
                     SimpleNamespace(
                         content="hello there",
                         attachments=(object(),),
-                        stickers=(object(), object()),
+                        stickers=(
+                            SimpleNamespace(name="Party Parrot"),
+                            SimpleNamespace(name="blob-dance"),
+                        ),
                         user_mentions=hikari.UNDEFINED,
                     ),
                 )
@@ -678,7 +706,7 @@ class VoiceCorrectionTests(unittest.TestCase):
 
         self.assertEqual(
             runtime._forwarded_snapshot_speech_input(message, hikari.Snowflake(123), hikari.Snowflake(1)),
-            "hello there, attachment, 2 stickers",
+            "hello there, attachment, :party_parrot:, :blob-dance:",
         )
 
     def test_forwarded_snapshot_mentions_use_overrides(self) -> None:

@@ -783,6 +783,26 @@ class SettingTests(unittest.TestCase):
             saved = pointer.read_text(encoding="utf-8")
             self.assertIn('name="ServerMaxWorldTransferSpeedKiBs" value="2048"', saved)
 
+    def test_sevendays_settings_blank_camera_restriction_keeps_default(self) -> None:
+        property_values = {
+            "CameraRestrictionMode": "",
+        }
+
+        with TemporaryDirectory[str]() as temp_dir:
+            pointer, _ = _write_sevendays_xml_files(Path(temp_dir), server_properties=property_values)
+
+            settings = SevenDays_Settings(pointer, version_getter=lambda: AppVersion(main="3.0"))
+            camera_restriction = settings.get_setting("CameraRestrictionMode")
+            if camera_restriction is None:
+                raise AssertionError("Missing camera restriction setting")
+
+            self.assertEqual(camera_restriction.value, 0)
+
+            settings.save()
+
+            saved = pointer.read_text(encoding="utf-8")
+            self.assertIn('name="CameraRestrictionMode" value="0"', saved)
+
     def test_sevendays_sandbox_code_requires_version_three(self) -> None:
         property_values = {
             "SandboxCode": "AAAJABJACJADJARFBNC",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import re
 
 from .runtime_imports import NodeSettingEntry, replace
@@ -18,6 +19,16 @@ from .types import (
 
 _VERSION_TOKEN_RE: re.Pattern[str] = re.compile(r"\d+|[A-Za-z]+")
 _ENABLED_SETTING_TEXTS: frozenset[str] = frozenset({"1", "true", "yes", "on", "enabled"})
+_MINECRAFT_APP_SCOPE = "minecraft"
+_SEVENDAYS_APP_SCOPE = "sevendays"
+_SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION_TEXT = "3.0.259"
+_KUBEJS_MOD_BASE_NAME = "kubejs"
+_KUBEJS_LOADER_TOKENS: frozenset[str] = frozenset({"forge", "fabric", "quilt", "neoforge"})
+_KUBEJS_RECIPE_ADDON_LABELS: dict[str, str] = {
+    "kubejs-create": "KubeJS Create",
+    "kubejs-immersive-engineering": "KubeJS Immersive Engineering",
+    "kubejs-immersiveengineering": "KubeJS Immersive Engineering",
+}
 
 
 class ModWebTabsMixin(ModWebServiceSupport):
@@ -58,7 +69,6 @@ class ModWebTabsMixin(ModWebServiceSupport):
         context: ModWebAppTabContext,
         is_detail_page: bool,
     ) -> tuple[ModWebAppTabDefinition, ...]:
-        del is_detail_page
         definitions: list[ModWebAppTabDefinition] = []
         if context.supports_map:
             definitions.append(
@@ -87,6 +97,32 @@ class ModWebTabsMixin(ModWebServiceSupport):
                     app_card_badge_handler_name="_blueprint_app_card_badges",
                 )
             )
+        if is_detail_page and self._minecraft_recipes_tab_available(context):
+            definitions.append(
+                ModWebAppTabDefinition.custom(
+                    tab_id="recipes",
+                    label="Recipes",
+                    page_order=425,
+                    app_card_order=675,
+                    app_card_tone="black",
+                    show_on_app_card=False,
+                    render_handler_name="_render_minecraft_recipes_section",
+                    badge_handler_name="_minecraft_recipes_tab_badges",
+                )
+            )
+        if is_detail_page and self._sevendays_sandbox_options_tab_available(context):
+            definitions.append(
+                ModWebAppTabDefinition.custom(
+                    tab_id="sandbox",
+                    label="Sandbox",
+                    page_order=475,
+                    app_card_order=675,
+                    app_card_tone="black",
+                    show_on_app_card=False,
+                    render_handler_name="_render_sevendays_sandbox_options_section",
+                    badge_handler_name="_sevendays_sandbox_options_tab_badges",
+                )
+            )
         return tuple(definitions)
 
     @staticmethod
@@ -94,8 +130,10 @@ class ModWebTabsMixin(ModWebServiceSupport):
         mod_names: tuple[str, ...]
         if isinstance(model, ModWebPageModel):
             mod_names = tuple(mod.name for mod in model.mods.mods)
+            enabled_mod_names = tuple(mod.name for mod in model.mods.mods if mod.enabled)
         else:
             mod_names = ()
+            enabled_mod_names = ()
         settings: tuple[ModWebAppTabSettingSnapshot, ...]
         if model.settings is None:
             settings = ()
@@ -107,11 +145,22 @@ class ModWebTabsMixin(ModWebServiceSupport):
         return ModWebAppTabContext(
             app_name=model.app_name,
             app_friendly=model.app_friendly,
-            app_version=model.app_stats.version if model.app_stats is not None else None,
+            app_version=(
+                model.app_stats.version
+                if model.app_stats is not None and model.app_stats.version is not None
+                else (
+                    None
+                    if model.sevendays_sandbox_options is None
+                    else model.sevendays_sandbox_options.app_version
+                )
+            ),
+            app_scope=model.app_scope,
             mod_names=mod_names,
+            enabled_mod_names=enabled_mod_names,
             settings=settings,
             supports_map=model.map_api_url is not None,
             supports_blueprints=model.blueprints is not None,
+            supports_sevendays_sandbox_options=model.sevendays_sandbox_options is not None,
         )
 
     @staticmethod
@@ -119,9 +168,73 @@ class ModWebTabsMixin(ModWebServiceSupport):
         return ModWebAppTabContext(
             app_name=app.name,
             app_friendly=app.friendly,
+            app_scope=app.app_scope,
             supports_map=app.map_url is not None,
             supports_blueprints=app.supports_blueprints,
         )
+
+    @classmethod
+    def _minecraft_recipes_tab_available(cls, context: ModWebAppTabContext) -> bool:
+        return cls._app_scope_matches(context, _MINECRAFT_APP_SCOPE) and cls._has_enabled_kubejs(context)
+
+    @staticmethod
+    def _resolved_context_scope(context: ModWebAppTabContext) -> str:
+        if context.app_scope is not None and context.app_scope.strip():
+            return context.app_scope.strip().casefold()
+        return context.app_name.strip().split("_", maxsplit=1)[0].casefold()
+
+    @classmethod
+    def _app_scope_matches(cls, context: ModWebAppTabContext, expected_scope: str) -> bool:
+        return cls._resolved_context_scope(context) == expected_scope
+
+    @classmethod
+    def _sevendays_sandbox_options_tab_available(cls, context: ModWebAppTabContext) -> bool:
+        if not context.supports_sevendays_sandbox_options:
+            return False
+        if not cls._app_scope_matches(context, _SEVENDAYS_APP_SCOPE):
+            return False
+        if context.app_version is None:
+            return False
+        return cls._app_version_is_at_least(context.app_version, _SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION_TEXT)
+
+    @classmethod
+    def _has_enabled_kubejs(cls, context: ModWebAppTabContext) -> bool:
+        return any(cls._is_kubejs_mod_name(mod_name) for mod_name in context.enabled_mod_names)
+
+    @staticmethod
+    def _normalised_minecraft_mod_stem(name: str) -> str:
+        return Path(name).stem.strip().casefold().replace("_", "-")
+
+    @classmethod
+    def _is_kubejs_mod_name(cls, name: str) -> bool:
+        stem: str = cls._normalised_minecraft_mod_stem(name)
+        if stem == _KUBEJS_MOD_BASE_NAME:
+            return True
+        tokens: tuple[str, ...] = tuple(token for token in stem.split("-") if token)
+        return len(tokens) >= 2 and tokens[0] == _KUBEJS_MOD_BASE_NAME and tokens[1] in _KUBEJS_LOADER_TOKENS
+
+    @classmethod
+    def _kubejs_recipe_addon_labels(cls, mod_names: tuple[str, ...]) -> tuple[str, ...]:
+        labels: list[str] = []
+        seen_labels: set[str] = set()
+        for mod_name in mod_names:
+            addon_label: str | None = cls._kubejs_recipe_addon_label(mod_name)
+            if addon_label is None:
+                continue
+            label_key: str = addon_label.casefold()
+            if label_key in seen_labels:
+                continue
+            labels.append(addon_label)
+            seen_labels.add(label_key)
+        return tuple(labels)
+
+    @classmethod
+    def _kubejs_recipe_addon_label(cls, name: str) -> str | None:
+        stem: str = cls._normalised_minecraft_mod_stem(name)
+        for addon_id, label in _KUBEJS_RECIPE_ADDON_LABELS.items():
+            if stem == addon_id or stem.startswith(f"{addon_id}-"):
+                return label
+        return None
 
     @staticmethod
     def _setting_snapshot_text(setting: NodeSettingEntry) -> str:
@@ -326,8 +439,19 @@ class ModWebTabsMixin(ModWebServiceSupport):
             return ()
         matched_tokens: tuple[str, ...] = tuple(_VERSION_TOKEN_RE.findall(stripped_text))
         if matched_tokens:
-            return matched_tokens
+            return ModWebTabsMixin._normalised_version_tokens(stripped_text, matched_tokens)
         return (stripped_text.casefold(),)
+
+    @staticmethod
+    def _normalised_version_tokens(version_text: str, tokens: tuple[str, ...]) -> tuple[str, ...]:
+        if ":" not in version_text or len(tokens) < 4 or not all(token.isdigit() for token in tokens):
+            return tokens
+        normalised_tokens: list[str] = list(tokens)
+        build_prefix_index = len(normalised_tokens) - 2
+        if normalised_tokens[build_prefix_index] != "0":
+            return tokens
+        del normalised_tokens[build_prefix_index]
+        return tuple(normalised_tokens)
 
     @staticmethod
     def _compare_version_tokens(current_token: str, minimum_token: str) -> int:

@@ -163,7 +163,7 @@ class FactorioModList:
 
     def save(self, pointer: Path) -> None:
         payload = {"mods": [entry.to_mapping() for entry in self.mods]}
-        pointer.write_text(json.dumps(payload, indent=2) + "\n", config.STR_ENCODE)
+        pointer.write_text(json.dumps(payload, indent=4) + "\n", config.STR_ENCODE)
 
 
 def _factorio_mod_name_from_archive(pointer: Path) -> str | None:

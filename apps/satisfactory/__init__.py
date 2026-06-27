@@ -8,7 +8,6 @@ import logging
 import re
 import signal
 import ssl
-import aiohttp
 from asyncio.events import AbstractEventLoop
 from asyncio.locks import Lock
 from collections import defaultdict, deque
@@ -23,6 +22,7 @@ from threading import Lock as ThreadLock
 from typing import Any, Protocol, Self, TypeVar, cast
 from urllib.parse import SplitResult, urlsplit
 
+import aiohttp
 import hikari
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from satisfactory_api_client import AsyncSatisfactoryAPI
@@ -345,9 +345,16 @@ class SatisfactoryBlueprintOwnershipStore:
             }
 
     def record_upload(self, *, relative_path: str, actor_user_id: int) -> None:
+        self.record_upload_batch(relative_paths=(relative_path,), actor_user_id=actor_user_id)
+
+    def record_upload_batch(self, *, relative_paths: Sequence[str], actor_user_id: int) -> None:
+        if not relative_paths:
+            return
         with self._lock:
             index = self._load_index()
-            index.files[relative_path] = SatisfactoryBlueprintOwnershipEntry(uploaded_by_user_id=actor_user_id)
+            ownership_entry = SatisfactoryBlueprintOwnershipEntry(uploaded_by_user_id=actor_user_id)
+            for relative_path in relative_paths:
+                index.files[relative_path] = ownership_entry
             self._save_index(index)
 
     def clear(self, *, relative_path: str) -> None:
@@ -368,6 +375,27 @@ class SatisfactoryBlueprintOwnershipStore:
                 )
             )
 
+    def migrate_legacy_relative_paths(self, *, legacy_to_shared_relative_path: Mapping[str, str]) -> None:
+        if not legacy_to_shared_relative_path:
+            return
+        with self._lock:
+            index = self._load_index()
+            files = dict(index.files)
+            for legacy_relative_path, shared_relative_path in legacy_to_shared_relative_path.items():
+                legacy_owner = files.pop(legacy_relative_path, None)
+                if legacy_owner is None:
+                    continue
+                shared_owner = files.get(shared_relative_path)
+                if shared_owner is None:
+                    files[shared_relative_path] = legacy_owner
+                    continue
+                if shared_owner.uploaded_by_user_id != legacy_owner.uploaded_by_user_id:
+                    raise ValueError(
+                        f"Conflicting shared blueprint ownership for {shared_relative_path}: "
+                        f"{shared_owner.uploaded_by_user_id} != {legacy_owner.uploaded_by_user_id}"
+                    )
+            self._save_index(SatisfactoryBlueprintOwnershipIndex(files=files))
+
     def _load_index(self) -> SatisfactoryBlueprintOwnershipIndex:
         if not self._path.exists():
             return SatisfactoryBlueprintOwnershipIndex()
@@ -380,10 +408,17 @@ class SatisfactoryBlueprintOwnershipStore:
 
     def _save_index(self, index: SatisfactoryBlueprintOwnershipIndex) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(index.model_dump(mode="json"), indent=2, sort_keys=True),
-            config.STR_ENCODE,
-        )
+        temp_path = self._path.with_name(f"{self._path.name}.tmp")
+        try:
+            temp_path.write_text(
+                json.dumps(index.model_dump(mode="json"), indent=4, sort_keys=True),
+                config.STR_ENCODE,
+            )
+            temp_path.replace(self._path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                temp_path.unlink()
+            raise
 
 
 class Satisfactory_Config(App_Config):
@@ -2006,21 +2041,24 @@ class Satisfactory(App[Satisfactory_Config]):
         cleanup_paths: list[Path] = [module_destination]
         if config_target is not None:
             cleanup_paths.append(config_target[0])
+        relative_paths_to_record: tuple[str, ...] = (
+            (module_relative_path,) if config_target is None else (module_relative_path, config_target[1])
+        )
         try:
             File_Utils.copy(source_path, module_destination, overwrite=False)
             if config_target is not None:
                 if config_source_path is None:
                     raise ValueError("Blueprint config upload requires a source path.")
                 File_Utils.copy(config_source_path, config_target[0], overwrite=False)
+            self._blueprint_ownership_store.record_upload_batch(
+                relative_paths=relative_paths_to_record,
+                actor_user_id=actor_user_id,
+            )
         except Exception:
             for cleanup_path in reversed(cleanup_paths):
                 cleanup_path.unlink(missing_ok=True)
             self._cleanup_empty_blueprint_directory(module_destination.parent)
             raise
-
-        self._blueprint_ownership_store.record_upload(relative_path=module_relative_path, actor_user_id=actor_user_id)
-        if config_target is not None:
-            self._blueprint_ownership_store.record_upload(relative_path=config_target[1], actor_user_id=actor_user_id)
         return describe_blueprint(
             root,
             relative_path=module_relative_path,
@@ -2112,18 +2150,15 @@ class Satisfactory(App[Satisfactory_Config]):
     def _prepare_shared_blueprint_layout(self) -> None:
         mount_root = self._blueprint_root_path()
         mount_root.mkdir(parents=True, exist_ok=True)
-        storage_root = self._blueprint_storage_root_path()
         shared_session_path = self._shared_blueprint_session_path()
         shared_session_path.mkdir(parents=True, exist_ok=True)
-        migrated_ownership = self._migrate_legacy_blueprint_directories(
+        migrated_relative_paths = self._migrate_legacy_blueprint_directories(
             mount_root=mount_root,
             shared_session_path=shared_session_path,
-            uploaded_by_user_id_by_relative_path=self._blueprint_ownership_store.uploaded_by_user_id_by_relative_path(),
         )
-        if migrated_ownership is not None:
-            self._blueprint_ownership_store.replace_all(
-                uploaded_by_user_id_by_relative_path=migrated_ownership,
-            )
+        self._blueprint_ownership_store.migrate_legacy_relative_paths(
+            legacy_to_shared_relative_path=migrated_relative_paths,
+        )
         for known_session_name in self._known_blueprint_session_names():
             self._ensure_shared_blueprint_session_link(known_session_name)
 
@@ -2132,10 +2167,8 @@ class Satisfactory(App[Satisfactory_Config]):
         *,
         mount_root: Path,
         shared_session_path: Path,
-        uploaded_by_user_id_by_relative_path: Mapping[str, int],
-    ) -> dict[str, int] | None:
-        next_uploaded_by_relative_path = dict(uploaded_by_user_id_by_relative_path)
-        migrated_any = False
+    ) -> dict[str, str]:
+        migrated_relative_paths: dict[str, str] = {}
         for session_path in sorted(mount_root.iterdir(), key=lambda path: path.name.casefold()):
             if session_path.name.startswith("."):
                 continue
@@ -2148,7 +2181,6 @@ class Satisfactory(App[Satisfactory_Config]):
             if not session_path.is_dir():
                 raise ValueError(f"Unsupported Satisfactory blueprint path: {session_path}")
             session_name = validate_blueprint_session_name(session_path.name)
-            migrated_any = True
             for child_path in sorted(session_path.iterdir(), key=lambda path: path.name.casefold()):
                 if child_path.name.startswith("."):
                     continue
@@ -2159,17 +2191,13 @@ class Satisfactory(App[Satisfactory_Config]):
                 self._merge_blueprint_file(source_path=child_path, target_path=target_path, session_name=session_name)
                 legacy_relative_path = f"{session_name}/{filename}"
                 shared_relative_path = f"{_SATISFACTORY_BLUEPRINT_SHARED_SESSION_NAME}/{filename}"
-                next_uploaded_by_relative_path = self._merge_blueprint_owner(
-                    uploaded_by_user_id_by_relative_path=next_uploaded_by_relative_path,
-                    legacy_relative_path=legacy_relative_path,
-                    shared_relative_path=shared_relative_path,
-                )
+                migrated_relative_paths[legacy_relative_path] = shared_relative_path
             with contextlib.suppress(OSError):
                 session_path.rmdir()
             if session_path.exists():
                 raise ValueError(f"Satisfactory blueprint session directory is not empty: {session_path}")
             session_path.symlink_to(shared_session_path, target_is_directory=True)
-        return next_uploaded_by_relative_path if migrated_any else None
+        return migrated_relative_paths
 
     @staticmethod
     def _merge_blueprint_file(*, source_path: Path, target_path: Path, session_name: str) -> None:
@@ -2182,27 +2210,6 @@ class Satisfactory(App[Satisfactory_Config]):
                 f"Conflicting shared blueprint file for {target_path.name} while migrating session {session_name}."
             )
         source_path.unlink()
-
-    @staticmethod
-    def _merge_blueprint_owner(
-        *,
-        uploaded_by_user_id_by_relative_path: dict[str, int],
-        legacy_relative_path: str,
-        shared_relative_path: str,
-    ) -> dict[str, int]:
-        next_uploaded_by_relative_path = dict(uploaded_by_user_id_by_relative_path)
-        legacy_owner = next_uploaded_by_relative_path.pop(legacy_relative_path, None)
-        shared_owner = next_uploaded_by_relative_path.get(shared_relative_path)
-        if legacy_owner is None:
-            return next_uploaded_by_relative_path
-        if shared_owner is None:
-            next_uploaded_by_relative_path[shared_relative_path] = legacy_owner
-            return next_uploaded_by_relative_path
-        if shared_owner != legacy_owner:
-            raise ValueError(
-                f"Conflicting shared blueprint ownership for {shared_relative_path}: {shared_owner} != {legacy_owner}"
-            )
-        return next_uploaded_by_relative_path
 
     def _known_blueprint_session_names(self) -> tuple[str, ...]:
         names: list[str] = []

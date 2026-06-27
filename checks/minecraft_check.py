@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -17,11 +19,26 @@ from apps.minecraft import (
     Activities as MinecraftActivities,
 )
 from apps.minecraft import (
+    KubeJsRecipeAddonKind,
+    KubeJsRecipeSupportStatus,
     Minecraft,
     Minecraft_Config,
+    MinecraftCookingRecipe,
+    MinecraftItemRegistrySnapshot,
+    MinecraftRecipeBook,
+    MinecraftRecipeIngredient,
+    MinecraftRecipeItemStack,
+    MinecraftRecipeKind,
+    MinecraftRecipeRemoval,
+    MinecraftRecipeRemovalFilter,
+    MinecraftShapedRecipe,
+    MinecraftShapelessRecipe,
+    MinecraftStonecuttingRecipe,
+    MinecraftRecipeUnificationMode,
     Mod_MC,
     _detect_minecraft_mod_version,
     _load_squaremap_web_address,
+    _managed_kubejs_recipe_script_source,
 )
 
 
@@ -260,6 +277,526 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
             self.assertTrue(changed)
             self.assertTrue(target_path.exists())
             self.assertIn("[YUKI_MC_EVENT]", target_path.read_text(encoding="utf-8"))
+
+    def test_kubejs_recipe_support_status_detects_addons_and_unification(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        ),
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-create-1.0.0.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        ),
+                        Mod_MC(
+                            Mod_Config(
+                                name="almostunified-1.0.0.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        ),
+                    ]
+                ),
+            )
+
+            status = app.kubejs_recipe_support_status()
+
+            self.assertTrue(status.kubejs_enabled)
+            self.assertEqual(tuple(addon.kind for addon in status.addons), (KubeJsRecipeAddonKind.CREATE,))
+            self.assertEqual(status.addon_display_names, ("KubeJS Create",))
+            self.assertEqual(status.unification_mode, MinecraftRecipeUnificationMode.EXPECTED_PRESENT)
+            self.assertEqual(status.script_path, directory / "kubejs" / "server_scripts" / "yuki_recipes.js")
+
+    def test_managed_kubejs_recipe_script_renders_vanilla_mutations(self) -> None:
+        status = KubeJsRecipeSupportStatus(
+            kubejs_enabled=True,
+            script_path=Path("kubejs/server_scripts/yuki_recipes.js"),
+            script_exists=False,
+        )
+        script_content = _managed_kubejs_recipe_script_source(
+            status,
+            mutations=(
+                MinecraftRecipeRemoval(
+                    MinecraftRecipeRemovalFilter(
+                        output=MinecraftRecipeIngredient.item("minecraft:stone_pickaxe"),
+                        recipe_type=MinecraftRecipeKind.SHAPED,
+                    )
+                ),
+                MinecraftShapelessRecipe(
+                    output=MinecraftRecipeItemStack("minecraft:gravel"),
+                    ingredients=(MinecraftRecipeIngredient.item("minecraft:flint", count=3),),
+                    recipe_id="kubejs:flint_to_gravel",
+                ),
+                MinecraftShapedRecipe(
+                    output=MinecraftRecipeItemStack("minecraft:blast_furnace"),
+                    pattern=("III", "IFI", "SSS"),
+                    key={
+                        "I": MinecraftRecipeIngredient.item("minecraft:iron_ingot"),
+                        "F": MinecraftRecipeIngredient.item("minecraft:furnace"),
+                        "S": MinecraftRecipeIngredient.item("minecraft:smooth_stone"),
+                    },
+                ),
+                MinecraftCookingRecipe(
+                    kind=MinecraftRecipeKind.SMELTING,
+                    output=MinecraftRecipeItemStack("minecraft:stone", count=2),
+                    ingredient=MinecraftRecipeIngredient.item("minecraft:cobblestone"),
+                    experience=0.1,
+                    cooking_time_ticks=100,
+                ),
+                MinecraftStonecuttingRecipe(
+                    output=MinecraftRecipeItemStack("minecraft:stick", count=3),
+                    ingredient=MinecraftRecipeIngredient.tag("minecraft:planks"),
+                ),
+            ),
+        )
+
+        self.assertIn(
+            'event.remove({"output": "minecraft:stone_pickaxe", "type": "minecraft:crafting_shaped"})',
+            script_content,
+        )
+        self.assertIn(
+            'event.shapeless("minecraft:gravel", ["3x minecraft:flint"]).id("kubejs:flint_to_gravel")',
+            script_content,
+        )
+        self.assertIn(
+            'event.shaped("minecraft:blast_furnace", ["III", "IFI", "SSS"], '
+            '{"F": "minecraft:furnace", "I": "minecraft:iron_ingot", "S": "minecraft:smooth_stone"})',
+            script_content,
+        )
+        self.assertIn(
+            'event.smelting("2x minecraft:stone", "minecraft:cobblestone").xp(0.1).cookingTime(100)',
+            script_content,
+        )
+        self.assertIn('event.stonecutting("3x minecraft:stick", "#minecraft:planks")', script_content)
+
+    def test_shaped_recipe_validation_rejects_missing_key_symbols(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing key symbols"):
+            MinecraftShapedRecipe(
+                output=MinecraftRecipeItemStack("minecraft:stone"),
+                pattern=("AB",),
+                key={"A": MinecraftRecipeIngredient.item("minecraft:dirt")},
+            )
+
+    def test_kubejs_recipe_book_save_and_load_uses_separate_yukibot_data_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            recipe_book = MinecraftRecipeBook(
+                mutations=(
+                    MinecraftShapelessRecipe(
+                        output=MinecraftRecipeItemStack("minecraft:gravel"),
+                        ingredients=(MinecraftRecipeIngredient.item("minecraft:flint", count=3),),
+                        recipe_id="kubejs:flint_to_gravel",
+                    ),
+                )
+            )
+
+            app.save_kubejs_recipe_book(recipe_book)
+            loaded_recipe_book = app.load_kubejs_recipe_book()
+            recipe_book_path = directory / ".yukibot" / "recipes.json"
+
+            self.assertTrue(recipe_book_path.exists())
+            self.assertFalse((directory / "kubejs" / "recipes.json").exists())
+            self.assertEqual(loaded_recipe_book.to_mapping(), recipe_book.to_mapping())
+
+    def test_load_kubejs_recipe_book_fails_loudly_for_invalid_json(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            recipe_book_path = directory / ".yukibot" / "recipes.json"
+            recipe_book_path.parent.mkdir()
+            recipe_book_path.write_text("{broken", encoding="utf-8")
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+
+            with self.assertRaisesRegex(ValueError, "Invalid Minecraft recipe book JSON"):
+                app.load_kubejs_recipe_book()
+
+    def test_load_kubejs_item_registry_reads_separate_yukibot_registry_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            item_registry_path = directory / ".yukibot" / "registries" / "items.json"
+            item_registry_path.parent.mkdir(parents=True)
+            item_registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "generated_at_epoch_ms": 1234567890,
+                        "item_ids": ["minecraft:stone", "minecraft:dirt", "minecraft:stone"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+
+            item_registry = app.load_kubejs_item_registry()
+
+            self.assertEqual(
+                item_registry,
+                MinecraftItemRegistrySnapshot(
+                    generated_at_epoch_ms=1234567890,
+                    item_ids=("minecraft:dirt", "minecraft:stone"),
+                ),
+            )
+
+    def test_load_kubejs_item_registry_fails_loudly_for_invalid_json(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            item_registry_path = directory / ".yukibot" / "registries" / "items.json"
+            item_registry_path.parent.mkdir(parents=True)
+            item_registry_path.write_text("{broken", encoding="utf-8")
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+
+            with self.assertRaisesRegex(ValueError, "Invalid Minecraft item registry JSON"):
+                app.load_kubejs_item_registry()
+
+    def test_resolve_minecraft_item_icon_path_caches_loose_kubejs_asset(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            asset_path = directory / "kubejs" / "assets" / "minecraft" / "textures" / "item" / "dirt.png"
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            asset_path.write_bytes(b"png-bits")
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(Any, SimpleNamespace(list_mods=lambda state=None: []))
+
+            resolved_path = app.resolve_minecraft_item_icon_path("minecraft:dirt")
+
+            self.assertEqual(
+                resolved_path,
+                directory / ".yukibot" / "assets" / "item_icons" / "minecraft" / "dirt.png",
+            )
+            assert resolved_path is not None
+            self.assertEqual(resolved_path.read_bytes(), b"png-bits")
+
+    def test_resolve_minecraft_item_icon_path_extracts_enabled_mod_jar_asset(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            mods_directory = directory / "mods"
+            mods_directory.mkdir(parents=True, exist_ok=True)
+            mod_path = mods_directory / "create-1.0.0.jar"
+            with zipfile.ZipFile(mod_path, "w") as archive:
+                archive.writestr("assets/create/textures/item/andesite_alloy.png", b"create-png")
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [Mod_MC(Mod_Config(name=mod_path.name, directory=mods_directory, enabled=True))]
+                ),
+            )
+
+            resolved_path = app.resolve_minecraft_item_icon_path("create:andesite_alloy")
+
+            self.assertEqual(
+                resolved_path,
+                directory / ".yukibot" / "assets" / "item_icons" / "create" / "andesite_alloy.png",
+            )
+            assert resolved_path is not None
+            self.assertEqual(resolved_path.read_bytes(), b"create-png")
+
+    def test_sync_kubejs_recipe_script_creates_managed_scaffold_when_enabled(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        ),
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-immersive-engineering-1.0.0.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        ),
+                    ]
+                ),
+            )
+
+            changed = app._sync_kubejs_recipe_script()
+            target_path = directory / "kubejs" / "server_scripts" / "yuki_recipes.js"
+            recipe_book_path = directory / ".yukibot" / "recipes.json"
+            script_content = target_path.read_text(encoding="utf-8")
+
+            self.assertTrue(changed)
+            self.assertTrue(target_path.exists())
+            self.assertTrue(recipe_book_path.exists())
+            self.assertIn("Managed by YukiBot", script_content)
+            self.assertIn("ServerEvents.recipes", script_content)
+            self.assertIn("KubeJS Immersive Engineering", script_content)
+
+    def test_sync_kubejs_item_registry_script_creates_managed_startup_script_when_enabled(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        )
+                    ]
+                ),
+            )
+
+            changed = app._sync_kubejs_item_registry_script()
+            target_path = directory / "kubejs" / "server_scripts" / "yuki_item_registry.js"
+            registry_directory = directory / ".yukibot" / "registries"
+            script_content = target_path.read_text(encoding="utf-8")
+
+            self.assertTrue(changed)
+            self.assertTrue(target_path.exists())
+            self.assertTrue(registry_directory.exists())
+            self.assertNotIn("StartupEvents.postInit", script_content)
+            self.assertIn(".yukibot/registries/items.json", script_content)
+
+    def test_migrate_legacy_yukibot_data_copies_recipe_book_and_item_registry(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            legacy_recipe_book_path = directory / "yukibot" / "recipes.json"
+            legacy_recipe_book_path.parent.mkdir(parents=True)
+            legacy_recipe_book_path.write_text('{"schema_version":1,"mutations":[]}\n', encoding="utf-8")
+            legacy_item_registry_path = directory / "yukibot" / "registries" / "items.json"
+            legacy_item_registry_path.parent.mkdir(parents=True)
+            legacy_item_registry_path.write_text(
+                '{"schema_version":1,"generated_at_epoch_ms":1,"item_ids":["minecraft:stone"]}\n',
+                encoding="utf-8",
+            )
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+
+            app._migrate_legacy_yukibot_data()
+
+            self.assertEqual(
+                (directory / ".yukibot" / "recipes.json").read_text(encoding="utf-8"),
+                legacy_recipe_book_path.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                (directory / ".yukibot" / "registries" / "items.json").read_text(encoding="utf-8"),
+                legacy_item_registry_path.read_text(encoding="utf-8"),
+            )
+
+    def test_sync_kubejs_recipe_script_uses_persisted_recipe_book(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        )
+                    ]
+                ),
+            )
+            app.save_kubejs_recipe_book(
+                MinecraftRecipeBook(
+                    mutations=(
+                        MinecraftRecipeRemoval(
+                            MinecraftRecipeRemovalFilter(recipe_id="minecraft:stick"),
+                        ),
+                        MinecraftStonecuttingRecipe(
+                            output=MinecraftRecipeItemStack("minecraft:stick", count=3),
+                            ingredient=MinecraftRecipeIngredient.tag("minecraft:planks"),
+                        ),
+                    )
+                )
+            )
+
+            changed = app._sync_kubejs_recipe_script()
+            script_content = (directory / "kubejs" / "server_scripts" / "yuki_recipes.js").read_text(encoding="utf-8")
+
+            self.assertTrue(changed)
+            self.assertIn('event.remove({"id": "minecraft:stick"})', script_content)
+            self.assertIn('event.stonecutting("3x minecraft:stick", "#minecraft:planks")', script_content)
+
+    def test_append_kubejs_recipe_mutation_persists_and_regenerates_script(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        )
+                    ]
+                ),
+            )
+
+            recipe_book = app.append_kubejs_recipe_mutation(
+                MinecraftShapelessRecipe(
+                    output=MinecraftRecipeItemStack("minecraft:gravel"),
+                    ingredients=(MinecraftRecipeIngredient.item("minecraft:flint", count=3),),
+                    recipe_id="kubejs:flint_to_gravel",
+                )
+            )
+            loaded_recipe_book = app.load_kubejs_recipe_book()
+            script_content = (directory / "kubejs" / "server_scripts" / "yuki_recipes.js").read_text(encoding="utf-8")
+
+            self.assertEqual(len(recipe_book.mutations), 1)
+            self.assertEqual(loaded_recipe_book.to_mapping(), recipe_book.to_mapping())
+            self.assertIn(
+                'event.shapeless("minecraft:gravel", ["3x minecraft:flint"]).id("kubejs:flint_to_gravel")',
+                script_content,
+            )
+
+    def test_replace_and_remove_kubejs_recipe_mutation_persist_and_regenerate_script(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        )
+                    ]
+                ),
+            )
+
+            app.append_kubejs_recipe_mutation(
+                MinecraftShapelessRecipe(
+                    output=MinecraftRecipeItemStack("minecraft:gravel"),
+                    ingredients=(MinecraftRecipeIngredient.item("minecraft:flint"),),
+                    recipe_id="kubejs:flint_to_gravel",
+                )
+            )
+            replaced_recipe_book = app.replace_kubejs_recipe_mutation(
+                0,
+                MinecraftShapelessRecipe(
+                    output=MinecraftRecipeItemStack("minecraft:sand"),
+                    ingredients=(MinecraftRecipeIngredient.item("minecraft:gravel"),),
+                    recipe_id="kubejs:gravel_to_sand",
+                ),
+            )
+            removed_recipe_book = app.remove_kubejs_recipe_mutation(0)
+            final_script_content = (directory / "kubejs" / "server_scripts" / "yuki_recipes.js").read_text(encoding="utf-8")
+
+            self.assertEqual(len(replaced_recipe_book.mutations), 1)
+            self.assertEqual(replaced_recipe_book.mutations[0].to_mapping()["id"], "kubejs:gravel_to_sand")
+            self.assertEqual(removed_recipe_book.mutations, ())
+            self.assertNotIn("kubejs:flint_to_gravel", final_script_content)
+            self.assertNotIn("kubejs:gravel_to_sand", final_script_content)
+
+    def test_sync_kubejs_recipe_script_does_nothing_without_enabled_kubejs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: []
+                    if state is True
+                    else [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=False,
+                            )
+                        )
+                    ]
+                ),
+            )
+
+            changed = app._sync_kubejs_recipe_script()
+            target_path = directory / "kubejs" / "server_scripts" / "yuki_recipes.js"
+
+            self.assertFalse(changed)
+            self.assertFalse(target_path.exists())
+
+    def test_sync_kubejs_item_registry_script_does_nothing_without_enabled_kubejs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: []
+                    if state is True
+                    else [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=False,
+                            )
+                        )
+                    ]
+                ),
+            )
+
+            changed = app._sync_kubejs_item_registry_script()
+            target_path = directory / "kubejs" / "server_scripts" / "yuki_item_registry.js"
+
+            self.assertFalse(changed)
+            self.assertFalse(target_path.exists())
 
     def test_load_squaremap_web_address_accepts_quoted_value_with_comment(self) -> None:
         with TemporaryDirectory() as temp_dir:

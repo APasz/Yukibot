@@ -330,11 +330,28 @@ class AppManageTests(unittest.TestCase):
         self.assertTrue(app.supports_console_actions)
         self.assertIn("saveworld", action_keys)
         self.assertIn("settime", action_keys)
+        self.assertIn("raw_command", action_keys)
         self.assertIn("say", action_keys)
         self.assertIn("kick", action_keys)
         self.assertIn("admin_add", action_keys)
         self.assertIn("admin_remove", action_keys)
         self.assertIn("shutdown", action_keys)
+
+    def test_sevendays_exposes_sandbox_options_action_for_supported_versions(self) -> None:
+        app = object.__new__(SevenDays)
+        app.cfg = SimpleNamespace(version=AppVersion(main="3.0", build=259))
+
+        action_keys = {action.key for action in app.console_actions}
+
+        self.assertIn("getsandboxoptions", action_keys)
+
+    def test_sevendays_hides_sandbox_options_action_before_supported_versions(self) -> None:
+        app = object.__new__(SevenDays)
+        app.cfg = SimpleNamespace(version=AppVersion(main="3.0", build=258))
+
+        action_keys = {action.key for action in app.console_actions}
+
+        self.assertNotIn("getsandboxoptions", action_keys)
 
     def test_console_action_view_hides_choice_preview_when_select_menu_exists(self) -> None:
         app = object.__new__(Minecraft)

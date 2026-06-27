@@ -3,6 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, BinaryIO
 
+from apps.minecraft import (
+    Minecraft,
+    MinecraftCookingRecipe,
+    MinecraftItemRegistrySnapshot,
+    MinecraftRecipeBook,
+    MinecraftRecipeIngredient,
+    MinecraftRecipeItemStack,
+    MinecraftRecipeMutation,
+    MinecraftRecipeRemoval,
+    MinecraftShapedRecipe,
+    MinecraftShapelessRecipe,
+    MinecraftStonecuttingRecipe,
+)
+from apps.sevendays import SevenDays, SevenDaysSandboxOptionsSnapshot
+
 from .constants import (
     _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
@@ -47,10 +62,12 @@ from .runtime_imports import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
+    NodeMinecraftRecipeWorkspaceState,
     NodeModList,
     NodeModUploadBatchResult,
     NodeSaveList,
     NodeSaveMutationResult,
+    NodeSevenDaysSandboxOptionsState,
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
@@ -81,12 +98,18 @@ from .runtime_imports import (
 )
 from .service_base import ModWebServiceSupport
 from .types import (
+    ModWebMinecraftItemRegistrySummary,
+    ModWebMinecraftRecipeBookSummary,
+    ModWebMinecraftRecipeEntry,
+    ModWebMinecraftRecipeOperationKind,
     ModWebHomeNodeSummary,
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebOverviewPageModel,
     ModWebPageModel,
     ModWebPageLoadWarning,
+    ModWebSevenDaysSandboxOptionEntry,
+    ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
     ModWebTitleStatLine,
 )
@@ -108,6 +131,9 @@ class _LocalAppPageData:
     app_start_blocked: bool
     mods: NodeModList | None
     app_stats: NodeAppRuntimeSummary | None
+    minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None
+    minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None
+    sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None
     load_warnings: tuple[ModWebPageLoadWarning, ...] = ()
 
 
@@ -288,6 +314,177 @@ class ModWebModelsMixin(ModWebServiceSupport):
             log.warning("%s section load failed: %s", context, error)
         load_warnings.append(self._page_load_warning(section_label=section_label, error=error))
 
+    @staticmethod
+    def _minecraft_recipe_item_text(item_stack: MinecraftRecipeItemStack) -> str:
+        return item_stack.kubejs_value
+
+    @staticmethod
+    def _minecraft_recipe_ingredient_text(ingredient: MinecraftRecipeIngredient) -> str:
+        return ingredient.kubejs_value
+
+    @classmethod
+    def _minecraft_recipe_entry(cls, mutation: MinecraftRecipeMutation) -> ModWebMinecraftRecipeEntry:
+        if isinstance(mutation, MinecraftRecipeRemoval):
+            filter_payload = mutation.filter.kubejs_payload
+            if mutation.filter.recipe_id is not None:
+                title = mutation.filter.recipe_id
+            elif mutation.filter.output is not None:
+                title = f"Output {cls._minecraft_recipe_ingredient_text(mutation.filter.output)}"
+            elif mutation.filter.input is not None:
+                title = f"Input {cls._minecraft_recipe_ingredient_text(mutation.filter.input)}"
+            elif mutation.filter.mod_id is not None:
+                title = f"Mod {mutation.filter.mod_id}"
+            else:
+                title = "Recipe filter"
+            detail = ", ".join(f"{key}: {value}" for key, value in filter_payload.items())
+            return ModWebMinecraftRecipeEntry(
+                operation=ModWebMinecraftRecipeOperationKind.REMOVE,
+                kind_label="Remove",
+                title=title,
+                detail=detail,
+                recipe_id=mutation.filter.recipe_id,
+            )
+        if isinstance(mutation, MinecraftShapelessRecipe):
+            ingredients = ", ".join(cls._minecraft_recipe_ingredient_text(item) for item in mutation.ingredients)
+            return ModWebMinecraftRecipeEntry(
+                operation=ModWebMinecraftRecipeOperationKind.ADD,
+                kind_label="Shapeless",
+                title=cls._minecraft_recipe_item_text(mutation.output),
+                detail=f"Ingredients: {ingredients}",
+                recipe_id=mutation.recipe_id,
+            )
+        if isinstance(mutation, MinecraftShapedRecipe):
+            pattern = " / ".join(mutation.pattern)
+            key_text = ", ".join(
+                f"{symbol}: {cls._minecraft_recipe_ingredient_text(ingredient)}"
+                for symbol, ingredient in sorted(mutation.key.items())
+            )
+            return ModWebMinecraftRecipeEntry(
+                operation=ModWebMinecraftRecipeOperationKind.ADD,
+                kind_label="Shaped",
+                title=cls._minecraft_recipe_item_text(mutation.output),
+                detail=f"Pattern: {pattern}; Key: {key_text}",
+                recipe_id=mutation.recipe_id,
+            )
+        if isinstance(mutation, MinecraftCookingRecipe):
+            detail = f"Input: {cls._minecraft_recipe_ingredient_text(mutation.ingredient)}"
+            extras: list[str] = []
+            if mutation.experience is not None:
+                extras.append(f"XP {mutation.experience:g}")
+            if mutation.cooking_time_ticks is not None:
+                extras.append(f"{mutation.cooking_time_ticks} ticks")
+            if extras:
+                detail = f"{detail}; {', '.join(extras)}"
+            return ModWebMinecraftRecipeEntry(
+                operation=ModWebMinecraftRecipeOperationKind.ADD,
+                kind_label=mutation.kind.value.replace("_", " ").title(),
+                title=cls._minecraft_recipe_item_text(mutation.output),
+                detail=detail,
+                recipe_id=mutation.recipe_id,
+            )
+        if isinstance(mutation, MinecraftStonecuttingRecipe):
+            return ModWebMinecraftRecipeEntry(
+                operation=ModWebMinecraftRecipeOperationKind.ADD,
+                kind_label="Stonecutting",
+                title=cls._minecraft_recipe_item_text(mutation.output),
+                detail=f"Input: {cls._minecraft_recipe_ingredient_text(mutation.ingredient)}",
+                recipe_id=mutation.recipe_id,
+            )
+        raise TypeError(f"Unsupported Minecraft recipe mutation: {type(mutation).__name__}")
+
+    def _minecraft_recipe_summary(self, app: App) -> ModWebMinecraftRecipeBookSummary | None:
+        if not isinstance(app, Minecraft):
+            return None
+        data_path = ".yukibot/recipes.json"
+        script_path = "kubejs/server_scripts/yuki_recipes.js"
+        try:
+            recipe_book: MinecraftRecipeBook = app.load_kubejs_recipe_book()
+        except Exception as xcp:
+            return ModWebMinecraftRecipeBookSummary(
+                data_path=data_path,
+                script_path=script_path,
+                load_error=str(xcp) or type(xcp).__name__,
+            )
+        return ModWebMinecraftRecipeBookSummary(
+            data_path=data_path,
+            script_path=script_path,
+            entries=tuple(self._minecraft_recipe_entry(mutation) for mutation in recipe_book.mutations),
+            mutation_mappings=tuple(mutation.to_mapping() for mutation in recipe_book.mutations),
+        )
+
+    def _minecraft_item_registry_summary(self, app: App) -> ModWebMinecraftItemRegistrySummary | None:
+        if not isinstance(app, Minecraft):
+            return None
+        data_path = ".yukibot/registries/items.json"
+        item_registry_path_exists = app._resolve_existing_yukibot_data_path(
+            current_path=app._yukibot_item_registry_path(),
+            legacy_path=app._legacy_yukibot_item_registry_path(),
+        ).exists()
+        try:
+            item_registry: MinecraftItemRegistrySnapshot = app.load_kubejs_item_registry()
+        except Exception as xcp:
+            return ModWebMinecraftItemRegistrySummary(
+                data_path=data_path,
+                file_exists=item_registry_path_exists,
+                load_error=str(xcp) or type(xcp).__name__,
+            )
+        return ModWebMinecraftItemRegistrySummary(
+            data_path=data_path,
+            item_ids=item_registry.item_ids,
+            file_exists=item_registry_path_exists,
+            generated_at_epoch_ms=item_registry.generated_at_epoch_ms,
+        )
+
+    @staticmethod
+    def _sevendays_sandbox_options_summary_from_snapshot(
+        *,
+        data_path: str,
+        file_exists: bool,
+        snapshot: SevenDaysSandboxOptionsSnapshot,
+    ) -> ModWebSevenDaysSandboxOptionsSummary:
+        return ModWebSevenDaysSandboxOptionsSummary(
+            data_path=data_path,
+            file_exists=file_exists,
+            generated_at=snapshot.generated_at,
+            sandbox_code=snapshot.sandbox_code,
+            app_version=snapshot.app_version,
+            options=tuple(
+                ModWebSevenDaysSandboxOptionEntry(
+                    section=option.section,
+                    key=option.key,
+                    value_index=option.value_index,
+                    value_label=option.value_label,
+                    default_index=option.default_index,
+                    default_label=option.default_label,
+                )
+                for option in snapshot.options
+            ),
+        )
+
+    def _sevendays_sandbox_options_summary(self, app: App) -> ModWebSevenDaysSandboxOptionsSummary | None:
+        if not isinstance(app, SevenDays) or not app.supports_sevendays_sandbox_options:
+            return None
+        data_path = ".yukibot/sandbox_options.json"
+        if not app.sandbox_options_file_exists:
+            return ModWebSevenDaysSandboxOptionsSummary(
+                data_path=data_path,
+                file_exists=False,
+                app_version=None if app.cfg.version is None else app.cfg.version.display_value,
+            )
+        try:
+            snapshot = app.load_sandbox_options_snapshot()
+        except Exception as xcp:
+            return ModWebSevenDaysSandboxOptionsSummary(
+                data_path=data_path,
+                file_exists=app.sandbox_options_file_exists,
+                load_error=str(xcp) or type(xcp).__name__,
+            )
+        return self._sevendays_sandbox_options_summary_from_snapshot(
+            data_path=data_path,
+            file_exists=app.sandbox_options_file_exists,
+            snapshot=snapshot,
+        )
+
     async def _build_local_app_page_data(self, app: App, *, user: ModWebUser) -> _LocalAppPageData:
         can_manage_app: bool = self._user_has_level(user, Power_Level.user)
         app_entry: NodeAppEntry = self._node_api.build_app_entry(app)
@@ -372,6 +569,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
         else:
             mods = None
             app_stats = await self._node_api.build_app_runtime_summary(app)
+        minecraft_recipes = self._minecraft_recipe_summary(app)
+        minecraft_item_registry = self._minecraft_item_registry_summary(app)
+        sevendays_sandbox_options = self._sevendays_sandbox_options_summary(app)
         return _LocalAppPageData(
             app=app,
             app_entry=app_entry,
@@ -383,6 +583,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
             app_start_blocked=app_start_blocked,
             mods=mods,
             app_stats=app_stats,
+            minecraft_recipes=minecraft_recipes,
+            minecraft_item_registry=minecraft_item_registry,
+            sevendays_sandbox_options=sevendays_sandbox_options,
             load_warnings=tuple(load_warnings),
         )
 
@@ -407,6 +610,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return self._remote_page_model(
             node=current_node,
+            app_scope=page_data.app_entry.scope,
             mods=mods,
             supports_configs=page_data.app_entry.supports_configs,
             config_read_level=page_data.app_entry.config_read_level,
@@ -442,6 +646,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
+            minecraft_recipes=page_data.minecraft_recipes,
+            minecraft_item_registry=page_data.minecraft_item_registry,
+            sevendays_sandbox_options=page_data.sevendays_sandbox_options,
         )
 
     def _overview_model_from_local_page_data(
@@ -460,6 +667,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             node=current_node,
             app_name=page_data.app_entry.name,
             app_friendly=page_data.app_entry.friendly,
+            app_scope=page_data.app_entry.scope,
             app_color_hex=page_data.app_entry.color_hex,
             supports_configs=page_data.app_entry.supports_configs,
             config_read_level=page_data.app_entry.config_read_level,
@@ -515,6 +723,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         self,
         *,
         node: ModWebNodeLink,
+        app_scope: str | None,
         mods: NodeModList,
         supports_configs: bool,
         config_read_level: Power_Level,
@@ -550,6 +759,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_advancement_term: str | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
+        minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None,
+        minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None,
+        sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None,
     ) -> ModWebPageModel:
         app_api_url: str = self._node_app_api_url(node, mods.app_name)
         return cast(
@@ -560,6 +772,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     app_name=mods.app_name,
                     app_friendly=mods.app_friendly,
                     app_color_hex=app_color_hex,
+                    app_scope=app_scope,
                     supports_configs=supports_configs,
                     config_read_level=config_read_level,
                     config_write_level=config_write_level,
@@ -595,6 +808,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_advancement_term=relay_advancement_term,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
+                    minecraft_recipes=minecraft_recipes,
+                    minecraft_item_registry=minecraft_item_registry,
+                    sevendays_sandbox_options=sevendays_sandbox_options,
                     download_all_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'false'})}",
                     download_enabled_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'true'})}",
                     mod_download_urls={
@@ -603,6 +819,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                         if mod.downloadable
                     },
                     map_api_url=f"{app_api_url}/map" if map_url is not None else None,
+                    minecraft_item_icon_api_url=f"{app_api_url}/minecraft/recipes/item-icon",
                 ),
             ),
         )
@@ -613,6 +830,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         node: ModWebNodeLink,
         app_name: str,
         app_friendly: str,
+        app_scope: str | None,
         app_color_hex: str | None,
         supports_configs: bool,
         config_read_level: Power_Level,
@@ -658,6 +876,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     app_name=app_name,
                     app_friendly=app_friendly,
                     app_color_hex=app_color_hex,
+                    app_scope=app_scope,
                     supports_configs=supports_configs,
                     config_read_level=config_read_level,
                     config_write_level=config_write_level,
@@ -674,6 +893,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     blueprints=blueprints,
                     map_url=map_url,
                     map_api_url=f"{app_api_url}/map" if map_url is not None else None,
+                    minecraft_item_icon_api_url=f"{app_api_url}/minecraft/recipes/item-icon",
                     can_write_map_annotations=map_url is not None and can_write_map_annotations,
                     supports_chat=supports_chat,
                     supports_updates=supports_updates,
@@ -819,6 +1039,135 @@ class ModWebModelsMixin(ModWebServiceSupport):
             user=user,
         )
         return NodeModList.from_mapping(payload)
+
+    def _remote_minecraft_recipe_summaries(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> tuple[ModWebMinecraftRecipeBookSummary, ModWebMinecraftItemRegistrySummary]:
+        default_recipe_summary = ModWebMinecraftRecipeBookSummary(
+            data_path=".yukibot/recipes.json",
+            script_path="kubejs/server_scripts/yuki_recipes.js",
+        )
+        default_item_registry_summary = ModWebMinecraftItemRegistrySummary(
+            data_path=".yukibot/registries/items.json",
+            file_exists=False,
+        )
+        try:
+            payload: dict[str, object] = self._remote_json(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/minecraft/recipes",
+                scopes=(NodeApiScope.MODS_READ,),
+                user=user,
+            )
+            workspace_state = NodeMinecraftRecipeWorkspaceState.from_mapping(payload)
+        except Exception as xcp:
+            error_text = str(xcp) or type(xcp).__name__
+            return (
+                ModWebMinecraftRecipeBookSummary(
+                    data_path=default_recipe_summary.data_path,
+                    script_path=default_recipe_summary.script_path,
+                    load_error=error_text,
+                ),
+                ModWebMinecraftItemRegistrySummary(
+                    data_path=default_item_registry_summary.data_path,
+                    file_exists=False,
+                    load_error=error_text,
+                ),
+            )
+
+        recipe_book_state = workspace_state.recipe_book
+        if recipe_book_state.load_error is not None:
+            recipe_summary = ModWebMinecraftRecipeBookSummary(
+                data_path=recipe_book_state.data_path,
+                script_path=recipe_book_state.script_path,
+                load_error=recipe_book_state.load_error,
+            )
+        elif recipe_book_state.payload is None:
+            recipe_summary = ModWebMinecraftRecipeBookSummary(
+                data_path=recipe_book_state.data_path,
+                script_path=recipe_book_state.script_path,
+            )
+        else:
+            recipe_book = MinecraftRecipeBook.from_mapping(recipe_book_state.payload)
+            recipe_summary = ModWebMinecraftRecipeBookSummary(
+                data_path=recipe_book_state.data_path,
+                script_path=recipe_book_state.script_path,
+                entries=tuple(self._minecraft_recipe_entry(mutation) for mutation in recipe_book.mutations),
+                mutation_mappings=tuple(mutation.to_mapping() for mutation in recipe_book.mutations),
+            )
+
+        item_registry_state = workspace_state.item_registry
+        if item_registry_state.load_error is not None:
+            item_registry_summary = ModWebMinecraftItemRegistrySummary(
+                data_path=item_registry_state.data_path,
+                file_exists=item_registry_state.file_exists,
+                load_error=item_registry_state.load_error,
+            )
+        elif item_registry_state.payload is None:
+            item_registry_summary = ModWebMinecraftItemRegistrySummary(
+                data_path=item_registry_state.data_path,
+                file_exists=item_registry_state.file_exists,
+            )
+        else:
+            item_registry = MinecraftItemRegistrySnapshot.from_mapping(item_registry_state.payload)
+            item_registry_summary = ModWebMinecraftItemRegistrySummary(
+                data_path=item_registry_state.data_path,
+                item_ids=item_registry.item_ids,
+                file_exists=item_registry_state.file_exists,
+                generated_at_epoch_ms=item_registry.generated_at_epoch_ms,
+            )
+        return recipe_summary, item_registry_summary
+
+    def _remote_sevendays_sandbox_options_summary(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> ModWebSevenDaysSandboxOptionsSummary:
+        default_data_path = ".yukibot/sandbox_options.json"
+        try:
+            payload: dict[str, object] = self._remote_json(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}/sevendays/sandbox-options",
+                scopes=(NodeApiScope.MODS_READ,),
+                user=user,
+            )
+            state = NodeSevenDaysSandboxOptionsState.from_mapping(payload)
+        except Exception as xcp:
+            return ModWebSevenDaysSandboxOptionsSummary(
+                data_path=default_data_path,
+                file_exists=True,
+                load_error=str(xcp) or type(xcp).__name__,
+            )
+
+        if state.load_error is not None:
+            return ModWebSevenDaysSandboxOptionsSummary(
+                data_path=state.data_path,
+                file_exists=state.file_exists,
+                load_error=state.load_error,
+            )
+        if state.payload is None:
+            return ModWebSevenDaysSandboxOptionsSummary(
+                data_path=state.data_path,
+                file_exists=state.file_exists,
+            )
+        try:
+            snapshot = SevenDaysSandboxOptionsSnapshot.from_mapping(dict(cast(dict[str, object], state.payload)))
+        except Exception as xcp:
+            return ModWebSevenDaysSandboxOptionsSummary(
+                data_path=state.data_path,
+                file_exists=state.file_exists,
+                load_error=str(xcp) or type(xcp).__name__,
+            )
+        return self._sevendays_sandbox_options_summary_from_snapshot(
+            data_path=state.data_path,
+            file_exists=state.file_exists,
+            snapshot=snapshot,
+        )
 
     def _remote_mod_uploads(
         self,

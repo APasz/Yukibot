@@ -51,7 +51,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             self._write_factorio_mod_archive(mods_dir / "example_1.0.0.zip", mod_name="example")
             (mods_dir / "mod-settings.dat").write_bytes(b"\x00")
             (mods_dir / "mod-list.json").write_text(
-                json.dumps({"mods": [{"name": "example", "enabled": False}]}, indent=2),
+                json.dumps({"mods": [{"name": "example", "enabled": False}]}, indent=4),
                 encoding="utf-8",
             )
             app_cfg = App_Config(
@@ -85,7 +85,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             self._write_factorio_mod_archive(archive_path, mod_name="example")
             mod_list_path = mods_dir / "mod-list.json"
             mod_list_path.write_text(
-                json.dumps({"mods": [{"name": "example", "enabled": True}]}, indent=2),
+                json.dumps({"mods": [{"name": "example", "enabled": True}]}, indent=4),
                 encoding="utf-8",
             )
             mod = Mod_Factorio(Mod_Config(name=archive_path.name, directory=mods_dir))
@@ -116,7 +116,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             self._write_factorio_mod_archive(mods_dir / "example_1.0.0.zip", mod_name="example")
             (mods_dir / "mod-settings.dat").write_bytes(b"\x00")
             (mods_dir / "mod-list.json").write_text(
-                json.dumps({"mods": [{"name": "example", "enabled": True}]}, indent=2),
+                json.dumps({"mods": [{"name": "example", "enabled": True}]}, indent=4),
                 encoding="utf-8",
             )
             db_path = root / "mods.jsonl"

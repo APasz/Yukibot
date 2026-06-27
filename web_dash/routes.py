@@ -570,6 +570,27 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             )
             return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
+        @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/minecraft/recipes/item-icon")
+        async def _proxy_minecraft_recipe_item_icon(
+            node_name: str,
+            app_name: str,
+            item_id: str,
+            request: Request,
+        ) -> StarletteResponse:
+            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            node = self._remote_node_link(node_name)
+            content, media_type, headers = await self._remote_bytes_async(
+                node=node,
+                app_name=app_name,
+                path=(
+                    f"/apps/{quote(app_name, safe='')}/minecraft/recipes/item-icon"
+                    f"?{urlencode({'item_id': item_id})}"
+                ),
+                scopes=(NodeApiScope.MODS_READ,),
+                user=user,
+            )
+            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
+
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods")
         async def _proxy_mods(node_name: str, app_name: str, request: Request) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)

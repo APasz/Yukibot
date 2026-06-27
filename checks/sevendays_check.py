@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from _discord import Fileish, OutboundRelayFormatter, RelayMessageReferenceKind,
 from _security import Power_Level
 from _utils import Utilities
 from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType
+from apps._console import ConsoleResponseSource, execute_console_action
 from apps._mod import Mod_Manager
 from apps.sevendays import (
     Activities as SevenDaysActivities,
@@ -21,9 +23,12 @@ from apps.sevendays import (
     Receiver,
     SevenDays,
     SevenDaysAdminAddRequest,
+    SevenDaysSandboxOption,
+    SevenDaysSandboxOptionsSnapshot,
     _candidate_sevendays_logs,
     _discover_sevendays_runtime_log,
     _preferred_sevendays_runtime_log,
+    _sevendays_telnet_port,
     detect_sevendays_version,
     parse_admin_add_value,
     parse_gamestat_value,
@@ -40,6 +45,24 @@ class _RecordingActivityManager:
 
     def deregister(self, provider: object) -> None:
         self.deregistered.append(provider)
+
+
+class _SevenDaysActivityAppStub:
+    def __init__(self, activity_manager: _RecordingActivityManager) -> None:
+        self.activity_manager = activity_manager
+        self._tail_matchers: set[object] = set()
+        self.providers: list[object] = []
+
+    def set_activity_providers(self, providers: Sequence[object]) -> None:
+        self.providers = list(providers)
+
+    def register_enabled_activity_providers(self) -> None:
+        for provider in self.providers:
+            self.activity_manager.register(provider)
+
+    def deregister_activity_providers(self) -> None:
+        for provider in self.providers:
+            self.activity_manager.deregister(provider)
 
 
 class SevenDaysGameStatParsingTests(unittest.TestCase):
@@ -145,6 +168,19 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
 
         self.assertEqual(version, AppVersion(main="1.4", build=8))
 
+    def test_detect_sevendays_version_accepts_spaced_build_suffix(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_path = root / "server_stdout.log"
+            log_path.write_text(
+                "2026-06-26T10:01:00 0.030 INF Version: V 3.0 B259 Compatibility Version: V 3.0\n",
+                encoding="utf-8",
+            )
+
+            version = detect_sevendays_version(directory=root, server_log=log_path)
+
+        self.assertEqual(version, AppVersion(main="3.0", build=259))
+
     def test_candidate_sevendays_logs_include_timestamped_output_logs(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -160,6 +196,40 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
         self.assertIn(newer, candidates)
         self.assertIn(older, candidates)
         self.assertLess(candidates.index(newer), candidates.index(older))
+
+    def test_candidate_sevendays_logs_include_root_timestamped_output_logs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_log = root / "output_log__2026-06-27__06-40-00.txt"
+            runtime_log.write_text("current", encoding="utf-8")
+
+            candidates = _candidate_sevendays_logs(directory=root, server_log=None)
+
+        self.assertIn(runtime_log, candidates)
+
+    def test_telnet_port_is_read_from_serverconfig(self) -> None:
+        with TemporaryDirectory() as tmp:
+            serverconfig = Path(tmp) / "serverconfig.xml"
+            serverconfig.write_text(
+                '<ServerSettings><property name="TelnetEnabled" value="true" />'
+                '<property name="TelnetPort" value="18081" /></ServerSettings>',
+                encoding="utf-8",
+            )
+
+            port = _sevendays_telnet_port(serverconfig)
+
+        self.assertEqual(port, 18081)
+
+    def test_disabled_telnet_is_rejected(self) -> None:
+        with TemporaryDirectory() as tmp:
+            serverconfig = Path(tmp) / "serverconfig.xml"
+            serverconfig.write_text(
+                '<ServerSettings><property name="TelnetEnabled" value="false" /></ServerSettings>',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "must be enabled"):
+                _sevendays_telnet_port(serverconfig)
 
     def test_detect_sevendays_version_from_timestamped_output_log(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -358,6 +428,133 @@ class SevenDaysRelayFormattingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(formatted, "look https://public.example/uploads/cat.png")
 
 
+class SevenDaysConsoleActionTests(unittest.IsolatedAsyncioTestCase):
+    def _console_app(self, *, version: AppVersion | None = None) -> SevenDays:
+        app = cast(SevenDays, object.__new__(SevenDays))
+        app.friendly = "7D2D Test"
+        app.cfg = SimpleNamespace(version=version)
+        app._relay = SimpleNamespace(send=AsyncMock(return_value=True))
+        return app
+
+    async def test_raw_console_command_sends_telnet_command(self) -> None:
+        app = self._console_app()
+        action = next(action for action in app.console_actions if action.key == "raw_command")
+
+        result = await execute_console_action(
+            app=app,
+            is_running=lambda: True,
+            action=action,
+            raw_value="mem",
+        )
+
+        app._relay.send.assert_awaited_once_with("mem")
+        self.assertEqual(result.summary, "7D2D Test: console command sent.")
+        self.assertEqual(result.source, ConsoleResponseSource.TELNET)
+
+    async def test_getsandboxoptions_sends_telnet_command_for_supported_versions(self) -> None:
+        app = self._console_app(version=AppVersion(main="3.0", build=259))
+        action = next(action for action in app.console_actions if action.key == "getsandboxoptions")
+
+        result = await execute_console_action(
+            app=app,
+            is_running=lambda: True,
+            action=action,
+            raw_value=None,
+        )
+
+        app._relay.send.assert_awaited_once_with("getsandboxoptions")
+        self.assertEqual(result.summary, "7D2D Test: sandbox options requested.")
+        self.assertEqual(result.text, "Sandbox options are written to the 7D2D stdout feed.")
+        self.assertEqual(result.source, ConsoleResponseSource.TELNET)
+
+    async def test_startup_sandbox_options_request_is_version_gated(self) -> None:
+        unsupported_app = self._console_app(version=AppVersion(main="3.0", build=258))
+        await unsupported_app._request_startup_sandbox_options(delay_seconds=0.0, max_attempts=1)
+        unsupported_app._relay.send.assert_not_awaited()
+
+        supported_app = self._console_app(version=AppVersion(main="3.0", build=259))
+        await supported_app._request_startup_sandbox_options(delay_seconds=0.0, max_attempts=1)
+        supported_app._relay.send.assert_awaited_once_with("getsandboxoptions")
+
+    def test_supports_sevendays_sandbox_options_is_version_gated_not_file_gated(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = cast(SevenDays, object.__new__(SevenDays))
+            app.directory = Path(temp_dir)
+            app.cfg = App_Config(
+                name="sevendays_alpha",
+                instance_key="alpha",
+                directory=Path(temp_dir),
+                apps_dir=Path(temp_dir),
+                scope="sevendays",
+                version=AppVersion(main="3.0", build=259),
+            )
+
+            self.assertTrue(app.supports_sevendays_sandbox_options)
+            self.assertFalse(app.sandbox_options_file_exists)
+
+    async def test_sandbox_options_matcher_persists_parsed_stdout_dump(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = cast(SevenDays, object.__new__(SevenDays))
+            app.name = "sevendays_alpha"
+            app.directory = Path(temp_dir)
+            app.cfg = App_Config(
+                name=app.name,
+                instance_key="alpha",
+                directory=Path(temp_dir),
+                apps_dir=Path(temp_dir),
+                scope="sevendays",
+                version=AppVersion(main="3.0", build=259),
+            )
+            app._tail_matchers = set()
+            matcher = Matchers(app)
+
+            await matcher.match_sandbox_options("2026-06-26T10:17:36 2575.058 INF Sandbox Code: AACK")
+            await matcher.match_sandbox_options("2026-06-26T10:17:36 2575.058 INF Sandbox Options:")
+            await matcher.match_sandbox_options("2026-06-26T10:17:36 2575.058 INF *** GENERAL ***")
+            await matcher.match_sandbox_options(
+                "2026-06-26T10:17:36 2575.058 INF Option BlockDamage: 10/200% (default: 7/100%)"
+            )
+
+            snapshot = app.load_sandbox_options_snapshot()
+
+        self.assertEqual(snapshot.sandbox_code, "AACK")
+        self.assertEqual(snapshot.app_version, "3.0:259")
+        self.assertEqual(
+            snapshot.options,
+            (
+                SevenDaysSandboxOption(
+                    section="General",
+                    key="BlockDamage",
+                    value_index=10,
+                    value_label="200%",
+                    default_index=7,
+                    default_label="100%",
+                ),
+            ),
+        )
+
+    def test_sandbox_options_snapshot_round_trips_mapping(self) -> None:
+        snapshot = SevenDaysSandboxOptionsSnapshot(
+            generated_at="2026-06-26T10:17:36",
+            sandbox_code="AACK",
+            app_version="3.0:259",
+            options=(
+                SevenDaysSandboxOption(
+                    section="General",
+                    key="BlockDamage",
+                    value_index=10,
+                    value_label="200%",
+                    default_index=7,
+                    default_label="100%",
+                ),
+            ),
+        )
+
+        parsed = SevenDaysSandboxOptionsSnapshot.from_mapping(snapshot.to_mapping())
+
+        self.assertEqual(parsed, snapshot)
+
+
 class SevenDaysActivityTests(unittest.IsolatedAsyncioTestCase):
     async def test_sevendays_activities_track_started_tasks_and_deregister_provider(self) -> None:
         activity_manager = _RecordingActivityManager()
@@ -366,7 +563,7 @@ class SevenDaysActivityTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
 
-        app = SimpleNamespace(activity_manager=activity_manager, _tail_matchers=set())
+        app = _SevenDaysActivityAppStub(activity_manager)
         activities = SevenDaysActivities(cast(Any, app))
         provider = activities.providers[0]
         provider.task_funcs = [background_worker]
@@ -522,8 +719,10 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         app.file_stdout = Path("/tmp/sevendays_stdout.log")
         app.process = SimpleNamespace(stdout=object())
         app._server_ready = asyncio.Event()
+        app._telnet_startup_error = None
         app._tail_matchers = set()
         app._std_launch = AsyncMock()
+        app._configure_telnet_client = AsyncMock()
         app.check_running = lambda: True
         relay_reader = object()
         app._relay = SimpleNamespace(
@@ -549,8 +748,11 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         app._activities = SimpleNamespace(start=AsyncMock(side_effect=start_activities))
         app._running = False
 
-        tailer = SimpleNamespace(start=AsyncMock())
-        with patch("apps.sevendays.Tailer", return_value=tailer) as tailer_cls:
+        tailer = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+        with (
+            patch("apps.sevendays.Tailer", return_value=tailer) as tailer_cls,
+            patch("apps.sevendays._discover_sevendays_runtime_log", new=AsyncMock(return_value=None)),
+        ):
             result = await SevenDays.start(app)
 
         self.assertTrue(result)
@@ -578,11 +780,13 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
             app.file_stdout = root / "stdout.log"
             app.process = SimpleNamespace(stdout=object())
             app._server_ready = asyncio.Event()
+            app._telnet_startup_error = None
             app._tail_matchers = set()
             app._std_launch = AsyncMock(
                 side_effect=lambda: runtime_log.write_text("INF Version: V 2.0 (b1)\n", encoding="utf-8")
             )
             app.check_running = lambda: True
+            app._configure_telnet_client = AsyncMock()
             app._relay = SimpleNamespace(
                 setup=AsyncMock(return_value=object()),
                 connected_event=asyncio.Event(),
@@ -592,7 +796,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
             app._activities = SimpleNamespace(start=AsyncMock())
             app._running = False
 
-            tailer = SimpleNamespace(start=AsyncMock())
+            tailer = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
             with (
                 patch("apps.sevendays.Tailer", return_value=tailer) as tailer_cls,
                 patch("apps.sevendays.File_Utils.link") as link_mock,
@@ -603,6 +807,45 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         tailer_cls.assert_called_once()
         self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
         link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
+
+    async def test_start_rejects_telnet_bind_failure_and_terminates_process(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_log = root / "output_log__2026-06-27__06-40-00.txt"
+            app = cast(Any, object.__new__(SevenDays))
+            app.name = "sevendays_demo"
+            app.directory = root
+            app.server_log = None
+            app.file_stdout = root / "stdout.log"
+            app._server_ready = asyncio.Event()
+            app._telnet_startup_error = None
+            app._tail_matchers = set()
+            app._configure_telnet_client = AsyncMock()
+            app._std_launch = AsyncMock(
+                side_effect=lambda: runtime_log.write_text("INF StartAsServer\n", encoding="utf-8")
+            )
+            app.check_running = lambda: True
+            app._relay = SimpleNamespace(setup=AsyncMock(), teardown=AsyncMock())
+            app._players = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+            app._activities = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+            app._running = False
+            app._terminate = AsyncMock()
+
+            async def record_telnet_failure(*_args: object, **_kwargs: object) -> None:
+                app._telnet_startup_error = "INF Error in Telnet.ctor: Address already in use"
+
+            app.wait_for_ready_event = AsyncMock(side_effect=record_telnet_failure)
+            tailer = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+            with (
+                patch("apps.sevendays.Tailer", return_value=tailer),
+                patch("apps.sevendays.File_Utils.link"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Telnet failed to start"):
+                    await SevenDays.start(app)
+
+        app._relay.setup.assert_not_awaited()
+        app._relay.teardown.assert_awaited_once()
+        app._terminate.assert_awaited_once()
 
     async def test_discover_runtime_log_waits_for_delayed_timestamped_log(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -628,6 +871,33 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(discovered, runtime_log)
 
+    async def test_discover_runtime_log_uses_changed_static_log(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_log = root / "server_stdout.log"
+            runtime_log.write_text("old\n", encoding="utf-8")
+            previous_signature = runtime_log.stat()
+            baseline = {
+                runtime_log: (
+                    previous_signature.st_dev,
+                    previous_signature.st_ino,
+                    previous_signature.st_mtime_ns,
+                    previous_signature.st_size,
+                )
+            }
+
+            runtime_log.write_text("current runtime output\n", encoding="utf-8")
+            discovered = await _discover_sevendays_runtime_log(
+                directory=root,
+                server_log=runtime_log,
+                previous_log_signatures=baseline,
+                check_running=lambda: True,
+                timeout_seconds=0.0,
+                poll_seconds=0.0,
+            )
+
+        self.assertEqual(discovered, runtime_log)
+
     async def test_discover_runtime_log_does_not_reuse_previous_timestamped_log(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -645,6 +915,44 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIsNone(discovered)
+
+    async def test_stop_terminates_when_telnet_send_and_polling_cleanup_fail(self) -> None:
+        app = cast(Any, object.__new__(SevenDays))
+        app.name = "sevendays_demo"
+        app._running = True
+        app._relay = SimpleNamespace(
+            send=AsyncMock(side_effect=BrokenPipeError("closed")),
+            teardown=AsyncMock(),
+        )
+        app._players = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("poll failed")))
+        app._activities = SimpleNamespace(stop=AsyncMock())
+        app._tail = SimpleNamespace(stop=AsyncMock())
+        app._terminate = AsyncMock()
+
+        result = await SevenDays.stop(app)
+
+        self.assertTrue(result)
+        app._activities.stop.assert_awaited_once()
+        app._tail.stop.assert_awaited_once()
+        app._relay.teardown.assert_awaited_once()
+        app._terminate.assert_awaited_once()
+
+    async def test_kill_terminates_when_polling_cleanup_fails(self) -> None:
+        app = cast(Any, object.__new__(SevenDays))
+        app.name = "sevendays_demo"
+        app._running = True
+        app._relay = SimpleNamespace(teardown=AsyncMock())
+        app._players = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("poll failed")))
+        app._activities = SimpleNamespace(stop=AsyncMock())
+        app._tail = None
+        app._terminate = AsyncMock()
+
+        result = await SevenDays.kill(app)
+
+        self.assertTrue(result)
+        app._activities.stop.assert_awaited_once()
+        app._relay.teardown.assert_awaited_once()
+        app._terminate.assert_awaited_once()
 
 
 if __name__ == "__main__":

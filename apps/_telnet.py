@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Sequence
 
@@ -50,6 +51,7 @@ class TelnetClient:
         self._reader: None | asyncio.StreamReader = None
         self._writer: None | asyncio.StreamWriter = None
         self._setup_lock: asyncio.Lock = asyncio.Lock()
+        self._send_lock: asyncio.Lock = asyncio.Lock()
         self.connected_event: asyncio.Event = asyncio.Event()
         self._running: bool = False
 
@@ -58,9 +60,10 @@ class TelnetClient:
 
     async def setup(self) -> asyncio.StreamReader:
         async with self._setup_lock:
-            self.connected_event.set()
-            if self._reader:
+            if self.is_connected and self._reader is not None:
                 return self._reader
+
+            await self._teardown_locked()
 
             log.info(f"Telnet.setup @ {self._host}:{self._port}")
 
@@ -76,6 +79,7 @@ class TelnetClient:
                         asyncio.open_connection(self._host, self._port), timeout=10
                     )
                     self._running = True
+                    self.connected_event.set()
                     log.info("Telnet Connected")
                     return self._reader
                 except ConnectionRefusedError:
@@ -89,51 +93,68 @@ class TelnetClient:
 
             raise RuntimeError("Failed to connect to Telnet after max attempts")
 
-    async def teardown(self):
+    async def _teardown_locked(self) -> None:
         log.info("Telnet.teardown")
         self.connected_event.clear()
-        if not self._running:
-            return
-        if self._writer:
-            self._writer.close()
-            await self._writer.wait_closed()
-            self._writer = None
+        writer = self._writer
+        self._writer = None
         self._reader = None
         self._running = False
+        if writer is not None:
+            with contextlib.suppress(BrokenPipeError, ConnectionError, OSError, RuntimeError):
+                writer.close()
+                await writer.wait_closed()
         log.info("Telnet Disconnected")
 
-    async def send(self, string: str | Sequence[str]) -> bool | None:
-        if not self.is_connected:
-            if not self.app_alive():
-                log.debug("Telnet.send: App.Alive=False")
-                return None
-            await self.setup()
-            if not self.is_connected:
-                return False
+    async def teardown(self) -> None:
+        async with self._setup_lock:
+            await self._teardown_locked()
 
+    async def send(self, string: str | Sequence[str]) -> bool | None:
         def str_fmt(value: str) -> bytes:
             return f"{self._prefix}{value}{self._suffix}".encode(config.STR_ENCODE)
 
-        try:
-            if not config.SILENT_DEBUG:
-                log.debug(f"Sending Telnet command: {string!r}")
-            if not self._writer:
-                raise ConnectionError("Telnet.write: Not Connected")
-            if isinstance(string, str):
-                self._writer.write(str_fmt(string))
-            else:
-                for cmd in string:
-                    self._writer.write(str_fmt(cmd))
-            await self._writer.drain()
-            return True
-        except Exception as xcp:
-            log.warning(f"Telnet send failed: {xcp}")
-            await self.teardown()
+        async with self._send_lock:
+            for attempt in range(2):
+                if not self.is_connected:
+                    if not self.app_alive():
+                        log.debug("Telnet.send: App.Alive=False")
+                        return None
+                    try:
+                        await self.setup()
+                    except Exception as xcp:
+                        log.warning("Telnet reconnect failed: %s", xcp)
+                        return False
+
+                try:
+                    if not config.SILENT_DEBUG:
+                        log.debug(f"Sending Telnet command: {string!r}")
+                    writer = self._writer
+                    if writer is None:
+                        raise ConnectionError("Telnet.write: Not Connected")
+                    if isinstance(string, str):
+                        writer.write(str_fmt(string))
+                    else:
+                        for cmd in string:
+                            writer.write(str_fmt(cmd))
+                    await writer.drain()
+                    return True
+                except Exception as xcp:
+                    log.warning("Telnet send failed (attempt %s/2): %s", attempt + 1, xcp)
+                    await self.teardown()
             return False
 
     @property
     def is_connected(self) -> bool:
-        return self._reader is not None and self._writer is not None and self._running
+        reader = self._reader
+        writer = self._writer
+        return (
+            reader is not None
+            and writer is not None
+            and self._running
+            and not reader.at_eof()
+            and not writer.is_closing()
+        )
 
     @property
     def reader(self) -> asyncio.StreamReader | None:

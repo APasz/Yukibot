@@ -14,7 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias, assert_never, cast
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import hikari
@@ -80,6 +80,8 @@ from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
 from apps._updater import AppUpdateInfo, AppUpdateStatus
+from apps.minecraft import Minecraft, MinecraftRecipeBook, MinecraftRecipeMutation
+from apps.sevendays import SevenDays
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub
 from font_assets import font_assets
 from map_annotations import (
@@ -352,6 +354,7 @@ class NodeAppEntry:
     supports_console_actions: bool = False
     supports_chat: bool = False
     supports_updates: bool = False
+    supports_sevendays_sandbox_options: bool = False
     runtime_fault: AppRuntimeFault | None = None
     update_info: AppUpdateInfo | None = None
     update_status: AppUpdateStatus | None = None
@@ -397,6 +400,7 @@ class NodeAppEntry:
         supports_console_actions = payload.get("supports_console_actions", False)
         supports_chat = payload.get("supports_chat", False)
         supports_updates = payload.get("supports_updates", False)
+        supports_sevendays_sandbox_options = payload.get("supports_sevendays_sandbox_options", False)
         raw_runtime_fault = payload.get("runtime_fault")
         raw_update_info = payload.get("update_info")
         raw_update_status = payload.get("update_status")
@@ -451,6 +455,8 @@ class NodeAppEntry:
             raise ValueError("Node app entry supports_chat is invalid.")
         if not isinstance(supports_updates, bool):
             raise ValueError("Node app entry supports_updates is invalid.")
+        if not isinstance(supports_sevendays_sandbox_options, bool):
+            raise ValueError("Node app entry supports_sevendays_sandbox_options is invalid.")
         if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
             raise ValueError("Node app entry runtime_fault is invalid.")
         if raw_update_info is not None and not isinstance(raw_update_info, Mapping):
@@ -521,6 +527,7 @@ class NodeAppEntry:
             supports_console_actions=supports_console_actions,
             supports_chat=supports_chat,
             supports_updates=supports_updates,
+            supports_sevendays_sandbox_options=supports_sevendays_sandbox_options,
             runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
             if raw_runtime_fault is not None
             else None,
@@ -579,6 +586,7 @@ class NodeAppEntry:
             "supports_console_actions": self.supports_console_actions,
             "supports_chat": self.supports_chat,
             "supports_updates": self.supports_updates,
+            "supports_sevendays_sandbox_options": self.supports_sevendays_sandbox_options,
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
             "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
             "update_status": self.update_status.to_mapping() if self.update_status is not None else None,
@@ -599,6 +607,199 @@ class NodeAppEntry:
             "relay_advancements_enabled": self.relay_advancements_enabled,
             "relay_advancement_term": self.relay_advancement_term,
             "activity_providers": [provider.to_mapping() for provider in self.activity_providers],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeMinecraftRecipeBookState:
+    data_path: str
+    script_path: str
+    payload: dict[str, JsonValue] | None = None
+    load_error: str | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeMinecraftRecipeBookState":
+        data_path = _required_string(payload, "data_path")
+        script_path = _required_string(payload, "script_path")
+        raw_book_payload = payload.get("payload")
+        if raw_book_payload is not None and not isinstance(raw_book_payload, Mapping):
+            raise ValueError("Node Minecraft recipe book payload is invalid.")
+        load_error = _optional_string(payload, "load_error")
+        return cls(
+            data_path=data_path,
+            script_path=script_path,
+            payload=None if raw_book_payload is None else dict(cast(Mapping[str, JsonValue], raw_book_payload)),
+            load_error=load_error,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "data_path": self.data_path,
+            "script_path": self.script_path,
+            "payload": self.payload,
+            "load_error": self.load_error,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeMinecraftItemRegistryState:
+    data_path: str
+    file_exists: bool
+    payload: dict[str, JsonValue] | None = None
+    load_error: str | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeMinecraftItemRegistryState":
+        data_path = _required_string(payload, "data_path")
+        file_exists = _required_bool(payload, "file_exists")
+        raw_registry_payload = payload.get("payload")
+        if raw_registry_payload is not None and not isinstance(raw_registry_payload, Mapping):
+            raise ValueError("Node Minecraft item registry payload is invalid.")
+        load_error = _optional_string(payload, "load_error")
+        return cls(
+            data_path=data_path,
+            file_exists=file_exists,
+            payload=None if raw_registry_payload is None else dict(cast(Mapping[str, JsonValue], raw_registry_payload)),
+            load_error=load_error,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "data_path": self.data_path,
+            "file_exists": self.file_exists,
+            "payload": self.payload,
+            "load_error": self.load_error,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeMinecraftRecipeWorkspaceState:
+    recipe_book: NodeMinecraftRecipeBookState
+    item_registry: NodeMinecraftItemRegistryState
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeMinecraftRecipeWorkspaceState":
+        raw_recipe_book = payload.get("recipe_book")
+        raw_item_registry = payload.get("item_registry")
+        if not isinstance(raw_recipe_book, Mapping):
+            raise ValueError("Node Minecraft recipe workspace recipe_book is invalid.")
+        if not isinstance(raw_item_registry, Mapping):
+            raise ValueError("Node Minecraft recipe workspace item_registry is invalid.")
+        return cls(
+            recipe_book=NodeMinecraftRecipeBookState.from_mapping(cast(Mapping[str, object], raw_recipe_book)),
+            item_registry=NodeMinecraftItemRegistryState.from_mapping(cast(Mapping[str, object], raw_item_registry)),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "recipe_book": self.recipe_book.to_mapping(),
+            "item_registry": self.item_registry.to_mapping(),
+        }
+
+class NodeMinecraftRecipeMutationAction(StrEnum):
+    ADD = "add"
+    REPLACE = "replace"
+    DELETE = "delete"
+
+
+@dataclass(frozen=True, slots=True)
+class NodeMinecraftRecipeMutationRequest:
+    action: NodeMinecraftRecipeMutationAction
+    mutation_index: int | None = None
+    mutation: MinecraftRecipeMutation | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeMinecraftRecipeMutationRequest":
+        try:
+            action = NodeMinecraftRecipeMutationAction(_required_string(payload, "action"))
+        except ValueError as xcp:
+            raise ValueError("Node Minecraft recipe mutation action is invalid.") from xcp
+        raw_mutation_index = payload.get("mutation_index")
+        if raw_mutation_index is None:
+            mutation_index = None
+        elif isinstance(raw_mutation_index, bool) or not isinstance(raw_mutation_index, int):
+            raise ValueError("Node Minecraft recipe mutation index must be an integer when provided.")
+        elif raw_mutation_index < 0:
+            raise ValueError("Node Minecraft recipe mutation index must not be negative.")
+        else:
+            mutation_index = raw_mutation_index
+        raw_mutation = payload.get("mutation")
+        mutation: MinecraftRecipeMutation | None
+        if raw_mutation is None:
+            mutation = None
+        else:
+            if not isinstance(raw_mutation, Mapping):
+                raise ValueError("Node Minecraft recipe mutation payload is invalid.")
+            empty_recipe_book = MinecraftRecipeBook.empty()
+            recipe_book = MinecraftRecipeBook.from_mapping(
+                {
+                    "schema_version": empty_recipe_book.schema_version,
+                    "mutations": [dict(cast(Mapping[str, object], raw_mutation))],
+                }
+            )
+            if len(recipe_book.mutations) != 1:
+                raise ValueError("Node Minecraft recipe mutation payload must contain exactly one mutation.")
+            mutation = recipe_book.mutations[0]
+        if action is NodeMinecraftRecipeMutationAction.ADD:
+            if mutation is None:
+                raise ValueError("Node Minecraft recipe add requests require a mutation.")
+            if mutation_index is not None:
+                raise ValueError("Node Minecraft recipe add requests must not include a mutation index.")
+        elif action is NodeMinecraftRecipeMutationAction.REPLACE:
+            if mutation is None:
+                raise ValueError("Node Minecraft recipe replace requests require a mutation.")
+            if mutation_index is None:
+                raise ValueError("Node Minecraft recipe replace requests require a mutation index.")
+        elif action is NodeMinecraftRecipeMutationAction.DELETE:
+            if mutation_index is None:
+                raise ValueError("Node Minecraft recipe delete requests require a mutation index.")
+            if mutation is not None:
+                raise ValueError("Node Minecraft recipe delete requests must not include a mutation payload.")
+        else:
+            assert_never(action)
+        return cls(action=action, mutation_index=mutation_index, mutation=mutation)
+
+    def to_mapping(self) -> dict[str, object]:
+        payload: dict[str, object] = {"action": self.action.value}
+        if self.mutation_index is not None:
+            payload["mutation_index"] = self.mutation_index
+        if self.mutation is not None:
+            payload["mutation"] = self.mutation.to_mapping()
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class NodeMinecraftRecipeMutationResult:
+    app_name: str
+    app_friendly: str
+    node: str
+    message: str
+    workspace: NodeMinecraftRecipeWorkspaceState
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeMinecraftRecipeMutationResult":
+        app_name = _required_string(payload, "app_name")
+        app_friendly = _required_string(payload, "app_friendly")
+        node = _required_string(payload, "node")
+        message = _required_string(payload, "message")
+        raw_workspace = payload.get("workspace")
+        if not isinstance(raw_workspace, Mapping):
+            raise ValueError("Node Minecraft recipe mutation workspace is invalid.")
+        return cls(
+            app_name=app_name,
+            app_friendly=app_friendly,
+            node=node,
+            message=message,
+            workspace=NodeMinecraftRecipeWorkspaceState.from_mapping(cast(Mapping[str, object], raw_workspace)),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "message": self.message,
+            "workspace": self.workspace.to_mapping(),
         }
 
 
@@ -1043,6 +1244,34 @@ class NodeDiscordSettingsMutationResult:
             "node": self.node,
             "message": self.message,
             "settings": self.settings.model_dump(mode="json"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSevenDaysSandboxOptionsState:
+    data_path: str
+    file_exists: bool
+    payload: dict[str, JsonValue] | None = None
+    load_error: str | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeSevenDaysSandboxOptionsState":
+        raw_snapshot_payload = payload.get("payload")
+        if raw_snapshot_payload is not None and not isinstance(raw_snapshot_payload, Mapping):
+            raise ValueError("Node 7D2D sandbox options payload is invalid.")
+        return cls(
+            data_path=_required_string(payload, "data_path"),
+            file_exists=_required_bool(payload, "file_exists"),
+            payload=None if raw_snapshot_payload is None else dict(cast(Mapping[str, JsonValue], raw_snapshot_payload)),
+            load_error=_optional_string(payload, "load_error"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "data_path": self.data_path,
+            "file_exists": self.file_exists,
+            "payload": self.payload,
+            "load_error": self.load_error,
         }
 
 
@@ -3116,6 +3345,71 @@ class NodeApiService:
             app = self._resolve_app(app_name)
             return (await self.build_app_runtime_summary(app)).to_mapping()
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/sevendays/sandbox-options")
+        async def _sevendays_sandbox_options(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API 7D2D sandbox options request: node=%s app=%s", self.node_name, app_name)
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+            app = self._resolve_app(app_name)
+            return self.build_sevendays_sandbox_options_state(app).to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/minecraft/recipes")
+        async def _minecraft_recipe_workspace(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Minecraft recipe workspace request: node=%s app=%s", self.node_name, app_name)
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+            app = self._resolve_app(app_name)
+            return self.build_minecraft_recipe_workspace_state(app).to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/minecraft/recipes/mutations")
+        async def _mutate_minecraft_recipe(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Minecraft recipe mutation request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.APP_MANAGE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.APP_MANAGE,),
+                verified_grant=grant,
+            )
+            try:
+                mutation_request = NodeMinecraftRecipeMutationRequest.from_mapping(payload)
+            except ValueError as xcp:
+                raise _http_exception(400, str(xcp)) from xcp
+            app = self._resolve_app(app_name)
+            result = await self.mutate_minecraft_recipe_book(
+                app=app, mutation_request=mutation_request, actor_user_id=actor_user_id
+            )
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/minecraft/recipes/item-icon")
+        async def _minecraft_recipe_item_icon(
+            app_name: str,
+            item_id: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> Response:
+            traffic_log.info(
+                "Node API Minecraft recipe item icon request: node=%s app=%s item=%s",
+                self.node_name,
+                app_name,
+                item_id,
+            )
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+            app = self._resolve_app(app_name)
+            return await asyncio.to_thread(self.build_minecraft_item_icon_response, app, item_id=item_id)
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/manifest")
         async def _map_manifest(
             app_name: str,
@@ -4133,6 +4427,7 @@ class NodeApiService:
             supports_console_actions=bool(getattr(app, "supports_console_actions", False)),
             supports_chat=app.supports_chat_relay,
             supports_updates=update_info is not None,
+            supports_sevendays_sandbox_options=bool(getattr(app, "supports_sevendays_sandbox_options", False)),
             runtime_fault=getattr(app, "runtime_fault", None),
             update_info=update_info,
             update_status=update_status,
@@ -4166,6 +4461,169 @@ class NodeApiService:
                 )
                 for entry in activity_provider_entries
             ),
+        )
+
+    def build_minecraft_recipe_workspace_state(self, app: App) -> NodeMinecraftRecipeWorkspaceState:
+        if not isinstance(app, Minecraft):
+            raise _http_exception(404, f"App {app.name!r} does not expose Minecraft recipe data.")
+        recipe_data_path = ".yukibot/recipes.json"
+        recipe_script_path = "kubejs/server_scripts/yuki_recipes.js"
+        try:
+            recipe_book = app.load_kubejs_recipe_book()
+            recipe_book_payload: dict[str, JsonValue] | None = cast(dict[str, JsonValue], recipe_book.to_mapping())
+            recipe_book_load_error: str | None = None
+        except Exception as xcp:
+            recipe_book_payload = None
+            recipe_book_load_error = str(xcp) or type(xcp).__name__
+        item_registry_data_path = ".yukibot/registries/items.json"
+        item_registry_file_exists = app._resolve_existing_yukibot_data_path(
+            current_path=app._yukibot_item_registry_path(),
+            legacy_path=app._legacy_yukibot_item_registry_path(),
+        ).exists()
+        try:
+            item_registry = app.load_kubejs_item_registry()
+            item_registry_payload: dict[str, JsonValue] | None = cast(
+                dict[str, JsonValue], item_registry.to_mapping()
+            )
+            item_registry_load_error: str | None = None
+        except Exception as xcp:
+            item_registry_payload = None
+            item_registry_load_error = str(xcp) or type(xcp).__name__
+        return NodeMinecraftRecipeWorkspaceState(
+            recipe_book=NodeMinecraftRecipeBookState(
+                data_path=recipe_data_path,
+                script_path=recipe_script_path,
+                payload=recipe_book_payload,
+                load_error=recipe_book_load_error,
+            ),
+            item_registry=NodeMinecraftItemRegistryState(
+                data_path=item_registry_data_path,
+                file_exists=item_registry_file_exists,
+                payload=item_registry_payload,
+                load_error=item_registry_load_error,
+            ),
+        )
+
+    def build_sevendays_sandbox_options_state(self, app: App) -> NodeSevenDaysSandboxOptionsState:
+        if not isinstance(app, SevenDays):
+            raise _http_exception(404, f"App {app.name!r} does not expose 7D2D sandbox options.")
+        data_path = ".yukibot/sandbox_options.json"
+        file_exists = app.sandbox_options_file_exists
+        if not file_exists:
+            return NodeSevenDaysSandboxOptionsState(data_path=data_path, file_exists=False)
+        try:
+            snapshot = app.load_sandbox_options_snapshot()
+            snapshot_payload: dict[str, JsonValue] | None = cast(dict[str, JsonValue], snapshot.to_mapping())
+            load_error: str | None = None
+        except Exception as xcp:
+            snapshot_payload = None
+            load_error = str(xcp) or type(xcp).__name__
+        return NodeSevenDaysSandboxOptionsState(
+            data_path=data_path,
+            file_exists=file_exists,
+            payload=snapshot_payload,
+            load_error=load_error,
+        )
+
+    def build_minecraft_item_icon_response(self, app: App, *, item_id: str) -> Response:
+        if not isinstance(app, Minecraft):
+            raise _http_exception(404, f"App {app.name!r} does not expose Minecraft recipe item icons.")
+        try:
+            icon_path = app.resolve_minecraft_item_icon_path(item_id)
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        if icon_path is not None:
+            return FileResponse(
+                icon_path,
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=300"},
+            )
+        return Response(
+            content=self._minecraft_item_icon_placeholder_svg(item_id),
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=60"},
+        )
+
+    @staticmethod
+    def _minecraft_item_icon_placeholder_svg(item_id: str) -> str:
+        resource_text = item_id.strip().casefold()
+        item_tail = resource_text.rsplit(":", maxsplit=1)[-1].split("/")[-1]
+        condensed_tail = "".join(character for character in item_tail if character.isalnum())
+        badge_text = (condensed_tail[:2] or "??").upper()
+        return (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Minecraft item icon">'
+            '<rect width="64" height="64" fill="#0b0b10"/>'
+            '<rect x="3" y="3" width="58" height="58" fill="#17171f" stroke="#52525b" stroke-width="2"/>'
+            '<rect x="7" y="7" width="50" height="50" fill="#1f1a2b" stroke="#8b5cf6" stroke-opacity="0.42"/>'
+            f'<text x="32" y="38" fill="#ede9fe" font-size="18" font-family="monospace" text-anchor="middle">{badge_text}</text>'
+            "</svg>"
+        )
+
+    async def append_minecraft_recipe_mutation(
+        self,
+        *,
+        app: App,
+        mutation: MinecraftRecipeMutation,
+        actor_user_id: int,
+    ) -> NodeMinecraftRecipeMutationResult:
+        mutation_request = NodeMinecraftRecipeMutationRequest(
+            action=NodeMinecraftRecipeMutationAction.ADD,
+            mutation=mutation,
+        )
+        return await self.mutate_minecraft_recipe_book(
+            app=app,
+            mutation_request=mutation_request,
+            actor_user_id=actor_user_id,
+        )
+
+    async def mutate_minecraft_recipe_book(
+        self,
+        *,
+        app: App,
+        mutation_request: NodeMinecraftRecipeMutationRequest,
+        actor_user_id: int,
+    ) -> NodeMinecraftRecipeMutationResult:
+        if not isinstance(app, Minecraft):
+            raise _http_exception(404, f"App {app.name!r} does not expose Minecraft recipe data.")
+        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
+        try:
+            if mutation_request.action is NodeMinecraftRecipeMutationAction.ADD:
+                assert mutation_request.mutation is not None
+                app.append_kubejs_recipe_mutation(mutation_request.mutation)
+            elif mutation_request.action is NodeMinecraftRecipeMutationAction.REPLACE:
+                assert mutation_request.mutation_index is not None
+                assert mutation_request.mutation is not None
+                app.replace_kubejs_recipe_mutation(mutation_request.mutation_index, mutation_request.mutation)
+            elif mutation_request.action is NodeMinecraftRecipeMutationAction.DELETE:
+                assert mutation_request.mutation_index is not None
+                app.remove_kubejs_recipe_mutation(mutation_request.mutation_index)
+            else:
+                assert_never(mutation_request.action)
+        except IndexError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        except FileNotFoundError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+        except Exception as xcp:
+            raise _http_exception(500, f"Minecraft recipe mutation failed: {xcp}") from xcp
+        traffic_log.info(
+            "Node API Minecraft recipe mutation applied: node=%s app=%s actor=%s action=%s index=%s kind=%s",
+            self.node_name,
+            app.name,
+            actor_user_id,
+            mutation_request.action.value,
+            mutation_request.mutation_index,
+            None if mutation_request.mutation is None else mutation_request.mutation.to_mapping().get("kind"),
+        )
+        return NodeMinecraftRecipeMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            message=f"Saved Minecraft recipe change for {app.friendly}.",
+            workspace=self.build_minecraft_recipe_workspace_state(app),
         )
 
     def _cached_app_transition_state(self, app_name: str) -> NodeAppTransitionState:

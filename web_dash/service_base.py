@@ -32,8 +32,10 @@ from .runtime_imports import (
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
     NodeFontSourceSettingsMutationResult,
+    NodeMinecraftRecipeMutationResult,
     NodeModEntry,
     NodeModList,
+    NodeModMutationResult,
     NodeModUploadBatchResult,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -54,12 +56,15 @@ from .types import (
     ModWebAppTabDefinition,
     ModWebBasePageModel,
     ModWebHomeNodeSummary,
+    ModWebMinecraftItemRegistrySummary,
+    ModWebMinecraftRecipeBookSummary,
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
     ModWebOverviewPageModel,
     ModWebPageModel,
     ModWebSearchOption,
+    ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
@@ -114,6 +119,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_app_list_api_actions_enabled"]) -> Callable[..., bool]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_absolute_node_api_base_url"]) -> Callable[..., str]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_app_list_view_url"]) -> Callable[..., str]: ...
 
     @overload
@@ -150,6 +158,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_badge"]) -> Callable[..., Label]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_badge_class_name"]) -> Callable[..., str]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_badge_spec"]) -> Callable[..., Element]: ...
 
     @overload
@@ -182,6 +193,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_page_model_from_local_page_data"]) -> Callable[..., ModWebPageModel]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_current_node_link"]) -> Callable[..., ModWebNodeLink]: ...
 
     @overload
     def __getattr__(self, name: Literal["_build_system_title_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
@@ -217,6 +231,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_download_query"]) -> Callable[..., dict[str, object]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_default_mod_web_node_name"]) -> Callable[..., str]: ...
 
     @overload
     def __getattr__(self, name: Literal["_download_selection_label"]) -> Callable[..., str]: ...
@@ -268,6 +285,11 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(
+        self, name: Literal["_kubejs_recipe_addon_labels"]
+    ) -> Callable[[tuple[str, ...]], tuple[str, ...]]: ...
+
+    @overload
+    def __getattr__(
         self, name: Literal["_home_app_sections"]
     ) -> Callable[..., Awaitable[tuple[ModWebNodeAppSection, ...]]]: ...
 
@@ -314,6 +336,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_mutate_app"]) -> Callable[..., Awaitable[NodeAppMutationResult]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_mutate_mod"]) -> Callable[..., Awaitable[NodeModMutationResult]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_node_capacity"]) -> Callable[..., Awaitable[config.NodeCapacityProfile]]: ...
@@ -374,10 +399,28 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_register_client_cleanup"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_resolved_app_color_hex"]) -> Callable[..., str | None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_register_routes"]) -> Callable[[ModWebFastApiApp, ModWebRouteUi], None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_register_timer_cleanup"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_append_minecraft_recipe_mutation"]
+    ) -> Callable[..., Awaitable[NodeMinecraftRecipeMutationResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_replace_minecraft_recipe_mutation"]
+    ) -> Callable[..., Awaitable[NodeMinecraftRecipeMutationResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_delete_minecraft_recipe_mutation"]
+    ) -> Callable[..., Awaitable[NodeMinecraftRecipeMutationResult]]: ...
 
     @overload
     def __getattr__(
@@ -450,6 +493,11 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_mod_list"]) -> Callable[..., NodeModList]: ...
 
     @overload
+    def __getattr__(
+        self, name: Literal["_remote_minecraft_recipe_summaries"]
+    ) -> Callable[..., tuple[ModWebMinecraftRecipeBookSummary, ModWebMinecraftItemRegistrySummary]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_remote_mod_uploads"]) -> Callable[..., NodeModUploadBatchResult]: ...
 
     @overload
@@ -500,6 +548,11 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_setting_list"]) -> Callable[..., NodeSettingList]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_sevendays_sandbox_options_summary"]
+    ) -> Callable[..., ModWebSevenDaysSandboxOptionsSummary]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_setting_write"]) -> Callable[..., NodeSettingMutationResult]: ...
@@ -650,6 +703,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_set_badge_state"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_run_node_presence_badges_javascript"]) -> Callable[..., None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_set_html_tooltip_state"]) -> Callable[..., None]: ...
 
     @overload
@@ -699,6 +755,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_upload_mods"]) -> Callable[..., Awaitable[NodeModUploadBatchResult]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_warn_page_section_load_failure"]) -> Callable[..., None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_user_avatar_markup"]) -> Callable[..., str]: ...

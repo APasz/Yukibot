@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 import hikari
 import requests
 from fastapi import HTTPException, Request, WebSocketDisconnect
+from fastapi.responses import FileResponse
 
 import config
 from _manager import AppStartBlocker, AppStartBlockerKind
@@ -46,6 +47,15 @@ from apps._updater import (
     AppUpdateStatus,
     Update_Manager,
 )
+from apps.minecraft import (
+    Minecraft,
+    MinecraftItemRegistrySnapshot,
+    MinecraftRecipeBook,
+    MinecraftRecipeIngredient,
+    MinecraftRecipeItemStack,
+    MinecraftShapelessRecipe,
+)
+from apps.sevendays import SevenDays, SevenDaysSandboxOption, SevenDaysSandboxOptionsSnapshot
 from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore, SatisfactoryServerState
 from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
 from map_annotations import MapAnnotationDraft
@@ -71,6 +81,10 @@ from node_api import (
     NodeDiscordSettingsMutationResult,
     NodeDownloadRequest,
     NodeFontSourceSettingsMutationResult,
+    NodeMinecraftRecipeMutationResult,
+    NodeMinecraftRecipeMutationAction,
+    NodeMinecraftRecipeMutationRequest,
+    NodeMinecraftRecipeWorkspaceState,
     NodeModMutationAction,
     NodeModMutationResult,
     NodeModUploadBatchResult,
@@ -79,6 +93,7 @@ from node_api import (
     NodeRelayTTSRequest,
     NodeSaveList,
     NodeSaveMutationResult,
+    NodeSevenDaysSandboxOptionsState,
     NodeSettingEntry,
     NodeSettingList,
     NodeStateStreamEvent,
@@ -604,6 +619,212 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(len(entries), 1)
         self.assertTrue(entries[0].supports_console_actions)
+
+    def test_build_minecraft_recipe_workspace_state_reads_managed_recipe_and_registry_data(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            recipe_book_path = directory / ".yukibot" / "recipes.json"
+            recipe_book_path.parent.mkdir(parents=True)
+            recipe_book_path.write_text(
+                json.dumps(
+                    MinecraftRecipeBook(
+                        mutations=(),
+                    ).to_mapping()
+                ),
+                encoding="utf-8",
+            )
+            item_registry_path = directory / ".yukibot" / "registries" / "items.json"
+            item_registry_path.parent.mkdir(parents=True)
+            item_registry_path.write_text(
+                json.dumps(
+                    MinecraftItemRegistrySnapshot(
+                        generated_at_epoch_ms=1234567890,
+                        item_ids=("minecraft:stone",),
+                    ).to_mapping()
+                ),
+                encoding="utf-8",
+            )
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            service = NodeApiService()
+
+            workspace_state = service.build_minecraft_recipe_workspace_state(cast(App, app))
+
+        self.assertEqual(workspace_state.recipe_book.data_path, ".yukibot/recipes.json")
+        self.assertEqual(workspace_state.recipe_book.script_path, "kubejs/server_scripts/yuki_recipes.js")
+        self.assertIsNotNone(workspace_state.recipe_book.payload)
+        self.assertEqual(workspace_state.item_registry.data_path, ".yukibot/registries/items.json")
+        self.assertTrue(workspace_state.item_registry.file_exists)
+        self.assertIsNotNone(workspace_state.item_registry.payload)
+        self.assertEqual(
+            cast(dict[str, object], workspace_state.item_registry.payload).get("item_ids"),
+            ["minecraft:stone"],
+        )
+
+    def test_build_sevendays_sandbox_options_state_reads_persisted_dataset(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(SevenDays)
+            app.name = "sevendays_alpha"
+            app.directory = directory
+            app.save_sandbox_options_snapshot(
+                SevenDaysSandboxOptionsSnapshot(
+                    generated_at="2026-06-26T10:17:36",
+                    sandbox_code="AACK",
+                    app_version="3.0:259",
+                    options=(
+                        SevenDaysSandboxOption(
+                            section="General",
+                            key="BlockDamage",
+                            value_index=10,
+                            value_label="200%",
+                            default_index=7,
+                            default_label="100%",
+                        ),
+                    ),
+                )
+            )
+
+            state = NodeApiService().build_sevendays_sandbox_options_state(cast(App, app))
+
+        self.assertEqual(state.data_path, ".yukibot/sandbox_options.json")
+        self.assertTrue(state.file_exists)
+        self.assertIsNotNone(state.payload)
+        assert state.payload is not None
+        self.assertEqual(state.payload["sandbox_code"], "AACK")
+
+    def test_node_sevendays_sandbox_options_state_round_trips_mapping(self) -> None:
+        state = NodeSevenDaysSandboxOptionsState(
+            data_path=".yukibot/sandbox_options.json",
+            file_exists=True,
+            payload={
+                "schema_version": 1,
+                "generated_at": "2026-06-26T10:17:36",
+                "sandbox_code": "AACK",
+                "app_version": "3.0:259",
+                "options": (),
+            },
+        )
+
+        parsed = NodeSevenDaysSandboxOptionsState.from_mapping(state.to_mapping())
+
+        self.assertEqual(parsed, state)
+
+    def test_build_minecraft_item_icon_response_returns_png_file_when_icon_exists(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            asset_path = directory / "kubejs" / "assets" / "minecraft" / "textures" / "item" / "dirt.png"
+            asset_path.parent.mkdir(parents=True, exist_ok=True)
+            asset_path.write_bytes(b"png-bits")
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(Any, SimpleNamespace(list_mods=lambda state=None: []))
+
+            response = NodeApiService().build_minecraft_item_icon_response(cast(App, app), item_id="minecraft:dirt")
+
+        self.assertIsInstance(response, FileResponse)
+        assert isinstance(response, FileResponse)
+        self.assertEqual(response.media_type, "image/png")
+        self.assertEqual(Path(response.path), directory / ".yukibot" / "assets" / "item_icons" / "minecraft" / "dirt.png")
+
+    def test_build_minecraft_item_icon_response_returns_svg_placeholder_when_icon_is_missing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(Any, SimpleNamespace(list_mods=lambda state=None: []))
+
+            response = NodeApiService().build_minecraft_item_icon_response(cast(App, app), item_id="minecraft:dirt")
+
+        self.assertEqual(response.media_type, "image/svg+xml")
+        self.assertIn("<svg", response.body.decode("utf-8"))
+
+    def test_append_minecraft_recipe_mutation_persists_and_returns_workspace_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.friendly = "Minecraft Alpha"
+            app.directory = directory
+            app.mods = cast(Any, SimpleNamespace(list_mods=lambda state=None: []))
+            service = NodeApiService()
+            acl = Access_Control()
+            acl._roles[0] = Power_Level.sudo
+            service.set_acl(acl)
+
+            result = asyncio.run(
+                service.append_minecraft_recipe_mutation(
+                    app=cast(App, app),
+                    mutation=MinecraftShapelessRecipe(
+                        output=MinecraftRecipeItemStack("minecraft:gravel"),
+                        ingredients=(MinecraftRecipeIngredient.item("minecraft:flint"),),
+                        recipe_id="kubejs:flint_to_gravel",
+                    ),
+                    actor_user_id=0,
+                )
+            )
+
+        self.assertIsInstance(result, NodeMinecraftRecipeMutationResult)
+        self.assertEqual(result.app_name, "minecraft_alpha")
+        self.assertEqual(result.workspace.recipe_book.data_path, ".yukibot/recipes.json")
+        self.assertIsNotNone(result.workspace.recipe_book.payload)
+        recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], result.workspace.recipe_book.payload))
+        self.assertEqual(len(recipe_book.mutations), 1)
+        self.assertEqual(recipe_book.mutations[0].to_mapping()["id"], "kubejs:flint_to_gravel")
+
+    def test_mutate_minecraft_recipe_book_replaces_and_deletes_by_index(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.friendly = "Minecraft Alpha"
+            app.directory = directory
+            app.mods = cast(Any, SimpleNamespace(list_mods=lambda state=None: []))
+            app.append_kubejs_recipe_mutation(
+                MinecraftShapelessRecipe(
+                    output=MinecraftRecipeItemStack("minecraft:gravel"),
+                    ingredients=(MinecraftRecipeIngredient.item("minecraft:flint"),),
+                    recipe_id="kubejs:flint_to_gravel",
+                )
+            )
+            service = NodeApiService()
+            acl = Access_Control()
+            acl._roles[0] = Power_Level.sudo
+            service.set_acl(acl)
+
+            replace_result = asyncio.run(
+                service.mutate_minecraft_recipe_book(
+                    app=cast(App, app),
+                    mutation_request=NodeMinecraftRecipeMutationRequest(
+                        action=NodeMinecraftRecipeMutationAction.REPLACE,
+                        mutation_index=0,
+                        mutation=MinecraftShapelessRecipe(
+                            output=MinecraftRecipeItemStack("minecraft:sand"),
+                            ingredients=(MinecraftRecipeIngredient.item("minecraft:gravel"),),
+                            recipe_id="kubejs:gravel_to_sand",
+                        ),
+                    ),
+                    actor_user_id=0,
+                )
+            )
+            delete_result = asyncio.run(
+                service.mutate_minecraft_recipe_book(
+                    app=cast(App, app),
+                    mutation_request=NodeMinecraftRecipeMutationRequest(
+                        action=NodeMinecraftRecipeMutationAction.DELETE,
+                        mutation_index=0,
+                    ),
+                    actor_user_id=0,
+                )
+            )
+
+        replaced_recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], replace_result.workspace.recipe_book.payload))
+        deleted_recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], delete_result.workspace.recipe_book.payload))
+        self.assertEqual(replaced_recipe_book.mutations[0].to_mapping()["id"], "kubejs:gravel_to_sand")
+        self.assertEqual(deleted_recipe_book.mutations, ())
 
     def test_single_mod_download_url_is_signed_and_escaped(self) -> None:
         server = replace(

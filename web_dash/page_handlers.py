@@ -20,6 +20,7 @@ from .runtime_imports import (
     NodeSystemSummary,
     Power_Level,
     Request,
+    app_scope_from_name,
     asyncio,
     cast,
     config,
@@ -29,10 +30,13 @@ from .service_base import ModWebServiceSupport
 from .types import (
     ModWebAppLink,
     ModWebBasePageModel,
+    ModWebMinecraftItemRegistrySummary,
+    ModWebMinecraftRecipeBookSummary,
     ModWebNodeAppSection,
     ModWebNodeLink,
-    ModWebPageLoadWarning,
     ModWebNodeStatus,
+    ModWebPageLoadWarning,
+    ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
 )
 
@@ -175,11 +179,14 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             latest = await self._remote_node_system_summary_async(node, user)
             return self._build_system_title_stats(latest)
 
-        subscribe_node_state_updates = lambda on_update: self._create_remote_node_state_subscription(
-            node=node,
-            user=user,
-            on_update=on_update,
-        )
+        def subscribe_node_state_updates(
+            on_update: Callable[[NodeStateStreamEvent], None],
+        ) -> Callable[[], None]:
+            return self._create_remote_node_state_subscription(
+                node=node,
+                user=user,
+                on_update=on_update,
+            )
 
         self._render_node_apps_page(
             ui=ui,
@@ -298,8 +305,31 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 settings = cast(NodeSettingList | None, remote_results[4])
                 console_actions = cast(NodeConsoleActionList | None, remote_results[5])
                 system_summary = cast(NodeSystemSummary | None, remote_results[6])
+                minecraft_scope = (
+                    app_entry.scope.casefold()
+                    if isinstance(app_entry.scope, str) and app_entry.scope.strip()
+                    else app_scope_from_name(app_entry.name)
+                )
+                minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None
+                minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None
+                if minecraft_scope == "minecraft":
+                    minecraft_recipes, minecraft_item_registry = await asyncio.to_thread(
+                        self._remote_minecraft_recipe_summaries,
+                        node,
+                        app_name,
+                        user,
+                    )
+                sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None
+                if minecraft_scope == "sevendays":
+                    sevendays_sandbox_options = await asyncio.to_thread(
+                        self._remote_sevendays_sandbox_options_summary,
+                        node,
+                        app_name,
+                        user,
+                    )
                 model = self._remote_page_model(
                     node=node,
+                    app_scope=app_entry.scope,
                     mods=mods,
                     supports_configs=app_entry.supports_configs,
                     config_read_level=app_entry.config_read_level,
@@ -336,6 +366,9 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     relay_advancement_term=app_entry.relay_advancement_term,
                     activity_providers=app_entry.activity_providers,
                     load_warnings=tuple(load_warnings),
+                    minecraft_recipes=minecraft_recipes,
+                    minecraft_item_registry=minecraft_item_registry,
+                    sevendays_sandbox_options=sevendays_sandbox_options,
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=mods.app_name,
                         app_stats=mods.app_stats,
@@ -456,6 +489,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     node=node,
                     app_name=app_entry.name,
                     app_friendly=app_entry.friendly,
+                    app_scope=app_entry.scope,
                     app_color_hex=resolved_app_color_hex,
                     supports_configs=app_entry.supports_configs,
                     config_read_level=app_entry.config_read_level,

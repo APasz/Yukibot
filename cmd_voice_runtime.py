@@ -280,6 +280,7 @@ class VoiceTTSRuntimeMixin:
             content,
             attachment_count=len(event.message.attachments),
             sticker_count=len(event.message.stickers),
+            sticker_names=self._sticker_speech_fragments(event.message.stickers),
             is_reply=self._is_reply_message(event.message),
             is_forward=self._is_forward_message(event.message),
             forwarded_content=self._forwarded_snapshot_speech_input(event.message, event.author_id, event.guild_id),
@@ -343,6 +344,7 @@ class VoiceTTSRuntimeMixin:
         *,
         attachment_count: int,
         sticker_count: int = 0,
+        sticker_names: Iterable[str] = (),
         is_reply: bool = False,
         is_forward: bool = False,
         forwarded_content: str = "",
@@ -351,6 +353,7 @@ class VoiceTTSRuntimeMixin:
             raw_content,
             attachment_count=attachment_count,
             sticker_count=sticker_count,
+            sticker_names=sticker_names,
         )
         forwarded = forwarded_content.strip()
         if forwarded:
@@ -376,10 +379,15 @@ class VoiceTTSRuntimeMixin:
         *,
         attachment_count: int,
         sticker_count: int = 0,
+        sticker_names: Iterable[str] = (),
         include_extras_with_content: bool = False,
     ) -> str:
         content = raw_content.strip()
-        extras = cls._message_extra_speech(attachment_count=attachment_count, sticker_count=sticker_count)
+        extras = cls._message_extra_speech(
+            attachment_count=attachment_count,
+            sticker_count=sticker_count,
+            sticker_names=sticker_names,
+        )
         if content:
             if extras and include_extras_with_content:
                 return f"{content}, {extras}"
@@ -387,12 +395,20 @@ class VoiceTTSRuntimeMixin:
         return extras
 
     @staticmethod
-    def _message_extra_speech(*, attachment_count: int, sticker_count: int) -> str:
+    def _message_extra_speech(
+        *,
+        attachment_count: int,
+        sticker_count: int,
+        sticker_names: Iterable[str] = (),
+    ) -> str:
         extras: list[str] = []
         if attachment_count > 0:
             extras.append("attachment" if attachment_count == 1 else f"{attachment_count} attachments")
-        if sticker_count > 0:
-            extras.append("sticker" if sticker_count == 1 else f"{sticker_count} stickers")
+        resolved_sticker_names = tuple(name for name in sticker_names if name)
+        extras.extend(resolved_sticker_names)
+        remaining_sticker_count = max(0, sticker_count - len(resolved_sticker_names))
+        if remaining_sticker_count > 0:
+            extras.append("sticker" if remaining_sticker_count == 1 else f"{remaining_sticker_count} stickers")
         return ", ".join(extras)
 
     @staticmethod
@@ -403,6 +419,37 @@ class VoiceTTSRuntimeMixin:
             return len(cast(Sized, value))
         except TypeError:
             return 0
+
+    @classmethod
+    def _sticker_speech_fragments(cls, stickers: object) -> tuple[str, ...]:
+        if stickers is None or stickers is hikari.UNDEFINED:
+            return ()
+        try:
+            sticker_items = tuple(cast(Iterable[object], stickers))
+        except TypeError:
+            return ()
+
+        fragments: list[str] = []
+        for sticker in sticker_items:
+            raw_name = getattr(sticker, "name", None)
+            if not isinstance(raw_name, str):
+                continue
+            fragment = cls._sticker_name_to_speech_fragment(raw_name)
+            if fragment:
+                fragments.append(fragment)
+        return tuple(fragments)
+
+    @staticmethod
+    def _sticker_name_to_speech_fragment(raw_name: str) -> str | None:
+        cleaned_name = re.sub(r"\s+", " ", raw_name).strip()
+        if not cleaned_name:
+            return None
+
+        tag_name = re.sub(r"[^a-z0-9_+\-]+", "_", cleaned_name.casefold())
+        tag_name = re.sub(r"_+", "_", tag_name).strip("_")
+        if tag_name:
+            return f":{tag_name}:"
+        return cleaned_name
 
     def _forwarded_snapshot_speech_input(
         self,
@@ -433,6 +480,7 @@ class VoiceTTSRuntimeMixin:
                 content,
                 attachment_count=self._collection_size(getattr(snapshot, "attachments", None)),
                 sticker_count=self._collection_size(getattr(snapshot, "stickers", None)),
+                sticker_names=self._sticker_speech_fragments(getattr(snapshot, "stickers", None)),
                 include_extras_with_content=True,
             )
             if rendered:

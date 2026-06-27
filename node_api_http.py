@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -74,7 +74,7 @@ class NodeApiHttpService:
                 return
 
             @asynccontextmanager
-            async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+            async def _lifespan(_: FastAPI) -> AsyncGenerator[None]:
                 self._startup_signal.set()
                 log.info("Node API startup event received")
                 yield

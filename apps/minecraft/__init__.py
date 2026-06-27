@@ -7,12 +7,13 @@ import logging
 import re
 import shlex
 import tempfile
+import zipfile
 from asyncio.locks import Event
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from pathlib import Path
-from typing import cast
+from pathlib import Path, PurePosixPath
+from typing import TypeAlias, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlsplit, urlunsplit
 
 import hikari
@@ -35,7 +36,14 @@ from _discord import (
 from _file import File_Utils
 from _minecraft_heads import minecraft_avatar_uri
 from _security import Power_Level
-from apps._app import AM_Receiver, App, AppActivityProvider, AppActivityProviderMetadata, AppRuntimeFaultKind, RelayAdvancementTerms
+from apps._app import (
+    AM_Receiver,
+    App,
+    AppActivityProvider,
+    AppActivityProviderMetadata,
+    AppRuntimeFaultKind,
+    RelayAdvancementTerms,
+)
 from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType, normalise_app_version
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
@@ -248,10 +256,25 @@ _MINECRAFT_MOD_VERSION_RE_PATTERNS = (
 )
 _MINECRAFT_MOD_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
 _KUBEJS_MOD_BASE_NAME = "kubejs"
+_YUKIBOT_DATA_RELATIVE_PATH = Path(".yukibot")
+_LEGACY_YUKIBOT_DATA_RELATIVE_PATH = Path("yukibot")
+_YUKIBOT_ASSETS_RELATIVE_PATH = _YUKIBOT_DATA_RELATIVE_PATH / "assets"
+_LEGACY_YUKIBOT_ASSETS_RELATIVE_PATH = _LEGACY_YUKIBOT_DATA_RELATIVE_PATH / "assets"
+_YUKIBOT_REGISTRIES_RELATIVE_PATH = _YUKIBOT_DATA_RELATIVE_PATH / "registries"
+_LEGACY_YUKIBOT_REGISTRIES_RELATIVE_PATH = _LEGACY_YUKIBOT_DATA_RELATIVE_PATH / "registries"
+_YUKIBOT_ITEM_ICONS_RELATIVE_PATH = _YUKIBOT_ASSETS_RELATIVE_PATH / "item_icons"
+_LEGACY_YUKIBOT_ITEM_ICONS_RELATIVE_PATH = _LEGACY_YUKIBOT_ASSETS_RELATIVE_PATH / "item_icons"
+_YUKIBOT_RECIPES_FILE_NAME = "recipes.json"
+_YUKIBOT_ITEM_REGISTRY_FILE_NAME = "items.json"
 _KUBEJS_SERVER_SCRIPTS_RELATIVE_PATH = Path("kubejs/server_scripts")
 _KUBEJS_YUKI_LOG_SCRIPT_NAME = "yuki_log.js"
+_KUBEJS_YUKI_RECIPES_SCRIPT_NAME = "yuki_recipes.js"
+_KUBEJS_YUKI_ITEM_REGISTRY_SCRIPT_NAME = "yuki_item_registry.js"
 _KUBEJS_YUKI_LOG_SOURCE_PATH = (
     Path(__file__).resolve().parents[2] / "resources" / "minecraft" / "kubejs" / _KUBEJS_YUKI_LOG_SCRIPT_NAME
+)
+_KUBEJS_YUKI_ITEM_REGISTRY_SOURCE_PATH = (
+    Path(__file__).resolve().parents[2] / "resources" / "minecraft" / "kubejs" / _KUBEJS_YUKI_ITEM_REGISTRY_SCRIPT_NAME
 )
 _KUBEJS_YUKI_LOG_FALLBACK_SOURCE = """var PREFIX = '[YUKI_MC_EVENT] '
 
@@ -324,7 +347,26 @@ EntityEvents.death(function (event) {
     })
 })
 """
+_KUBEJS_YUKI_ITEM_REGISTRY_FALLBACK_SOURCE = """const YUKIBOT_ITEM_REGISTRY_OUTPUT_PATH = '.yukibot/registries/items.json'
+const YUKIBOT_ITEM_REGISTRY_SCHEMA_VERSION = 1
+const BuiltInRegistries = Java.loadClass('net.minecraft.core.registries.BuiltInRegistries')
+
+const itemIds = []
+
+BuiltInRegistries.ITEM.keySet().forEach(id => {
+    itemIds.push(String(id))
+})
+
+itemIds.sort()
+JsonIO.write(YUKIBOT_ITEM_REGISTRY_OUTPUT_PATH, {
+    schema_version: YUKIBOT_ITEM_REGISTRY_SCHEMA_VERSION,
+    generated_at_epoch_ms: Date.now(),
+    item_ids: itemIds
+})
+console.info(`[YUKI_MC_ITEM_REGISTRY] wrote ${itemIds.length} item ids to ${YUKIBOT_ITEM_REGISTRY_OUTPUT_PATH}`)
+"""
 _KUBEJS_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
+_ALMOST_UNIFIED_MOD_BASE_NAME = "almostunified"
 _KUBEJS_SCRIPT_LOADED_RE = re.compile(
     r"\[KubeJS Server/\]:\s+Loaded script server_scripts:yuki_log\.js\b",
     re.IGNORECASE,
@@ -372,6 +414,715 @@ class MinecraftLoader(enum.StrEnum):
         if self is MinecraftLoader.LEGACY_FABRIC:
             return "Legacy Fabric"
         return self.title()
+
+
+class MinecraftRecipeKind(enum.StrEnum):
+    SHAPELESS = "shapeless"
+    SHAPED = "shaped"
+    SMELTING = "smelting"
+    BLASTING = "blasting"
+    SMOKING = "smoking"
+    CAMPFIRE_COOKING = "campfire_cooking"
+    STONECUTTING = "stonecutting"
+
+    @property
+    def kubejs_method(self) -> str:
+        if self is MinecraftRecipeKind.CAMPFIRE_COOKING:
+            return "campfireCooking"
+        return self.value
+
+    @property
+    def recipe_type_id(self) -> str:
+        if self is MinecraftRecipeKind.SHAPED:
+            return "minecraft:crafting_shaped"
+        if self is MinecraftRecipeKind.SHAPELESS:
+            return "minecraft:crafting_shapeless"
+        return f"minecraft:{self.value}"
+
+
+class MinecraftRecipeUnificationMode(enum.StrEnum):
+    DISABLED = "disabled"
+    EXPECTED_PRESENT = "expected_present"
+    ADDED_LATER = "added_later"
+
+
+class KubeJsRecipeAddonKind(enum.StrEnum):
+    CREATE = "create"
+    IMMERSIVE_ENGINEERING = "immersive_engineering"
+
+    @property
+    def display_name(self) -> str:
+        if self is KubeJsRecipeAddonKind.CREATE:
+            return "KubeJS Create"
+        if self is KubeJsRecipeAddonKind.IMMERSIVE_ENGINEERING:
+            return "KubeJS Immersive Engineering"
+        return self.value.replace("_", " ").title()
+
+
+_KUBEJS_RECIPE_ADDON_BASE_NAMES: Mapping[str, KubeJsRecipeAddonKind] = {
+    "kubejs-create": KubeJsRecipeAddonKind.CREATE,
+    "kubejs-immersive-engineering": KubeJsRecipeAddonKind.IMMERSIVE_ENGINEERING,
+    "kubejs-immersiveengineering": KubeJsRecipeAddonKind.IMMERSIVE_ENGINEERING,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class KubeJsRecipeAddonCapability:
+    kind: KubeJsRecipeAddonKind
+    mod_name: str
+
+    @property
+    def display_name(self) -> str:
+        return self.kind.display_name
+
+
+@dataclass(frozen=True, slots=True)
+class KubeJsRecipeSupportStatus:
+    kubejs_enabled: bool
+    script_path: Path
+    script_exists: bool
+    addons: tuple[KubeJsRecipeAddonCapability, ...] = ()
+    unification_mode: MinecraftRecipeUnificationMode = MinecraftRecipeUnificationMode.DISABLED
+
+    @property
+    def addon_display_names(self) -> tuple[str, ...]:
+        return tuple(addon.display_name for addon in self.addons)
+
+
+class MinecraftRecipeIngredientKind(enum.StrEnum):
+    ITEM = "item"
+    TAG = "tag"
+
+
+_MINECRAFT_RESOURCE_LOCATION_RE = re.compile(r"^[a-z0-9_.-]+:[a-z0-9_./-]+$")
+_MINECRAFT_NAMESPACE_RE = re.compile(r"^[a-z0-9_.-]+$")
+
+
+def _normalise_minecraft_resource_location(raw: str, *, field_name: str) -> str:
+    text = raw.strip().casefold()
+    if _MINECRAFT_RESOURCE_LOCATION_RE.fullmatch(text) is None:
+        raise ValueError(f"{field_name} must be a namespaced Minecraft id.")
+    return text
+
+
+def _normalise_minecraft_namespace(raw: str, *, field_name: str) -> str:
+    text = raw.strip().casefold()
+    if _MINECRAFT_NAMESPACE_RE.fullmatch(text) is None:
+        raise ValueError(f"{field_name} must be a Minecraft namespace.")
+    return text
+
+
+def _normalise_recipe_count(raw: int, *, field_name: str, maximum: int = 64) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise TypeError(f"{field_name} must be an integer.")
+    if raw < 1 or raw > maximum:
+        raise ValueError(f"{field_name} must be between 1 and {maximum}.")
+    return raw
+
+
+def _kubejs_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def _recipe_mapping(raw: object, *, label: str) -> Mapping[str, object]:
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{label} must be an object.")
+    return raw
+
+
+def _recipe_sequence(raw: object, *, label: str) -> Sequence[object]:
+    if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
+        raise ValueError(f"{label} must be a list.")
+    return raw
+
+
+def _required_recipe_string(payload: Mapping[str, object], key: str, *, label: str) -> str:
+    raw = payload.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{label} {key!r} must be a non-empty string.")
+    return raw
+
+
+def _optional_recipe_string(payload: Mapping[str, object], key: str, *, label: str) -> str | None:
+    raw = payload.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{label} {key!r} must be a non-empty string when provided.")
+    return raw
+
+
+def _optional_recipe_int(payload: Mapping[str, object], key: str, *, label: str) -> int | None:
+    raw = payload.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ValueError(f"{label} {key!r} must be an integer when provided.")
+    return raw
+
+
+def _optional_recipe_float(payload: Mapping[str, object], key: str, *, label: str) -> float | None:
+    raw = payload.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        raise ValueError(f"{label} {key!r} must be a number when provided.")
+    return float(raw)
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftRecipeIngredient:
+    kind: MinecraftRecipeIngredientKind
+    resource_id: str
+    count: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "resource_id",
+            _normalise_minecraft_resource_location(self.resource_id, field_name="recipe ingredient"),
+        )
+        object.__setattr__(self, "count", _normalise_recipe_count(self.count, field_name="recipe ingredient count"))
+
+    @classmethod
+    def item(cls, item_id: str, *, count: int = 1) -> "MinecraftRecipeIngredient":
+        return cls(MinecraftRecipeIngredientKind.ITEM, item_id, count=count)
+
+    @classmethod
+    def tag(cls, tag_id: str, *, count: int = 1) -> "MinecraftRecipeIngredient":
+        return cls(MinecraftRecipeIngredientKind.TAG, tag_id, count=count)
+
+    @property
+    def kubejs_value(self) -> str:
+        resource_text = self.resource_id if self.kind is MinecraftRecipeIngredientKind.ITEM else f"#{self.resource_id}"
+        if self.count == 1:
+            return resource_text
+        return f"{self.count}x {resource_text}"
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftRecipeIngredient":
+        raw_kind = _required_recipe_string(payload, "kind", label="recipe ingredient")
+        kind = MinecraftRecipeIngredientKind(raw_kind)
+        count = _optional_recipe_int(payload, "count", label="recipe ingredient")
+        return cls(
+            kind=kind,
+            resource_id=_required_recipe_string(payload, "id", label="recipe ingredient"),
+            count=1 if count is None else count,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "kind": self.kind.value,
+            "id": self.resource_id,
+            "count": self.count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftRecipeItemStack:
+    item_id: str
+    count: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "item_id",
+            _normalise_minecraft_resource_location(self.item_id, field_name="recipe output"),
+        )
+        object.__setattr__(self, "count", _normalise_recipe_count(self.count, field_name="recipe output count"))
+
+    @property
+    def kubejs_value(self) -> str:
+        if self.count == 1:
+            return self.item_id
+        return f"{self.count}x {self.item_id}"
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftRecipeItemStack":
+        count = _optional_recipe_int(payload, "count", label="recipe output")
+        return cls(
+            item_id=_required_recipe_string(payload, "item", label="recipe output"),
+            count=1 if count is None else count,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "item": self.item_id,
+            "count": self.count,
+        }
+
+
+def _normalise_optional_recipe_id(recipe_id: str | None) -> str | None:
+    if recipe_id is None:
+        return None
+    return _normalise_minecraft_resource_location(recipe_id, field_name="recipe id")
+
+
+def _recipe_expression_with_id(expression: str, recipe_id: str | None) -> str:
+    if recipe_id is None:
+        return expression
+    return f"{expression}.id({_kubejs_json(recipe_id)})"
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftShapelessRecipe:
+    output: MinecraftRecipeItemStack
+    ingredients: tuple[MinecraftRecipeIngredient, ...]
+    recipe_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.ingredients:
+            raise ValueError("Shapeless recipes require at least one ingredient.")
+        ingredient_slot_count = sum(ingredient.count for ingredient in self.ingredients)
+        if ingredient_slot_count > 9:
+            raise ValueError("Shapeless recipes can use at most 9 ingredient slots.")
+        object.__setattr__(self, "recipe_id", _normalise_optional_recipe_id(self.recipe_id))
+
+    def render_kubejs(self) -> str:
+        expression = (
+            f"event.shapeless({_kubejs_json(self.output.kubejs_value)}, "
+            f"{_kubejs_json([ingredient.kubejs_value for ingredient in self.ingredients])})"
+        )
+        return _recipe_expression_with_id(expression, self.recipe_id)
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftShapelessRecipe":
+        raw_ingredients = _recipe_sequence(payload.get("ingredients"), label="shapeless recipe ingredients")
+        return cls(
+            output=MinecraftRecipeItemStack.from_mapping(_recipe_mapping(payload.get("output"), label="recipe output")),
+            ingredients=tuple(
+                MinecraftRecipeIngredient.from_mapping(_recipe_mapping(item, label="shapeless recipe ingredient"))
+                for item in raw_ingredients
+            ),
+            recipe_id=_optional_recipe_string(payload, "id", label="shapeless recipe"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": MinecraftRecipeKind.SHAPELESS.value,
+            "output": self.output.to_mapping(),
+            "ingredients": [ingredient.to_mapping() for ingredient in self.ingredients],
+        }
+        if self.recipe_id is not None:
+            payload["id"] = self.recipe_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftShapedRecipe:
+    output: MinecraftRecipeItemStack
+    pattern: tuple[str, ...]
+    key: Mapping[str, MinecraftRecipeIngredient]
+    recipe_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not 1 <= len(self.pattern) <= 3:
+            raise ValueError("Shaped recipes require 1 to 3 pattern rows.")
+        row_widths = {len(row) for row in self.pattern}
+        if len(row_widths) != 1:
+            raise ValueError("Shaped recipe rows must all have the same width.")
+        row_width = row_widths.pop()
+        if not 1 <= row_width <= 3:
+            raise ValueError("Shaped recipe rows must be 1 to 3 characters wide.")
+
+        used_symbols: set[str] = {symbol for row in self.pattern for symbol in row if symbol != " "}
+        if not used_symbols:
+            raise ValueError("Shaped recipes require at least one non-empty ingredient slot.")
+        key_symbols: set[str] = set()
+        for symbol, ingredient in self.key.items():
+            if len(symbol) != 1 or symbol == " ":
+                raise ValueError("Shaped recipe key symbols must be single non-space characters.")
+            if ingredient.count != 1:
+                raise ValueError("Shaped recipe key ingredients must have a count of 1.")
+            key_symbols.add(symbol)
+        missing_symbols = used_symbols - key_symbols
+        if missing_symbols:
+            raise ValueError(f"Shaped recipe pattern is missing key symbols: {', '.join(sorted(missing_symbols))}")
+        unused_symbols = key_symbols - used_symbols
+        if unused_symbols:
+            raise ValueError(f"Shaped recipe key has unused symbols: {', '.join(sorted(unused_symbols))}")
+        object.__setattr__(self, "recipe_id", _normalise_optional_recipe_id(self.recipe_id))
+
+    def render_kubejs(self) -> str:
+        key_payload = {symbol: ingredient.kubejs_value for symbol, ingredient in sorted(self.key.items())}
+        expression = (
+            f"event.shaped({_kubejs_json(self.output.kubejs_value)}, "
+            f"{_kubejs_json(list(self.pattern))}, {_kubejs_json(key_payload)})"
+        )
+        return _recipe_expression_with_id(expression, self.recipe_id)
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftShapedRecipe":
+        raw_pattern = _recipe_sequence(payload.get("pattern"), label="shaped recipe pattern")
+        raw_key = _recipe_mapping(payload.get("key"), label="shaped recipe key")
+        pattern: list[str] = []
+        for raw_row in raw_pattern:
+            if not isinstance(raw_row, str):
+                raise ValueError("Shaped recipe pattern rows must be strings.")
+            pattern.append(raw_row)
+        key: dict[str, MinecraftRecipeIngredient] = {}
+        for symbol, raw_ingredient in raw_key.items():
+            if not isinstance(symbol, str):
+                raise ValueError("Shaped recipe key symbols must be strings.")
+            key[symbol] = MinecraftRecipeIngredient.from_mapping(
+                _recipe_mapping(raw_ingredient, label="shaped recipe key ingredient")
+            )
+        return cls(
+            output=MinecraftRecipeItemStack.from_mapping(_recipe_mapping(payload.get("output"), label="recipe output")),
+            pattern=tuple(pattern),
+            key=key,
+            recipe_id=_optional_recipe_string(payload, "id", label="shaped recipe"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": MinecraftRecipeKind.SHAPED.value,
+            "output": self.output.to_mapping(),
+            "pattern": list(self.pattern),
+            "key": {symbol: ingredient.to_mapping() for symbol, ingredient in sorted(self.key.items())},
+        }
+        if self.recipe_id is not None:
+            payload["id"] = self.recipe_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftCookingRecipe:
+    kind: MinecraftRecipeKind
+    output: MinecraftRecipeItemStack
+    ingredient: MinecraftRecipeIngredient
+    experience: float | None = None
+    cooking_time_ticks: int | None = None
+    recipe_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in (
+            MinecraftRecipeKind.SMELTING,
+            MinecraftRecipeKind.BLASTING,
+            MinecraftRecipeKind.SMOKING,
+            MinecraftRecipeKind.CAMPFIRE_COOKING,
+        ):
+            raise ValueError(f"Unsupported cooking recipe kind: {self.kind.value}")
+        if self.ingredient.count != 1:
+            raise ValueError("Cooking recipe ingredients must have a count of 1.")
+        if self.experience is not None and self.experience < 0:
+            raise ValueError("Cooking recipe experience must be non-negative.")
+        if self.cooking_time_ticks is not None:
+            if isinstance(self.cooking_time_ticks, bool) or not isinstance(self.cooking_time_ticks, int):
+                raise TypeError("Cooking time must be an integer tick count.")
+            if self.cooking_time_ticks < 0:
+                raise ValueError("Cooking time must be non-negative.")
+        object.__setattr__(self, "recipe_id", _normalise_optional_recipe_id(self.recipe_id))
+
+    def render_kubejs(self) -> str:
+        expression = (
+            f"event.{self.kind.kubejs_method}({_kubejs_json(self.output.kubejs_value)}, "
+            f"{_kubejs_json(self.ingredient.kubejs_value)})"
+        )
+        if self.experience is not None:
+            expression = f"{expression}.xp({self.experience:g})"
+        if self.cooking_time_ticks is not None:
+            expression = f"{expression}.cookingTime({self.cooking_time_ticks})"
+        return _recipe_expression_with_id(expression, self.recipe_id)
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object], *, kind: MinecraftRecipeKind) -> "MinecraftCookingRecipe":
+        return cls(
+            kind=kind,
+            output=MinecraftRecipeItemStack.from_mapping(_recipe_mapping(payload.get("output"), label="recipe output")),
+            ingredient=MinecraftRecipeIngredient.from_mapping(
+                _recipe_mapping(payload.get("ingredient"), label="cooking recipe ingredient")
+            ),
+            experience=_optional_recipe_float(payload, "experience", label="cooking recipe"),
+            cooking_time_ticks=_optional_recipe_int(payload, "cooking_time_ticks", label="cooking recipe"),
+            recipe_id=_optional_recipe_string(payload, "id", label="cooking recipe"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": self.kind.value,
+            "output": self.output.to_mapping(),
+            "ingredient": self.ingredient.to_mapping(),
+        }
+        if self.experience is not None:
+            payload["experience"] = self.experience
+        if self.cooking_time_ticks is not None:
+            payload["cooking_time_ticks"] = self.cooking_time_ticks
+        if self.recipe_id is not None:
+            payload["id"] = self.recipe_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftStonecuttingRecipe:
+    output: MinecraftRecipeItemStack
+    ingredient: MinecraftRecipeIngredient
+    recipe_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.ingredient.count != 1:
+            raise ValueError("Stonecutting recipe ingredients must have a count of 1.")
+        object.__setattr__(self, "recipe_id", _normalise_optional_recipe_id(self.recipe_id))
+
+    def render_kubejs(self) -> str:
+        expression = (
+            f"event.stonecutting({_kubejs_json(self.output.kubejs_value)}, "
+            f"{_kubejs_json(self.ingredient.kubejs_value)})"
+        )
+        return _recipe_expression_with_id(expression, self.recipe_id)
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftStonecuttingRecipe":
+        return cls(
+            output=MinecraftRecipeItemStack.from_mapping(_recipe_mapping(payload.get("output"), label="recipe output")),
+            ingredient=MinecraftRecipeIngredient.from_mapping(
+                _recipe_mapping(payload.get("ingredient"), label="stonecutting recipe ingredient")
+            ),
+            recipe_id=_optional_recipe_string(payload, "id", label="stonecutting recipe"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "kind": MinecraftRecipeKind.STONECUTTING.value,
+            "output": self.output.to_mapping(),
+            "ingredient": self.ingredient.to_mapping(),
+        }
+        if self.recipe_id is not None:
+            payload["id"] = self.recipe_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftRecipeRemovalFilter:
+    recipe_id: str | None = None
+    output: MinecraftRecipeIngredient | None = None
+    input: MinecraftRecipeIngredient | None = None
+    recipe_type: MinecraftRecipeKind | str | None = None
+    mod_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "recipe_id", _normalise_optional_recipe_id(self.recipe_id))
+        if self.mod_id is not None:
+            object.__setattr__(self, "mod_id", _normalise_minecraft_namespace(self.mod_id, field_name="recipe mod id"))
+        if self.output is not None and self.output.count != 1:
+            raise ValueError("Recipe removal output filters must have a count of 1.")
+        if self.input is not None and self.input.count != 1:
+            raise ValueError("Recipe removal input filters must have a count of 1.")
+        if not any((self.recipe_id, self.output, self.input, self.recipe_type, self.mod_id)):
+            raise ValueError("Recipe removal filters require at least one condition.")
+
+    @property
+    def kubejs_payload(self) -> dict[str, str]:
+        payload: dict[str, str] = {}
+        if self.recipe_id is not None:
+            payload["id"] = self.recipe_id
+        if self.output is not None:
+            payload["output"] = self.output.kubejs_value
+        if self.input is not None:
+            payload["input"] = self.input.kubejs_value
+        if self.recipe_type is not None:
+            payload["type"] = (
+                self.recipe_type.recipe_type_id
+                if isinstance(self.recipe_type, MinecraftRecipeKind)
+                else _normalise_minecraft_resource_location(self.recipe_type, field_name="recipe type")
+            )
+        if self.mod_id is not None:
+            payload["mod"] = self.mod_id
+        return payload
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftRecipeRemovalFilter":
+        raw_recipe_type = _optional_recipe_string(payload, "recipe_type", label="recipe removal filter")
+        recipe_type: MinecraftRecipeKind | str | None
+        if raw_recipe_type is None:
+            recipe_type = None
+        else:
+            try:
+                recipe_type = MinecraftRecipeKind(raw_recipe_type)
+            except ValueError:
+                recipe_type = raw_recipe_type
+        raw_output = payload.get("output")
+        raw_input = payload.get("input")
+        return cls(
+            recipe_id=_optional_recipe_string(payload, "id", label="recipe removal filter"),
+            output=None
+            if raw_output is None
+            else MinecraftRecipeIngredient.from_mapping(_recipe_mapping(raw_output, label="recipe removal output")),
+            input=None
+            if raw_input is None
+            else MinecraftRecipeIngredient.from_mapping(_recipe_mapping(raw_input, label="recipe removal input")),
+            recipe_type=recipe_type,
+            mod_id=_optional_recipe_string(payload, "mod", label="recipe removal filter"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        payload: dict[str, object] = {}
+        if self.recipe_id is not None:
+            payload["id"] = self.recipe_id
+        if self.output is not None:
+            payload["output"] = self.output.to_mapping()
+        if self.input is not None:
+            payload["input"] = self.input.to_mapping()
+        if self.recipe_type is not None:
+            payload["recipe_type"] = (
+                self.recipe_type.value if isinstance(self.recipe_type, MinecraftRecipeKind) else self.recipe_type
+            )
+        if self.mod_id is not None:
+            payload["mod"] = self.mod_id
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftRecipeRemoval:
+    filter: MinecraftRecipeRemovalFilter
+
+    def render_kubejs(self) -> str:
+        return f"event.remove({_kubejs_json(self.filter.kubejs_payload)})"
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftRecipeRemoval":
+        return cls(
+            filter=MinecraftRecipeRemovalFilter.from_mapping(
+                _recipe_mapping(payload.get("filter"), label="recipe removal filter")
+            )
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "kind": "remove",
+            "filter": self.filter.to_mapping(),
+        }
+
+
+MinecraftRecipeMutation: TypeAlias = (
+    MinecraftShapedRecipe
+    | MinecraftShapelessRecipe
+    | MinecraftCookingRecipe
+    | MinecraftStonecuttingRecipe
+    | MinecraftRecipeRemoval
+)
+
+_MINECRAFT_RECIPE_BOOK_SCHEMA_VERSION = 1
+_MINECRAFT_ITEM_REGISTRY_SCHEMA_VERSION = 1
+
+
+def _minecraft_recipe_mutation_from_mapping(payload: Mapping[str, object]) -> MinecraftRecipeMutation:
+    raw_kind = _required_recipe_string(payload, "kind", label="recipe mutation")
+    if raw_kind == "remove":
+        return MinecraftRecipeRemoval.from_mapping(payload)
+    kind = MinecraftRecipeKind(raw_kind)
+    if kind is MinecraftRecipeKind.SHAPELESS:
+        return MinecraftShapelessRecipe.from_mapping(payload)
+    if kind is MinecraftRecipeKind.SHAPED:
+        return MinecraftShapedRecipe.from_mapping(payload)
+    if kind in (
+        MinecraftRecipeKind.SMELTING,
+        MinecraftRecipeKind.BLASTING,
+        MinecraftRecipeKind.SMOKING,
+        MinecraftRecipeKind.CAMPFIRE_COOKING,
+    ):
+        return MinecraftCookingRecipe.from_mapping(payload, kind=kind)
+    if kind is MinecraftRecipeKind.STONECUTTING:
+        return MinecraftStonecuttingRecipe.from_mapping(payload)
+    raise ValueError(f"Unsupported recipe mutation kind: {raw_kind}")
+
+
+def _minecraft_recipe_mutation_to_mapping(mutation: MinecraftRecipeMutation) -> dict[str, object]:
+    return mutation.to_mapping()
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftRecipeBook:
+    mutations: tuple[MinecraftRecipeMutation, ...] = ()
+    schema_version: int = _MINECRAFT_RECIPE_BOOK_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != _MINECRAFT_RECIPE_BOOK_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported Minecraft recipe book schema version: {self.schema_version}")
+
+    @classmethod
+    def empty(cls) -> "MinecraftRecipeBook":
+        return cls()
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftRecipeBook":
+        raw_schema_version = payload.get("schema_version")
+        if isinstance(raw_schema_version, bool) or not isinstance(raw_schema_version, int):
+            raise ValueError("Minecraft recipe book schema_version must be an integer.")
+        raw_mutations = _recipe_sequence(payload.get("mutations"), label="recipe book mutations")
+        return cls(
+            schema_version=raw_schema_version,
+            mutations=tuple(
+                _minecraft_recipe_mutation_from_mapping(_recipe_mapping(item, label="recipe mutation"))
+                for item in raw_mutations
+            ),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "mutations": [_minecraft_recipe_mutation_to_mapping(mutation) for mutation in self.mutations],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MinecraftItemRegistrySnapshot:
+    item_ids: tuple[str, ...] = ()
+    generated_at_epoch_ms: int | None = None
+    schema_version: int = _MINECRAFT_ITEM_REGISTRY_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != _MINECRAFT_ITEM_REGISTRY_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported Minecraft item registry schema version: {self.schema_version}")
+        if self.generated_at_epoch_ms is not None:
+            if isinstance(self.generated_at_epoch_ms, bool) or not isinstance(self.generated_at_epoch_ms, int):
+                raise ValueError("Minecraft item registry generated_at_epoch_ms must be an integer.")
+            if self.generated_at_epoch_ms < 0:
+                raise ValueError("Minecraft item registry generated_at_epoch_ms must not be negative.")
+        normalised_item_ids = tuple(
+            sorted(
+                {
+                    _normalise_minecraft_resource_location(item_id, field_name="minecraft item registry item id")
+                    for item_id in self.item_ids
+                }
+            )
+        )
+        object.__setattr__(self, "item_ids", normalised_item_ids)
+
+    @classmethod
+    def empty(cls) -> "MinecraftItemRegistrySnapshot":
+        return cls()
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "MinecraftItemRegistrySnapshot":
+        raw_schema_version = payload.get("schema_version")
+        if isinstance(raw_schema_version, bool) or not isinstance(raw_schema_version, int):
+            raise ValueError("Minecraft item registry schema_version must be an integer.")
+        raw_generated_at_epoch_ms = payload.get("generated_at_epoch_ms")
+        if raw_generated_at_epoch_ms is None:
+            generated_at_epoch_ms: int | None = None
+        else:
+            if isinstance(raw_generated_at_epoch_ms, bool) or not isinstance(raw_generated_at_epoch_ms, int):
+                raise ValueError("Minecraft item registry generated_at_epoch_ms must be an integer.")
+            generated_at_epoch_ms = raw_generated_at_epoch_ms
+        raw_item_ids = _recipe_sequence(payload.get("item_ids"), label="minecraft item registry item ids")
+        item_ids: list[str] = []
+        for raw_item_id in raw_item_ids:
+            if not isinstance(raw_item_id, str):
+                raise ValueError("Minecraft item registry item ids must be strings.")
+            item_ids.append(raw_item_id)
+        return cls(
+            schema_version=raw_schema_version,
+            generated_at_epoch_ms=generated_at_epoch_ms,
+            item_ids=tuple(item_ids),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "generated_at_epoch_ms": self.generated_at_epoch_ms,
+            "item_ids": list(self.item_ids),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1092,12 +1843,62 @@ def _bundled_kubejs_yuki_log_script_source() -> str:
         return _KUBEJS_YUKI_LOG_FALLBACK_SOURCE
 
 
+def _bundled_kubejs_yuki_item_registry_script_source() -> str:
+    try:
+        return _KUBEJS_YUKI_ITEM_REGISTRY_SOURCE_PATH.read_text(config.STR_ENCODE)
+    except OSError as xcp:
+        log.info(
+            "Bundled KubeJS item registry script unavailable at %s; using embedded fallback: %s",
+            _KUBEJS_YUKI_ITEM_REGISTRY_SOURCE_PATH,
+            xcp,
+        )
+        return _KUBEJS_YUKI_ITEM_REGISTRY_FALLBACK_SOURCE
+
+
 def _is_kubejs_mod_name(name: str) -> bool:
-    base_name = _detect_minecraft_mod_base_name(name).casefold()
+    base_name = _normalised_minecraft_mod_base_name(name)
     if base_name == _KUBEJS_MOD_BASE_NAME:
         return True
     tokens = tuple(token for token in base_name.split("-") if token)
     return len(tokens) >= 2 and tokens[0] == _KUBEJS_MOD_BASE_NAME and tokens[1] in _KUBEJS_LOADER_TOKENS
+
+
+def _normalised_minecraft_mod_base_name(name: str) -> str:
+    return _detect_minecraft_mod_base_name(name).strip().casefold().replace("_", "-")
+
+
+def _is_almost_unified_mod_name(name: str) -> bool:
+    return _normalised_minecraft_mod_base_name(name) == _ALMOST_UNIFIED_MOD_BASE_NAME
+
+
+def _detect_kubejs_recipe_addon_kind(name: str) -> KubeJsRecipeAddonKind | None:
+    base_name = _normalised_minecraft_mod_base_name(name)
+    for addon_base_name, addon_kind in _KUBEJS_RECIPE_ADDON_BASE_NAMES.items():
+        if base_name == addon_base_name or base_name.startswith(f"{addon_base_name}-"):
+            return addon_kind
+    return None
+
+
+def _managed_kubejs_recipe_script_source(
+    status: KubeJsRecipeSupportStatus,
+    mutations: tuple[MinecraftRecipeMutation, ...] = (),
+) -> str:
+    addon_lines = "\n".join(f"// - {addon.display_name}: {addon.mod_name}" for addon in status.addons)
+    if not addon_lines:
+        addon_lines = "// - none detected"
+    mutation_lines = "\n".join(f"  {mutation.render_kubejs()}" for mutation in mutations)
+    if not mutation_lines:
+        mutation_lines = "  // YukiBot generated recipe mutations will be written here."
+    return (
+        "// Managed by YukiBot. Edit generated recipes through the Recipes tab.\n"
+        "// Manual changes in this file may be overwritten.\n"
+        f"// AlmostUnified mode: {status.unification_mode.value}\n"
+        "// Detected KubeJS recipe addons:\n"
+        f"{addon_lines}\n\n"
+        "ServerEvents.recipes(function(event) {\n"
+        f"{mutation_lines}\n"
+        "})\n"
+    )
 
 
 def _is_squaremap_mod_name(name: str) -> bool:
@@ -1695,7 +2496,10 @@ class Minecraft(App[Minecraft_Config]):
 
     async def post_init(self):
         await super().post_init()
+        self._migrate_legacy_yukibot_data()
         self._sync_kubejs_yuki_log_script()
+        self._sync_kubejs_recipe_script()
+        self._sync_kubejs_item_registry_script()
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
@@ -1867,8 +2671,58 @@ class Minecraft(App[Minecraft_Config]):
     def _has_enabled_kubejs_mod(self) -> bool:
         return self._has_enabled_matching_mod(_is_kubejs_mod_name)
 
+    def _has_enabled_almost_unified_mod(self) -> bool:
+        return self._has_enabled_matching_mod(_is_almost_unified_mod_name)
+
     def _kubejs_yuki_log_path(self) -> Path:
         return self.directory / _KUBEJS_SERVER_SCRIPTS_RELATIVE_PATH / _KUBEJS_YUKI_LOG_SCRIPT_NAME
+
+    def _kubejs_yuki_recipes_path(self) -> Path:
+        return self.directory / _KUBEJS_SERVER_SCRIPTS_RELATIVE_PATH / _KUBEJS_YUKI_RECIPES_SCRIPT_NAME
+
+    def _kubejs_yuki_item_registry_script_path(self) -> Path:
+        return self.directory / _KUBEJS_SERVER_SCRIPTS_RELATIVE_PATH / _KUBEJS_YUKI_ITEM_REGISTRY_SCRIPT_NAME
+
+    def _yukibot_recipe_book_path(self) -> Path:
+        return self.directory / _YUKIBOT_DATA_RELATIVE_PATH / _YUKIBOT_RECIPES_FILE_NAME
+
+    def _legacy_yukibot_recipe_book_path(self) -> Path:
+        return self.directory / _LEGACY_YUKIBOT_DATA_RELATIVE_PATH / _YUKIBOT_RECIPES_FILE_NAME
+
+    def _yukibot_item_registry_path(self) -> Path:
+        return self.directory / _YUKIBOT_REGISTRIES_RELATIVE_PATH / _YUKIBOT_ITEM_REGISTRY_FILE_NAME
+
+    def _legacy_yukibot_item_registry_path(self) -> Path:
+        return self.directory / _LEGACY_YUKIBOT_REGISTRIES_RELATIVE_PATH / _YUKIBOT_ITEM_REGISTRY_FILE_NAME
+
+    def _yukibot_item_icon_directory(self) -> Path:
+        return self.directory / _YUKIBOT_ITEM_ICONS_RELATIVE_PATH
+
+    def _legacy_yukibot_item_icon_directory(self) -> Path:
+        return self.directory / _LEGACY_YUKIBOT_ITEM_ICONS_RELATIVE_PATH
+
+    def _yukibot_item_icon_path(self, item_id: str) -> Path:
+        namespace, resource_path = _normalise_minecraft_resource_location(
+            item_id,
+            field_name="minecraft item icon id",
+        ).split(":", maxsplit=1)
+        return self._yukibot_item_icon_directory() / namespace / Path(*resource_path.split("/")).with_suffix(".png")
+
+    def _legacy_yukibot_item_icon_path(self, item_id: str) -> Path:
+        namespace, resource_path = _normalise_minecraft_resource_location(
+            item_id,
+            field_name="minecraft item icon id",
+        ).split(":", maxsplit=1)
+        return (
+            self._legacy_yukibot_item_icon_directory() / namespace / Path(*resource_path.split("/")).with_suffix(".png")
+        )
+
+    def _resolve_existing_yukibot_data_path(self, *, current_path: Path, legacy_path: Path) -> Path:
+        if current_path.exists():
+            return current_path
+        if legacy_path.exists():
+            return legacy_path
+        return current_path
 
     def _uses_kubejs_event_stream(self) -> bool:
         return (
@@ -1876,6 +2730,233 @@ class Minecraft(App[Minecraft_Config]):
             and self._kubejs_yuki_log_path().is_file()
             and getattr(self, "_kubejs_event_stream_ready", False)
         )
+
+    def kubejs_recipe_support_status(self) -> KubeJsRecipeSupportStatus:
+        script_path = self._kubejs_yuki_recipes_path()
+        addons: list[KubeJsRecipeAddonCapability] = []
+        seen_addons: set[KubeJsRecipeAddonKind] = set()
+        if self.mods is not None:
+            for mod in self.mods.list_mods(True):
+                addon_kind = _detect_kubejs_recipe_addon_kind(mod.name)
+                if addon_kind is None or addon_kind in seen_addons:
+                    continue
+                addons.append(KubeJsRecipeAddonCapability(kind=addon_kind, mod_name=mod.name))
+                seen_addons.add(addon_kind)
+        unification_mode = (
+            MinecraftRecipeUnificationMode.EXPECTED_PRESENT
+            if self._has_enabled_almost_unified_mod()
+            else MinecraftRecipeUnificationMode.DISABLED
+        )
+        return KubeJsRecipeSupportStatus(
+            kubejs_enabled=self._has_enabled_kubejs_mod(),
+            script_path=script_path,
+            script_exists=script_path.is_file(),
+            addons=tuple(addons),
+            unification_mode=unification_mode,
+        )
+
+    def load_kubejs_recipe_book(self) -> MinecraftRecipeBook:
+        recipe_book_path = self._resolve_existing_yukibot_data_path(
+            current_path=self._yukibot_recipe_book_path(),
+            legacy_path=self._legacy_yukibot_recipe_book_path(),
+        )
+        if not recipe_book_path.exists():
+            return MinecraftRecipeBook.empty()
+        try:
+            raw_payload: object = json.loads(recipe_book_path.read_text(config.STR_ENCODE))
+        except json.JSONDecodeError as xcp:
+            raise ValueError(f"Invalid Minecraft recipe book JSON at {recipe_book_path}: {xcp}") from xcp
+        except OSError as xcp:
+            raise ValueError(f"Unable to read Minecraft recipe book at {recipe_book_path}: {xcp}") from xcp
+        return MinecraftRecipeBook.from_mapping(_recipe_mapping(raw_payload, label="Minecraft recipe book"))
+
+    def save_kubejs_recipe_book(self, recipe_book: MinecraftRecipeBook) -> None:
+        recipe_book_path = self._yukibot_recipe_book_path()
+        try:
+            recipe_book_path.parent.mkdir(parents=True, exist_ok=True)
+            recipe_book_path.write_text(json.dumps(recipe_book.to_mapping(), indent=4) + "\n", config.STR_ENCODE)
+        except OSError as xcp:
+            raise ValueError(f"Unable to write Minecraft recipe book at {recipe_book_path}: {xcp}") from xcp
+
+    def load_kubejs_item_registry(self) -> MinecraftItemRegistrySnapshot:
+        item_registry_path = self._resolve_existing_yukibot_data_path(
+            current_path=self._yukibot_item_registry_path(),
+            legacy_path=self._legacy_yukibot_item_registry_path(),
+        )
+        if not item_registry_path.exists():
+            return MinecraftItemRegistrySnapshot.empty()
+        try:
+            raw_payload: object = json.loads(item_registry_path.read_text(config.STR_ENCODE))
+        except json.JSONDecodeError as xcp:
+            raise ValueError(f"Invalid Minecraft item registry JSON at {item_registry_path}: {xcp}") from xcp
+        except OSError as xcp:
+            raise ValueError(f"Unable to read Minecraft item registry at {item_registry_path}: {xcp}") from xcp
+        return MinecraftItemRegistrySnapshot.from_mapping(_recipe_mapping(raw_payload, label="Minecraft item registry"))
+
+    def resolve_minecraft_item_icon_path(self, item_id: str) -> Path | None:
+        normalised_item_id = _normalise_minecraft_resource_location(item_id, field_name="minecraft item icon id")
+        current_cache_path = self._yukibot_item_icon_path(normalised_item_id)
+        cached_path = self._resolve_existing_yukibot_data_path(
+            current_path=current_cache_path,
+            legacy_path=self._legacy_yukibot_item_icon_path(normalised_item_id),
+        )
+        if cached_path.is_file():
+            return cached_path
+        icon_bytes = self._load_minecraft_item_icon_source_bytes(normalised_item_id)
+        if icon_bytes is None:
+            return None
+        current_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        current_cache_path.write_bytes(icon_bytes)
+        return current_cache_path
+
+    def _load_minecraft_item_icon_source_bytes(self, item_id: str) -> bytes | None:
+        namespace, _separator, _resource_path = item_id.partition(":")
+        candidate_asset_paths = self._minecraft_item_icon_candidate_asset_paths(item_id)
+        for asset_root in self._minecraft_item_icon_loose_asset_roots():
+            for asset_path in candidate_asset_paths:
+                source_path = asset_root / Path(asset_path.as_posix())
+                if source_path.is_file():
+                    return source_path.read_bytes()
+        archive_paths_by_namespace = self._minecraft_item_icon_archive_paths_by_namespace()
+        for archive_path in archive_paths_by_namespace.get(namespace, ()):
+            try:
+                with zipfile.ZipFile(archive_path, "r") as archive:
+                    for asset_path in candidate_asset_paths:
+                        try:
+                            with archive.open(asset_path.as_posix(), "r") as asset_file:
+                                return asset_file.read()
+                        except KeyError:
+                            continue
+            except OSError, zipfile.BadZipFile:
+                continue
+        return None
+
+    @staticmethod
+    def _minecraft_item_icon_candidate_asset_paths(item_id: str) -> tuple[PurePosixPath, ...]:
+        namespace, resource_path = item_id.split(":", maxsplit=1)
+        return (
+            PurePosixPath("assets") / namespace / "textures" / "item" / f"{resource_path}.png",
+            PurePosixPath("assets") / namespace / "textures" / "items" / f"{resource_path}.png",
+            PurePosixPath("assets") / namespace / "textures" / "block" / f"{resource_path}.png",
+            PurePosixPath("assets") / namespace / "textures" / "blocks" / f"{resource_path}.png",
+        )
+
+    def _minecraft_item_icon_loose_asset_roots(self) -> tuple[Path, ...]:
+        roots: list[Path] = [self.directory / "kubejs"]
+        resourcepacks_path = self.directory / "resourcepacks"
+        if resourcepacks_path.is_dir():
+            roots.extend(pointer for pointer in sorted(resourcepacks_path.iterdir()) if pointer.is_dir())
+        return tuple(root for root in roots if root.exists())
+
+    def _minecraft_item_icon_archive_paths_by_namespace(self) -> dict[str, tuple[Path, ...]]:
+        cached_mapping = getattr(self, "_minecraft_item_icon_archive_paths_by_namespace_cache", None)
+        if isinstance(cached_mapping, dict):
+            return cast(dict[str, tuple[Path, ...]], cached_mapping)
+        archive_paths_by_namespace: dict[str, list[Path]] = {}
+        for archive_path in self._minecraft_item_icon_archive_candidates():
+            try:
+                with zipfile.ZipFile(archive_path, "r") as archive:
+                    namespaces = {
+                        entry_parts[1]
+                        for entry in archive.namelist()
+                        for entry_parts in [entry.split("/", maxsplit=3)]
+                        if len(entry_parts) >= 3 and entry_parts[0] == "assets" and entry_parts[1]
+                    }
+            except OSError, zipfile.BadZipFile:
+                continue
+            for namespace in sorted(namespaces):
+                archive_paths_by_namespace.setdefault(namespace, []).append(archive_path)
+        resolved_mapping = {namespace: tuple(paths) for namespace, paths in archive_paths_by_namespace.items()}
+        setattr(self, "_minecraft_item_icon_archive_paths_by_namespace_cache", resolved_mapping)
+        return resolved_mapping
+
+    def _minecraft_item_icon_archive_candidates(self) -> tuple[Path, ...]:
+        candidate_paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        if self.mods is not None:
+            for mod in self.mods.list_mods(True):
+                mod_path = mod.path
+                if mod_path.suffix.casefold() != ".jar" or not mod_path.is_file() or mod_path in seen_paths:
+                    continue
+                candidate_paths.append(mod_path)
+                seen_paths.add(mod_path)
+        resourcepacks_path = self.directory / "resourcepacks"
+        if resourcepacks_path.is_dir():
+            for archive_path in sorted(resourcepacks_path.iterdir()):
+                if archive_path.suffix.casefold() != ".zip" or not archive_path.is_file() or archive_path in seen_paths:
+                    continue
+                candidate_paths.append(archive_path)
+                seen_paths.add(archive_path)
+        for archive_path in sorted(self.directory.glob("*.jar")):
+            if not archive_path.is_file() or archive_path in seen_paths:
+                continue
+            candidate_paths.append(archive_path)
+            seen_paths.add(archive_path)
+        return tuple(candidate_paths)
+
+    def append_kubejs_recipe_mutation(self, mutation: MinecraftRecipeMutation) -> MinecraftRecipeBook:
+        recipe_book = self.load_kubejs_recipe_book()
+        next_recipe_book = MinecraftRecipeBook(mutations=recipe_book.mutations + (mutation,))
+        self.save_kubejs_recipe_book(next_recipe_book)
+        self._sync_kubejs_recipe_script()
+        return next_recipe_book
+
+    def replace_kubejs_recipe_mutation(self, index: int, mutation: MinecraftRecipeMutation) -> MinecraftRecipeBook:
+        if index < 0:
+            raise ValueError("Minecraft recipe mutation index must not be negative.")
+        recipe_book = self.load_kubejs_recipe_book()
+        if index >= len(recipe_book.mutations):
+            raise IndexError(f"Unknown Minecraft recipe mutation index: {index}")
+        next_mutations = list(recipe_book.mutations)
+        next_mutations[index] = mutation
+        next_recipe_book = MinecraftRecipeBook(mutations=tuple(next_mutations))
+        self.save_kubejs_recipe_book(next_recipe_book)
+        self._sync_kubejs_recipe_script()
+        return next_recipe_book
+
+    def remove_kubejs_recipe_mutation(self, index: int) -> MinecraftRecipeBook:
+        if index < 0:
+            raise ValueError("Minecraft recipe mutation index must not be negative.")
+        recipe_book = self.load_kubejs_recipe_book()
+        if index >= len(recipe_book.mutations):
+            raise IndexError(f"Unknown Minecraft recipe mutation index: {index}")
+        next_recipe_book = MinecraftRecipeBook(
+            mutations=tuple(
+                mutation for mutation_index, mutation in enumerate(recipe_book.mutations) if mutation_index != index
+            )
+        )
+        self.save_kubejs_recipe_book(next_recipe_book)
+        self._sync_kubejs_recipe_script()
+        return next_recipe_book
+
+    def _load_or_create_kubejs_recipe_book(self) -> MinecraftRecipeBook:
+        recipe_book_path = self._yukibot_recipe_book_path()
+        recipe_book = self.load_kubejs_recipe_book()
+        if not recipe_book_path.exists():
+            self.save_kubejs_recipe_book(recipe_book)
+        return recipe_book
+
+    def _migrate_legacy_yukibot_data(self) -> None:
+        migration_pairs = (
+            (self._legacy_yukibot_recipe_book_path(), self._yukibot_recipe_book_path()),
+            (self._legacy_yukibot_item_registry_path(), self._yukibot_item_registry_path()),
+        )
+        for legacy_path, current_path in migration_pairs:
+            if current_path.exists() or not legacy_path.exists():
+                continue
+            try:
+                current_path.parent.mkdir(parents=True, exist_ok=True)
+                current_path.write_text(legacy_path.read_text(config.STR_ENCODE), config.STR_ENCODE)
+            except OSError as xcp:
+                log.warning(
+                    "Failed to migrate legacy YukiBot Minecraft data for %s from %s to %s: %s",
+                    self.name,
+                    legacy_path,
+                    current_path,
+                    xcp,
+                )
+                continue
+            log.info("%s migrated legacy YukiBot Minecraft data: %s -> %s", self.name, legacy_path, current_path)
 
     def _sync_kubejs_yuki_log_script(self) -> bool:
         if not self._has_enabled_kubejs_mod():
@@ -1891,6 +2972,42 @@ class Minecraft(App[Minecraft_Config]):
             log.warning("Failed to sync KubeJS relay script for %s at %s: %s", self.name, script_path, xcp)
             return False
         log.info("%s synced KubeJS relay script: %s", self.name, script_path)
+        return True
+
+    def _sync_kubejs_recipe_script(self) -> bool:
+        status = self.kubejs_recipe_support_status()
+        if not status.kubejs_enabled:
+            return False
+        recipe_book = self._load_or_create_kubejs_recipe_book()
+        script_content = _managed_kubejs_recipe_script_source(status, mutations=recipe_book.mutations)
+        script_path = status.script_path
+        try:
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            if script_path.exists() and script_path.read_text(config.STR_ENCODE) == script_content:
+                return False
+            script_path.write_text(script_content, config.STR_ENCODE)
+        except OSError as xcp:
+            log.warning("Failed to sync KubeJS recipe script for %s at %s: %s", self.name, script_path, xcp)
+            return False
+        log.info("%s synced KubeJS recipe script: %s", self.name, script_path)
+        return True
+
+    def _sync_kubejs_item_registry_script(self) -> bool:
+        if not self._has_enabled_kubejs_mod():
+            return False
+        script_content = _bundled_kubejs_yuki_item_registry_script_source()
+        script_path = self._kubejs_yuki_item_registry_script_path()
+        item_registry_path = self._yukibot_item_registry_path()
+        try:
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            item_registry_path.parent.mkdir(parents=True, exist_ok=True)
+            if script_path.exists() and script_path.read_text(config.STR_ENCODE) == script_content:
+                return False
+            script_path.write_text(script_content, config.STR_ENCODE)
+        except OSError as xcp:
+            log.warning("Failed to sync KubeJS item registry script for %s at %s: %s", self.name, script_path, xcp)
+            return False
+        log.info("%s synced KubeJS item registry script: %s", self.name, script_path)
         return True
 
     def _apply_runtime_snapshot(self, runtime: MinecraftRuntimeInfo | None, *, persist: bool) -> bool:
@@ -1925,7 +3042,10 @@ class Minecraft(App[Minecraft_Config]):
         self.clear_runtime_fault()
         self._server_ready.clear()
         self._kubejs_event_stream_ready = False
+        self._migrate_legacy_yukibot_data()
         self._sync_kubejs_yuki_log_script()
+        self._sync_kubejs_recipe_script()
+        self._sync_kubejs_item_registry_script()
         log.info(
             "Minecraft config for %s: server_properties=%s exists=%s rcon_host=%s rcon_port=%s file_enable_rcon=%s file_rcon_port=%s file_max_players=%s file_password_state=%s password_match=%s",
             self.name,

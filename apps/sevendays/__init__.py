@@ -1,11 +1,12 @@
 import ast
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -27,7 +28,7 @@ from _security import Power_Level
 from apps._app import AM_Receiver, App, AppActivityProvider, AppActivityProviderMetadata
 from apps._config import App_Config, AppVersion, Mod_Config, ModType
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
-from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult
+from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod
 from apps._save_files import (
     AppSaveEntry,
@@ -64,9 +65,10 @@ from relay_notices import (
 log = logging.getLogger(__name__)
 
 type GameStatValue = int | float | str | bool | None
+type SevenDaysRuntimeLogSignature = tuple[int, int, int, int]
 
 _SEVENDAYS_VERSION_RE = re.compile(
-    r"Version:\s*V\s*(?P<version>\d+(?:\.\d+)*(?:\s*\([^)]+\)|[bB]\d+)?)",
+    r"Version:\s*V\s*(?P<version>\d+(?:\.\d+)*(?:\s*\([^)]+\)|\s*[bB]\d+)?)",
     re.IGNORECASE,
 )
 _SEVENDAYS_GAME_VERSION_RE = re.compile(
@@ -74,24 +76,156 @@ _SEVENDAYS_GAME_VERSION_RE = re.compile(
     re.IGNORECASE,
 )
 _SEVENDAYS_VERSION_BUILD_RE = re.compile(
-    r"(?P<main>\d+(?:\.\d+)*)(?:\s*\((?P<parenthesized>[^)]+)\)|(?P<suffix>[bB]\d+))",
+    r"(?P<main>\d+(?:\.\d+)*)(?:\s*\((?P<parenthesized>[^)]+)\)|\s*(?P<suffix>[bB]\d+))",
     re.IGNORECASE,
 )
 _SEVENDAYS_READY_RE = re.compile(r"\bStartAsServer\b")
+_SEVENDAYS_TELNET_STARTUP_ERROR_RE = re.compile(r"\bError in Telnet\.ctor\b", re.IGNORECASE)
 _SEVENDAYS_TRANSIENT_RE = re.compile(r"GMSG: Player '(.+?)' (joined|left) the game", re.IGNORECASE)
 _SEVENDAYS_DEATH_RE = re.compile(r"GMSG: Player '(?P<player>.+?)' died\b", re.IGNORECASE)
 _SEVENDAYS_CHAT_RE = re.compile(r"Chat.*?:\s*'(.*?)':\s*(.+)", re.IGNORECASE)
+_SEVENDAYS_SANDBOX_CODE_RE = re.compile(r"\bSandbox Code:\s*(?P<code>\S+)\s*$", re.IGNORECASE)
+_SEVENDAYS_SANDBOX_OPTIONS_RE = re.compile(r"\bSandbox Options:\s*$", re.IGNORECASE)
+_SEVENDAYS_SANDBOX_SECTION_RE = re.compile(r"\*\*\*\s*(?P<section>[^*]+?)\s*\*\*\*")
+_SEVENDAYS_SANDBOX_OPTION_RE = re.compile(
+    r"\bOption\s+(?P<key>[^:]+):\s*"
+    r"(?P<value_index>-?\d+)/(?P<value_label>.*?)\s+"
+    r"\(default:\s*(?P<default_index>-?\d+)/(?P<default_label>.*?)\)\s*$",
+    re.IGNORECASE,
+)
 _SEVENDAYS_RUNTIME_LOG_DISCOVERY_TIMEOUT_SECONDS = 10.0
 _SEVENDAYS_RUNTIME_LOG_DISCOVERY_POLL_SECONDS = 0.25
 _SEVENDAYS_MANAGED_USERDATA_FOLDER = "userdata"
+_SEVENDAYS_YUKIBOT_DATA_RELATIVE_PATH = Path(".yukibot")
+_SEVENDAYS_SANDBOX_OPTIONS_FILE_NAME = "sandbox_options.json"
+_SEVENDAYS_SANDBOX_OPTIONS_SCHEMA_VERSION = 1
+_SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION = AppVersion(main="3.0", build=259)
+_SEVENDAYS_STARTUP_SANDBOX_OPTIONS_DELAY_SECONDS = 5.0
+_SEVENDAYS_STARTUP_SANDBOX_OPTIONS_MAX_ATTEMPTS = 6
+_SEVENDAYS_DEFAULT_TELNET_PORT = 8081
+
+
+def _required_mapping_text(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string")
+    return value.strip()
+
+
+def _optional_mapping_text(payload: dict[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value.strip() or None
+
+
+def _required_mapping_int(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
+    return value
+
+
+def _sevendays_version_supports_sandbox_options(app_version: AppVersion | None) -> bool:
+    return app_version is not None and app_version.is_at_least(_SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION)
+
+
+def _json_object(raw_value: object, *, label: str) -> dict[str, object]:
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return raw_value
+
+
+@dataclass(frozen=True, slots=True)
+class SevenDaysSandboxOption:
+    section: str
+    key: str
+    value_index: int
+    value_label: str
+    default_index: int
+    default_label: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("section", "key", "value_label", "default_label"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Sandbox option {field_name} must be a non-empty string")
+            object.__setattr__(self, field_name, value.strip())
+
+    @classmethod
+    def from_mapping(cls, payload: dict[str, object]) -> "SevenDaysSandboxOption":
+        return cls(
+            section=_required_mapping_text(payload, "section"),
+            key=_required_mapping_text(payload, "key"),
+            value_index=_required_mapping_int(payload, "value_index"),
+            value_label=_required_mapping_text(payload, "value_label"),
+            default_index=_required_mapping_int(payload, "default_index"),
+            default_label=_required_mapping_text(payload, "default_label"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "section": self.section,
+            "key": self.key,
+            "value_index": self.value_index,
+            "value_label": self.value_label,
+            "default_index": self.default_index,
+            "default_label": self.default_label,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SevenDaysSandboxOptionsSnapshot:
+    generated_at: str
+    options: tuple[SevenDaysSandboxOption, ...]
+    sandbox_code: str | None = None
+    app_version: str | None = None
+    schema_version: int = _SEVENDAYS_SANDBOX_OPTIONS_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != _SEVENDAYS_SANDBOX_OPTIONS_SCHEMA_VERSION:
+            raise ValueError("Unsupported 7D2D sandbox options schema version")
+        if not self.generated_at.strip():
+            raise ValueError("Sandbox options snapshot requires a generated timestamp")
+        object.__setattr__(self, "generated_at", self.generated_at.strip())
+        object.__setattr__(self, "sandbox_code", self.sandbox_code.strip() if self.sandbox_code else None)
+        object.__setattr__(self, "app_version", self.app_version.strip() if self.app_version else None)
+        if not self.options:
+            raise ValueError("Sandbox options snapshot requires at least one option")
+
+    @classmethod
+    def from_mapping(cls, payload: dict[str, object]) -> "SevenDaysSandboxOptionsSnapshot":
+        schema_version = _required_mapping_int(payload, "schema_version")
+        raw_options = payload.get("options")
+        if isinstance(raw_options, str) or not isinstance(raw_options, list | tuple):
+            raise ValueError("Sandbox options snapshot options must be a sequence")
+        options: list[SevenDaysSandboxOption] = []
+        for raw_option in raw_options:
+            options.append(SevenDaysSandboxOption.from_mapping(_json_object(raw_option, label="Sandbox option")))
+        return cls(
+            schema_version=schema_version,
+            generated_at=_required_mapping_text(payload, "generated_at"),
+            sandbox_code=_optional_mapping_text(payload, "sandbox_code"),
+            app_version=_optional_mapping_text(payload, "app_version"),
+            options=tuple(options),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "generated_at": self.generated_at,
+            "sandbox_code": self.sandbox_code,
+            "app_version": self.app_version,
+            "options": [option.to_mapping() for option in self.options],
+        }
 
 
 def _timestamped_sevendays_output_logs(*, directory: Path) -> tuple[Path, ...]:
-    log_dir = directory / "7DaysToDieServer_Data"
-    if not log_dir.is_dir():
-        return ()
+    log_directories = (directory, directory / "7DaysToDieServer_Data")
     candidates = sorted(
-        log_dir.glob("output_log__*.txt"),
+        (pointer for log_dir in log_directories if log_dir.is_dir() for pointer in log_dir.glob("output_log__*.txt")),
         key=lambda pointer: (pointer.stat().st_mtime, pointer.name),
         reverse=True,
     )
@@ -110,6 +244,13 @@ def _preferred_sevendays_runtime_log(
     server_log: Path | None,
     previous_timestamped_logs: Collection[Path] | None = None,
 ) -> Path | None:
+    timestamped_logs: tuple[Path, ...] = _timestamped_sevendays_output_logs(directory=directory)
+    if previous_timestamped_logs is not None:
+        previous_log_set = frozenset(previous_timestamped_logs)
+        for pointer in timestamped_logs:
+            if pointer not in previous_log_set:
+                return pointer
+
     explicit_candidates: tuple[Path | None, ...] = (
         server_log,
         directory / "server_stdout.log",
@@ -118,12 +259,6 @@ def _preferred_sevendays_runtime_log(
         if pointer is not None and pointer.exists():
             return pointer
 
-    timestamped_logs: tuple[Path, ...] = _timestamped_sevendays_output_logs(directory=directory)
-    if previous_timestamped_logs is not None:
-        previous_log_set = frozenset(previous_timestamped_logs)
-        for pointer in timestamped_logs:
-            if pointer not in previous_log_set:
-                return pointer
     for pointer in timestamped_logs:
         return pointer
 
@@ -133,28 +268,23 @@ def _preferred_sevendays_runtime_log(
     return None
 
 
-def _stable_sevendays_runtime_log(*, directory: Path, server_log: Path | None) -> Path | None:
-    candidates: tuple[Path | None, ...] = (
-        server_log,
-        directory / "server_stdout.log",
-        directory / "7DaysToDieServer_Data" / "output_log.txt",
-    )
-    for pointer in candidates:
-        if pointer is not None and pointer.exists():
-            return pointer
-    return None
+def _sevendays_runtime_log_signature(pointer: Path) -> SevenDaysRuntimeLogSignature:
+    stat = pointer.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
 
-def _launch_created_sevendays_runtime_log(
+def _snapshot_sevendays_runtime_logs(
     *,
     directory: Path,
-    previous_timestamped_logs: Collection[Path] | None = None,
-) -> Path | None:
-    previous_log_set = frozenset(previous_timestamped_logs or ())
-    for pointer in _timestamped_sevendays_output_logs(directory=directory):
-        if pointer not in previous_log_set:
-            return pointer
-    return None
+    server_log: Path | None,
+) -> dict[Path, SevenDaysRuntimeLogSignature]:
+    snapshot: dict[Path, SevenDaysRuntimeLogSignature] = {}
+    for pointer in _candidate_sevendays_logs(directory=directory, server_log=server_log):
+        try:
+            snapshot[pointer] = _sevendays_runtime_log_signature(pointer)
+        except FileNotFoundError:
+            continue
+    return snapshot
 
 
 async def _discover_sevendays_runtime_log(
@@ -162,19 +292,36 @@ async def _discover_sevendays_runtime_log(
     directory: Path,
     server_log: Path | None,
     previous_timestamped_logs: Collection[Path] | None = None,
+    previous_log_signatures: Mapping[Path, SevenDaysRuntimeLogSignature] | None = None,
     check_running: Callable[[], bool],
     timeout_seconds: float = _SEVENDAYS_RUNTIME_LOG_DISCOVERY_TIMEOUT_SECONDS,
     poll_seconds: float = _SEVENDAYS_RUNTIME_LOG_DISCOVERY_POLL_SECONDS,
 ) -> Path | None:
+    baseline = dict(previous_log_signatures or {})
+    if previous_timestamped_logs is not None:
+        for pointer in previous_timestamped_logs:
+            try:
+                baseline.setdefault(pointer, _sevendays_runtime_log_signature(pointer))
+            except FileNotFoundError:
+                continue
+
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while True:
-        if runtime_log := _stable_sevendays_runtime_log(directory=directory, server_log=server_log):
-            return runtime_log
-        if runtime_log := _launch_created_sevendays_runtime_log(
-            directory=directory,
-            previous_timestamped_logs=previous_timestamped_logs,
-        ):
-            return runtime_log
+        if baseline:
+            for runtime_log in _candidate_sevendays_logs(directory=directory, server_log=server_log):
+                try:
+                    current_signature = _sevendays_runtime_log_signature(runtime_log)
+                except FileNotFoundError:
+                    continue
+                if baseline.get(runtime_log) != current_signature:
+                    return runtime_log
+        else:
+            if runtime_log := _preferred_sevendays_runtime_log(
+                directory=directory,
+                server_log=server_log,
+                previous_timestamped_logs=previous_timestamped_logs,
+            ):
+                return runtime_log
         if not check_running() or asyncio.get_running_loop().time() >= deadline:
             return None
         await asyncio.sleep(poll_seconds)
@@ -182,9 +329,9 @@ async def _discover_sevendays_runtime_log(
 
 def _candidate_sevendays_logs(*, directory: Path, server_log: Path | None) -> tuple[Path, ...]:
     candidates: list[Path | None] = [
+        *_latest_sevendays_output_logs(directory=directory),
         server_log,
         directory / "server_stdout.log",
-        *_latest_sevendays_output_logs(directory=directory),
         directory / "7DaysToDieServer_Data" / "output_log.txt",
     ]
     existing: list[Path] = []
@@ -195,6 +342,24 @@ def _candidate_sevendays_logs(*, directory: Path, server_log: Path | None) -> tu
         seen.add(pointer)
         existing.append(pointer)
     return tuple(existing)
+
+
+def _sevendays_telnet_port(pointer: Path) -> int:
+    enabled_value = _read_serverconfig_value(pointer, "TelnetEnabled")
+    if enabled_value is not None and enabled_value.casefold() not in {"true", "false"}:
+        raise ValueError(f"Invalid 7D2D TelnetEnabled value: {enabled_value!r}")
+    if enabled_value is not None and enabled_value.casefold() == "false":
+        raise ValueError("7D2D Telnet must be enabled for server management")
+
+    raw_port = _read_serverconfig_value(pointer, "TelnetPort")
+    if raw_port is None:
+        return _SEVENDAYS_DEFAULT_TELNET_PORT
+    if not raw_port.isdigit():
+        raise ValueError(f"Invalid 7D2D TelnetPort value: {raw_port!r}")
+    port = int(raw_port)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"7D2D TelnetPort must be between 1 and 65535, got {port}")
+    return port
 
 
 def _app_version_from_sevendays_text(raw_version: str) -> AppVersion:
@@ -496,11 +661,17 @@ def parse_admin_add_value(raw_value: str) -> SevenDaysAdminAddRequest:
     return SevenDaysAdminAddRequest(subject=subject, permission_level=permission_level)
 
 
-async def _send_console_command(app: "SevenDays", command: str, *, success_text: str) -> ConsoleActionResult:
+async def _send_console_command(
+    app: "SevenDays",
+    command: str,
+    *,
+    success_text: str,
+    response_text: str | None = None,
+) -> ConsoleActionResult:
     was_sent = await app._relay.send(command)
     if not was_sent:
         raise RuntimeError(f"Failed to send console command: {command}")
-    return ConsoleActionResult(summary=success_text)
+    return ConsoleActionResult(summary=success_text, text=response_text, source=ConsoleResponseSource.TELNET)
 
 
 async def _console_saveworld(app_obj: object, value: object | None) -> ConsoleActionResult:
@@ -517,6 +688,28 @@ async def _console_settime(app_obj: object, value: object | None) -> ConsoleActi
     app = cast(SevenDays, app_obj)
     target = cast(str, value)
     return await _send_console_command(app, f"settime {target}", success_text=f"{app.friendly}: time command sent.")
+
+
+async def _console_raw_command(app_obj: object, value: object | None) -> ConsoleActionResult:
+    app = cast(SevenDays, app_obj)
+    command = cast(str, value)
+    return await _send_console_command(
+        app,
+        command,
+        success_text=f"{app.friendly}: console command sent.",
+    )
+
+
+async def _console_getsandboxoptions(app_obj: object, value: object | None) -> ConsoleActionResult:
+    del value
+    app = cast(SevenDays, app_obj)
+    if not await app.request_sandbox_options():
+        raise RuntimeError("Failed to send console command: getsandboxoptions")
+    return ConsoleActionResult(
+        summary=f"{app.friendly}: sandbox options requested.",
+        text="Sandbox options are written to the 7D2D stdout feed.",
+        source=ConsoleResponseSource.TELNET,
+    )
 
 
 async def _console_say(app_obj: object, value: object | None) -> ConsoleActionResult:
@@ -573,6 +766,15 @@ _SEVENDAYS_SETTIME_PARAMETER = ConsoleActionParameter[str](
     desc="Use `day`, `night`, `1300`, or `<day> <hour> <minute>` like `6 15 0`.",
     max_length=32,
 )
+_SEVENDAYS_RAW_COMMAND_PARAMETER = ConsoleActionParameter[str](
+    key="command",
+    label="Command",
+    value_type=str,
+    validator=_is_non_empty_text,
+    desc="Raw 7D2D console command without a leading slash.",
+    max_length=500,
+    multiline=True,
+)
 _SEVENDAYS_PLAYER_PARAMETER = ConsoleActionParameter[str](
     key="player",
     label="Player Or Id",
@@ -612,6 +814,22 @@ _SEVENDAYS_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_settime,
         parameter=_SEVENDAYS_SETTIME_PARAMETER,
+    ),
+    ConsoleAction(
+        key="raw_command",
+        label="Run Command",
+        description="Send a raw command to the 7D2D console.",
+        power_level=Power_Level.sudo,
+        execute=_console_raw_command,
+        parameter=_SEVENDAYS_RAW_COMMAND_PARAMETER,
+    ),
+    ConsoleAction(
+        key="getsandboxoptions",
+        label="Get Sandbox Options",
+        description="Request the sandbox option dump added in 7D2D 3.0 b259.",
+        power_level=Power_Level.user,
+        execute=_console_getsandboxoptions,
+        min_app_version=AppVersion(main="3.0", build=259),
     ),
     ConsoleAction(
         key="kick",
@@ -1398,7 +1616,19 @@ class SevenDays_Settings(App_Settings):
         for element in data:
             for opt in self.options:
                 if element.attrib.get("name") == opt.key:
-                    opt.load_value(element.attrib["value"])
+                    raw_value = element.attrib["value"]
+                    try:
+                        opt.load_value(raw_value)
+                    except ValueError:
+                        if raw_value.strip():
+                            raise
+                        opt.value = opt.default
+                        log.warning(
+                            "7D2D stored setting was blank; keeping default: key=%s label=%s default=%s",
+                            opt.key,
+                            opt.label,
+                            opt.serialise_value(),
+                        )
 
         rwg_root = self._rwgmixer_tree().getroot()
         adjustments = self._find_trader_adjustments(rwg_root)
@@ -1466,10 +1696,13 @@ class SevenDays(App[App_Config]):
             persist=False,
         )
 
-        self._relay = TelnetClient(self.check_running, 8081)
+        self._telnet_port = _sevendays_telnet_port(file_settings)
+        self._relay = TelnetClient(self.check_running, self._telnet_port)
         self._tail: Tailer | None = None
-        self._tail_matchers = set()
+        self._tail_matchers: set[Callable[[str], Awaitable[None]]] = set()
         self._server_ready = asyncio.Event()
+        self._startup_sandbox_options_task: asyncio.Task[None] | None = None
+        self._telnet_startup_error: str | None = None
         self.am_receiver = Receiver(self)
         self._players = Players(self)
         self._activities = Activities(self)
@@ -1630,71 +1863,196 @@ class SevenDays(App[App_Config]):
             return None
         return raw_value.strip() or None
 
+    async def _configure_telnet_client(self) -> None:
+        telnet_port = _sevendays_telnet_port(self.directory / "serverconfig.xml")
+        if telnet_port == self._telnet_port:
+            return
+        await self._relay.teardown()
+        self._telnet_port = telnet_port
+        self._relay = TelnetClient(self.check_running, telnet_port)
+
+    async def _cleanup_runtime_component(
+        self,
+        label: str,
+        operation: Callable[[], Awaitable[object]],
+    ) -> None:
+        try:
+            await operation()
+        except Exception:
+            log.exception("Failed to clean up %s for %s", label, self.name)
+
+    async def _cleanup_runtime_components(self) -> None:
+        startup_sandbox_options_task = self._startup_sandbox_options_task
+        self._startup_sandbox_options_task = None
+        if startup_sandbox_options_task is not None:
+            startup_sandbox_options_task.cancel()
+            try:
+                await startup_sandbox_options_task
+            except asyncio.CancelledError:
+                pass
+        await self._cleanup_runtime_component("player polling", self._players.stop)
+        await self._cleanup_runtime_component("activity polling", self._activities.stop)
+        if self._tail is not None:
+            await self._cleanup_runtime_component("log tailer", self._tail.stop)
+        await self._cleanup_runtime_component("Telnet", self._relay.teardown)
+
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
         self._server_ready.clear()
-        previous_timestamped_logs: frozenset[Path] = frozenset(
-            _timestamped_sevendays_output_logs(directory=self.directory)
+        self._telnet_startup_error = None
+        await self._configure_telnet_client()
+        previous_log_signatures = _snapshot_sevendays_runtime_logs(
+            directory=self.directory,
+            server_log=self.server_log,
         )
         await self._std_launch()
 
-        while not self.check_running():
-            log.debug(f"Waiting for {self.name}.check_running...")
-            await asyncio.sleep(5)
+        try:
+            while not self.check_running():
+                log.debug(f"Waiting for {self.name}.check_running...")
+                await asyncio.sleep(5)
 
-        log.debug(f"{self.name}.running...")
-        reader = await self._relay.setup()
-
-        runtime_log = await _discover_sevendays_runtime_log(
-            directory=self.directory,
-            server_log=self.server_log,
-            previous_timestamped_logs=previous_timestamped_logs,
-            check_running=self.check_running,
-        )
-        if runtime_log is not None:
-            File_Utils.link(runtime_log, self.file_stdout.with_name(runtime_log.name))
-            self._tail = Tailer(self.check_running, runtime_log, self.file_stdout)
-        else:
-            self._tail = Tailer(lambda: self._relay.connected_event, reader, self.file_stdout)  # type: ignore[arg-type]
-        await self._tail.start(self._tail_matchers)
-        await self.wait_for_ready_event(
-            self._server_ready,
-            timeout_seconds=900.0,
-            ready_label="server readiness",
-        )
-        await self._players.start()
-        await self._activities.start()
-        self._running = True
-        return True
+            log.debug(f"{self.name}.running...")
+            runtime_log = await _discover_sevendays_runtime_log(
+                directory=self.directory,
+                server_log=self.server_log,
+                previous_log_signatures=previous_log_signatures,
+                check_running=self.check_running,
+            )
+            if runtime_log is not None:
+                File_Utils.link(runtime_log, self.file_stdout.with_name(runtime_log.name))
+                self._tail = Tailer(self.check_running, runtime_log, self.file_stdout)
+                await self._tail.start(self._tail_matchers)
+                await self.wait_for_ready_event(
+                    self._server_ready,
+                    timeout_seconds=900.0,
+                    ready_label="server readiness",
+                )
+                if self._telnet_startup_error is not None:
+                    raise RuntimeError(f"7D2D Telnet failed to start: {self._telnet_startup_error}")
+                await self._relay.setup()
+            else:
+                reader = await self._relay.setup()
+                self._tail = Tailer(lambda: self._relay.connected_event, reader, self.file_stdout)
+                await self._tail.start(self._tail_matchers)
+                await self.wait_for_ready_event(
+                    self._server_ready,
+                    timeout_seconds=900.0,
+                    ready_label="server readiness",
+                )
+            await self._players.start()
+            await self._activities.start()
+            self._running = True
+            self._schedule_startup_sandbox_options_request()
+            return True
+        except Exception:
+            self._running = False
+            await self._cleanup_runtime_components()
+            await self._terminate()
+            raise
 
     async def stop(self) -> bool:
         log.info(f"{__name__}.stop")
         self._running = False
-        await self._relay.send("saveworld")
-        await asyncio.sleep(0.1)
-        await self._relay.send("shutdown")
-        await self._players.stop()
-        await self._activities.stop()
-        if self._tail:
-            await self._tail.stop()
-        if self._relay:
-            await self._relay.teardown()
-        await self._terminate()
+        try:
+            save_sent = await self._relay.send("saveworld")
+            if save_sent:
+                await asyncio.sleep(0.1)
+            else:
+                log.warning("Could not request a world save before stopping %s", self.name)
+            shutdown_sent = await self._relay.send("shutdown")
+            if not shutdown_sent:
+                log.warning("Could not request graceful shutdown for %s; terminating the process", self.name)
+        except Exception:
+            log.exception("Failed to send graceful shutdown commands for %s", self.name)
+        finally:
+            await self._cleanup_runtime_components()
+            await self._terminate()
         return True
 
     async def kill(self) -> bool:
         self._running = False
-        await self._players.stop()
-        await self._activities.stop()
-        if self._tail:
-            await self._tail.stop()
-        if self._relay:
-            await self._relay.teardown()
+        await self._cleanup_runtime_components()
         await self._terminate()
         return True
 
     async def player_count(self) -> tuple[int, int] | None:
         return await self._players.count()
+
+    @property
+    def sandbox_options_path(self) -> Path:
+        return self.directory / _SEVENDAYS_YUKIBOT_DATA_RELATIVE_PATH / _SEVENDAYS_SANDBOX_OPTIONS_FILE_NAME
+
+    @property
+    def sandbox_options_file_exists(self) -> bool:
+        return self.sandbox_options_path.is_file()
+
+    @property
+    def supports_sevendays_sandbox_options(self) -> bool:
+        return _sevendays_version_supports_sandbox_options(self.cfg.version)
+
+    async def request_sandbox_options(self) -> bool:
+        cfg = getattr(self, "cfg", None)
+        app_version = getattr(cfg, "version", None)
+        if not _sevendays_version_supports_sandbox_options(app_version):
+            return False
+        return bool(await self._relay.send("getsandboxoptions"))
+
+    def _schedule_startup_sandbox_options_request(self) -> None:
+        existing_task = self._startup_sandbox_options_task
+        if existing_task is not None and not existing_task.done():
+            return
+        self._startup_sandbox_options_task = asyncio.create_task(
+            self._request_startup_sandbox_options(),
+            name=f"{self.name}-startup-sandbox-options",
+        )
+
+    async def _request_startup_sandbox_options(
+        self,
+        *,
+        delay_seconds: float = _SEVENDAYS_STARTUP_SANDBOX_OPTIONS_DELAY_SECONDS,
+        max_attempts: int = _SEVENDAYS_STARTUP_SANDBOX_OPTIONS_MAX_ATTEMPTS,
+    ) -> None:
+        try:
+            for attempt_index in range(max_attempts):
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+                was_sent = await self.request_sandbox_options()
+                if was_sent:
+                    return
+                if self.cfg.version is not None and not self.supports_sevendays_sandbox_options:
+                    return
+                if attempt_index + 1 >= max_attempts:
+                    break
+            if self.supports_sevendays_sandbox_options:
+                log.warning("%s failed to request 7D2D sandbox options during startup", self.name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("%s failed while requesting 7D2D sandbox options during startup", self.name)
+        finally:
+            if getattr(self, "_startup_sandbox_options_task", None) is asyncio.current_task():
+                self._startup_sandbox_options_task = None
+
+    def load_sandbox_options_snapshot(self) -> SevenDaysSandboxOptionsSnapshot:
+        pointer = self.sandbox_options_path
+        try:
+            raw_payload: object = json.loads(pointer.read_text(config.STR_ENCODE))
+        except json.JSONDecodeError as xcp:
+            raise ValueError(f"Invalid 7D2D sandbox options JSON at {pointer}: {xcp}") from xcp
+        except OSError as xcp:
+            raise ValueError(f"Unable to read 7D2D sandbox options at {pointer}: {xcp}") from xcp
+        return SevenDaysSandboxOptionsSnapshot.from_mapping(
+            _json_object(raw_payload, label="7D2D sandbox options snapshot")
+        )
+
+    def save_sandbox_options_snapshot(self, snapshot: SevenDaysSandboxOptionsSnapshot) -> None:
+        pointer = self.sandbox_options_path
+        try:
+            pointer.parent.mkdir(parents=True, exist_ok=True)
+            pointer.write_text(json.dumps(snapshot.to_mapping(), indent=4, sort_keys=True) + "\n", config.STR_ENCODE)
+        except OSError as xcp:
+            raise ValueError(f"Unable to write 7D2D sandbox options at {pointer}: {xcp}") from xcp
 
 
 class Receiver(AM_Receiver):
@@ -1723,11 +2081,17 @@ class Matchers:
     def __init__(self, app: SevenDays) -> None:
         self.app: SevenDays = app
         self._last_telnet: datetime = datetime.now()
+        self._sandbox_options_active = False
+        self._sandbox_code: str | None = None
+        self._sandbox_section: str | None = None
+        self._sandbox_options: list[SevenDaysSandboxOption] = []
         app._tail_matchers.add(self.match_version)
+        app._tail_matchers.add(self.match_telnet_startup_error)
         app._tail_matchers.add(self.match_ready)
         app._tail_matchers.add(self.match_transiant)
         app._tail_matchers.add(self.match_chat)
         app._tail_matchers.add(self.match_death)
+        app._tail_matchers.add(self.match_sandbox_options)
 
     async def match_version(self, line: str) -> None:
         if match := _SEVENDAYS_VERSION_RE.search(line):
@@ -1741,6 +2105,50 @@ class Matchers:
             if not self.app._server_ready.is_set():
                 log.info("%s matched 7D2D ready line: %s", self.app.name, line)
                 self.app._server_ready.set()
+
+    async def match_telnet_startup_error(self, line: str) -> None:
+        if _SEVENDAYS_TELNET_STARTUP_ERROR_RE.search(line):
+            self.app._telnet_startup_error = line
+
+    async def match_sandbox_options(self, line: str) -> None:
+        if match := _SEVENDAYS_SANDBOX_CODE_RE.search(line):
+            self._sandbox_options_active = False
+            self._sandbox_code = match.group("code").strip()
+            self._sandbox_section = None
+            self._sandbox_options = []
+            return
+
+        if _SEVENDAYS_SANDBOX_OPTIONS_RE.search(line):
+            self._sandbox_options_active = True
+            if self._sandbox_code is None:
+                self._sandbox_options = []
+            self._sandbox_section = None
+            return
+
+        if not self._sandbox_options_active:
+            return
+
+        if section_match := _SEVENDAYS_SANDBOX_SECTION_RE.search(line):
+            self._sandbox_section = section_match.group("section").strip().title()
+            return
+
+        if option_match := _SEVENDAYS_SANDBOX_OPTION_RE.search(line):
+            option = SevenDaysSandboxOption(
+                section=self._sandbox_section or "Uncategorised",
+                key=option_match.group("key"),
+                value_index=int(option_match.group("value_index")),
+                value_label=option_match.group("value_label"),
+                default_index=int(option_match.group("default_index")),
+                default_label=option_match.group("default_label"),
+            )
+            self._sandbox_options.append(option)
+            snapshot = SevenDaysSandboxOptionsSnapshot(
+                generated_at=datetime.now().isoformat(timespec="seconds"),
+                sandbox_code=self._sandbox_code,
+                app_version=self.app.cfg.version.display_value if self.app.cfg.version is not None else None,
+                options=tuple(self._sandbox_options),
+            )
+            self.app.save_sandbox_options_snapshot(snapshot)
 
     async def match_transiant(self, line: str) -> None:
         if match := _SEVENDAYS_TRANSIENT_RE.search(line):
@@ -1825,7 +2233,10 @@ class Players:
                 await self._players_task
             except asyncio.CancelledError:
                 pass
-            self._players_task = None
+            except Exception:
+                log.exception("7D2D player polling task failed before shutdown for %s", self.app.name)
+            finally:
+                self._players_task = None
 
     async def match_players(self, line: str):
         current = maximum = None
@@ -1895,6 +2306,8 @@ class Activities:
                 await task
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                log.exception("7D2D activity task failed before shutdown for %s", self.app.name)
 
 
 class Provider_Time(AppActivityProvider[SevenDays]):

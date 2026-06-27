@@ -188,8 +188,7 @@ def _cast_mod_web_route_ui(value: object) -> ModWebRouteUi:
 
 
 def _event_args_as_text(container: ModWebEventArgumentsContainer) -> str:
-    value = container.args
-    return "" if value is None else str(value)
+    return _value_as_text(container)
 
 
 def _value_as_object(container: object) -> object:
