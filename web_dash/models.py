@@ -22,7 +22,6 @@ from .constants import (
     _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     _REMOTE_NODE_TOKEN_TTL_SECONDS,
-    _SAME_ORIGIN_NODE_API_BASE,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
     log,
@@ -342,7 +341,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 kind_label="Remove",
                 title=title,
                 detail=detail,
-                recipe_id=mutation.filter.recipe_id,
+                recipe_id=mutation.directive_id,
             )
         if isinstance(mutation, MinecraftShapelessRecipe):
             ingredients = ", ".join(cls._minecraft_recipe_ingredient_text(item) for item in mutation.ingredients)
@@ -431,6 +430,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         return ModWebMinecraftItemRegistrySummary(
             data_path=data_path,
             item_ids=item_registry.item_ids,
+            block_item_ids=item_registry.block_item_ids,
+            item_types_classified=item_registry.item_types_classified,
             file_exists=item_registry_path_exists,
             generated_at_epoch_ms=item_registry.generated_at_epoch_ms,
         )
@@ -1116,6 +1117,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             item_registry_summary = ModWebMinecraftItemRegistrySummary(
                 data_path=item_registry_state.data_path,
                 item_ids=item_registry.item_ids,
+                block_item_ids=item_registry.block_item_ids,
+                item_types_classified=item_registry.item_types_classified,
                 file_exists=item_registry_state.file_exists,
                 generated_at_epoch_ms=item_registry.generated_at_epoch_ms,
             )
@@ -1964,16 +1967,16 @@ class ModWebModelsMixin(ModWebServiceSupport):
         for snapshot in self._known_bot_snapshots():
             if snapshot.profile.bot_profile is not config.BotProfileName.PORTAL:
                 continue
-            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
-            if mod_web is not None:
-                return mod_web.public_base_url
+            portal_mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
+            if portal_mod_web is not None:
+                return portal_mod_web.public_base_url
 
         for snapshot in self._known_bot_snapshots():
             if snapshot.profile.bot_profile is not config.BotProfileName.YUKI:
                 continue
-            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
-            if mod_web is not None:
-                return mod_web.public_base_url
+            yuki_mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
+            if yuki_mod_web is not None:
+                return yuki_mod_web.public_base_url
 
         endpoint: AuthorityEndpoint | None = config.DATA_AUTHORITY_ENDPOINT
         if endpoint is not None:

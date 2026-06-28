@@ -2401,6 +2401,7 @@ class ModWebTests(unittest.TestCase):
         model = service._remote_page_model(
             node=current_node,
             mods=mods,
+            app_scope="minecraft",
             supports_configs=True,
             config_read_level=Power_Level.user,
             config_write_level=Power_Level.sudo,
@@ -9779,6 +9780,8 @@ class ModWebTests(unittest.TestCase):
                     MinecraftItemRegistrySnapshot(
                         generated_at_epoch_ms=1234567890,
                         item_ids=("minecraft:dirt", "minecraft:stone"),
+                        block_item_ids=("minecraft:stone",),
+                        item_types_classified=True,
                     ).to_mapping()
                 ),
                 encoding="utf-8",
@@ -9792,6 +9795,37 @@ class ModWebTests(unittest.TestCase):
             self.assertTrue(summary.file_exists)
             self.assertEqual(summary.generated_at_epoch_ms, 1234567890)
             self.assertEqual(summary.item_ids, ("minecraft:dirt", "minecraft:stone"))
+            self.assertEqual(summary.block_item_ids, ("minecraft:stone",))
+            self.assertTrue(summary.item_types_classified)
+
+    def test_minecraft_item_browser_filters_by_namespace_and_item_type(self) -> None:
+        entries = ModWebService._minecraft_browser_entries(
+            ("minecraft:stone", "minecraft:stick", "create:cogwheel"),
+            block_item_ids=("minecraft:stone",),
+        )
+
+        create_entries = ModWebService._filtered_minecraft_browser_entries(
+            entries,
+            "",
+            namespace="create",
+        )
+        block_entries = ModWebService._filtered_minecraft_browser_entries(
+            entries,
+            "",
+            item_type=entries[0].item_type,
+        )
+        item_entries = ModWebService._filtered_minecraft_browser_entries(
+            entries,
+            "",
+            item_type=entries[1].item_type,
+        )
+
+        self.assertEqual([entry.item_id for entry in create_entries], ["create:cogwheel"])
+        self.assertEqual([entry.item_id for entry in block_entries], ["minecraft:stone"])
+        self.assertEqual(
+            [entry.item_id for entry in item_entries],
+            ["minecraft:stick", "create:cogwheel"],
+        )
 
     def test_minecraft_recipes_body_markup_handles_empty_error_and_entries(self) -> None:
         unavailable_markup = ModWebService._minecraft_recipes_body_markup(None)
@@ -9875,13 +9909,36 @@ class ModWebTests(unittest.TestCase):
             ("minecraft:dirt", "minecraft:stone"),
         )
 
+    def test_minecraft_item_icon_markup_layers_lazy_image_over_csp_safe_fallback(self) -> None:
+        markup = ModWebService._minecraft_item_icon_markup(
+            item_icon_api_url="/api/node-proxy/yuki/apps/minecraft_alpha/minecraft/recipes/item-icon",
+            item_id="minecraft:dirt",
+            alt_text="Dirt",
+        )
+
+        self.assertIn("mod-recipe-icon-stack", markup)
+        self.assertIn("mod-recipe-icon-fallback", markup)
+        self.assertIn('loading="lazy"', markup)
+        self.assertNotIn("onerror=", markup)
+
+    def test_minecraft_item_icon_remote_path_encodes_app_and_item_ids(self) -> None:
+        path = ModWebService._minecraft_item_icon_remote_path(
+            app_name="minecraft alpha",
+            item_id="minecraft:dark oak_planks",
+        )
+
+        self.assertEqual(
+            path,
+            "/apps/minecraft%20alpha/minecraft/recipes/item-icon?item_id=minecraft%3Adark+oak_planks",
+        )
+
     def test_minecraft_recipe_editor_supports_cooking_extras(self) -> None:
         editor_state = _MinecraftRecipeEditorState(
             operation=_MinecraftRecipeEditorOperation.ADD,
             kind=MinecraftRecipeKind.SMELTING,
             recipe_id="kubejs:smelt_gravel",
             output_item_id="minecraft:gravel",
-            output_count=2,
+            output_count_text="2",
             cooking_input_ingredient=_MinecraftRecipeEditorIngredientState.item("minecraft:cobblestone"),
             cooking_experience_text="0.35",
             cooking_time_ticks_text="160",
@@ -9894,6 +9951,20 @@ class ModWebTests(unittest.TestCase):
         assert isinstance(mutation, MinecraftCookingRecipe)
         self.assertEqual(mutation.experience, 0.35)
         self.assertEqual(mutation.cooking_time_ticks, 160)
+
+    def test_minecraft_recipe_editor_preserves_counts_and_accepts_multi_digit_output_count(self) -> None:
+        original_mutation = MinecraftShapelessRecipe(
+            output=MinecraftRecipeItemStack("minecraft:gravel", count=12),
+            ingredients=(MinecraftRecipeIngredient.item("minecraft:flint", count=3),),
+            recipe_id="yukibot:yuki/minecraft/gravel",
+        )
+        editor_state = _MinecraftRecipeEditorState()
+
+        ModWebService._load_minecraft_recipe_editor_state(editor_state, original_mutation, mutation_index=0)
+        rebuilt_mutation = ModWebService._minecraft_recipe_mutation_from_editor(editor_state)
+
+        self.assertEqual(editor_state.output_count_text, "12")
+        self.assertEqual(rebuilt_mutation.to_mapping(), original_mutation.to_mapping())
 
     def test_minecraft_recipe_editor_supports_removal_filters_and_loading(self) -> None:
         mutation = MinecraftRecipeRemoval(
@@ -9927,7 +9998,7 @@ class ModWebTests(unittest.TestCase):
             kind=MinecraftRecipeKind.SHAPED,
             recipe_id="kubejs:tagged_recipe",
             output_item_id="minecraft:stick",
-            output_count=1,
+            output_count_text="1",
             shaped_ingredients=[
                 _MinecraftRecipeEditorIngredientState.tag("minecraft:planks"),
                 _MinecraftRecipeEditorIngredientState.empty(),
@@ -10019,6 +10090,8 @@ class ModWebTests(unittest.TestCase):
                 payload=MinecraftItemRegistrySnapshot(
                     generated_at_epoch_ms=1234567890,
                     item_ids=("minecraft:dirt", "minecraft:stone"),
+                    block_item_ids=("minecraft:stone",),
+                    item_types_classified=True,
                 ).to_mapping(),
             ),
         )
@@ -10036,6 +10109,8 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(item_registry_summary.data_path, ".yukibot/registries/items.json")
         self.assertTrue(item_registry_summary.file_exists)
         self.assertEqual(item_registry_summary.item_ids, ("minecraft:dirt", "minecraft:stone"))
+        self.assertEqual(item_registry_summary.block_item_ids, ("minecraft:stone",))
+        self.assertTrue(item_registry_summary.item_types_classified)
 
     def test_append_minecraft_recipe_mutation_posts_to_node_api(self) -> None:
         service = ModWebService()

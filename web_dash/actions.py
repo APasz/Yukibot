@@ -14,7 +14,6 @@ from .runtime_imports import (
     Awaitable,
     Callable,
     Checkbox,
-    ManagedApp,
     ModType,
     ModWebUser,
     NodeApiScope,

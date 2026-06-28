@@ -1139,6 +1139,25 @@ class ModWebTheme:
                         inset 0 1px 0 rgba(255, 255, 255, 0.03),
                         0 20px 42px rgba(0, 0, 0, 0.34) !important;
                 }}
+                .mod-recipe-subtabs {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0;
+                    height: auto !important;
+                    min-height: 0 !important;
+                }}
+                .mod-recipe-subtabs > .mod-section-tabs-shell {{
+                    flex: 0 0 auto;
+                    width: 100%;
+                }}
+                .mod-recipe-subtab-panels,
+                .mod-recipe-subtab-panels .q-panel,
+                .mod-recipe-subtab-panels .q-panel > div,
+                .mod-recipe-subtab-panels .mod-section-panel {{
+                    flex: 0 0 auto !important;
+                    height: auto !important;
+                    min-height: 0 !important;
+                }}
                 .mod-recipe-panel-heading {{
                     display: flex;
                     flex-direction: column;
@@ -1299,13 +1318,24 @@ class ModWebTheme:
                         0 8px 18px rgba(0, 0, 0, 0.24);
                     overflow: hidden;
                 }}
+                .mod-recipe-icon-stack {{
+                    position: relative;
+                    display: inline-block;
+                    width: 2.85rem;
+                    height: 2.85rem;
+                }}
+                .mod-recipe-icon-stack .mod-recipe-icon-shell {{
+                    position: absolute;
+                    inset: 0;
+                }}
                 .mod-recipe-icon-image {{
                     display: block;
-                    width: 100%;
-                    height: 100%;
+                    z-index: 1;
+                    color: transparent;
+                    font-size: 0;
                     object-fit: contain;
                     image-rendering: pixelated;
-                    background: rgba(0, 0, 0, 0.12);
+                    background: transparent;
                 }}
                 .mod-recipe-icon-tag,
                 .mod-recipe-icon-empty,
@@ -1335,6 +1365,10 @@ class ModWebTheme:
                     flex-wrap: wrap;
                     width: 100%;
                 }}
+                .mod-recipe-browser-filter {{
+                    flex: 0 1 13rem;
+                    min-width: 11rem;
+                }}
                 .mod-recipe-browser-status {{
                     display: flex;
                     align-items: center;
@@ -1345,13 +1379,15 @@ class ModWebTheme:
                 .mod-recipe-browser-grid {{
                     display: grid;
                     grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
-                    gap: 0.65rem;
+                    gap: 0.75rem 0.9rem;
                     width: 100%;
                 }}
                 .mod-recipe-browser-card {{
+                    position: relative;
+                    overflow: hidden !important;
                     cursor: pointer;
-                    min-height: 5.35rem;
-                    padding: 0.65rem 0.72rem !important;
+                    min-height: 3.75rem;
+                    padding: 0.5rem 4.25rem 0.5rem 0.65rem !important;
                     border: 1px solid rgba(82, 82, 91, 0.66) !important;
                     background:
                         linear-gradient(135deg, rgba(12, 12, 18, 0.98), rgba(17, 14, 24, 0.96)) !important;
@@ -1369,6 +1405,26 @@ class ModWebTheme:
                     justify-content: space-between;
                     gap: 0.7rem;
                     flex-wrap: nowrap;
+                }}
+                .mod-recipe-browser-visual {{
+                    position: absolute;
+                    z-index: 2;
+                    top: -1px;
+                    right: -1px;
+                    bottom: -1px;
+                    width: 3.75rem;
+                    pointer-events: none;
+                }}
+                .mod-recipe-browser-card .mod-recipe-icon-shell {{
+                    width: 100%;
+                    height: 100%;
+                    border: 0;
+                    border-left: 1px solid rgba(139, 92, 246, 0.58);
+                    box-shadow: none;
+                }}
+                .mod-recipe-browser-card .mod-recipe-icon-stack {{
+                    width: 100%;
+                    height: 100%;
                 }}
                 .mod-recipe-browser-copy {{
                     flex: 1 1 auto;
@@ -3932,6 +3988,10 @@ class ModWebTheme:
                     }}
                     .mod-recipe-browser-toolbar {{
                         align-items: stretch;
+                    }}
+                    .mod-recipe-browser-filter {{
+                        flex: 1 1 calc(50% - 0.5rem);
+                        min-width: 10rem;
                     }}
                     .mod-recipe-browser-status {{
                         width: 100%;

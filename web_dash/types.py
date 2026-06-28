@@ -210,6 +210,8 @@ class ModWebMinecraftRecipeBookSummary:
 class ModWebMinecraftItemRegistrySummary:
     data_path: str
     item_ids: tuple[str, ...] = ()
+    block_item_ids: tuple[str, ...] = ()
+    item_types_classified: bool = False
     file_exists: bool = False
     generated_at_epoch_ms: int | None = None
     load_error: str | None = None
@@ -219,11 +221,19 @@ class ModWebMinecraftItemRegistrySummary:
         if not data_path:
             raise ValueError("Minecraft item registry summaries require a data path.")
         object.__setattr__(self, "data_path", data_path)
+        if not isinstance(self.item_types_classified, bool):
+            raise TypeError("Minecraft item registry summary item_types_classified must be a boolean.")
         if self.generated_at_epoch_ms is not None:
             if self.generated_at_epoch_ms < 0:
                 raise ValueError("Minecraft item registry summary timestamps must not be negative.")
         normalised_item_ids = tuple(item_id.strip() for item_id in self.item_ids if item_id.strip())
         object.__setattr__(self, "item_ids", normalised_item_ids)
+        normalised_block_item_ids = tuple(item_id.strip() for item_id in self.block_item_ids if item_id.strip())
+        if set(normalised_block_item_ids) - set(normalised_item_ids):
+            raise ValueError("Minecraft block item summary IDs must also exist in the item registry.")
+        if normalised_block_item_ids and not self.item_types_classified:
+            raise ValueError("Minecraft block item summaries require classified item type data.")
+        object.__setattr__(self, "block_item_ids", normalised_block_item_ids)
         if self.load_error is not None:
             load_error = self.load_error.strip()
             object.__setattr__(self, "load_error", load_error or None)

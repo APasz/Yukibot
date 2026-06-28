@@ -25,6 +25,7 @@ from .runtime_imports import (
     config,
     quote,
     requests,
+    urlencode,
     urlsplit,
 )
 from .service_base import ModWebServiceSupport
@@ -44,6 +45,13 @@ class _ModWebClientMapErrorReport(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=False)
 
 class ModWebRoutesMixin(ModWebServiceSupport):
+    @staticmethod
+    def _minecraft_item_icon_remote_path(*, app_name: str, item_id: str) -> str:
+        return (
+            f"/apps/{quote(app_name, safe='')}/minecraft/recipes/item-icon"
+            f"?{urlencode({'item_id': item_id})}"
+        )
+
     @staticmethod
     def _is_self_redirect_target(*, request: Request, location: str) -> bool:
         if not location:
@@ -579,16 +587,28 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            content, media_type, headers = await self._remote_bytes_async(
-                node=node,
-                app_name=app_name,
-                path=(
-                    f"/apps/{quote(app_name, safe='')}/minecraft/recipes/item-icon"
-                    f"?{urlencode({'item_id': item_id})}"
-                ),
-                scopes=(NodeApiScope.MODS_READ,),
-                user=user,
-            )
+            try:
+                content, media_type, headers = await self._remote_bytes_async(
+                    node=node,
+                    app_name=app_name,
+                    path=self._minecraft_item_icon_remote_path(app_name=app_name, item_id=item_id),
+                    scopes=(NodeApiScope.MODS_READ,),
+                    user=user,
+                    timeout=60.0,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Minecraft item icon proxy failed: node=%s app=%s item=%s error=%s",
+                    node_name,
+                    app_name,
+                    item_id,
+                    xcp,
+                )
+                return StarletteResponse(
+                    content=self._node_api.minecraft_item_icon_placeholder_svg(item_id),
+                    media_type="image/svg+xml",
+                    headers={"Cache-Control": "private, max-age=30"},
+                )
             return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods")

@@ -46,6 +46,7 @@ from .runtime_imports import (
     Path,
     Power_Level,
     RedirectResponse,
+    StarletteResponse,
     Tooltip,
     cast,
     config,
@@ -173,7 +174,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_build_async_refreshable_updater"]) -> Callable[..., AsyncRefresh]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_build_framework_error_response"]) -> Callable[..., Awaitable[object]]: ...
+    def __getattr__(
+        self, name: Literal["_build_framework_error_response"]
+    ) -> Callable[..., Awaitable[StarletteResponse]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_build_home_title_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...

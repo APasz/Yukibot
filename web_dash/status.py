@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from relay_notices import (
     AppLifecycleNotice,
     AppLifecycleState,
@@ -31,7 +33,6 @@ from .nicegui_protocols import (
     _value_as_text,
 )
 from .runtime_imports import (
-    BadgeTone,
     MOD_WEB_ACTION_BASE_CLASSES,
     Awaitable,
     Button,
@@ -47,6 +48,7 @@ from .runtime_imports import (
     ChatMediaProvider,
     ChatMessageReference,
     ChatReferenceKind,
+    Callable,
     Iterable,
     Label,
     LiteralString,
@@ -54,6 +56,7 @@ from .runtime_imports import (
     Path,
     Power_Level,
     Request,
+    StarletteResponse,
     asyncio,
     cast,
     config,
@@ -75,6 +78,9 @@ from .types import (
     _ModWebNotificationTrayItem,
     _ModWebStatusPageConfig,
 )
+
+if TYPE_CHECKING:
+    from nicegui.element import Element
 
 _STATUS_SVG_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "svg" / "web_dash"
 _USER_HEADER_SURFACE_MIN_HEIGHT_REM = 4.9
@@ -190,7 +196,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
         request: Request,
         status_code: int,
         exception: Exception,
-    ) -> object:
+    ) -> StarletteResponse:
         from nicegui.client import Client
         from nicegui.page import page as nicegui_page
 
@@ -600,7 +606,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
         def _clear_transfers() -> None:
             self._backend.clear_user_transfers(user_id=user.discord_id)
 
-        action_specs: list[tuple[str, object]] = []
+        action_specs: list[tuple[str, Callable[[], object]]] = []
         if config.INDEV:
             action_specs.extend(
                 (
@@ -617,10 +623,11 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
         menu_factory = getattr(ui, "menu", None)
         if callable(menu_factory):
+            create_menu = cast("Callable[[], Element]", menu_factory)
             with ui.button("").props("icon=menu flat aria-label=Utilities").classes(
                 f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-menu-button"
             ):
-                with menu_factory().classes("mod-chat-entry-menu min-w-[12rem]"):
+                with create_menu().classes("mod-chat-entry-menu min-w-[12rem]"):
                     for label, action in action_specs:
                         ui.menu_item(label, on_click=lambda _, action=action: action()).classes("mod-chat-entry-menu-item")
             return
@@ -1018,7 +1025,11 @@ class ModWebStatusMixin(ModWebServiceSupport):
         initial_app_name: str | None = (
             context_options.get(initial_app_label)
             if initial_app_label is not None
-            else send_target_options.get(initial_publish_target_label)
+            else (
+                send_target_options.get(initial_publish_target_label)
+                if initial_publish_target_label is not None
+                else None
+            )
         )
         state: _ModWebFakeChatPreviewState = _ModWebFakeChatPreviewState(app_name=initial_app_name)
         publish_target_label: str | None = initial_publish_target_label

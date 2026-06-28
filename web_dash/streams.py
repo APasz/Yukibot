@@ -24,6 +24,7 @@ from .runtime_imports import (
     aiohttp,
     asyncio,
     cast,
+    config,
     quote,
     urlsplit,
     urlunsplit,

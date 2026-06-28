@@ -80,7 +80,14 @@ from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
 from apps._updater import AppUpdateInfo, AppUpdateStatus
-from apps.minecraft import Minecraft, MinecraftRecipeBook, MinecraftRecipeMutation
+from apps.minecraft import (
+    Minecraft,
+    MinecraftRecipeBook,
+    MinecraftRecipeMutation,
+    generated_minecraft_recipe_mutation_id,
+    minecraft_recipe_mutation_id,
+    minecraft_recipe_mutation_with_id,
+)
 from apps.sevendays import SevenDays
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub
 from font_assets import font_assets
@@ -4539,13 +4546,13 @@ class NodeApiService:
                 headers={"Cache-Control": "public, max-age=300"},
             )
         return Response(
-            content=self._minecraft_item_icon_placeholder_svg(item_id),
+            content=self.minecraft_item_icon_placeholder_svg(item_id),
             media_type="image/svg+xml",
             headers={"Cache-Control": "public, max-age=60"},
         )
 
     @staticmethod
-    def _minecraft_item_icon_placeholder_svg(item_id: str) -> str:
+    def minecraft_item_icon_placeholder_svg(item_id: str) -> str:
         resource_text = item_id.strip().casefold()
         item_tail = resource_text.rsplit(":", maxsplit=1)[-1].split("/")[-1]
         condensed_tail = "".join(character for character in item_tail if character.isalnum())
@@ -4589,11 +4596,23 @@ class NodeApiService:
         try:
             if mutation_request.action is NodeMinecraftRecipeMutationAction.ADD:
                 assert mutation_request.mutation is not None
-                app.append_kubejs_recipe_mutation(mutation_request.mutation)
+                mutation = self._minecraft_recipe_mutation_for_actor(
+                    app=app,
+                    mutation=mutation_request.mutation,
+                    mutation_index=None,
+                    actor_user_id=actor_user_id,
+                )
+                app.append_kubejs_recipe_mutation(mutation)
             elif mutation_request.action is NodeMinecraftRecipeMutationAction.REPLACE:
                 assert mutation_request.mutation_index is not None
                 assert mutation_request.mutation is not None
-                app.replace_kubejs_recipe_mutation(mutation_request.mutation_index, mutation_request.mutation)
+                mutation = self._minecraft_recipe_mutation_for_actor(
+                    app=app,
+                    mutation=mutation_request.mutation,
+                    mutation_index=mutation_request.mutation_index,
+                    actor_user_id=actor_user_id,
+                )
+                app.replace_kubejs_recipe_mutation(mutation_request.mutation_index, mutation)
             elif mutation_request.action is NodeMinecraftRecipeMutationAction.DELETE:
                 assert mutation_request.mutation_index is not None
                 app.remove_kubejs_recipe_mutation(mutation_request.mutation_index)
@@ -4625,6 +4644,36 @@ class NodeApiService:
             message=f"Saved Minecraft recipe change for {app.friendly}.",
             workspace=self.build_minecraft_recipe_workspace_state(app),
         )
+
+    @staticmethod
+    def _minecraft_recipe_mutation_for_actor(
+        *,
+        app: Minecraft,
+        mutation: MinecraftRecipeMutation,
+        mutation_index: int | None,
+        actor_user_id: int,
+    ) -> MinecraftRecipeMutation:
+        recipe_book = app.load_kubejs_recipe_book()
+        if mutation_index is not None:
+            if mutation_index < 0 or mutation_index >= len(recipe_book.mutations):
+                raise IndexError(f"Unknown Minecraft recipe mutation index: {mutation_index}")
+        minecraft_username = config.Name_Cache().get_game_alias(actor_user_id, "minecraft")
+        if minecraft_username is None:
+            raise ValueError(
+                "Link a Minecraft username to your Discord account before creating recipes or removal directives."
+            )
+        existing_recipe_ids = {
+            recipe_id
+            for existing_index, existing_mutation in enumerate(recipe_book.mutations)
+            if existing_index != mutation_index
+            if (recipe_id := minecraft_recipe_mutation_id(existing_mutation)) is not None
+        }
+        recipe_id = generated_minecraft_recipe_mutation_id(
+            minecraft_username=minecraft_username,
+            mutation=mutation,
+            existing_recipe_ids=existing_recipe_ids,
+        )
+        return minecraft_recipe_mutation_with_id(mutation, recipe_id)
 
     def _cached_app_transition_state(self, app_name: str) -> NodeAppTransitionState:
         key = app_name.casefold()

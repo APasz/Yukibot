@@ -11,7 +11,6 @@ from .constants import (
     _CONFIG_EDITOR_THEME,
     _HIDDEN_SETTING_CYCLE_VARIANT_COUNT,
     _HIDDEN_SETTING_GLYPHS,
-    _SAME_ORIGIN_NODE_API_BASE,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     log,
 )
@@ -55,7 +54,6 @@ from .runtime_imports import (
     NodeConsoleStdoutSnapshot,
     NodeModEntry,
     NodeModUploadBatchResult,
-    NodeModUploadSource,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveMutationResult,

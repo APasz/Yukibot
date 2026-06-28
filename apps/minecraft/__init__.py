@@ -7,10 +7,11 @@ import logging
 import re
 import shlex
 import tempfile
+import threading
 import zipfile
 from asyncio.locks import Event
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import TypeAlias, cast
@@ -352,18 +353,24 @@ const YUKIBOT_ITEM_REGISTRY_SCHEMA_VERSION = 1
 const BuiltInRegistries = Java.loadClass('net.minecraft.core.registries.BuiltInRegistries')
 
 const itemIds = []
+const blockItemIds = []
 
 BuiltInRegistries.ITEM.keySet().forEach(id => {
     itemIds.push(String(id))
+    if (BuiltInRegistries.BLOCK.containsKey(id)) {
+        blockItemIds.push(String(id))
+    }
 })
 
 itemIds.sort()
+blockItemIds.sort()
 JsonIO.write(YUKIBOT_ITEM_REGISTRY_OUTPUT_PATH, {
     schema_version: YUKIBOT_ITEM_REGISTRY_SCHEMA_VERSION,
     generated_at_epoch_ms: Date.now(),
-    item_ids: itemIds
+    item_ids: itemIds,
+    block_item_ids: blockItemIds
 })
-console.info(`[YUKI_MC_ITEM_REGISTRY] wrote ${itemIds.length} item ids to ${YUKIBOT_ITEM_REGISTRY_OUTPUT_PATH}`)
+console.info(`[YUKI_MC_ITEM_REGISTRY] wrote ${itemIds.length} item ids (${blockItemIds.length} blocks) to ${YUKIBOT_ITEM_REGISTRY_OUTPUT_PATH}`)
 """
 _KUBEJS_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
 _ALMOST_UNIFIED_MOD_BASE_NAME = "almostunified"
@@ -502,6 +509,9 @@ def _normalise_minecraft_resource_location(raw: str, *, field_name: str) -> str:
     text = raw.strip().casefold()
     if _MINECRAFT_RESOURCE_LOCATION_RE.fullmatch(text) is None:
         raise ValueError(f"{field_name} must be a namespaced Minecraft id.")
+    _namespace, resource_path = text.split(":", maxsplit=1)
+    if any(segment in {"", ".", ".."} for segment in resource_path.split("/")):
+        raise ValueError(f"{field_name} contains an invalid resource path.")
     return text
 
 
@@ -522,6 +532,26 @@ def _normalise_recipe_count(raw: int, *, field_name: str, maximum: int = 64) -> 
 
 def _kubejs_json(value: object) -> str:
     return json.dumps(value, sort_keys=True)
+
+
+def _write_text_atomically(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding=config.STR_ENCODE,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(content)
+            temporary_path = Path(temporary_file.name)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def _recipe_mapping(raw: object, *, label: str) -> Mapping[str, object]:
@@ -902,6 +932,12 @@ class MinecraftRecipeRemovalFilter:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "recipe_id", _normalise_optional_recipe_id(self.recipe_id))
+        if self.recipe_type is not None and not isinstance(self.recipe_type, MinecraftRecipeKind):
+            object.__setattr__(
+                self,
+                "recipe_type",
+                _normalise_minecraft_resource_location(self.recipe_type, field_name="recipe type"),
+            )
         if self.mod_id is not None:
             object.__setattr__(self, "mod_id", _normalise_minecraft_namespace(self.mod_id, field_name="recipe mod id"))
         if self.output is not None and self.output.count != 1:
@@ -975,6 +1011,10 @@ class MinecraftRecipeRemovalFilter:
 @dataclass(frozen=True, slots=True)
 class MinecraftRecipeRemoval:
     filter: MinecraftRecipeRemovalFilter
+    directive_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "directive_id", _normalise_optional_recipe_id(self.directive_id))
 
     def render_kubejs(self) -> str:
         return f"event.remove({_kubejs_json(self.filter.kubejs_payload)})"
@@ -984,14 +1024,18 @@ class MinecraftRecipeRemoval:
         return cls(
             filter=MinecraftRecipeRemovalFilter.from_mapping(
                 _recipe_mapping(payload.get("filter"), label="recipe removal filter")
-            )
+            ),
+            directive_id=_optional_recipe_string(payload, "id", label="recipe removal directive"),
         )
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "kind": "remove",
             "filter": self.filter.to_mapping(),
         }
+        if self.directive_id is not None:
+            payload["id"] = self.directive_id
+        return payload
 
 
 MinecraftRecipeMutation: TypeAlias = (
@@ -1001,6 +1045,91 @@ MinecraftRecipeMutation: TypeAlias = (
     | MinecraftStonecuttingRecipe
     | MinecraftRecipeRemoval
 )
+
+_MINECRAFT_MANAGED_RECIPE_NAMESPACE = "yukibot"
+
+
+def minecraft_recipe_mutation_id(mutation: MinecraftRecipeMutation) -> str | None:
+    if isinstance(mutation, MinecraftRecipeRemoval):
+        return mutation.directive_id
+    return mutation.recipe_id
+
+
+def minecraft_recipe_mutation_with_id(
+    mutation: MinecraftRecipeMutation,
+    recipe_id: str,
+) -> MinecraftRecipeMutation:
+    if isinstance(mutation, MinecraftRecipeRemoval):
+        return replace(mutation, directive_id=recipe_id)
+    return replace(mutation, recipe_id=recipe_id)
+
+
+def _unique_managed_minecraft_recipe_id(base_recipe_id: str, existing_recipe_ids: Collection[str]) -> str:
+    normalised_existing_ids = {recipe_id.strip().casefold() for recipe_id in existing_recipe_ids}
+    if base_recipe_id not in normalised_existing_ids:
+        return base_recipe_id
+    suffix = 2
+    while f"{base_recipe_id}_{suffix}" in normalised_existing_ids:
+        suffix += 1
+    return f"{base_recipe_id}_{suffix}"
+
+
+def generated_minecraft_recipe_id(
+    *,
+    minecraft_username: str,
+    output_item_id: str,
+    existing_recipe_ids: Collection[str],
+) -> str:
+    username = minecraft_username.strip()
+    if _PLAYER_NAME_RE.fullmatch(username) is None:
+        raise ValueError("A valid linked Minecraft username is required to create recipes.")
+    normalised_output_id = _normalise_minecraft_resource_location(output_item_id, field_name="recipe output")
+    output_namespace, output_path = normalised_output_id.split(":", maxsplit=1)
+    base_recipe_id = (
+        f"{_MINECRAFT_MANAGED_RECIPE_NAMESPACE}:{username.casefold()}/{output_namespace}/{output_path}"
+    )
+    return _unique_managed_minecraft_recipe_id(base_recipe_id, existing_recipe_ids)
+
+
+def generated_minecraft_recipe_mutation_id(
+    *,
+    minecraft_username: str,
+    mutation: MinecraftRecipeMutation,
+    existing_recipe_ids: Collection[str],
+) -> str:
+    if not isinstance(mutation, MinecraftRecipeRemoval):
+        return generated_minecraft_recipe_id(
+            minecraft_username=minecraft_username,
+            output_item_id=mutation.output.item_id,
+            existing_recipe_ids=existing_recipe_ids,
+        )
+    username = minecraft_username.strip()
+    if _PLAYER_NAME_RE.fullmatch(username) is None:
+        raise ValueError("A valid linked Minecraft username is required to create recipe removal directives.")
+    removal_filter = mutation.filter
+    if removal_filter.recipe_id is not None:
+        namespace, resource_path = removal_filter.recipe_id.split(":", maxsplit=1)
+        descriptor = f"recipe/{namespace}/{resource_path}"
+    elif removal_filter.output is not None:
+        namespace, resource_path = removal_filter.output.resource_id.split(":", maxsplit=1)
+        descriptor = f"output/{removal_filter.output.kind.value}/{namespace}/{resource_path}"
+    elif removal_filter.input is not None:
+        namespace, resource_path = removal_filter.input.resource_id.split(":", maxsplit=1)
+        descriptor = f"input/{removal_filter.input.kind.value}/{namespace}/{resource_path}"
+    elif removal_filter.mod_id is not None:
+        descriptor = f"mod/{removal_filter.mod_id}"
+    elif removal_filter.recipe_type is not None:
+        recipe_type_id = (
+            removal_filter.recipe_type.recipe_type_id
+            if isinstance(removal_filter.recipe_type, MinecraftRecipeKind)
+            else removal_filter.recipe_type
+        )
+        namespace, resource_path = recipe_type_id.split(":", maxsplit=1)
+        descriptor = f"type/{namespace}/{resource_path}"
+    else:
+        raise ValueError("Recipe removal directives require at least one filter.")
+    base_recipe_id = f"{_MINECRAFT_MANAGED_RECIPE_NAMESPACE}:{username.casefold()}/remove/{descriptor}"
+    return _unique_managed_minecraft_recipe_id(base_recipe_id, existing_recipe_ids)
 
 _MINECRAFT_RECIPE_BOOK_SCHEMA_VERSION = 1
 _MINECRAFT_ITEM_REGISTRY_SCHEMA_VERSION = 1
@@ -1068,12 +1197,18 @@ class MinecraftRecipeBook:
 @dataclass(frozen=True, slots=True)
 class MinecraftItemRegistrySnapshot:
     item_ids: tuple[str, ...] = ()
+    block_item_ids: tuple[str, ...] = ()
+    item_types_classified: bool = False
     generated_at_epoch_ms: int | None = None
     schema_version: int = _MINECRAFT_ITEM_REGISTRY_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if self.schema_version != _MINECRAFT_ITEM_REGISTRY_SCHEMA_VERSION:
             raise ValueError(f"Unsupported Minecraft item registry schema version: {self.schema_version}")
+        if not isinstance(self.item_types_classified, bool):
+            raise TypeError("Minecraft item registry item_types_classified must be a boolean.")
+        if self.block_item_ids and not self.item_types_classified:
+            raise ValueError("Minecraft block item IDs require classified item type data.")
         if self.generated_at_epoch_ms is not None:
             if isinstance(self.generated_at_epoch_ms, bool) or not isinstance(self.generated_at_epoch_ms, int):
                 raise ValueError("Minecraft item registry generated_at_epoch_ms must be an integer.")
@@ -1088,6 +1223,21 @@ class MinecraftItemRegistrySnapshot:
             )
         )
         object.__setattr__(self, "item_ids", normalised_item_ids)
+        normalised_block_item_ids = tuple(
+            sorted(
+                {
+                    _normalise_minecraft_resource_location(
+                        item_id,
+                        field_name="minecraft block item registry item id",
+                    )
+                    for item_id in self.block_item_ids
+                }
+            )
+        )
+        unknown_block_item_ids = set(normalised_block_item_ids) - set(normalised_item_ids)
+        if unknown_block_item_ids:
+            raise ValueError("Minecraft block item registry IDs must also exist in the item registry.")
+        object.__setattr__(self, "block_item_ids", normalised_block_item_ids)
 
     @classmethod
     def empty(cls) -> "MinecraftItemRegistrySnapshot":
@@ -1111,18 +1261,33 @@ class MinecraftItemRegistrySnapshot:
             if not isinstance(raw_item_id, str):
                 raise ValueError("Minecraft item registry item ids must be strings.")
             item_ids.append(raw_item_id)
+        raw_block_item_ids = payload.get("block_item_ids")
+        block_item_ids: list[str] = []
+        if raw_block_item_ids is not None:
+            for raw_block_item_id in _recipe_sequence(
+                raw_block_item_ids,
+                label="minecraft block item registry item ids",
+            ):
+                if not isinstance(raw_block_item_id, str):
+                    raise ValueError("Minecraft block item registry item ids must be strings.")
+                block_item_ids.append(raw_block_item_id)
         return cls(
             schema_version=raw_schema_version,
             generated_at_epoch_ms=generated_at_epoch_ms,
             item_ids=tuple(item_ids),
+            block_item_ids=tuple(block_item_ids),
+            item_types_classified=raw_block_item_ids is not None,
         )
 
     def to_mapping(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "generated_at_epoch_ms": self.generated_at_epoch_ms,
             "item_ids": list(self.item_ids),
         }
+        if self.item_types_classified:
+            payload["block_item_ids"] = list(self.block_item_ids)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -2476,6 +2641,7 @@ class Minecraft(App[Minecraft_Config]):
         )
         self._tail: Tailer | None = None
         self._tail_machers = set()
+        self._minecraft_item_icon_archive_cache_lock = threading.Lock()
         self._kubejs_event_stream_ready = False
         self._server_ready: Event = asyncio.Event()
         self._players: Players = Players(self)
@@ -2500,6 +2666,7 @@ class Minecraft(App[Minecraft_Config]):
         self._sync_kubejs_yuki_log_script()
         self._sync_kubejs_recipe_script()
         self._sync_kubejs_item_registry_script()
+        await asyncio.to_thread(self._minecraft_item_icon_archive_paths_by_namespace)
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
@@ -2773,8 +2940,10 @@ class Minecraft(App[Minecraft_Config]):
     def save_kubejs_recipe_book(self, recipe_book: MinecraftRecipeBook) -> None:
         recipe_book_path = self._yukibot_recipe_book_path()
         try:
-            recipe_book_path.parent.mkdir(parents=True, exist_ok=True)
-            recipe_book_path.write_text(json.dumps(recipe_book.to_mapping(), indent=4) + "\n", config.STR_ENCODE)
+            _write_text_atomically(
+                recipe_book_path,
+                json.dumps(recipe_book.to_mapping(), indent=4) + "\n",
+            )
         except OSError as xcp:
             raise ValueError(f"Unable to write Minecraft recipe book at {recipe_book_path}: {xcp}") from xcp
 
@@ -2852,23 +3021,31 @@ class Minecraft(App[Minecraft_Config]):
         cached_mapping = getattr(self, "_minecraft_item_icon_archive_paths_by_namespace_cache", None)
         if isinstance(cached_mapping, dict):
             return cast(dict[str, tuple[Path, ...]], cached_mapping)
-        archive_paths_by_namespace: dict[str, list[Path]] = {}
-        for archive_path in self._minecraft_item_icon_archive_candidates():
-            try:
-                with zipfile.ZipFile(archive_path, "r") as archive:
-                    namespaces = {
-                        entry_parts[1]
-                        for entry in archive.namelist()
-                        for entry_parts in [entry.split("/", maxsplit=3)]
-                        if len(entry_parts) >= 3 and entry_parts[0] == "assets" and entry_parts[1]
-                    }
-            except OSError, zipfile.BadZipFile:
-                continue
-            for namespace in sorted(namespaces):
-                archive_paths_by_namespace.setdefault(namespace, []).append(archive_path)
-        resolved_mapping = {namespace: tuple(paths) for namespace, paths in archive_paths_by_namespace.items()}
-        setattr(self, "_minecraft_item_icon_archive_paths_by_namespace_cache", resolved_mapping)
-        return resolved_mapping
+        cache_lock = getattr(self, "_minecraft_item_icon_archive_cache_lock", None)
+        if not isinstance(cache_lock, threading.Lock):
+            cache_lock = threading.Lock()
+            setattr(self, "_minecraft_item_icon_archive_cache_lock", cache_lock)
+        with cache_lock:
+            cached_mapping = getattr(self, "_minecraft_item_icon_archive_paths_by_namespace_cache", None)
+            if isinstance(cached_mapping, dict):
+                return cast(dict[str, tuple[Path, ...]], cached_mapping)
+            archive_paths_by_namespace: dict[str, list[Path]] = {}
+            for archive_path in self._minecraft_item_icon_archive_candidates():
+                try:
+                    with zipfile.ZipFile(archive_path, "r") as archive:
+                        namespaces = {
+                            entry_parts[1]
+                            for entry in archive.namelist()
+                            for entry_parts in [entry.split("/", maxsplit=3)]
+                            if len(entry_parts) >= 3 and entry_parts[0] == "assets" and entry_parts[1]
+                        }
+                except OSError, zipfile.BadZipFile:
+                    continue
+                for namespace in sorted(namespaces):
+                    archive_paths_by_namespace.setdefault(namespace, []).append(archive_path)
+            resolved_mapping = {namespace: tuple(paths) for namespace, paths in archive_paths_by_namespace.items()}
+            setattr(self, "_minecraft_item_icon_archive_paths_by_namespace_cache", resolved_mapping)
+            return resolved_mapping
 
     def _minecraft_item_icon_archive_candidates(self) -> tuple[Path, ...]:
         candidate_paths: list[Path] = []
@@ -2897,8 +3074,7 @@ class Minecraft(App[Minecraft_Config]):
     def append_kubejs_recipe_mutation(self, mutation: MinecraftRecipeMutation) -> MinecraftRecipeBook:
         recipe_book = self.load_kubejs_recipe_book()
         next_recipe_book = MinecraftRecipeBook(mutations=recipe_book.mutations + (mutation,))
-        self.save_kubejs_recipe_book(next_recipe_book)
-        self._sync_kubejs_recipe_script()
+        self._save_and_sync_kubejs_recipe_book(recipe_book, next_recipe_book)
         return next_recipe_book
 
     def replace_kubejs_recipe_mutation(self, index: int, mutation: MinecraftRecipeMutation) -> MinecraftRecipeBook:
@@ -2910,8 +3086,7 @@ class Minecraft(App[Minecraft_Config]):
         next_mutations = list(recipe_book.mutations)
         next_mutations[index] = mutation
         next_recipe_book = MinecraftRecipeBook(mutations=tuple(next_mutations))
-        self.save_kubejs_recipe_book(next_recipe_book)
-        self._sync_kubejs_recipe_script()
+        self._save_and_sync_kubejs_recipe_book(recipe_book, next_recipe_book)
         return next_recipe_book
 
     def remove_kubejs_recipe_mutation(self, index: int) -> MinecraftRecipeBook:
@@ -2925,9 +3100,34 @@ class Minecraft(App[Minecraft_Config]):
                 mutation for mutation_index, mutation in enumerate(recipe_book.mutations) if mutation_index != index
             )
         )
-        self.save_kubejs_recipe_book(next_recipe_book)
-        self._sync_kubejs_recipe_script()
+        self._save_and_sync_kubejs_recipe_book(recipe_book, next_recipe_book)
         return next_recipe_book
+
+    def _save_and_sync_kubejs_recipe_book(
+        self,
+        previous_recipe_book: MinecraftRecipeBook,
+        next_recipe_book: MinecraftRecipeBook,
+    ) -> None:
+        status = self.kubejs_recipe_support_status()
+        script_content = (
+            _managed_kubejs_recipe_script_source(status, mutations=next_recipe_book.mutations)
+            if status.kubejs_enabled
+            else None
+        )
+        self.save_kubejs_recipe_book(next_recipe_book)
+        if script_content is None:
+            return
+        try:
+            self._write_kubejs_recipe_script(status.script_path, script_content)
+        except Exception as xcp:
+            try:
+                self.save_kubejs_recipe_book(previous_recipe_book)
+            except Exception as rollback_xcp:
+                raise RuntimeError(
+                    "Minecraft recipe script generation failed and the recipe book rollback also failed: "
+                    f"{rollback_xcp}"
+                ) from xcp
+            raise OSError(f"Minecraft recipe script generation failed; recipe changes were rolled back: {xcp}") from xcp
 
     def _load_or_create_kubejs_recipe_book(self) -> MinecraftRecipeBook:
         recipe_book_path = self._yukibot_recipe_book_path()
@@ -2980,16 +3180,20 @@ class Minecraft(App[Minecraft_Config]):
             return False
         recipe_book = self._load_or_create_kubejs_recipe_book()
         script_content = _managed_kubejs_recipe_script_source(status, mutations=recipe_book.mutations)
-        script_path = status.script_path
         try:
-            script_path.parent.mkdir(parents=True, exist_ok=True)
-            if script_path.exists() and script_path.read_text(config.STR_ENCODE) == script_content:
-                return False
-            script_path.write_text(script_content, config.STR_ENCODE)
+            changed = self._write_kubejs_recipe_script(status.script_path, script_content)
         except OSError as xcp:
-            log.warning("Failed to sync KubeJS recipe script for %s at %s: %s", self.name, script_path, xcp)
+            log.warning("Failed to sync KubeJS recipe script for %s at %s: %s", self.name, status.script_path, xcp)
             return False
-        log.info("%s synced KubeJS recipe script: %s", self.name, script_path)
+        if changed:
+            log.info("%s synced KubeJS recipe script: %s", self.name, status.script_path)
+        return changed
+
+    @staticmethod
+    def _write_kubejs_recipe_script(script_path: Path, script_content: str) -> bool:
+        if script_path.exists() and script_path.read_text(config.STR_ENCODE) == script_content:
+            return False
+        _write_text_atomically(script_path, script_content)
         return True
 
     def _sync_kubejs_item_registry_script(self) -> bool:

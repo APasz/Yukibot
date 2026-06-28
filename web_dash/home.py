@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 from . import avatars as mod_web_avatars
 from .constants import (
     _APP_SECTION_QUERY_PARAM,
-    _SAME_ORIGIN_NODE_API_BASE,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
     log,
@@ -23,7 +22,6 @@ from .runtime_imports import (
     Enum,
     Input,
     Label,
-    ManagedApp,
     ModWebUser,
     NodeAppEntry,
     NodeAppRuntimeSummary,
@@ -44,6 +42,7 @@ from .runtime_imports import (
 
 _KEEP_PAGE_MODEL_VALUE = object()
 from .service_base import ModWebServiceSupport
+from .ui_helpers import ModWebUiHelpersMixin
 from .types import (
     ModWebAppLink,
     ModWebAppTabDefinition,
@@ -368,7 +367,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     if panel.google_font_urls_input is None:
                         raise RuntimeError("Node settings font URL input is unavailable.")
                     font_sources = config.NodeFontSourceSettings(
-                        google_font_urls=_value_as_text(panel.google_font_urls_input)
+                        google_font_urls=config.normalise_google_font_source_urls(
+                            _value_as_text(panel.google_font_urls_input)
+                        )
                     )
                 except (TypeError, ValueError) as xcp:
                     ui.notify(str(xcp), type="negative")
@@ -1112,12 +1113,12 @@ class ModWebHomeMixin(ModWebServiceSupport):
             alive_text=f"{section.node.label}: Alive",
             down_text=f"{section.node.label}: Down",
             presence_stream_url=section.node.presence_stream_url if section.error is None else None,
-            pending_class_name=cls._badge_class_name(
+            pending_class_name=ModWebUiHelpersMixin._badge_class_name(
                 tone=cls._node_status_badge_tone(section),
                 extra_classes=extra_classes,
             ),
-            healthy_class_name=cls._badge_class_name(tone="black", extra_classes=extra_classes),
-            unhealthy_class_name=cls._badge_class_name(tone="red", extra_classes=extra_classes),
+            healthy_class_name=ModWebUiHelpersMixin._badge_class_name(tone="black", extra_classes=extra_classes),
+            unhealthy_class_name=ModWebUiHelpersMixin._badge_class_name(tone="red", extra_classes=extra_classes),
             show_latency=section.error is None,
         )
 
@@ -1128,7 +1129,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         ui: ModWebUi,
         badge_specs: tuple[_ModWebNodePresenceBadgeSpec, ...],
     ) -> None:
-        cls._run_node_presence_badges_javascript(
+        ModWebUiHelpersMixin._run_node_presence_badges_javascript(
             ui=ui,
             badge_specs=badge_specs,
             controller_key="modWebHomeNodeLatency",
@@ -1139,7 +1140,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         cls,
         badge_specs: tuple[_ModWebNodePresenceBadgeSpec, ...],
     ) -> str:
-        return cls._node_presence_badges_javascript(
+        return ModWebUiHelpersMixin._node_presence_badges_javascript(
             badge_specs=badge_specs,
             controller_key="modWebHomeNodeLatency",
         )

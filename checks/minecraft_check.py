@@ -5,6 +5,7 @@ import json
 import threading
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -39,6 +40,8 @@ from apps.minecraft import (
     _detect_minecraft_mod_version,
     _load_squaremap_web_address,
     _managed_kubejs_recipe_script_source,
+    generated_minecraft_recipe_id,
+    generated_minecraft_recipe_mutation_id,
 )
 
 
@@ -439,6 +442,7 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
                         "schema_version": 1,
                         "generated_at_epoch_ms": 1234567890,
                         "item_ids": ["minecraft:stone", "minecraft:dirt", "minecraft:stone"],
+                        "block_item_ids": ["minecraft:stone"],
                     }
                 ),
                 encoding="utf-8",
@@ -454,8 +458,23 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
                 MinecraftItemRegistrySnapshot(
                     generated_at_epoch_ms=1234567890,
                     item_ids=("minecraft:dirt", "minecraft:stone"),
+                    block_item_ids=("minecraft:stone",),
+                    item_types_classified=True,
                 ),
             )
+
+    def test_minecraft_item_registry_snapshot_accepts_legacy_unclassified_payload(self) -> None:
+        item_registry = MinecraftItemRegistrySnapshot.from_mapping(
+            {
+                "schema_version": 1,
+                "generated_at_epoch_ms": 1234567890,
+                "item_ids": ["minecraft:stone"],
+            }
+        )
+
+        self.assertFalse(item_registry.item_types_classified)
+        self.assertEqual(item_registry.block_item_ids, ())
+        self.assertNotIn("block_item_ids", item_registry.to_mapping())
 
     def test_load_kubejs_item_registry_fails_loudly_for_invalid_json(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -516,6 +535,60 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
             )
             assert resolved_path is not None
             self.assertEqual(resolved_path.read_bytes(), b"create-png")
+
+    def test_minecraft_resource_paths_reject_filesystem_traversal(self) -> None:
+        app = object.__new__(Minecraft)
+
+        for item_id in ("minecraft:../../private/avatar", "minecraft:/private/avatar"):
+            with self.subTest(item_id=item_id):
+                with self.assertRaisesRegex(ValueError, "invalid resource path"):
+                    app.resolve_minecraft_item_icon_path(item_id)
+
+    def test_minecraft_item_archive_index_is_built_once_for_concurrent_icon_requests(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            archive_path = directory / "example.jar"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("assets/example/textures/item/widget.png", b"widget")
+            app = object.__new__(Minecraft)
+            app._minecraft_item_icon_archive_cache_lock = threading.Lock()
+            start_barrier = threading.Barrier(8)
+
+            def build_index() -> dict[str, tuple[Path, ...]]:
+                start_barrier.wait()
+                return app._minecraft_item_icon_archive_paths_by_namespace()
+
+            with patch.object(
+                Minecraft,
+                "_minecraft_item_icon_archive_candidates",
+                return_value=(archive_path,),
+            ) as archive_candidates:
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    indexes = tuple(executor.map(lambda _index: build_index(), range(8)))
+
+            self.assertEqual(archive_candidates.call_count, 1)
+            self.assertTrue(all(index["example"] == (archive_path,) for index in indexes))
+
+    def test_generated_recipe_ids_use_player_output_and_collision_suffixes(self) -> None:
+        recipe_id = generated_minecraft_recipe_id(
+            minecraft_username="YukiPlayer",
+            output_item_id="minecraft:stone",
+            existing_recipe_ids={"yukibot:yukiplayer/minecraft/stone"},
+        )
+        removal_id = generated_minecraft_recipe_mutation_id(
+            minecraft_username="YukiPlayer",
+            mutation=MinecraftRecipeRemoval(
+                MinecraftRecipeRemovalFilter(output=MinecraftRecipeIngredient.tag("c:iron_ingots"))
+            ),
+            existing_recipe_ids=(),
+        )
+
+        self.assertEqual(recipe_id, "yukibot:yukiplayer/minecraft/stone_2")
+        self.assertEqual(removal_id, "yukibot:yukiplayer/remove/output/tag/c/iron_ingots")
+
+    def test_removal_recipe_type_is_validated_before_persistence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "recipe type must be a namespaced Minecraft id"):
+            MinecraftRecipeRemovalFilter(recipe_type="crafting_shaped")
 
     def test_sync_kubejs_recipe_script_creates_managed_scaffold_when_enabled(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -588,6 +661,8 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
             self.assertTrue(registry_directory.exists())
             self.assertNotIn("StartupEvents.postInit", script_content)
             self.assertIn(".yukibot/registries/items.json", script_content)
+            self.assertIn("block_item_ids", script_content)
+            self.assertIn("BuiltInRegistries.BLOCK.containsKey", script_content)
 
     def test_migrate_legacy_yukibot_data_copies_recipe_book_and_item_registry(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -694,6 +769,39 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
                 'event.shapeless("minecraft:gravel", ["3x minecraft:flint"]).id("kubejs:flint_to_gravel")',
                 script_content,
             )
+
+    def test_recipe_mutation_rolls_back_book_when_script_write_fails(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = directory
+            app.mods = cast(
+                Any,
+                SimpleNamespace(
+                    list_mods=lambda state=None: [
+                        Mod_MC(
+                            Mod_Config(
+                                name="kubejs-forge-2001.6.5-build.26.jar",
+                                directory=directory / "mods",
+                                enabled=True,
+                            )
+                        )
+                    ]
+                ),
+            )
+
+            with patch.object(Minecraft, "_write_kubejs_recipe_script", side_effect=OSError("read-only")):
+                with self.assertRaisesRegex(OSError, "recipe changes were rolled back"):
+                    app.append_kubejs_recipe_mutation(
+                        MinecraftShapelessRecipe(
+                            output=MinecraftRecipeItemStack("minecraft:gravel"),
+                            ingredients=(MinecraftRecipeIngredient.item("minecraft:flint"),),
+                            recipe_id="yukibot:yuki/minecraft/gravel",
+                        )
+                    )
+
+            self.assertEqual(app.load_kubejs_recipe_book().mutations, ())
 
     def test_replace_and_remove_kubejs_recipe_mutation_persist_and_regenerate_script(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -640,6 +640,8 @@ class NodeApiTests(unittest.TestCase):
                     MinecraftItemRegistrySnapshot(
                         generated_at_epoch_ms=1234567890,
                         item_ids=("minecraft:stone",),
+                        block_item_ids=("minecraft:stone",),
+                        item_types_classified=True,
                     ).to_mapping()
                 ),
                 encoding="utf-8",
@@ -659,6 +661,10 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsNotNone(workspace_state.item_registry.payload)
         self.assertEqual(
             cast(dict[str, object], workspace_state.item_registry.payload).get("item_ids"),
+            ["minecraft:stone"],
+        )
+        self.assertEqual(
+            cast(dict[str, object], workspace_state.item_registry.payload).get("block_item_ids"),
             ["minecraft:stone"],
         )
 
@@ -755,17 +761,18 @@ class NodeApiTests(unittest.TestCase):
             acl._roles[0] = Power_Level.sudo
             service.set_acl(acl)
 
-            result = asyncio.run(
-                service.append_minecraft_recipe_mutation(
-                    app=cast(App, app),
-                    mutation=MinecraftShapelessRecipe(
-                        output=MinecraftRecipeItemStack("minecraft:gravel"),
-                        ingredients=(MinecraftRecipeIngredient.item("minecraft:flint"),),
-                        recipe_id="kubejs:flint_to_gravel",
-                    ),
-                    actor_user_id=0,
+            with patch.object(config.Name_Cache(), "get_game_alias", return_value="YukiPlayer"):
+                result = asyncio.run(
+                    service.append_minecraft_recipe_mutation(
+                        app=cast(App, app),
+                        mutation=MinecraftShapelessRecipe(
+                            output=MinecraftRecipeItemStack("minecraft:gravel"),
+                            ingredients=(MinecraftRecipeIngredient.item("minecraft:flint"),),
+                            recipe_id="client:ignored",
+                        ),
+                        actor_user_id=0,
+                    )
                 )
-            )
 
         self.assertIsInstance(result, NodeMinecraftRecipeMutationResult)
         self.assertEqual(result.app_name, "minecraft_alpha")
@@ -773,7 +780,34 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsNotNone(result.workspace.recipe_book.payload)
         recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], result.workspace.recipe_book.payload))
         self.assertEqual(len(recipe_book.mutations), 1)
-        self.assertEqual(recipe_book.mutations[0].to_mapping()["id"], "kubejs:flint_to_gravel")
+        self.assertEqual(recipe_book.mutations[0].to_mapping()["id"], "yukibot:yukiplayer/minecraft/gravel")
+
+    def test_append_minecraft_recipe_mutation_requires_linked_minecraft_username(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = object.__new__(Minecraft)
+            app.name = "minecraft_alpha"
+            app.friendly = "Minecraft Alpha"
+            app.directory = Path(temp_dir)
+            app.mods = cast(Any, SimpleNamespace(list_mods=lambda state=None: []))
+            service = NodeApiService()
+            acl = Access_Control()
+            acl._roles[0] = Power_Level.sudo
+            service.set_acl(acl)
+
+            with patch.object(config.Name_Cache(), "get_game_alias", return_value=None):
+                with self.assertRaisesRegex(HTTPException, "Link a Minecraft username"):
+                    asyncio.run(
+                        service.append_minecraft_recipe_mutation(
+                            app=cast(App, app),
+                            mutation=MinecraftShapelessRecipe(
+                                output=MinecraftRecipeItemStack("minecraft:gravel"),
+                                ingredients=(MinecraftRecipeIngredient.item("minecraft:flint"),),
+                            ),
+                            actor_user_id=0,
+                        )
+                    )
+
+            self.assertEqual(app.load_kubejs_recipe_book().mutations, ())
 
     def test_mutate_minecraft_recipe_book_replaces_and_deletes_by_index(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -795,21 +829,22 @@ class NodeApiTests(unittest.TestCase):
             acl._roles[0] = Power_Level.sudo
             service.set_acl(acl)
 
-            replace_result = asyncio.run(
-                service.mutate_minecraft_recipe_book(
-                    app=cast(App, app),
-                    mutation_request=NodeMinecraftRecipeMutationRequest(
-                        action=NodeMinecraftRecipeMutationAction.REPLACE,
-                        mutation_index=0,
-                        mutation=MinecraftShapelessRecipe(
-                            output=MinecraftRecipeItemStack("minecraft:sand"),
-                            ingredients=(MinecraftRecipeIngredient.item("minecraft:gravel"),),
-                            recipe_id="kubejs:gravel_to_sand",
+            with patch.object(config.Name_Cache(), "get_game_alias", return_value="YukiPlayer"):
+                replace_result = asyncio.run(
+                    service.mutate_minecraft_recipe_book(
+                        app=cast(App, app),
+                        mutation_request=NodeMinecraftRecipeMutationRequest(
+                            action=NodeMinecraftRecipeMutationAction.REPLACE,
+                            mutation_index=0,
+                            mutation=MinecraftShapelessRecipe(
+                                output=MinecraftRecipeItemStack("minecraft:sand"),
+                                ingredients=(MinecraftRecipeIngredient.item("minecraft:gravel"),),
+                                recipe_id="client:ignored",
+                            ),
                         ),
-                    ),
-                    actor_user_id=0,
+                        actor_user_id=0,
+                    )
                 )
-            )
             delete_result = asyncio.run(
                 service.mutate_minecraft_recipe_book(
                     app=cast(App, app),
@@ -823,7 +858,7 @@ class NodeApiTests(unittest.TestCase):
 
         replaced_recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], replace_result.workspace.recipe_book.payload))
         deleted_recipe_book = MinecraftRecipeBook.from_mapping(cast(dict[str, object], delete_result.workspace.recipe_book.payload))
-        self.assertEqual(replaced_recipe_book.mutations[0].to_mapping()["id"], "kubejs:gravel_to_sand")
+        self.assertEqual(replaced_recipe_book.mutations[0].to_mapping()["id"], "yukibot:yukiplayer/minecraft/sand")
         self.assertEqual(deleted_recipe_book.mutations, ())
 
     def test_single_mod_download_url_is_signed_and_escaped(self) -> None:

@@ -15,6 +15,10 @@ from apps.minecraft import (
     MinecraftShapedRecipe,
     MinecraftShapelessRecipe,
     MinecraftStonecuttingRecipe,
+    generated_minecraft_recipe_id,
+    generated_minecraft_recipe_mutation_id,
+    minecraft_recipe_mutation_id,
+    minecraft_recipe_mutation_with_id,
 )
 
 from .nicegui_protocols import (
@@ -27,6 +31,7 @@ from .runtime_imports import (
     Callable,
     ModWebUser,
     Power_Level,
+    config,
     escape,
     json,
     urlencode,
@@ -62,6 +67,12 @@ class _MinecraftRecipeEditorOperation(Enum):
 class _MinecraftRecipeEditorIngredientKind(Enum):
     ITEM = "item"
     TAG = "tag"
+
+
+class _MinecraftRecipeBrowserItemType(Enum):
+    ALL = "all"
+    ITEM = "item"
+    BLOCK = "block"
 
 
 @dataclass(slots=True)
@@ -141,6 +152,8 @@ class _MinecraftRecipeEditorIngredientState:
 class _MinecraftRecipeBrowserEntry:
     item_id: str
     display_name: str
+    namespace: str
+    item_type: _MinecraftRecipeBrowserItemType
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +194,7 @@ class _MinecraftRecipeEditorState:
     editing_recipe_index: int | None = None
     recipe_id: str = ""
     output_item_id: str = ""
-    output_count: int = 1
+    output_count_text: str = "1"
     shapeless_ingredients: list[_MinecraftRecipeEditorIngredientState] = field(
         default_factory=lambda: [_MinecraftRecipeEditorIngredientState.empty() for _ in range(9)]
     )
@@ -206,6 +219,8 @@ class _MinecraftRecipeEditorState:
     removal_recipe_type_text: str = ""
     removal_mod_id: str = ""
     search_text: str = ""
+    browser_namespace: str = ""
+    browser_item_type: _MinecraftRecipeBrowserItemType = _MinecraftRecipeBrowserItemType.ALL
     page_index: int = 0
     selected_slot: _MinecraftRecipeEditorSelection = field(default_factory=_MinecraftRecipeEditorSelection.output)
 
@@ -287,26 +302,31 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             refresh_editor_workspace()
             recipe_subtabs.set_value(add_tab)
 
-        with ui.element("div").classes("mod-section-tabs-shell"):
-            with ui.tabs().classes("mod-section-tabs") as recipe_subtabs:
-                add_tab = ui.tab("Add")
-                manage_tab = ui.tab("Manage")
-        with ui.tab_panels(recipe_subtabs, value=add_tab).classes("mod-section-panels w-full bg-transparent"):
-            with ui.tab_panel(add_tab).classes("mod-section-panel w-full"):
-                refresh_editor_workspace = self._render_minecraft_recipe_add_form(
-                    ui=ui,
-                    model=model,
-                    user=user,
-                    editor_state=editor_state,
-                )
-            with ui.tab_panel(manage_tab).classes("mod-section-panel w-full"):
-                self._render_minecraft_recipe_manage_panel(
-                    ui=ui,
-                    model=model,
-                    user=user,
-                    editor_state=editor_state,
-                    on_edit=edit_managed_recipe,
-                )
+        with ui.element("div").classes("mod-recipe-subtabs w-full"):
+            with ui.element("div").classes("mod-section-tabs-shell"):
+                with ui.tabs().classes("mod-section-tabs") as recipe_subtabs:
+                    add_tab = ui.tab("Add")
+                    manage_tab = ui.tab("Manage")
+            with ui.tab_panels(
+                recipe_subtabs,
+                value=add_tab,
+                animated=False,
+            ).classes("mod-section-panels mod-recipe-subtab-panels w-full bg-transparent"):
+                with ui.tab_panel(add_tab).classes("mod-section-panel w-full"):
+                    refresh_editor_workspace = self._render_minecraft_recipe_add_form(
+                        ui=ui,
+                        model=model,
+                        user=user,
+                        editor_state=editor_state,
+                    )
+                with ui.tab_panel(manage_tab).classes("mod-section-panel w-full"):
+                    self._render_minecraft_recipe_manage_panel(
+                        ui=ui,
+                        model=model,
+                        user=user,
+                        editor_state=editor_state,
+                        on_edit=edit_managed_recipe,
+                    )
 
     def _render_minecraft_recipe_add_form(
         self,
@@ -328,8 +348,26 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             return lambda: None
 
         known_item_ids = self._minecraft_known_item_ids(model.minecraft_item_registry)
-        browser_entries: tuple[_MinecraftRecipeBrowserEntry, ...] = self._minecraft_browser_entries(known_item_ids)
+        block_item_ids = (
+            () if model.minecraft_item_registry is None else model.minecraft_item_registry.block_item_ids
+        )
+        item_types_classified = bool(
+            model.minecraft_item_registry is not None
+            and model.minecraft_item_registry.item_types_classified
+        )
+        browser_entries: tuple[_MinecraftRecipeBrowserEntry, ...] = self._minecraft_browser_entries(
+            known_item_ids,
+            block_item_ids=block_item_ids,
+        )
+        browser_namespaces = tuple(sorted({entry.namespace for entry in browser_entries}))
         item_icon_api_url = model.minecraft_item_icon_api_url
+        minecraft_username = config.Name_Cache().get_game_alias(user.discord_id, "minecraft")
+        managed_mutations = self._minecraft_recipe_mutations(model.minecraft_recipes)
+        existing_recipe_ids = {
+            recipe_id
+            for mutation in managed_mutations
+            if (recipe_id := minecraft_recipe_mutation_id(mutation)) is not None
+        }
         page_size = 60
         operation_options: dict[str, str] = {
             _MinecraftRecipeEditorOperation.ADD.value: "Add Recipe",
@@ -344,11 +382,32 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             MinecraftRecipeKind.CAMPFIRE_COOKING.value: "Campfire Cooking",
             MinecraftRecipeKind.STONECUTTING.value: "Stonecutting",
         }
+        namespace_options: dict[str, str] = {
+            "": "All Mods",
+            **{
+                namespace: self._minecraft_namespace_display_name(namespace)
+                for namespace in browser_namespaces
+            },
+        }
+        item_type_options: dict[str, str] = {
+            _MinecraftRecipeBrowserItemType.ALL.value: "All Types",
+            _MinecraftRecipeBrowserItemType.ITEM.value: "Items",
+            _MinecraftRecipeBrowserItemType.BLOCK.value: "Blocks",
+        }
 
         def refresh_all() -> None:
             render_editor.refresh()
             render_browser_summary.refresh()
             render_browser_grid.refresh()
+
+        def other_recipe_ids() -> set[str]:
+            recipe_ids = set(existing_recipe_ids)
+            mutation_index = editor_state.editing_recipe_index
+            if mutation_index is not None and mutation_index < len(managed_mutations):
+                current_recipe_id = minecraft_recipe_mutation_id(managed_mutations[mutation_index])
+                if current_recipe_id is not None:
+                    recipe_ids.discard(current_recipe_id)
+            return recipe_ids
 
         def set_operation(operation_value: str) -> None:
             editor_state.operation = _MinecraftRecipeEditorOperation(operation_value)
@@ -360,19 +419,11 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             self._sync_minecraft_recipe_selection(editor_state)
             refresh_all()
 
-        def set_recipe_id(value: str) -> None:
-            editor_state.recipe_id = value.strip()
-
         def set_removal_recipe_id(value: str) -> None:
             editor_state.removal_recipe_id = value.strip()
 
         def set_output_count(raw_value: str) -> None:
-            try:
-                editor_state.output_count = self._parse_minecraft_recipe_count(raw_value)
-            except ValueError as xcp:
-                ui.notify(str(xcp), type="warning")
-                return
-            render_editor.refresh()
+            editor_state.output_count_text = raw_value.strip()
 
         def set_cooking_experience(value: str) -> None:
             editor_state.cooking_experience_text = value.strip()
@@ -452,8 +503,25 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             render_browser_summary.refresh()
             render_browser_grid.refresh()
 
+        def change_browser_namespace(value: str) -> None:
+            editor_state.browser_namespace = value.strip().casefold()
+            editor_state.page_index = 0
+            render_browser_summary.refresh()
+            render_browser_grid.refresh()
+
+        def change_browser_item_type(value: str) -> None:
+            editor_state.browser_item_type = _MinecraftRecipeBrowserItemType(value)
+            editor_state.page_index = 0
+            render_browser_summary.refresh()
+            render_browser_grid.refresh()
+
         def change_page(delta: int) -> None:
-            filtered_entries = self._filtered_minecraft_browser_entries(browser_entries, editor_state.search_text)
+            filtered_entries = self._filtered_minecraft_browser_entries(
+                browser_entries,
+                editor_state.search_text,
+                namespace=editor_state.browser_namespace,
+                item_type=editor_state.browser_item_type,
+            )
             page_count = self._minecraft_browser_page_count(filtered_entries, page_size=page_size)
             editor_state.page_index = max(0, min(editor_state.page_index + delta, page_count - 1))
             render_browser_summary.refresh()
@@ -462,6 +530,17 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
         async def add_recipe() -> None:
             try:
                 mutation = self._minecraft_recipe_mutation_from_editor(editor_state)
+                if minecraft_username is None:
+                    raise ValueError(
+                        "Link a Minecraft username to your Discord account before creating recipes or removal "
+                        "directives."
+                    )
+                recipe_id = generated_minecraft_recipe_mutation_id(
+                    minecraft_username=minecraft_username,
+                    mutation=mutation,
+                    existing_recipe_ids=other_recipe_ids(),
+                )
+                mutation = minecraft_recipe_mutation_with_id(mutation, recipe_id)
                 if editor_state.editing_recipe_index is None:
                     await self._append_minecraft_recipe_mutation(model=model, mutation=mutation, user=user)
                     success_message = "Recipe added."
@@ -491,6 +570,10 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                             ui.label(f"Editing managed recipe #{editor_state.editing_recipe_index + 1}.").classes(
                                 "mod-subtitle"
                             )
+                        if minecraft_username is None:
+                            ui.label(
+                                "Link a Minecraft username to create recipes or removal directives."
+                            ).classes("mod-subtitle")
                     with ui.element("div").classes("grid grid-cols-1 md:grid-cols-3 gap-3 w-full"):
                         (
                             ui.select(
@@ -530,13 +613,19 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                                 .classes("w-full mod-recipe-field")
                             )
                         if editor_state.operation is _MinecraftRecipeEditorOperation.ADD:
+                            displayed_recipe_id = ""
+                            if minecraft_username and editor_state.output_item_id:
+                                displayed_recipe_id = generated_minecraft_recipe_id(
+                                    minecraft_username=minecraft_username,
+                                    output_item_id=editor_state.output_item_id,
+                                    existing_recipe_ids=other_recipe_ids(),
+                                )
                             (
                                 ui.input(
-                                    "Recipe ID",
-                                    value=editor_state.recipe_id,
-                                    on_change=lambda event: set_recipe_id(_event_args_as_text(event)),
+                                    "Generated Recipe ID",
+                                    value=displayed_recipe_id,
                                 )
-                                .props("filled square dense hide-bottom-space color=accent")
+                                .props("filled square dense readonly hide-bottom-space color=accent")
                                 .classes("w-full mod-recipe-field")
                             )
                         else:
@@ -549,12 +638,31 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                                 .props("filled square dense hide-bottom-space color=accent")
                                 .classes("w-full mod-recipe-field")
                             )
+                            displayed_directive_id = ""
+                            if minecraft_username is not None:
+                                try:
+                                    preview_removal = self._minecraft_recipe_mutation_from_editor(editor_state)
+                                    displayed_directive_id = generated_minecraft_recipe_mutation_id(
+                                        minecraft_username=minecraft_username,
+                                        mutation=preview_removal,
+                                        existing_recipe_ids=other_recipe_ids(),
+                                    )
+                                except ValueError:
+                                    pass
+                            (
+                                ui.input(
+                                    "Generated Directive ID",
+                                    value=displayed_directive_id,
+                                )
+                                .props("filled square dense readonly hide-bottom-space color=accent")
+                                .classes("w-full mod-recipe-field")
+                            )
                     with ui.element("div").classes("grid grid-cols-1 md:grid-cols-3 gap-3 w-full"):
                         if editor_state.operation is _MinecraftRecipeEditorOperation.ADD:
                             (
                                 ui.input(
                                     "Output count",
-                                    value=str(editor_state.output_count),
+                                    value=editor_state.output_count_text,
                                     on_change=lambda event: set_output_count(_event_args_as_text(event)),
                                 )
                                 .props("filled square dense hide-bottom-space color=accent")
@@ -744,12 +852,14 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                                     ui.button("Clear Recipe", on_click=clear_recipe).classes(
                                         "mod-list-button secondary"
                                     )
-                                    ui.button(
+                                    save_button = ui.button(
                                         "Update Recipe"
                                         if editor_state.editing_recipe_index is not None
                                         else "Add Recipe",
                                         on_click=add_recipe,
                                     ).classes("mod-list-button")
+                                    if minecraft_username is None:
+                                        save_button.disable()
 
         render_editor()
 
@@ -769,11 +879,44 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                         change_search_text(_event_args_as_text(event))
 
                     search_input.on("update:model-value", _refresh_browser)
+                    (
+                        ui.select(
+                            namespace_options,
+                            value=editor_state.browser_namespace,
+                            label="Mod / Namespace",
+                            on_change=lambda event: change_browser_namespace(_event_args_as_text(event)),
+                        )
+                        .props(
+                            "filled square dense hide-bottom-space color=accent "
+                            "options-dark popup-content-class=mod-setting-menu"
+                        )
+                        .classes("mod-recipe-browser-filter mod-config-select mod-recipe-field")
+                    )
+                    item_type_select = (
+                        ui.select(
+                            item_type_options,
+                            value=editor_state.browser_item_type.value,
+                            label="Item Type",
+                            on_change=lambda event: change_browser_item_type(_event_args_as_text(event)),
+                        )
+                        .props(
+                            "filled square dense hide-bottom-space color=accent "
+                            "options-dark popup-content-class=mod-setting-menu"
+                        )
+                        .classes("mod-recipe-browser-filter mod-config-select mod-recipe-field")
+                    )
+                    if not item_types_classified:
+                        item_type_select.disable()
+                        with item_type_select:
+                            ui.tooltip("Restart Minecraft to generate item type data.")
 
                     @ui.refreshable
                     def render_browser_summary() -> None:
                         filtered_entries = self._filtered_minecraft_browser_entries(
-                            browser_entries, editor_state.search_text
+                            browser_entries,
+                            editor_state.search_text,
+                            namespace=editor_state.browser_namespace,
+                            item_type=editor_state.browser_item_type,
                         )
                         page_count = self._minecraft_browser_page_count(filtered_entries, page_size=page_size)
                         editor_state.page_index = max(0, min(editor_state.page_index, page_count - 1))
@@ -797,7 +940,10 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                 @ui.refreshable
                 def render_browser_grid() -> None:
                     filtered_entries = self._filtered_minecraft_browser_entries(
-                        browser_entries, editor_state.search_text
+                        browser_entries,
+                        editor_state.search_text,
+                        namespace=editor_state.browser_namespace,
+                        item_type=editor_state.browser_item_type,
                     )
                     page_count = self._minecraft_browser_page_count(filtered_entries, page_size=page_size)
                     editor_state.page_index = max(0, min(editor_state.page_index, page_count - 1))
@@ -941,7 +1087,7 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
         editor_state.editing_recipe_index = None
         editor_state.recipe_id = ""
         editor_state.output_item_id = ""
-        editor_state.output_count = 1
+        editor_state.output_count_text = "1"
         editor_state.shapeless_ingredients = [_MinecraftRecipeEditorIngredientState.empty() for _ in range(9)]
         editor_state.shaped_ingredients = [_MinecraftRecipeEditorIngredientState.empty() for _ in range(9)]
         editor_state.cooking_input_ingredient = _MinecraftRecipeEditorIngredientState.empty()
@@ -985,11 +1131,14 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             editor_state.kind = MinecraftRecipeKind.SHAPELESS
             editor_state.recipe_id = mutation.recipe_id or ""
             editor_state.output_item_id = mutation.output.item_id
-            editor_state.output_count = mutation.output.count
-            for index, ingredient in enumerate(mutation.ingredients):
-                editor_state.shapeless_ingredients[index] = cls._minecraft_editor_ingredient_from_recipe_ingredient(
-                    ingredient
-                )
+            editor_state.output_count_text = str(mutation.output.count)
+            slot_index = 0
+            for ingredient in mutation.ingredients:
+                for _ in range(ingredient.count):
+                    editor_state.shapeless_ingredients[slot_index] = (
+                        cls._minecraft_editor_ingredient_from_recipe_ingredient(ingredient)
+                    )
+                    slot_index += 1
             editor_state.selected_slot = _MinecraftRecipeEditorSelection.shapeless(0)
             return
         if isinstance(mutation, MinecraftShapedRecipe):
@@ -997,7 +1146,7 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             editor_state.kind = MinecraftRecipeKind.SHAPED
             editor_state.recipe_id = mutation.recipe_id or ""
             editor_state.output_item_id = mutation.output.item_id
-            editor_state.output_count = mutation.output.count
+            editor_state.output_count_text = str(mutation.output.count)
             for row_index, row in enumerate(mutation.pattern):
                 for column_index, symbol in enumerate(row):
                     if symbol == " ":
@@ -1013,7 +1162,7 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             editor_state.kind = mutation.kind
             editor_state.recipe_id = mutation.recipe_id or ""
             editor_state.output_item_id = mutation.output.item_id
-            editor_state.output_count = mutation.output.count
+            editor_state.output_count_text = str(mutation.output.count)
             editor_state.cooking_input_ingredient = cls._minecraft_editor_ingredient_from_recipe_ingredient(
                 mutation.ingredient
             )
@@ -1028,7 +1177,7 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             editor_state.kind = MinecraftRecipeKind.STONECUTTING
             editor_state.recipe_id = mutation.recipe_id or ""
             editor_state.output_item_id = mutation.output.item_id
-            editor_state.output_count = mutation.output.count
+            editor_state.output_count_text = str(mutation.output.count)
             editor_state.stonecutting_input_ingredient = cls._minecraft_editor_ingredient_from_recipe_ingredient(
                 mutation.ingredient
             )
@@ -1036,6 +1185,7 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             return
         if isinstance(mutation, MinecraftRecipeRemoval):
             editor_state.operation = _MinecraftRecipeEditorOperation.REMOVE
+            editor_state.recipe_id = mutation.directive_id or ""
             editor_state.removal_recipe_id = mutation.filter.recipe_id or ""
             editor_state.removal_output_filter = cls._minecraft_optional_editor_ingredient_from_recipe_ingredient(
                 mutation.filter.output
@@ -1086,10 +1236,29 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
         display_text = path or item_id
         return " ".join(part.capitalize() for part in display_text.replace("/", " ").replace("_", " ").split())
 
+    @staticmethod
+    def _minecraft_namespace_display_name(namespace: str) -> str:
+        return " ".join(part.capitalize() for part in namespace.replace("-", " ").replace("_", " ").split())
+
     @classmethod
-    def _minecraft_browser_entries(cls, item_ids: tuple[str, ...]) -> tuple[_MinecraftRecipeBrowserEntry, ...]:
+    def _minecraft_browser_entries(
+        cls,
+        item_ids: tuple[str, ...],
+        *,
+        block_item_ids: tuple[str, ...] = (),
+    ) -> tuple[_MinecraftRecipeBrowserEntry, ...]:
+        block_item_id_set = frozenset(block_item_ids)
         return tuple(
-            _MinecraftRecipeBrowserEntry(item_id=item_id, display_name=cls._minecraft_item_display_name(item_id))
+            _MinecraftRecipeBrowserEntry(
+                item_id=item_id,
+                display_name=cls._minecraft_item_display_name(item_id),
+                namespace=item_id.partition(":")[0],
+                item_type=(
+                    _MinecraftRecipeBrowserItemType.BLOCK
+                    if item_id in block_item_id_set
+                    else _MinecraftRecipeBrowserItemType.ITEM
+                ),
+            )
             for item_id in item_ids
         )
 
@@ -1097,12 +1266,17 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
     def _filtered_minecraft_browser_entries(
         entries: tuple[_MinecraftRecipeBrowserEntry, ...],
         search_text: str,
+        *,
+        namespace: str = "",
+        item_type: _MinecraftRecipeBrowserItemType = _MinecraftRecipeBrowserItemType.ALL,
     ) -> tuple[_MinecraftRecipeBrowserEntry, ...]:
         needle = search_text.strip().casefold()
-        if not needle:
-            return entries
         return tuple(
-            entry for entry in entries if needle in entry.item_id.casefold() or needle in entry.display_name.casefold()
+            entry
+            for entry in entries
+            if (not namespace or entry.namespace == namespace)
+            and (item_type is _MinecraftRecipeBrowserItemType.ALL or entry.item_type is item_type)
+            and (not needle or needle in entry.item_id.casefold() or needle in entry.display_name.casefold())
         )
 
     @staticmethod
@@ -1369,8 +1543,10 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
         if icon_url is None:
             return '<div class="mod-recipe-icon-shell mod-recipe-icon-fallback">?</div>'
         return (
-            '<div class="mod-recipe-icon-shell">'
-            f'<img class="mod-recipe-icon-image" src="{escape(icon_url)}" alt="{escape(alt_text)}">'
+            f'<div class="mod-recipe-icon-stack" role="img" aria-label="{escape(alt_text)}">'
+            '<div class="mod-recipe-icon-shell mod-recipe-icon-fallback" aria-hidden="true"></div>'
+            f'<img class="mod-recipe-icon-shell mod-recipe-icon-image" src="{escape(icon_url)}" '
+            'alt="" aria-hidden="true" loading="lazy" decoding="async">'
             "</div>"
         )
 
@@ -1514,19 +1690,29 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                     ),
                     recipe_type=cls._parse_optional_minecraft_recipe_type(editor_state.removal_recipe_type_text),
                     mod_id=editor_state.removal_mod_id.strip() or None,
-                )
+                ),
+                directive_id=editor_state.recipe_id.strip() or None,
             )
         output_item_id = editor_state.output_item_id.strip()
         if not output_item_id:
             raise ValueError("Choose an output item.")
-        output = MinecraftRecipeItemStack(output_item_id, count=editor_state.output_count)
+        output = MinecraftRecipeItemStack(
+            output_item_id,
+            count=cls._parse_minecraft_recipe_count(editor_state.output_count_text),
+        )
         recipe_id = editor_state.recipe_id.strip() or None
         if editor_state.kind is MinecraftRecipeKind.SHAPELESS:
+            ingredient_counts: dict[tuple[_MinecraftRecipeEditorIngredientKind, str], int] = {}
+            for ingredient_state in editor_state.shapeless_ingredients:
+                if not ingredient_state.has_value:
+                    continue
+                ingredient_key = (ingredient_state.kind, ingredient_state.resource_id.strip())
+                ingredient_counts[ingredient_key] = ingredient_counts.get(ingredient_key, 0) + 1
             ingredients = tuple(
-                ingredient
-                for ingredient_state in editor_state.shapeless_ingredients
-                for ingredient in [cls._minecraft_optional_recipe_ingredient_from_editor_state(ingredient_state)]
-                if ingredient is not None
+                MinecraftRecipeIngredient.item(resource_id, count=count)
+                if kind is _MinecraftRecipeEditorIngredientKind.ITEM
+                else MinecraftRecipeIngredient.tag(resource_id, count=count)
+                for (kind, resource_id), count in ingredient_counts.items()
             )
             if not ingredients:
                 raise ValueError("Choose at least one shapeless ingredient.")
