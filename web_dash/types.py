@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from mod_web_theme import BadgeTone
 
+from .nicegui_protocols import ModWebNotificationType
 from .runtime_imports import (
     AppRuntimeFault,
     AppTitleFont,
@@ -15,6 +16,7 @@ from .runtime_imports import (
     ChatEvent,
     ChatReferenceKind,
     Enum,
+    Label,
     Literal,
     NodeAppMutationAction,
     NodeAppActivityProviderEntry,
@@ -121,6 +123,32 @@ class _ModWebAppCardBadgeSpec:
 class _ModWebLinkSpec:
     label: str
     url: str
+    new_tab: bool = field(default=False, kw_only=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebLoginAdministrator:
+    user_id: int
+    display_name: str
+    level: Power_Level
+    avatar_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebNotificationPreviewSpec:
+    label: str
+    message: str
+    notification_type: ModWebNotificationType
+    repeat_count: int = 1
+    multi_line: bool = False
+    close_button: bool | str = False
+    timeout_milliseconds: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.repeat_count < 1:
+            raise ValueError("Notification preview repeat count must be positive.")
+        if self.timeout_milliseconds is not None and self.timeout_milliseconds < 0:
+            raise ValueError("Notification preview timeout must not be negative.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +335,7 @@ class _ModWebModToolbarBindings:
     selection_button: Button | None
     download_button: Button | None
     delete_button: Button | None
+    result_count_label: Label | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,6 +472,34 @@ class ModDownloadKind(Enum):
     ALL = "all"
     SELECTED = "selected"
     SINGLE = "single"
+
+
+class ModWebModSortOrder(Enum):
+    NEWEST = "newest"
+    OLDEST = "oldest"
+    NAME_ASCENDING = "name_ascending"
+    NAME_DESCENDING = "name_descending"
+    SIZE_DESCENDING = "size_descending"
+    SIZE_ASCENDING = "size_ascending"
+    TYPE = "type"
+
+    @property
+    def label(self) -> str:
+        match self:
+            case ModWebModSortOrder.NEWEST:
+                return "Newest first"
+            case ModWebModSortOrder.OLDEST:
+                return "Oldest first"
+            case ModWebModSortOrder.NAME_ASCENDING:
+                return "Name A–Z"
+            case ModWebModSortOrder.NAME_DESCENDING:
+                return "Name Z–A"
+            case ModWebModSortOrder.SIZE_DESCENDING:
+                return "Largest first"
+            case ModWebModSortOrder.SIZE_ASCENDING:
+                return "Smallest first"
+            case ModWebModSortOrder.TYPE:
+                return "Mod type"
 
 
 @dataclass(frozen=True, slots=True)
@@ -960,8 +1017,10 @@ __all__: tuple[str, ...] = (
     "_ModWebFakeChatPreviewState",
     "_ModWebKillControlState",
     "_ModWebLinkSpec",
+    "_ModWebLoginAdministrator",
     "_ModWebModToolbarBindings",
     "_ModWebNodePresenceBadgeSpec",
+    "_ModWebNotificationPreviewSpec",
     "_ModWebNotificationTrayItem",
     "_ModWebRuntimeToolbarBindings",
     "_ModWebStartStopControlState",

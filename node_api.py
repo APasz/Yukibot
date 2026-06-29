@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias, assert_never, cast
@@ -63,6 +64,7 @@ from apps._blueprint_files import (
 )
 from apps._config import (
     AppTitleFont,
+    ClientPackConfig,
     ModDownloadBlockReason,
     ModType,
     normalise_activity_provider_ids,
@@ -862,6 +864,14 @@ class NodeModEntry:
     added: str
     size_bytes: int
     size_text: str
+    client_pack: ClientPackConfig = field(default_factory=ClientPackConfig)
+
+    @property
+    def added_at(self) -> datetime:
+        try:
+            return datetime.fromisoformat(self.added)
+        except ValueError as xcp:
+            raise ValueError(f"Node mod {self.name!r} has an invalid added timestamp: {self.added!r}") from xcp
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeModEntry:
@@ -876,6 +886,9 @@ class NodeModEntry:
         added = _required_string(payload, "added")
         size_bytes = _required_int(payload, "size_bytes")
         size_text = _required_string(payload, "size_text")
+        raw_client_pack = payload.get("client_pack")
+        if raw_client_pack is not None and not isinstance(raw_client_pack, Mapping):
+            raise ValueError("Node mod client_pack is invalid.")
         if raw_mod_type is not None:
             mod_type = ModType(raw_mod_type)
         elif download_block_reason == ModDownloadBlockReason.BUILTIN.value:
@@ -898,6 +911,11 @@ class NodeModEntry:
             added=added,
             size_bytes=size_bytes,
             size_text=size_text,
+            client_pack=(
+                ClientPackConfig()
+                if raw_client_pack is None
+                else ClientPackConfig.model_validate(dict(raw_client_pack))
+            ),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -915,6 +933,7 @@ class NodeModEntry:
             "added": self.added,
             "size_bytes": self.size_bytes,
             "size_text": self.size_text,
+            "client_pack": self.client_pack.model_dump(mode="json"),
         }
 
 
@@ -8131,6 +8150,7 @@ class NodeApiService:
             added=mod.cfg.added.isoformat(sep=" ", timespec="seconds"),
             size_bytes=size_bytes,
             size_text=Utilities.humanise_bytes(size_bytes),
+            client_pack=mod.cfg.client_pack,
         )
 
     @staticmethod

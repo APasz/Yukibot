@@ -963,6 +963,40 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
             "https://mc-heads.net/avatar/123e4567-e89b-12d3-a456-426614174000/32",
         )
 
+    async def test_match_advancement_uses_native_title_when_kubejs_stream_is_available(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            script_path = directory / "kubejs" / "server_scripts" / "yuki_log.js"
+            script_path.parent.mkdir(parents=True)
+            script_path.write_text("// managed", encoding="utf-8")
+
+            app = cast(Any, object.__new__(Minecraft))
+            app.cfg = _make_minecraft_cfg(relay_advancements=True)
+            app.name = "minecraft_demo"
+            app.scope = "minecraft"
+            app.manage_embed_color = 0x22C55E
+            app.directory = directory
+            app.mods = SimpleNamespace(
+                list_mods=lambda state=None: [SimpleNamespace(name="kubejs-forge-2001.6.5-build.26.jar")]
+                if state is not False
+                else []
+            )
+            app._kubejs_event_stream_ready = True
+            app._tail_machers = set()
+            app._players = Players(app)
+            matcher = Matchers(app)
+
+            with patch("apps.minecraft.DC_Relay.add") as add_mock:
+                await matcher.match_advancement(
+                    "[12:00:00] [Server thread/INFO]: Alice has made the advancement [Diorite Stairs]"
+                )
+
+            add_mock.assert_called_once()
+            relayed_message = add_mock.call_args.args[0]
+            self.assertEqual(relayed_message.content, "Advancement: Diorite Stairs")
+            assert relayed_message.relay_embed is not None
+            self.assertEqual(relayed_message.relay_embed.description, "Diorite Stairs")
+
     async def test_match_advancement_normalises_goal_and_challenge_lines_to_advancement_term(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
         app.cfg = _make_minecraft_cfg(relay_advancements=True)

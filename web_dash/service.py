@@ -35,7 +35,6 @@ from .runtime_imports import (
     cast,
     config,
     escape,
-    quote,
     threading,
 )
 from .status import ModWebStatusMixin
@@ -105,12 +104,10 @@ class ModWebService(
 
     @staticmethod
     def _discord_avatar_uri(user: ModWebUser) -> str | None:
-        if user.avatar_hash is None:
-            return None
-        avatar_hash = user.avatar_hash.strip()
-        if not avatar_hash:
-            return None
-        return f"https://cdn.discordapp.com/avatars/{user.discord_id}/{quote(avatar_hash, safe='')}.png?size=128"
+        return mod_web_avatars._discord_avatar_uri(
+            user_id=user.discord_id,
+            avatar_hash=user.avatar_hash,
+        )
 
     @staticmethod
     def _user_avatar_markup(*, avatar_uri: str, display_name: str) -> str:
@@ -126,10 +123,7 @@ class ModWebService(
         if discord_avatar_uri is not None:
             return discord_avatar_uri
         level = self._user_level(user)
-        resource_avatar_uri = mod_web_avatars._user_avatar_icon_data_uri(level)
-        if resource_avatar_uri is not None:
-            return resource_avatar_uri
-        return mod_web_avatars._user_avatar_fallback_svg_data_uri(level)
+        return mod_web_avatars._user_avatar_data_uri(level)
 
     def app_url(self, app_name: str) -> str:
         return f"{config.MOD_WEB_SERVER.public_base_url}{self.app_path(app_name)}"

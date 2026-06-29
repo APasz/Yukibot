@@ -12,8 +12,11 @@ from .constants import (
 from .nicegui_protocols import ModWebUi
 from .runtime_imports import (
     Awaitable,
+    BadgeTone,
     Callable,
     Checkbox,
+    ClientPackPolicy,
+    ModDownloadBlockReason,
     ModType,
     ModWebUser,
     NodeApiScope,
@@ -53,6 +56,20 @@ if TYPE_CHECKING:
 
 
 class ModWebActionsMixin(ModWebServiceSupport):
+    @staticmethod
+    def _mod_type_badge_tone(mod_type: ModType) -> BadgeTone:
+        match mod_type:
+            case ModType.REGULAR:
+                return "grey"
+            case ModType.CLIENT:
+                return "purple"
+            case ModType.SERVER_ONLY:
+                return "warn"
+            case ModType.COREMOD:
+                return "red"
+            case ModType.BUILTIN:
+                return "black"
+
     @staticmethod
     def _is_protected_mod(entry: NodeModEntry) -> bool:
         return entry.mod_type in {ModType.COREMOD, ModType.BUILTIN}
@@ -334,6 +351,15 @@ class ModWebActionsMixin(ModWebServiceSupport):
             return "Delete"
         return f"Delete {selected_count}"
 
+    @staticmethod
+    def _mod_result_count_label(*, visible_count: int, total_count: int) -> str:
+        if visible_count < 0 or total_count < 0 or visible_count > total_count:
+            raise ValueError("Mod result counts must satisfy 0 <= visible_count <= total_count.")
+        mod_label: str = "mod" if total_count == 1 else "mods"
+        if visible_count == total_count:
+            return f"{total_count} {mod_label}"
+        return f"{visible_count} of {total_count} {mod_label}"
+
     async def _mutate_app(
         self,
         *,
@@ -599,6 +625,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
         return None
 
     @staticmethod
+    def _app_action_completion_message(*, pending_message: str | None, result_message: str) -> str | None:
+        if result_message == pending_message:
+            return None
+        return result_message
+
+    @staticmethod
     def _app_enable_disable_action(model: ModWebBasePageModel) -> NodeAppMutationAction:
         app_stats: NodeAppRuntimeSummary | None = model.app_stats
         if app_stats is not None and app_stats.enabled:
@@ -682,6 +714,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         ui.label(entry.name).classes("mod-subtitle text-sm break-all")
                     with ui.grid(columns=2).classes("mod-detail-grid"):
                         self._render_mod_detail_item(ui=ui, label="Status", value=status_text)
+                        self._render_mod_detail_item(ui=ui, label="Type", value=entry.mod_type.label)
                         self._render_mod_detail_item(ui=ui, label="Size", value=entry.size_text)
                         self._render_mod_detail_item(ui=ui, label="Downloadable", value=downloadable_text)
                         self._render_mod_detail_item(ui=ui, label="Coremod", value="Yes" if entry.coremod else "No")
@@ -689,6 +722,18 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         self._render_mod_detail_item(ui=ui, label="Version", value=version_text)
                         self._render_mod_detail_item(ui=ui, label="Added", value=entry.added)
                         self._render_mod_detail_item(ui=ui, label="Blocked", value=block_text)
+                        self._render_mod_detail_item(
+                            ui=ui,
+                            label="Client pack",
+                            value=entry.client_pack.policy.label,
+                        )
+                        if entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE:
+                            assert entry.client_pack.choice_group is not None
+                            self._render_mod_detail_item(
+                                ui=ui,
+                                label="Choice group",
+                                value=entry.client_pack.choice_group,
+                            )
                     if available_actions:
                         with ui.column().classes("gap-2"):
                             ui.label("Privileged Actions").classes("mod-stat-label")
@@ -746,9 +791,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.label(entry.name).classes("mod-row-file")
             with ui.row().classes("mod-row-meta"):
                 ui.label(entry.size_text).classes("mod-pill size")
-                if entry.coremod:
-                    ui.label("Coremod").classes("mod-pill core")
-                if not entry.downloadable:
+                if entry.client_pack.policy is not ClientPackPolicy.REQUIRED:
+                    ui.label(entry.client_pack.policy.label).classes("mod-pill")
+                show_download_block_badge: bool = not entry.downloadable and not (
+                    entry.mod_type is ModType.SERVER_ONLY
+                    and entry.download_block_reason == ModDownloadBlockReason.SERVER_ONLY.value
+                )
+                if show_download_block_badge:
                     ui.label(entry.download_block_label or "Not downloadable").classes("mod-pill blocked")
             if download_url is None:
                 ui.label("Blocked").classes("mod-row-download blocked")
@@ -771,6 +820,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.button("Download", on_click=download_single).props("flat dense no-caps").classes(
                     "mod-row-download"
                 ).on("click", js_handler="(event) => event.stopPropagation()")
+            with ui.column().classes("mod-setting-badge-rail mod-mod-type-badge-rail"):
+                self._badge(
+                    ui=ui,
+                    text=entry.mod_type.label,
+                    tone=self._mod_type_badge_tone(entry.mod_type),
+                    extra_classes="mod-setting-badge mod-mod-type-badge",
+                )
         return checkbox if can_select else None
 
     async def _start_download(

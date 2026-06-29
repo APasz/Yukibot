@@ -16,6 +16,7 @@ from .constants import (
 )
 from .nicegui_protocols import (
     ModWebEventArgumentsContainer,
+    ModWebNotificationType,
     ModWebUi,
     ModWebValueContainer,
     _event_args_as_text,
@@ -36,6 +37,7 @@ from .runtime_imports import (
     Literal,
     LiteralString,
     Mapping,
+    ModType,
     ModWebUser,
     NodeApiScope,
     NodeAppRuntimeSummary,
@@ -88,6 +90,7 @@ from .types import (
     ModWebConfigEditorLayout,
     ModWebConfigEditorShape,
     ModWebNodeLink,
+    ModWebModSortOrder,
     ModWebPageModel,
     ModWebSearchOption,
     ModWebSettingControlKind,
@@ -419,7 +422,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
         notify_client = nicegui_context.client
 
-        def _notify(message: str, *, tone: str) -> None:
+        def _notify(message: str, *, tone: ModWebNotificationType) -> None:
             with notify_client:
                 ui.notify(message, type=tone)
 
@@ -1615,15 +1618,15 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     self._render_setting_meta_value(ui=ui, setting=setting)
                     if setting.default_text or not setting.value_is_hidden:
                         ui.label(setting.default_text).classes("mod-setting-meta-default")
-                with ui.column().classes("mod-setting-badge-rail"):
-                    self._badge(
-                        ui=ui,
-                        text=setting.permission_level,
-                        tone=self._setting_permission_badge_tone(setting),
-                        extra_classes="mod-setting-badge",
-                    )
-                    if setting.has_pending_value:
-                        self._badge(ui=ui, text="Draft", tone="grey", extra_classes="mod-setting-badge")
+            with ui.column().classes("mod-setting-badge-rail"):
+                self._badge(
+                    ui=ui,
+                    text=setting.permission_level,
+                    tone=self._setting_permission_badge_tone(setting),
+                    extra_classes="mod-setting-badge",
+                )
+                if setting.has_pending_value:
+                    self._badge(ui=ui, text="Draft", tone="grey", extra_classes="mod-setting-badge")
 
     def _render_config_editor(self, *, ui: ModWebUi, model: ModWebBasePageModel, user: ModWebUser) -> None:
         if not model.supports_configs:
@@ -2121,9 +2124,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     transfer_id=transfer_id,
                     active_detail_text=f"Receiving blueprint files for {model.app_friendly}.",
                 )
-            config_source_path: Path | None = None
-            if upload_pair.config_filename is not None:
-                config_source_path = temp_paths[upload_pair.config_filename]
             self._mark_transfers_applying(
                 transfer_ids=transfer_ids,
                 detail_text=f"Applying blueprint files to {model.app_friendly}.",
@@ -2610,6 +2610,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     entry.size_text,
                     entry.download_block_label,
                     entry.download_block_reason,
+                    entry.client_pack.policy.value,
+                    entry.client_pack.policy.label,
+                    entry.client_pack.choice_group,
                 ),
             )
         )
@@ -2753,6 +2756,38 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not matching_ids and cls._search_query_tokens(search_query):
             return ()
         return tuple[NodeModEntry, ...](mod for mod in mods if mod.name in matching_ids or not matching_ids)
+
+    @staticmethod
+    def _sort_mod_entries(
+        mods: tuple[NodeModEntry, ...],
+        order: ModWebModSortOrder,
+    ) -> tuple[NodeModEntry, ...]:
+        alphabetic: list[NodeModEntry] = sorted(
+            mods,
+            key=lambda entry: (entry.friendly.casefold(), entry.name.casefold()),
+        )
+        if order is ModWebModSortOrder.NAME_ASCENDING:
+            return tuple(alphabetic)
+        if order is ModWebModSortOrder.NAME_DESCENDING:
+            return tuple(reversed(alphabetic))
+        if order is ModWebModSortOrder.NEWEST:
+            return tuple(sorted(alphabetic, key=lambda entry: entry.added_at, reverse=True))
+        if order is ModWebModSortOrder.OLDEST:
+            return tuple(sorted(alphabetic, key=lambda entry: entry.added_at))
+        if order is ModWebModSortOrder.SIZE_DESCENDING:
+            return tuple(sorted(alphabetic, key=lambda entry: entry.size_bytes, reverse=True))
+        if order is ModWebModSortOrder.SIZE_ASCENDING:
+            return tuple(sorted(alphabetic, key=lambda entry: entry.size_bytes))
+        if order is ModWebModSortOrder.TYPE:
+            type_order: dict[ModType, int] = {
+                ModType.REGULAR: 0,
+                ModType.CLIENT: 1,
+                ModType.SERVER_ONLY: 2,
+                ModType.COREMOD: 3,
+                ModType.BUILTIN: 4,
+            }
+            return tuple(sorted(alphabetic, key=lambda entry: type_order[entry.mod_type]))
+        raise ValueError(f"Unsupported mod sort order: {order!r}")
 
     @staticmethod
     def _setting_choice_for_value(setting: NodeSettingEntry, value: str) -> NodeSettingChoice | None:

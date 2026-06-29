@@ -24,7 +24,7 @@ import config
 from _minecraft_heads import minecraft_dev_bypass_head_data_uri
 from _security import Access_Control, Power_Level
 from apps._app import AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
-from apps._config import AppTitleFont, ModType
+from apps._config import AppTitleFont, ClientPackConfig, ClientPackPolicy, ModType
 from apps._updater import (
     AppUpdateBranchState,
     AppUpdateInfo,
@@ -129,6 +129,7 @@ from web_dash.app_page import (
     _MinecraftRecipeEditorState,
 )
 from web_dash.links import current_node_app_url
+from web_dash.constants import _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS
 from web_dash.models import _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
 from web_dash.nicegui_protocols import ModWebUi
 from web_dash.service import ModWebService
@@ -144,6 +145,7 @@ from web_dash.types import (
     ModWebHomeNodeSummary,
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
+    ModWebModSortOrder,
     ModWebSevenDaysSandboxOptionEntry,
     ModWebSevenDaysSandboxOptionsSummary,
     ModWebNodeAppSection,
@@ -166,7 +168,9 @@ from web_dash.types import (
     _ModWebFakeChatMessageMode,
     _ModWebFakeChatPreviewState,
     _ModWebLinkSpec,
+    _ModWebLoginAdministrator,
     _ModWebNodePresenceBadgeSpec,
+    _ModWebNotificationPreviewSpec,
     _ModWebNotificationTrayItem,
     _ModWebTabActionSpec,
 )
@@ -691,6 +695,7 @@ class ModWebTests(unittest.TestCase):
         added: str = "2026-06-04T20:00:00",
         size_bytes: int = 128,
         size_text: str = "128B",
+        client_pack: ClientPackConfig | None = None,
     ) -> NodeModEntry:
         return NodeModEntry(
             name=name,
@@ -706,6 +711,7 @@ class ModWebTests(unittest.TestCase):
             added=added,
             size_bytes=size_bytes,
             size_text=size_text,
+            client_pack=client_pack or ClientPackConfig(),
         )
 
     @staticmethod
@@ -1823,6 +1829,19 @@ class ModWebTests(unittest.TestCase):
         self.assertIn('<img class="mod-user-avatar"', markup)
         self.assertIn('src="https://cdn.discordapp.com/avatars/42/abc123.png?size=128"', markup)
         self.assertIn('alt="Tester avatar"', markup)
+
+    def test_badge_avatar_markup_escapes_image_attributes(self) -> None:
+        markup = ModWebService._badge_avatar_markup(
+            avatar_uri='https://example.invalid/avatar.png?size=32&variant="square"',
+            display_name='Admin <Alice> "Root"',
+        )
+
+        self.assertIn(
+            'src="https://example.invalid/avatar.png?size=32&amp;variant=&quot;square&quot;"',
+            markup,
+        )
+        self.assertIn('alt="Admin &lt;Alice&gt; &quot;Root&quot; avatar"', markup)
+        self.assertIn('loading="lazy"', markup)
 
     def test_run_server_preserves_existing_logging_configuration(self) -> None:
         class FakeUi:
@@ -3208,8 +3227,18 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             badges,
             (
-                _ModWebBadgeSpec(text="3 (5)", tone="black", icon="speed", tooltip_text="CPU"),
-                _ModWebBadgeSpec(text="8", tone="black", icon="memory", tooltip_text="RAM"),
+                _ModWebBadgeSpec(
+                    text="3 (5)",
+                    tone="black",
+                    icon="speed",
+                    tooltip_text="CPU resource points — running: 3; startup: 5",
+                ),
+                _ModWebBadgeSpec(
+                    text="8",
+                    tone="black",
+                    icon="memory",
+                    tooltip_text="RAM resource points: 8",
+                ),
             ),
         )
 
@@ -3681,6 +3710,18 @@ class ModWebTests(unittest.TestCase):
                 self.class_value: str | None = None
                 self.style_values: list[tuple[str, str]] = []
 
+            def __enter__(self) -> "FakeHtml":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
             def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeHtml":
                 self.class_value = replace if replace is not None else value
                 return self
@@ -3787,13 +3828,14 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(hero_card.replaced_classes, "mod-card mod-card-hero w-full mod-app-hero-running")
         self.assertEqual(ui.label_texts[:3], ["Minecraft Alpha", "Status", "Running"])
         self.assertEqual(ui.label_texts, ["Minecraft Alpha", "Status", "Running", ""])
-        self.assertEqual(ui.html_contents, ["", "Day 2"])
+        self.assertEqual(ui.html_contents, ["", "Day 2", "Day Counter<br>Current day: 2"])
 
         apply_runtime(updated_stats)
 
         self.assertEqual(hero_card.replaced_classes, "mod-card mod-card-hero w-full mod-app-hero-starting")
         self.assertEqual(ui.label_texts, ["Minecraft Alpha", "Status", "Running", ""])
         self.assertEqual(ui.html_elements[1].content, "Day 2")
+        self.assertEqual(ui.html_elements[2].content, "")
         self.assertEqual(ui.labels[2].text, "Starting")
 
     def test_render_page_disables_hero_runtime_polling_when_live_app_updates_are_subscribed(self) -> None:
@@ -4518,6 +4560,7 @@ class ModWebTests(unittest.TestCase):
             (
                 _ModWebLinkSpec(label="Access Denied", url="/mod-web/dev/error/access-denied"),
                 _ModWebLinkSpec(label="Sign-in Unavailable", url="/mod-web/dev/error/sign-in-unavailable"),
+                _ModWebLinkSpec(label="OAuth Failure", url="/mod-web/dev/error/oauth-failure"),
                 _ModWebLinkSpec(label="Page Unavailable", url="/mod-web/dev/error/page-unavailable"),
                 _ModWebLinkSpec(label="Chat Unavailable", url="/mod-web/dev/error/chat-unavailable"),
                 _ModWebLinkSpec(label="Node Unavailable", url="/mod-web/dev/error/node-unavailable"),
@@ -4533,6 +4576,294 @@ class ModWebTests(unittest.TestCase):
                 _ModWebLinkSpec(label="Chat Stream WS", url="/mod-web/dev/error/chat-stream-websocket"),
             ),
         )
+
+    def test_oauth_failure_page_config_offers_retry_and_home_actions(self) -> None:
+        page_config = ModWebService()._oauth_failure_page_config("OAuth state expired.")
+
+        self.assertEqual(page_config.title, "Discord sign-in failed")
+        self.assertEqual(page_config.badge_tone, "red")
+        self.assertEqual(page_config.detail_text, "OAuth state expired.")
+        self.assertEqual(
+            page_config.actions,
+            (
+                _ModWebLinkSpec(label="Try Again", url="/auth/login?next_path=%2F"),
+                _ModWebLinkSpec(label="Home", url="/"),
+            ),
+        )
+
+    def test_login_administrators_lists_admin_and_above_with_cached_names(self) -> None:
+        with TemporaryDirectory() as tmp:
+            pointer = Path(tmp) / "users.json"
+            pointer.write_text(
+                json.dumps(
+                    {
+                        "visitor": [1],
+                        "user": [2],
+                        "admin": [3],
+                        "sudo": [4],
+                        "root": [5, 792857784508219404],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            acl = Access_Control(pointer)
+
+        display_names = {
+            3: "Admin Alice",
+            4: "Sudo Sam",
+            5: "Root Riley",
+            792857784508219404: "AiviA",
+        }
+        name_cache = Mock()
+        name_cache.discord_avatar_hash.side_effect = lambda user_id: f"avatar-{user_id}"
+        name_cache.web_display_name.side_effect = (
+            lambda user_id, default: display_names.get(user_id, default)
+        )
+        service = ModWebService()
+        service.set_acl(acl)
+
+        with patch("web_dash.status.config.Name_Cache", return_value=name_cache):
+            administrators = service._login_administrators()
+
+        self.assertEqual([administrator.user_id for administrator in administrators], [5, 4, 3])
+        self.assertNotIn(792857784508219404, [administrator.user_id for administrator in administrators])
+        self.assertEqual(
+            [administrator.display_name for administrator in administrators],
+            ["Root Riley", "Sudo Sam", "Admin Alice"],
+        )
+        self.assertEqual(
+            [administrator.avatar_hash for administrator in administrators],
+            ["avatar-5", "avatar-4", "avatar-3"],
+        )
+
+    def test_login_administrator_rows_use_descending_power_order(self) -> None:
+        self.assertEqual(
+            ModWebService._login_administrator_levels(),
+            (Power_Level.root, Power_Level.sudo, Power_Level.admin),
+        )
+
+    def test_login_administrator_avatar_requires_cached_discord_avatar(self) -> None:
+        without_avatar = _ModWebLoginAdministrator(
+            user_id=42,
+            display_name="Admin Alice",
+            level=Power_Level.admin,
+            avatar_hash=None,
+        )
+        with_avatar = _ModWebLoginAdministrator(
+            user_id=42,
+            display_name="Admin Alice",
+            level=Power_Level.admin,
+            avatar_hash="avatar-123",
+        )
+
+        self.assertIsNone(ModWebService._login_administrator_avatar_uri(without_avatar))
+        self.assertEqual(
+            ModWebService._login_administrator_avatar_uri(with_avatar),
+            "https://cdn.discordapp.com/avatars/42/avatar-123.png?size=128",
+        )
+
+    def test_login_information_actions_include_source_about_and_optional_build(self) -> None:
+        with patch.object(config, "MOD_WEB_BUILD_SHA", "abcdef1234567890"):
+            actions = ModWebService._login_information_actions()
+
+        self.assertEqual([action.label for action in actions], ["About", "GitHub", "Build abcdef1"])
+        self.assertEqual(actions[0].url, "/auth/about")
+        self.assertEqual(actions[1].url, "https://github.com/APasz/Yukibot")
+        self.assertEqual(
+            actions[2].url,
+            "https://github.com/APasz/Yukibot/commit/abcdef1234567890",
+        )
+        self.assertFalse(actions[0].new_tab)
+        self.assertTrue(actions[1].new_tab)
+        self.assertTrue(actions[2].new_tab)
+
+    def test_login_information_actions_omit_unconfigured_build(self) -> None:
+        with patch.object(config, "MOD_WEB_BUILD_SHA", None):
+            actions = ModWebService._login_information_actions()
+
+        self.assertEqual([action.label for action in actions], ["About", "GitHub"])
+
+    def test_about_page_config_credits_project_history(self) -> None:
+        page_config = ModWebService()._about_page_config()
+
+        self.assertEqual(page_config.title, "About Yukibot")
+        self.assertIn("NaiTechie", page_config.detail_text or "")
+        self.assertIn("AiviA", page_config.detail_text or "")
+        self.assertIn("APasz", page_config.detail_text or "")
+        self.assertIn("rgba(167, 139, 250", page_config.icon_markup or "")
+        self.assertEqual([action.label for action in page_config.actions], ["GitHub", "Home"])
+        self.assertTrue(page_config.actions[0].new_tab)
+
+    def test_about_supported_apps_follow_configured_app_scopes(self) -> None:
+        self.assertEqual(
+            ModWebService._about_supported_app_names(),
+            (
+                "Minecraft",
+                "7 Days to Die",
+                "BeamMP",
+                "Euro Truck Simulator 2",
+                "Factorio",
+                "Satisfactory",
+            ),
+        )
+
+    def test_dev_notification_preview_actions_cover_every_notification_type(self) -> None:
+        actions = ModWebService._dev_notification_preview_actions()
+
+        self.assertEqual(
+            actions,
+            (
+                _ModWebNotificationPreviewSpec(
+                    label="Positive Toast",
+                    message="Positive notification preview.",
+                    notification_type="positive",
+                ),
+                _ModWebNotificationPreviewSpec(
+                    label="Negative Toast",
+                    message="Negative notification preview.",
+                    notification_type="negative",
+                ),
+                _ModWebNotificationPreviewSpec(
+                    label="Warning Toast",
+                    message="Warning notification preview.",
+                    notification_type="warning",
+                ),
+                _ModWebNotificationPreviewSpec(
+                    label="Info Toast",
+                    message="Info notification preview.",
+                    notification_type="info",
+                ),
+                _ModWebNotificationPreviewSpec(
+                    label="Ongoing Toast",
+                    message="Ongoing notification preview.",
+                    notification_type="ongoing",
+                ),
+                _ModWebNotificationPreviewSpec(
+                    label="Grouped Duplicate",
+                    message="Intentional grouped duplicate preview.",
+                    notification_type="info",
+                    repeat_count=2,
+                ),
+                _ModWebNotificationPreviewSpec(
+                    label="Long Multiline",
+                    message=(
+                        "Long multiline notification preview for checking wrapping, spacing, and readability "
+                        "when a toast contains more detail than usual."
+                    ),
+                    notification_type="warning",
+                    multi_line=True,
+                ),
+                _ModWebNotificationPreviewSpec(
+                    label="Persistent Dismissible",
+                    message="Persistent notification preview; dismiss it with the button.",
+                    notification_type="ongoing",
+                    close_button="Dismiss",
+                    timeout_milliseconds=0,
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            {action.notification_type for action in actions},
+            {"positive", "negative", "warning", "info", "ongoing"},
+        )
+
+    def test_notification_preview_spec_rejects_invalid_repeat_count_and_timeout(self) -> None:
+        with self.assertRaisesRegex(ValueError, "repeat count must be positive"):
+            _ModWebNotificationPreviewSpec(
+                label="Invalid",
+                message="Invalid",
+                notification_type="info",
+                repeat_count=0,
+            )
+        with self.assertRaisesRegex(ValueError, "timeout must not be negative"):
+            _ModWebNotificationPreviewSpec(
+                label="Invalid",
+                message="Invalid",
+                notification_type="info",
+                timeout_milliseconds=-1,
+            )
+
+    def test_login_dev_preview_card_buttons_emit_configured_notifications(self) -> None:
+        class FakeElement:
+            def __enter__(self) -> "FakeElement":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+            def classes(self, value: str) -> "FakeElement":
+                del value
+                return self
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.button_handlers: dict[str, Callable[[object | None], None]] = {}
+                self.notifications: list[dict[str, object]] = []
+
+            def card(self) -> FakeElement:
+                return FakeElement()
+
+            def column(self) -> FakeElement:
+                return FakeElement()
+
+            def row(self) -> FakeElement:
+                return FakeElement()
+
+            def label(self, text: str) -> FakeElement:
+                del text
+                return FakeElement()
+
+            def button(
+                self,
+                label: str,
+                *,
+                on_click: Callable[[object | None], None],
+            ) -> FakeElement:
+                self.button_handlers[label] = on_click
+                return FakeElement()
+
+            def notify(
+                self,
+                message: str,
+                *,
+                close_button: bool | str = False,
+                multi_line: bool = False,
+                type: str | None = None,
+                timeout: int | None = None,
+            ) -> None:
+                self.notifications.append(
+                    {
+                        "message": message,
+                        "close_button": close_button,
+                        "multi_line": multi_line,
+                        "type": type,
+                        "timeout": timeout,
+                    }
+                )
+
+        service = ModWebService()
+        ui = FakeUi()
+        with patch.object(service, "_action_link"):
+            service._render_login_dev_error_preview_card(ui=cast(ModWebUi, cast(object, ui)))
+
+        ui.button_handlers["Grouped Duplicate"](None)
+        self.assertEqual(len(ui.notifications), 2)
+        self.assertEqual(ui.notifications[0], ui.notifications[1])
+        self.assertEqual(ui.notifications[0]["timeout"], _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS)
+
+        ui.button_handlers["Long Multiline"](None)
+        self.assertIs(ui.notifications[-1]["multi_line"], True)
+
+        ui.button_handlers["Persistent Dismissible"](None)
+        self.assertEqual(ui.notifications[-1]["close_button"], "Dismiss")
+        self.assertEqual(ui.notifications[-1]["timeout"], 0)
 
     def test_exception_detail_text_formats_class_and_message(self) -> None:
         self.assertEqual(ModWebService._exception_detail_text(RuntimeError("boom")), "RuntimeError: boom")
@@ -5289,14 +5620,15 @@ class ModWebTests(unittest.TestCase):
                 player_capacity=20,
                 connected_player_names=("Yoko", "Bea", "Casey"),
             ),
-            "Yoko<br>Bea<br>Casey",
+            "Players<br>Connected: 3 / 20<br>Connected players:<br>Yoko<br>Bea<br>Casey",
         )
-        self.assertIsNone(
+        self.assertEqual(
             service._player_count_tooltip_html(
                 player_count=3,
                 player_capacity=20,
                 connected_player_names=(),
-            )
+            ),
+            "Players<br>Connected: 3 / 20<br>No players connected",
         )
         self.assertIsNone(
             service._player_count_tooltip_html(
@@ -7064,6 +7396,100 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(service._filter_mod_entries(mods=mods, options=options, search_query="missing"), ())
 
+    def test_sort_mod_entries_defaults_can_use_newest_first_and_support_all_orders(self) -> None:
+        service = ModWebService()
+        alpha = self._mod_entry(
+            name="alpha.jar",
+            friendly="Alpha",
+            added="2026-06-01 12:00:00",
+            size_bytes=50,
+            mod_type=ModType.CLIENT,
+        )
+        beta = self._mod_entry(
+            name="beta.jar",
+            friendly="Beta",
+            added="2026-06-03 12:00:00",
+            size_bytes=10,
+            mod_type=ModType.REGULAR,
+        )
+        gamma = self._mod_entry(
+            name="gamma.jar",
+            friendly="Gamma",
+            added="2026-06-02 12:00:00",
+            size_bytes=100,
+            mod_type=ModType.SERVER_ONLY,
+        )
+        mods = (alpha, beta, gamma)
+
+        self.assertEqual(
+            service._sort_mod_entries(mods, ModWebModSortOrder.NEWEST),
+            (beta, gamma, alpha),
+        )
+        self.assertEqual(
+            service._sort_mod_entries(mods, ModWebModSortOrder.OLDEST),
+            (alpha, gamma, beta),
+        )
+        self.assertEqual(
+            service._sort_mod_entries(mods, ModWebModSortOrder.NAME_DESCENDING),
+            (gamma, beta, alpha),
+        )
+        self.assertEqual(
+            service._sort_mod_entries(mods, ModWebModSortOrder.SIZE_DESCENDING),
+            (gamma, alpha, beta),
+        )
+        self.assertEqual(
+            service._sort_mod_entries(mods, ModWebModSortOrder.TYPE),
+            (beta, alpha, gamma),
+        )
+
+    def test_resolve_client_pack_mod_names_includes_required_optional_and_one_choice(self) -> None:
+        required = self._mod_entry(name="required.jar")
+        optional = self._mod_entry(
+            name="optional.jar",
+            client_pack=ClientPackConfig(policy=ClientPackPolicy.OPTIONAL),
+        )
+        default_choice = self._mod_entry(
+            name="default.jar",
+            client_pack=ClientPackConfig(
+                policy=ClientPackPolicy.ALTERNATIVE,
+                choice_group="renderer",
+                default_choice=True,
+            ),
+        )
+        other_choice = self._mod_entry(
+            name="other.jar",
+            client_pack=ClientPackConfig(
+                policy=ClientPackPolicy.ALTERNATIVE,
+                choice_group="renderer",
+            ),
+        )
+
+        self.assertEqual(
+            ModWebService._resolve_client_pack_mod_names(
+                mods=(required, optional, default_choice, other_choice),
+                optional_names=frozenset({optional.name}),
+                choice_names={"renderer": other_choice.name},
+            ),
+            (required.name, optional.name, other_choice.name),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Every client-pack choice group"):
+            ModWebService._resolve_client_pack_mod_names(
+                mods=(required, default_choice, other_choice),
+                optional_names=frozenset(),
+                choice_names={},
+            )
+
+    def test_node_mod_entry_mapping_preserves_client_pack_policy(self) -> None:
+        entry = self._mod_entry(
+            name="optional.jar",
+            client_pack=ClientPackConfig(policy=ClientPackPolicy.OPTIONAL),
+        )
+
+        restored = NodeModEntry.from_mapping(entry.to_mapping())
+
+        self.assertEqual(restored, entry)
+
     def test_render_mods_section_adds_search_box_and_filters_visible_rows(self) -> None:
         class FakeContainer:
             def __init__(self) -> None:
@@ -7222,6 +7648,10 @@ class ModWebTests(unittest.TestCase):
                 self.inputs.append(control)
                 return control
 
+            def select(self, *args: object, **kwargs: object) -> FakeInput:
+                del args, kwargs
+                return FakeInput()
+
             def notify(self, message: str, *, type: str | None = None) -> None:
                 del message, type
                 return None
@@ -7295,12 +7725,18 @@ class ModWebTests(unittest.TestCase):
                 "mod-config-search mod-settings-search mod-mods-toolbar-search",
             )
             self.assertEqual(rendered_mod_names, ["alpha-fabric.jar", "beta-forge.jar"])
+            result_count_label = next(
+                label for label in ui.labels if label.class_value == "mod-mods-toolbar-result-count"
+            )
+            self.assertEqual(result_count_label.text, "2 mods")
 
             search_handler = ui.inputs[0].handlers["update:model-value"]
             search_handler(SimpleNamespace(args="beta"))
             self.assertEqual(rendered_mod_names, ["alpha-fabric.jar", "beta-forge.jar", "beta-forge.jar"])
+            self.assertEqual(result_count_label.text, "1 of 2 mods")
 
             search_handler(SimpleNamespace(args="missing"))
+            self.assertEqual(result_count_label.text, "0 of 2 mods")
 
         self.assertIn("No mods match that search.", [label.text for label in ui.labels])
 
@@ -7350,6 +7786,9 @@ class ModWebTests(unittest.TestCase):
             def classes(self, value: str) -> "FakeLabel":
                 del value
                 return self
+
+            def set_text(self, value: str) -> None:
+                self.text = value
 
         class FakeInput:
             def props(self, value: str) -> "FakeInput":
@@ -7435,6 +7874,10 @@ class ModWebTests(unittest.TestCase):
                 return FakeLabel(text)
 
             def input(self, *args: object, **kwargs: object) -> FakeInput:
+                del args, kwargs
+                return FakeInput()
+
+            def select(self, *args: object, **kwargs: object) -> FakeInput:
                 del args, kwargs
                 return FakeInput()
 
@@ -8220,8 +8663,18 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             badges,
             (
-                _ModWebBadgeSpec(text="3 (5)", tone="black", icon="speed", tooltip_text="CPU"),
-                _ModWebBadgeSpec(text="8", tone="black", icon="memory", tooltip_text="RAM"),
+                _ModWebBadgeSpec(
+                    text="3 (5)",
+                    tone="black",
+                    icon="speed",
+                    tooltip_text="CPU resource points — running: 3; startup: 5",
+                ),
+                _ModWebBadgeSpec(
+                    text="8",
+                    tone="black",
+                    icon="memory",
+                    tooltip_text="RAM resource points: 8",
+                ),
             ),
         )
 
@@ -8309,6 +8762,33 @@ class ModWebTests(unittest.TestCase):
                 current_value="!D14/H21",
             ),
             'Day <span class="mod-app-activity-alert">14</span> Hour 21',
+        )
+
+    def test_app_activity_provider_tooltips_explain_values_and_player_names(self) -> None:
+        service = ModWebService()
+
+        self.assertEqual(
+            service._app_activity_provider_tooltip_html(
+                provider=NodeAppActivityProviderEntry(
+                    provider_id="time",
+                    label="Game Time",
+                    enabled=True,
+                    current_value="!D14/H21",
+                )
+            ),
+            "Game Time<br>Day: 14<br>Hour: 21<br>Blood moon active",
+        )
+        self.assertEqual(
+            service._app_activity_provider_tooltip_html(
+                provider=NodeAppActivityProviderEntry(
+                    provider_id="players",
+                    label="Player Count",
+                    enabled=True,
+                    current_value="2/20",
+                ),
+                connected_player_names=("Yoko", "Bea"),
+            ),
+            "Player Count<br>Current value: 2/20<br>Connected players:<br>Yoko<br>Bea",
         )
 
     def test_app_title_font_style_resolves_auto_preset_from_app_scope(self) -> None:
@@ -9252,11 +9732,26 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(ModWebService._is_builtin_mod(cast(Any, builtin_entry)))
         self.assertFalse(ModWebService._is_builtin_mod(cast(Any, normal_entry)))
 
+    def test_mod_type_badges_use_short_labels_and_distinct_power_badge_tones(self) -> None:
+        self.assertEqual(ModType.REGULAR.label, "Regular")
+        self.assertEqual(ModType.SERVER_ONLY.label, "Server")
+        self.assertEqual(ModType.CLIENT.label, "Client")
+        self.assertEqual(ModWebService._mod_type_badge_tone(ModType.REGULAR), "grey")
+        self.assertEqual(ModWebService._mod_type_badge_tone(ModType.SERVER_ONLY), "warn")
+        self.assertEqual(ModWebService._mod_type_badge_tone(ModType.CLIENT), "purple")
+
     def test_selection_toggle_label_switches_between_select_all_and_clear(self) -> None:
         self.assertEqual(ModWebService._selection_toggle_label(selected_count=0), "Select All")
         self.assertEqual(ModWebService._selection_toggle_label(selected_count=2), "Clear")
 
-    def test_mods_card_description_reflects_downloadable_inventory(self) -> None:
+    def test_mod_result_count_label_distinguishes_filtered_and_total_counts(self) -> None:
+        self.assertEqual(ModWebService._mod_result_count_label(visible_count=7, total_count=7), "7 mods")
+        self.assertEqual(ModWebService._mod_result_count_label(visible_count=1, total_count=1), "1 mod")
+        self.assertEqual(ModWebService._mod_result_count_label(visible_count=2, total_count=7), "2 of 7 mods")
+        with self.assertRaisesRegex(ValueError, "0 <= visible_count <= total_count"):
+            ModWebService._mod_result_count_label(visible_count=8, total_count=7)
+
+    def test_mods_card_description_only_renders_for_empty_inventory(self) -> None:
         self.assertEqual(
             ModWebService._mods_card_description(
                 NodeModSummary(
@@ -9268,7 +9763,7 @@ class ModWebTests(unittest.TestCase):
                     non_downloadable_count=0,
                 )
             ),
-            "No mods are currently indexed for this app.",
+            "No mods are currently indexed.",
         )
         self.assertEqual(
             ModWebService._mods_card_description(
@@ -9281,7 +9776,7 @@ class ModWebTests(unittest.TestCase):
                     non_downloadable_count=3,
                 )
             ),
-            "Browse the indexed mod inventory and inspect file details.",
+            None,
         )
         self.assertEqual(
             ModWebService._mods_card_description(
@@ -9294,7 +9789,7 @@ class ModWebTests(unittest.TestCase):
                     non_downloadable_count=2,
                 )
             ),
-            "Browse the indexed mod inventory, inspect details, and download available files.",
+            None,
         )
 
     def test_mods_header_badges_surface_download_and_block_summary(self) -> None:
@@ -11626,6 +12121,23 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             ModWebService._app_action_pending_message(NodeAppMutationAction.VERIFY, "Minecraft Alpha"),
             "Verify requested for Minecraft Alpha.",
+        )
+
+    def test_app_action_completion_message_suppresses_duplicate_pending_notification(self) -> None:
+        pending_message = "Start requested for Minecraft Alpha."
+
+        self.assertIsNone(
+            ModWebService._app_action_completion_message(
+                pending_message=pending_message,
+                result_message=pending_message,
+            )
+        )
+        self.assertEqual(
+            ModWebService._app_action_completion_message(
+                pending_message=pending_message,
+                result_message="Minecraft Alpha started.",
+            ),
+            "Minecraft Alpha started.",
         )
 
     def test_render_global_app_toolbar_exposes_details_dialog_for_sudo_users(self) -> None:

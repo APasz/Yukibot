@@ -611,9 +611,45 @@ class ModType(enum.StrEnum):
             case ModType.BUILTIN:
                 return "Built-in"
             case ModType.SERVER_ONLY:
-                return "Server only"
+                return "Server"
             case ModType.CLIENT:
                 return "Client"
+
+
+class ClientPackPolicy(enum.StrEnum):
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+    ALTERNATIVE = "alternative"
+
+    @property
+    def label(self) -> str:
+        match self:
+            case ClientPackPolicy.REQUIRED:
+                return "Required"
+            case ClientPackPolicy.OPTIONAL:
+                return "Optional"
+            case ClientPackPolicy.ALTERNATIVE:
+                return "Alternative"
+
+
+class ClientPackConfig(BaseModel):
+    policy: ClientPackPolicy = ClientPackPolicy.REQUIRED
+    choice_group: str | None = None
+    default_choice: bool = False
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @model_validator(mode="after")
+    def validate_choice_configuration(self) -> ClientPackConfig:
+        if self.policy is ClientPackPolicy.ALTERNATIVE:
+            if not self.choice_group:
+                raise ValueError("alternative client-pack mods require a choice group")
+            return self
+        if self.choice_group is not None:
+            raise ValueError("only alternative client-pack mods may have a choice group")
+        if self.default_choice:
+            raise ValueError("only alternative client-pack mods may be the default choice")
+        return self
 
 
 _VERSION_LOADER_RE: Pattern[str] = re.compile(r"[a-z0-9_]+")
@@ -971,6 +1007,7 @@ class Mod_Config(BaseModel):
     origin: str = "manual"
     mod_type: ModType = ModType.REGULAR
     download_block_reason: ModDownloadBlockReason | None = None
+    client_pack: ClientPackConfig = Field(default_factory=ClientPackConfig)
 
     model_config = ConfigDict(arbitrary_types_allowed=True, str_strip_whitespace=True)
 

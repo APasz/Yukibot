@@ -117,6 +117,7 @@ class ModWebDashboardBackend:
 
     def begin_shutdown(self) -> None:
         self._node_api.begin_shutdown()
+        self._auth.close()
 
     def resolve_app(self, app_name: str) -> ManagedApp:
         if self._manager is None:

@@ -13,8 +13,10 @@ from fastapi import Request  # pyright: ignore[reportMissingImports]
 import config
 from _security import Access_Control, Power_Level
 from mod_web_auth import (
+    _OAUTH_STATE_COOKIE_NAME,
     _SESSION_COOKIE_NAME,
     ModWebAuthService,
+    ModWebSessionPersistence,
     ModWebUser,
 )
 from node_api import NodeApiScope, NodeApiService
@@ -38,6 +40,13 @@ class ModWebAuthTests(unittest.TestCase):
             if not header.startswith(prefix):
                 continue
             return header[len(prefix) :].split(";", 1)[0]
+        self.fail(f"Missing cookie {cookie_name!r}")
+
+    def _cookie_header(self, response: object, cookie_name: str) -> str:
+        prefix = f"{cookie_name}="
+        for header in self._set_cookie_headers(response):
+            if header.startswith(prefix):
+                return header
         self.fail(f"Missing cookie {cookie_name!r}")
 
     def test_login_redirect_builds_discord_oauth_url_and_state_cookie(self) -> None:
@@ -76,6 +85,90 @@ class ModWebAuthTests(unittest.TestCase):
         request = cast(Request, FakeRequest(cookies={_SESSION_COOKIE_NAME: session.session_id}))
 
         self.assertEqual(auth.current_user(request), user)
+
+    def test_browser_session_cookie_expires_when_the_browser_closes(self) -> None:
+        auth = ModWebAuthService(
+            config.ModWebAuthConfig(
+                discord_client_id=None,
+                discord_client_secret=None,
+                redirect_url="http://localhost:3180/auth/discord/callback",
+                bypass_enabled=True,
+            )
+        )
+
+        response = auth.dev_login_response(level=Power_Level.user)
+
+        self.assertNotIn("Max-Age=", self._cookie_header(response, _SESSION_COOKIE_NAME))
+        session_id = self._cookie_value(response, _SESSION_COOKIE_NAME)
+        request = cast(Request, cast(object, FakeRequest(cookies={_SESSION_COOKIE_NAME: session_id})))
+        session = auth.current_session(request)
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual(session.expires_at - session.created_at, 16 * 60 * 60)
+
+    def test_remembered_session_cookie_persists_for_thirty_days(self) -> None:
+        auth = ModWebAuthService(
+            config.ModWebAuthConfig(
+                discord_client_id=None,
+                discord_client_secret=None,
+                redirect_url="http://localhost:3180/auth/discord/callback",
+                bypass_enabled=True,
+            )
+        )
+
+        response = auth.dev_login_response(
+            level=Power_Level.user,
+            persistence=ModWebSessionPersistence.REMEMBERED,
+        )
+
+        self.assertIn("Max-Age=2592000", self._cookie_header(response, _SESSION_COOKIE_NAME))
+
+    def test_session_survives_auth_service_restart(self) -> None:
+        with TemporaryDirectory() as tmp:
+            auth_config = config.ModWebAuthConfig(
+                discord_client_id=None,
+                discord_client_secret=None,
+                redirect_url="http://localhost:3180/auth/discord/callback",
+                bypass_enabled=True,
+                session_cache_directory=Path(tmp),
+            )
+            first_auth = ModWebAuthService(auth_config)
+            user = ModWebUser(discord_id=42, username="tester", global_name="Tester", avatar_hash=None)
+            session = first_auth._create_session(user, persistence=ModWebSessionPersistence.REMEMBERED)
+            first_auth.close()
+
+            second_auth = ModWebAuthService(auth_config)
+            request = cast(Request, cast(object, FakeRequest(cookies={_SESSION_COOKIE_NAME: session.session_id})))
+            try:
+                self.assertEqual(second_auth.current_user(request), user)
+            finally:
+                second_auth.close()
+
+    def test_oauth_state_and_persistence_survive_auth_service_restart(self) -> None:
+        with TemporaryDirectory() as tmp:
+            auth_config = config.ModWebAuthConfig(
+                discord_client_id="123456789012345678",
+                discord_client_secret="secret",
+                redirect_url="https://mods.example/auth/discord/callback",
+                session_cache_directory=Path(tmp),
+            )
+            first_auth = ModWebAuthService(auth_config)
+            response = first_auth.login_redirect(
+                next_path="/mods/minecraft",
+                persistence=ModWebSessionPersistence.REMEMBERED,
+            )
+            state = self._cookie_value(response, _OAUTH_STATE_COOKIE_NAME)
+            first_auth.close()
+
+            second_auth = ModWebAuthService(auth_config)
+            request = cast(Request, cast(object, FakeRequest(cookies={_OAUTH_STATE_COOKIE_NAME: state})))
+            try:
+                pending = second_auth._consume_state(request=request, state=state)
+            finally:
+                second_auth.close()
+
+            self.assertEqual(pending.next_path, "/mods/minecraft")
+            self.assertIs(pending.persistence, ModWebSessionPersistence.REMEMBERED)
 
     def test_dev_login_response_creates_session_for_requested_level(self) -> None:
         auth = ModWebAuthService(

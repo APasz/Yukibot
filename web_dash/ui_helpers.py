@@ -124,6 +124,46 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         )
         return badge
 
+    @staticmethod
+    def _badge_avatar_markup(*, avatar_uri: str, display_name: str) -> str:
+        safe_avatar_uri = escape(avatar_uri, quote=True)
+        safe_alt_text = escape(f"{display_name} avatar", quote=True)
+        return (
+            f'<img src="{safe_avatar_uri}" alt="{safe_alt_text}" '
+            'loading="lazy" referrerpolicy="no-referrer">'
+        )
+
+    @staticmethod
+    def _badge_avatar(
+        *,
+        ui: ModWebUi,
+        text: str,
+        tone: BadgeTone,
+        avatar_uri: str,
+        extra_classes: str = "",
+        tooltip_text: str | None = None,
+    ) -> "Element":
+        badge = ui.element("span").classes(
+            ModWebUiHelpersMixin._badge_class_name(
+                tone=tone,
+                extra_classes=f"mod-badge-avatar {extra_classes}".strip(),
+            )
+        )
+        with badge:
+            ui.html(
+                ModWebUiHelpersMixin._badge_avatar_markup(
+                    avatar_uri=avatar_uri,
+                    display_name=text,
+                )
+            ).classes("mod-badge-avatar-media")
+            ui.label(text).classes("mod-badge-avatar-value")
+        ModWebUiHelpersMixin._attach_badge_tooltip(
+            ui=ui,
+            target=badge,
+            text=ModWebUiHelpersMixin._resolved_badge_tooltip_text(text=text, tooltip_text=tooltip_text),
+        )
+        return badge
+
     def _badge_spec(self, *, ui: ModWebUi, badge: _ModWebBadgeSpec, extra_classes: str = "") -> "Element":
         if badge.icon is None:
             return cast(
@@ -592,7 +632,17 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
     ) -> str | None:
         if player_count is None or player_capacity is None:
             return None
-        return self._tooltip_lines_html(connected_player_names)
+        detail_lines: tuple[str, ...] = (
+            ("Connected players:", *connected_player_names)
+            if connected_player_names
+            else ("No players connected",)
+        )
+        lines: tuple[str, ...] = (
+            "Players",
+            f"Connected: {player_count} / {player_capacity}",
+            *detail_lines,
+        )
+        return self._tooltip_lines_html(lines)
 
     @staticmethod
     def _app_list_api_actions_enabled(request: Request) -> bool:

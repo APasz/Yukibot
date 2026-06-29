@@ -56,10 +56,15 @@ Sister bots also push a typed bot-metadata snapshot to Yuki through the same aut
 - `NODE_API_TOKEN_SECRET` signs direct node API links. If unset, Yukibot falls back to `DATA_AUTHORITY_TOKEN`; if both are unset, node API auth is disabled.
 - `MOD_WEB_DISCORD_CLIENT_ID` and `MOD_WEB_DISCORD_CLIENT_SECRET` enable Discord login for the mod web UI.
 - The Discord OAuth redirect defaults to `{MOD_WEB_PUBLIC_BASE_URL}/auth/discord/callback`; override it with `MOD_WEB_AUTH_REDIRECT_URL` only when Discord is configured with a different public callback.
+- `MOD_WEB_SESSION_CACHE_DIR` defaults to `.cache/mod_web_sessions`; Portal persists browser sessions and pending OAuth state there so Portal restarts do not force users to sign in again.
+- `MOD_WEB_BUILD_SHA` optionally exposes the deployed Git commit on the login page and links it to GitHub.
+- Normal sign-ins use a browser-session cookie with a 16-hour server expiry. “Remember me” uses a persistent cookie with a 30-day absolute expiry.
 - Mod web browser sessions authenticate as Discord user IDs and authorize through `users.json` / `Access_Control`; `visitor` access can use chat-only web relay routes, while `user` and above can use the broader mod web tools.
 - `BYPASS_WEB_AUTH=true` skips Discord web auth only when `INDEV` is also set. It is intended for local development and is ignored outside `INDEV`.
 - When the standalone portal hosts the web UI, sibling nodes do not need Discord OAuth credentials; the portal reads their node API with short-lived tokens signed by the shared `NODE_API_TOKEN_SECRET` / `DATA_AUTHORITY_TOKEN`, and remote downloads redirect to the owning node with a scoped short-lived token.
 - Mods with a `download_block_reason` in their mod DB entry are listed in the web UI but excluded from downloads; 7D2D built-in mods are marked this way automatically.
+- Downloadable mods may define `client_pack.policy` as `required` (the default), `optional`, or `alternative`. Optional mods start selected in the client-pack dialog.
+- Alternative mods must share a non-empty `client_pack.choice_group`; every group requires at least two mods and exactly one entry with `client_pack.default_choice` set to `true`.
 - For local multi-node testing, use `uv run python dev_cluster.py`. It launches Yuki, Erin, and Portal as separate processes with local loopback ports and gives you `start` / `stop` / `restart` controls in one terminal.
 
 All other bot profiles act as clients.

@@ -59,6 +59,7 @@ from .types import (
     ModWebHomeNodeSummary,
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
+    ModWebModSortOrder,
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
@@ -94,6 +95,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_app_action_pending_message"]) -> Callable[..., str | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_app_action_completion_message"]) -> Callable[..., str | None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_app_enable_disable_action"]) -> Callable[..., NodeAppMutationAction]: ...
@@ -157,6 +161,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_badge"]) -> Callable[..., Label]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_badge_avatar"]) -> Callable[..., Element]: ...
 
     @overload
     def __getattr__(self, name: Literal["_badge_class_name"]) -> Callable[..., str]: ...
@@ -386,6 +393,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_player_count_tooltip_html"]) -> Callable[..., str | None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_tooltip_lines_html"]) -> Callable[[tuple[str, ...]], str | None]: ...
+
+    @overload
     def __getattr__(
         self, name: Literal["_update_node_capacity"]
     ) -> Callable[..., Awaitable[NodeCapacityMutationResult]]: ...
@@ -573,6 +583,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_render_app_node_badge"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_render_about_page"]) -> Callable[..., None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_render_chat_event_group"]) -> Callable[..., None]: ...
 
     @overload
@@ -630,6 +643,9 @@ class ModWebServiceSupport:
     ) -> Callable[[tuple[NodeModEntry, ...]], tuple[ModWebSearchOption, ...]]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_mod_result_count_label"]) -> Callable[..., str]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_render_mods_page"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
@@ -643,6 +659,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_render_node_unavailable_card"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_oauth_failure_page"]) -> Callable[..., None]: ...
 
     @overload
     def __getattr__(self, name: Literal["_render_overview_page"]) -> Callable[..., None]: ...
@@ -701,6 +720,11 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_filter_mod_entries"]
     ) -> Callable[..., tuple[NodeModEntry, ...]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_sort_mod_entries"]
+    ) -> Callable[[tuple[NodeModEntry, ...], ModWebModSortOrder], tuple[NodeModEntry, ...]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_set_badge_state"]) -> Callable[..., None]: ...

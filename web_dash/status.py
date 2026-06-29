@@ -22,7 +22,10 @@ from relay_notices import (
 )
 from restart_targets import RestartTarget
 
+from . import avatars as mod_web_avatars
 from .constants import (
+    _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+    _MOD_WEB_REPOSITORY_URL,
     log,
 )
 from .nicegui_protocols import (
@@ -36,6 +39,7 @@ from .runtime_imports import (
     MOD_WEB_ACTION_BASE_CLASSES,
     Awaitable,
     Button,
+    Callable,
     ChatAttachment,
     ChatAuthor,
     ChatAuthorKind,
@@ -48,10 +52,10 @@ from .runtime_imports import (
     ChatMediaProvider,
     ChatMessageReference,
     ChatReferenceKind,
-    Callable,
     Iterable,
     Label,
     LiteralString,
+    ModWebSessionPersistence,
     ModWebUser,
     Path,
     Power_Level,
@@ -67,14 +71,16 @@ from .runtime_imports import (
 )
 from .service_base import ModWebServiceSupport
 from .types import (
+    ModWebNodeStatus,
     ModWebNotificationTrayItemKind,
     ModWebNotificationTrayItemState,
-    ModWebNodeStatus,
     _ModWebChatEventGroup,
     _ModWebFakeChatMessageMode,
     _ModWebFakeChatPreviewState,
     _ModWebLinkSpec,
+    _ModWebLoginAdministrator,
     _ModWebNodePresenceBadgeSpec,
+    _ModWebNotificationPreviewSpec,
     _ModWebNotificationTrayItem,
     _ModWebStatusPageConfig,
 )
@@ -88,6 +94,13 @@ _USER_HEADER_TRAY_CARD_HEIGHT_REM = 4.35
 _USER_HEADER_SURFACE_ASPECT_RATIO = "4 / 1"
 _USER_HEADER_STACK_WIDTH_REM = 10.5
 _USER_HEADER_ICON_BUTTON_CLASSES = "mod-list-button secondary grow basis-0 min-h-[2.2rem] min-w-0 px-3 py-2"
+_LOGIN_ADMINISTRATOR_LEVELS: tuple[Power_Level, ...] = (
+    Power_Level.root,
+    Power_Level.sudo,
+    Power_Level.admin,
+)
+# Historical ACL members who cannot serve as active support contacts.
+_LOGIN_CONTACT_EXCLUDED_USER_IDS: frozenset[int] = frozenset({792_857_784_508_219_404})
 
 class ModWebStatusMixin(ModWebServiceSupport):
     @staticmethod
@@ -178,7 +191,12 @@ class ModWebStatusMixin(ModWebServiceSupport):
                         if config.actions:
                             with ui.row().classes("mod-status-actions w-full"):
                                 for action in config.actions:
-                                    self._action_link(ui=ui, label=action.label, url=action.url)
+                                    self._action_link(
+                                        ui=ui,
+                                        label=action.label,
+                                        url=action.url,
+                                        new_tab=action.new_tab,
+                                    )
                     ui.html(self._resolved_status_icon_markup(config)).classes("mod-status-figure mod-status-figure-inline")
 
     def _render_framework_page_exception(self, *, ui: ModWebUi, exception: Exception) -> None:
@@ -317,6 +335,10 @@ class ModWebStatusMixin(ModWebServiceSupport):
         return _status_svg_markup("generic_error.svg")
 
     @staticmethod
+    def _about_icon_markup() -> str:
+        return _status_svg_markup("about.svg", fallback_name="generic_error.svg")
+
+    @staticmethod
     def _chat_unavailable_icon_markup() -> str:
         return _status_svg_markup("chat_unavailable.svg", fallback_name="generic_error.svg")
 
@@ -385,6 +407,33 @@ class ModWebStatusMixin(ModWebServiceSupport):
                 ),
             )
 
+    def _render_oauth_failure_page(self, *, ui: ModWebUi, detail: str) -> None:
+        self._apply_theme(ui=ui)
+        with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
+            self._render_status_page_panel(
+                ui=ui,
+                config=self._oauth_failure_page_config(detail),
+            )
+
+    def _oauth_failure_page_config(self, detail: str) -> _ModWebStatusPageConfig:
+        return _ModWebStatusPageConfig(
+            title="Discord sign-in failed",
+            support_text="Yukibot could not complete the Discord sign-in flow.",
+            badge_text="Sign-in Failed",
+            badge_tone="red",
+            accent_color_hex="#dc2626",
+            icon_markup=self._generic_error_icon_markup(),
+            detail_text=detail,
+            detail_label="Details",
+            actions=(
+                _ModWebLinkSpec(
+                    label="Try Again",
+                    url=f"/auth/login?{urlencode({'next_path': self.index_path()})}",
+                ),
+                _ModWebLinkSpec(label="Home", url=self.index_path()),
+            ),
+        )
+
     def _render_login_page(self, *, ui: ModWebUi, next_path: str, request: Request, show_api_actions: bool) -> None:
         self._apply_theme(ui=ui)
         simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
@@ -443,6 +492,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                                 controller_key="modWebLoginNodePresence",
                             )
                     login_show_api_actions: bool = show_api_actions
+                    login_persistence = ModWebSessionPersistence.BROWSER_SESSION
 
                     def _set_login_show_api_actions(enabled: bool) -> None:
                         nonlocal login_show_api_actions
@@ -452,6 +502,11 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     def _handle_login_show_api_actions_change(event: ModWebValueContainer) -> None:
                         _set_login_show_api_actions(bool(_value_as_object(event)))
 
+                    def _handle_login_persistence_change(event: ModWebValueContainer) -> None:
+                        nonlocal login_persistence
+                        login_persistence = ModWebSessionPersistence.from_remembered(bool(_value_as_object(event)))
+                        _render_login_actions.refresh()
+
                     if self._auth.bypass_enabled:
                         ui.switch(
                             "Show API pill on app lists",
@@ -459,50 +514,317 @@ class ModWebStatusMixin(ModWebServiceSupport):
                             on_change=_handle_login_show_api_actions_change,
                         ).props("color=accent")
 
+                    with ui.column().classes("gap-1"):
+                        ui.checkbox(
+                            "Remember me",
+                            value=False,
+                            on_change=_handle_login_persistence_change,
+                        ).props("color=accent")
+                        ui.label("Keep this device signed in for 30 days. Leave this off on a shared device.").classes(
+                            "text-sm mod-subtitle"
+                        )
+
                     @ui.refreshable
                     def _render_login_actions() -> None:
                         with ui.row().classes(self._hero_action_row_classes()):
                             for action in self._login_actions(
                                 next_path=next_path,
                                 show_api_actions=login_show_api_actions,
+                                persistence=login_persistence,
                             ):
                                 self._action_link(ui=ui, label=action.label, url=action.url)
 
                     _render_login_actions()
+                    self._render_login_information(ui=ui)
             if config.INDEV:
                 self._render_login_dev_error_preview_card(ui=ui)
+
+    def _render_login_information(self, *, ui: ModWebUi) -> None:
+        with ui.element("div").classes("w-full border-t border-white/10 pt-4"):
+            with ui.column().classes("w-full gap-3"):
+                ui.label(
+                    "Discord handles authentication; Yukibot only requests your identity and never "
+                    "receives your password."
+                ).classes("text-sm mod-subtitle")
+                administrators = self._login_administrators()
+                with ui.column().classes("gap-2"):
+                    ui.label("Need access? Contact an administrator.").classes("mod-stat-label")
+                    if administrators:
+                        with ui.column().classes("gap-2"):
+                            for level in self._login_administrator_levels():
+                                level_administrators = tuple(
+                                    administrator for administrator in administrators if administrator.level is level
+                                )
+                                with ui.element("div").classes(
+                                    "grid grid-cols-1 sm:grid-cols-[4rem_minmax(0,1fr)] "
+                                    "items-start gap-1 sm:gap-2 w-full"
+                                ):
+                                    ui.label(level.name.title()).classes("mod-stat-label sm:pt-1")
+                                    if level_administrators:
+                                        with ui.row().classes("gap-2 flex-wrap min-w-0 w-full"):
+                                            for administrator in level_administrators:
+                                                avatar_uri = self._login_administrator_avatar_uri(administrator)
+                                                if avatar_uri is None:
+                                                    self._badge(
+                                                        ui=ui,
+                                                        text=administrator.display_name,
+                                                        tone="grey",
+                                                        extra_classes=(
+                                                            "max-w-full whitespace-normal break-words"
+                                                        ),
+                                                    )
+                                                else:
+                                                    self._badge_avatar(
+                                                        ui=ui,
+                                                        text=administrator.display_name,
+                                                        tone="grey",
+                                                        avatar_uri=avatar_uri,
+                                                        extra_classes="max-w-full",
+                                                    )
+                                    else:
+                                        ui.label("None listed").classes("text-sm mod-subtitle")
+                    else:
+                        ui.label("Administrator contacts are currently unavailable.").classes("text-sm mod-subtitle")
+                with ui.row().classes("gap-2 flex-wrap"):
+                    for action in self._login_information_actions():
+                        self._action_link(
+                            ui=ui,
+                            label=action.label,
+                            url=action.url,
+                            compact=True,
+                            new_tab=action.new_tab,
+                        )
+
+    def _login_administrators(self) -> tuple[_ModWebLoginAdministrator, ...]:
+        if self._acl is None:
+            return ()
+        name_cache = config.Name_Cache()
+        administrators = tuple(
+            _ModWebLoginAdministrator(
+                user_id=user_id,
+                display_name=name_cache.web_display_name(user_id, f"Discord user {user_id}"),
+                level=level,
+                avatar_hash=name_cache.discord_avatar_hash(user_id),
+            )
+            for user_id, level in self._acl.explicit_roles().items()
+            if level >= Power_Level.admin and user_id not in _LOGIN_CONTACT_EXCLUDED_USER_IDS
+        )
+        return tuple(
+            sorted(
+                administrators,
+                key=lambda administrator: (
+                    -int(administrator.level),
+                    administrator.display_name.casefold(),
+                    administrator.user_id,
+                ),
+            )
+        )
+
+    @staticmethod
+    def _login_administrator_levels() -> tuple[Power_Level, ...]:
+        return _LOGIN_ADMINISTRATOR_LEVELS
+
+    @staticmethod
+    def _login_administrator_avatar_uri(administrator: _ModWebLoginAdministrator) -> str | None:
+        return mod_web_avatars._discord_avatar_uri(
+            user_id=administrator.user_id,
+            avatar_hash=administrator.avatar_hash,
+        )
+
+    @staticmethod
+    def _login_information_actions() -> tuple[_ModWebLinkSpec, ...]:
+        actions: list[_ModWebLinkSpec] = [
+            _ModWebLinkSpec(label="About", url="/auth/about"),
+            _ModWebLinkSpec(label="GitHub", url=_MOD_WEB_REPOSITORY_URL, new_tab=True),
+        ]
+        build_sha: str | None = config.MOD_WEB_BUILD_SHA
+        if build_sha is not None:
+            actions.append(
+                _ModWebLinkSpec(
+                    label=f"Build {build_sha[:7]}",
+                    url=f"{_MOD_WEB_REPOSITORY_URL}/commit/{build_sha}",
+                    new_tab=True,
+                )
+            )
+        return tuple(actions)
+
+    def _about_page_config(self) -> _ModWebStatusPageConfig:
+        return _ModWebStatusPageConfig(
+            title="About Yukibot",
+            support_text="Discord, web, and dedicated game-server operations brought together in one place.",
+            badge_text="About",
+            badge_tone="black",
+            accent_color_hex="#8b5cf6",
+            icon_markup=self._about_icon_markup(),
+            detail_label="Project",
+            detail_text=("This rewrite was started by NaiTechie, also known as AiviA, and completed by APasz."),
+            actions=(
+                _ModWebLinkSpec(label="GitHub", url=_MOD_WEB_REPOSITORY_URL, new_tab=True),
+                _ModWebLinkSpec(label="Home", url=self.index_path()),
+            ),
+        )
+
+    @staticmethod
+    def _about_supported_app_names() -> tuple[str, ...]:
+        return tuple(scope.display_name for scope in config.AppScopes)
+
+    def _render_about_page(self, *, ui: ModWebUi) -> None:
+        self._apply_theme(ui=ui)
+        with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
+            self._render_status_page_panel(ui=ui, config=self._about_page_config())
+            with ui.card().classes("mod-card w-full"):
+                with ui.column().classes("gap-5 p-5"):
+                    with ui.column().classes("gap-1"):
+                        ui.label("What Yukibot does").classes("text-xl font-bold mod-title-small")
+                        ui.label(
+                            "Yukibot is a Discord bot and web dashboard built to operate a small number of "
+                            "dedicated game servers. It combines live status, lifecycle controls, updates, "
+                            "mods, configurations, saves, chat relay, and game-specific tools behind one "
+                            "interface. Available features vary by game and server."
+                        ).classes("text-sm mod-subtitle")
+                    with ui.column().classes("gap-2"):
+                        ui.label("Supported applications").classes("text-xl font-bold mod-title-small")
+                        with ui.row().classes("gap-2 flex-wrap"):
+                            for app_name in self._about_supported_app_names():
+                                self._badge(ui=ui, text=app_name, tone="grey")
+                    with ui.column().classes("gap-1"):
+                        ui.label("How it fits together").classes("text-xl font-bold mod-title-small")
+                        ui.label(
+                            "This portal provides a shared dashboard for the Yuki and Erin bots' "
+                            "own nodes. Identity is Discord backed while a separate ACL controls "
+                            "what each account may view or change."
+                        ).classes("text-sm mod-subtitle")
 
     def _render_login_dev_error_preview_card(self, *, ui: ModWebUi) -> None:
         with ui.card().classes("mod-card w-full"):
             with ui.column().classes("gap-4 p-5"):
                 with ui.column().classes("gap-1"):
-                    ui.label("Dev Error Previews").classes("text-xl font-bold mod-title-small")
-                    ui.label(
-                        "Open the current mod web and NiceGUI error states without breaking a live app page."
-                    ).classes("text-sm mod-subtitle")
+                    ui.label("Dev Previews").classes("text-xl font-bold mod-title-small")
+                    ui.label("Test notification styles and error states without breaking a live app page.").classes(
+                        "text-sm mod-subtitle"
+                    )
+                with ui.column().classes("gap-2"):
+                    ui.label("Toast Previews").classes("mod-stat-label")
+
+                    def _show_notification_preview(preview: _ModWebNotificationPreviewSpec) -> None:
+                        timeout_milliseconds: int = (
+                            _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS
+                            if preview.timeout_milliseconds is None
+                            else preview.timeout_milliseconds
+                        )
+                        for _ in range(preview.repeat_count):
+                            ui.notify(
+                                preview.message,
+                                close_button=preview.close_button,
+                                multi_line=preview.multi_line,
+                                type=preview.notification_type,
+                                timeout=timeout_milliseconds,
+                            )
+
+                    def _notification_preview_handler(
+                        preview: _ModWebNotificationPreviewSpec,
+                    ) -> Callable[[object | None], None]:
+                        def _handle_notification_preview(_: object | None = None) -> None:
+                            _show_notification_preview(preview)
+
+                        return _handle_notification_preview
+
+                    with ui.row().classes("gap-2 flex-wrap"):
+                        for preview in self._dev_notification_preview_actions():
+                            ui.button(
+                                preview.label,
+                                on_click=_notification_preview_handler(preview),
+                            ).classes("mod-list-button")
+                ui.label("Error Page Previews").classes("mod-stat-label")
                 with ui.row().classes("gap-2 flex-wrap"):
                     for action in self._dev_error_preview_actions():
-                        self._action_link(ui=ui, label=action.label, url=action.url, compact=True)
+                        self._action_link(
+                            ui=ui,
+                            label=action.label,
+                            url=action.url,
+                            compact=True,
+                            new_tab=action.new_tab,
+                        )
+
+    @staticmethod
+    def _dev_notification_preview_actions() -> tuple[_ModWebNotificationPreviewSpec, ...]:
+        return (
+            _ModWebNotificationPreviewSpec(
+                label="Positive Toast",
+                message="Positive notification preview.",
+                notification_type="positive",
+            ),
+            _ModWebNotificationPreviewSpec(
+                label="Negative Toast",
+                message="Negative notification preview.",
+                notification_type="negative",
+            ),
+            _ModWebNotificationPreviewSpec(
+                label="Warning Toast",
+                message="Warning notification preview.",
+                notification_type="warning",
+            ),
+            _ModWebNotificationPreviewSpec(
+                label="Info Toast",
+                message="Info notification preview.",
+                notification_type="info",
+            ),
+            _ModWebNotificationPreviewSpec(
+                label="Ongoing Toast",
+                message="Ongoing notification preview.",
+                notification_type="ongoing",
+            ),
+            _ModWebNotificationPreviewSpec(
+                label="Grouped Duplicate",
+                message="Intentional grouped duplicate preview.",
+                notification_type="info",
+                repeat_count=2,
+            ),
+            _ModWebNotificationPreviewSpec(
+                label="Long Multiline",
+                message=(
+                    "Long multiline notification preview for checking wrapping, spacing, and readability "
+                    "when a toast contains more detail than usual."
+                ),
+                notification_type="warning",
+                multi_line=True,
+            ),
+            _ModWebNotificationPreviewSpec(
+                label="Persistent Dismissible",
+                message="Persistent notification preview; dismiss it with the button.",
+                notification_type="ongoing",
+                close_button="Dismiss",
+                timeout_milliseconds=0,
+            ),
+        )
 
     def _login_page_subtitle(self) -> str:
         if self._auth.bypass_enabled:
             return "Choose a dev sign-in level to test mod web permissions."
         return "Sign in with Discord to use mod web actions."
 
-    def _login_actions(self, *, next_path: str, show_api_actions: bool) -> tuple[_ModWebLinkSpec, ...]:
+    def _login_actions(
+        self,
+        *,
+        next_path: str,
+        show_api_actions: bool,
+        persistence: ModWebSessionPersistence = ModWebSessionPersistence.BROWSER_SESSION,
+    ) -> tuple[_ModWebLinkSpec, ...]:
         login_next_path: str = self._app_list_view_url(next_path, show_api_actions=show_api_actions)
+        remember: str = str(persistence is ModWebSessionPersistence.REMEMBERED).lower()
         if self._auth.bypass_enabled:
             return tuple[_ModWebLinkSpec, ...](
                 _ModWebLinkSpec(
                     label=f"Sign in {level.name.title()}",
-                    url=f"/auth/dev-login?{urlencode({'level': level.name, 'next_path': login_next_path})}",
+                    url="/auth/dev-login?"
+                    + urlencode({"level": level.name, "next_path": login_next_path, "remember": remember}),
                 )
                 for level in self._auth.bypass_levels
             )
         return (
             _ModWebLinkSpec(
                 label="Sign in with Discord",
-                url=f"/auth/login?{urlencode({'next_path': login_next_path})}",
+                url=f"/auth/login?{urlencode({'next_path': login_next_path, 'remember': remember})}",
             ),
         )
 
@@ -511,6 +833,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
         return (
             _ModWebLinkSpec(label="Access Denied", url="/mod-web/dev/error/access-denied"),
             _ModWebLinkSpec(label="Sign-in Unavailable", url="/mod-web/dev/error/sign-in-unavailable"),
+            _ModWebLinkSpec(label="OAuth Failure", url="/mod-web/dev/error/oauth-failure"),
             _ModWebLinkSpec(label="Page Unavailable", url="/mod-web/dev/error/page-unavailable"),
             _ModWebLinkSpec(label="Chat Unavailable", url="/mod-web/dev/error/chat-unavailable"),
             _ModWebLinkSpec(label="Node Unavailable", url="/mod-web/dev/error/node-unavailable"),

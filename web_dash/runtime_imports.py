@@ -65,7 +65,16 @@ from _manager import App_Manager, ManagedApp, app_scope_from_name
 from _security import Access_Control, Power_Level
 from _utils import Utilities
 from apps._app import App, AppRuntimeFault
-from apps._config import AppTitleFont, ModType, SteamUpdateBranch, SteamUpdatePreset, steam_update_preset_for_scope
+from apps._config import (
+    AppTitleFont,
+    ClientPackConfig,
+    ClientPackPolicy,
+    ModDownloadBlockReason,
+    ModType,
+    SteamUpdateBranch,
+    SteamUpdatePreset,
+    steam_update_preset_for_scope,
+)
 from apps._updater import AppUpdateInfo, AppUpdateOperationKind, AppUpdateState, AppUpdateStatus
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
@@ -83,7 +92,7 @@ from chat_hub import (
     ChatReferenceKind,
 )
 from config import AuthorityEndpoint, BotMetadataModWeb, BotMetadataSnapshot
-from mod_web_auth import ModWebAuthError, ModWebAuthService, ModWebUser
+from mod_web_auth import ModWebAuthError, ModWebAuthService, ModWebSessionPersistence, ModWebUser
 from mod_web_theme import MOD_WEB_ACTION_BASE_CLASSES, BadgeTone, apply_mod_web_theme, mod_web_badge_class
 from node_api import (
     NodeApiService,
@@ -176,6 +185,8 @@ __all__: tuple[str, ...] = (
     "ChatMediaProvider",
     "ChatMessageReference",
     "ChatReferenceKind",
+    "ClientPackConfig",
+    "ClientPackPolicy",
     "Checkbox",
     "CodeMirror",
     "Column",
@@ -195,8 +206,10 @@ __all__: tuple[str, ...] = (
     "ManagedApp",
     "Mapping",
     "ModType",
+    "ModDownloadBlockReason",
     "ModWebAuthError",
     "ModWebAuthService",
+    "ModWebSessionPersistence",
     "ModWebUser",
     "MutableMapping",
     "NodeAccessGrant",

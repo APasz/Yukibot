@@ -12,6 +12,7 @@ from .runtime_imports import (
     Coroutine,
     Input,
     Label,
+    Literal,
     MutableMapping,
     ParamSpec,
     Protocol,
@@ -19,6 +20,7 @@ from .runtime_imports import (
     Select,
     Timer,
     Tooltip,
+    TypeAlias,
     TypeVar,
     Upload,
     cast,
@@ -40,6 +42,7 @@ RefreshableReturn = TypeVar("RefreshableReturn", covariant=True)
 RefreshableValue = TypeVar("RefreshableValue")
 ModWebRouteCallable = TypeVar("ModWebRouteCallable", bound=Callable[..., object])
 type AsyncRefresh = Callable[[], Coroutine[None, None, None]]
+ModWebNotificationType: TypeAlias = Literal["positive", "negative", "warning", "info", "ongoing"]
 
 
 class ModWebNavigate(Protocol):
@@ -90,7 +93,15 @@ class ModWebUi(Protocol):
     @property
     def navigate(self) -> ModWebNavigate: ...
 
-    def notify(self, message: str, *, type: str | None = None) -> None: ...
+    def notify(
+        self,
+        message: str,
+        *,
+        close_button: bool | str = False,
+        multi_line: bool = False,
+        type: ModWebNotificationType | None = None,
+        timeout: int | None = None,
+    ) -> None: ...
 
     def download(self, src: object, filename: str | None = None, media_type: str = "") -> None: ...
 
@@ -208,6 +219,7 @@ __all__: tuple[str, ...] = (
     "AsyncRefresh",
     "ModWebEventArgumentsContainer",
     "ModWebFastApiApp",
+    "ModWebNotificationType",
     "ModWebNavigate",
     "ModWebRefreshable",
     "ModWebRouteCallable",

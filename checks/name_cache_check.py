@@ -28,6 +28,7 @@ def _make_member(
     username: str,
     global_name: str | None,
     nickname: str | None,
+    avatar_hash: str | None = None,
 ) -> hikari.Member:
     member = create_autospec(hikari.Member, instance=True)
     member.id = hikari.Snowflake(user_id)
@@ -35,6 +36,7 @@ def _make_member(
     member.username = username
     member.global_name = global_name
     member.nickname = nickname
+    member.avatar_hash = avatar_hash
     member.display_name = nickname or global_name or username
     return member
 
@@ -46,6 +48,7 @@ class NameCacheTests(unittest.TestCase):
             cache.by_id[1] = config.UserNames(
                 account="user-name",
                 global_name="global-name",
+                avatar_hash="avatar-123",
                 names={"user-name", "global-name"},
                 guild_names={100: "guild-name"},
             )
@@ -54,7 +57,42 @@ class NameCacheTests(unittest.TestCase):
 
             self.assertNotIn("names", payload["1"])
             self.assertEqual(payload["1"]["global_name"], "global-name")
+            self.assertEqual(payload["1"]["avatar_hash"], "avatar-123")
             self.assertEqual(payload["1"]["guild_names"], {"100": "guild-name"})
+
+    def test_set_names_caches_discord_avatar_hash(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+
+            cache.set_names(
+                _make_member(
+                    user_id=1,
+                    guild_id=100,
+                    username="user-name",
+                    global_name="global-name",
+                    nickname=None,
+                    avatar_hash="avatar-123",
+                )
+            )
+
+            self.assertEqual(cache.by_id[1].avatar_hash, "avatar-123")
+            self.assertEqual(cache.discord_avatar_hash(1), "avatar-123")
+
+    def test_set_names_mutation_updates_cached_discord_avatar_hash(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = _make_cache(Path(tmp) / "discord_names.json")
+            cache.by_id[1] = config.UserNames(avatar_hash="old-avatar")
+
+            changed = cache.apply_mutation_event(
+                {
+                    "kind": config.NameMutationKind.SET_NAMES.value,
+                    "user_id": 1,
+                    "avatar_hash": "new-avatar",
+                }
+            )
+
+            self.assertTrue(changed)
+            self.assertEqual(cache.discord_avatar_hash(1), "new-avatar")
 
     def test_serializable_includes_game_profiles_and_platform_ids(self) -> None:
         with TemporaryDirectory() as tmp:

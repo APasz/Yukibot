@@ -7,13 +7,14 @@ from pydantic import BaseModel, ConfigDict
 from font_assets import font_assets
 
 from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
-from .nicegui_protocols import ModWebFastApiApp, ModWebRouteUi
+from .nicegui_protocols import ModWebFastApiApp, ModWebNotificationType, ModWebRouteUi
 from .runtime_imports import (
     Access_Control,
     Awaitable,
     Callable,
     FileResponse,
     ModWebAuthError,
+    ModWebSessionPersistence,
     ModWebUser,
     NodeApiScope,
     Path,
@@ -176,28 +177,56 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             return FileResponse(path=Path(resolved_path), filename=resolved_path.name)
 
         @nicegui_app.get("/auth/login")
-        def _login(request: Request, next_path: str | None = None) -> RedirectResponse:
+        def _login(request: Request, next_path: str | None = None, remember: bool = False) -> RedirectResponse:
             del request
-            return self._auth.login_redirect(next_path=next_path or self.index_path())
+            return self._auth.login_redirect(
+                next_path=next_path or self.index_path(),
+                persistence=ModWebSessionPersistence.from_remembered(remember),
+            )
 
         @nicegui_app.get("/auth/dev-login")
-        def _dev_login(level: str, next_path: str | None = None) -> RedirectResponse:
+        def _dev_login(level: str, next_path: str | None = None, remember: bool = False) -> RedirectResponse:
             if not self._auth.bypass_enabled:
                 raise _http_exception(404, "Dev login is not available.")
             dev_level = Access_Control.parse_level(level)
             if dev_level is None:
                 raise _http_exception(400, f"Unknown dev login level: {level}")
-            return self._auth.dev_login_response(level=dev_level, next_path=next_path or self.index_path())
+            return self._auth.dev_login_response(
+                level=dev_level,
+                next_path=next_path or self.index_path(),
+                persistence=ModWebSessionPersistence.from_remembered(remember),
+            )
 
         @nicegui_app.get("/auth/discord/callback")
         async def _discord_callback(
-            request: Request, code: str | None = None, state: str | None = None
+            request: Request,
+            code: str | None = None,
+            state: str | None = None,
+            error: str | None = None,
         ) -> RedirectResponse:
             try:
+                if error == "access_denied":
+                    raise ModWebAuthError("Discord sign-in was cancelled.")
+                if error is not None:
+                    raise ModWebAuthError("Discord did not complete the sign-in request.")
                 return await self._auth.callback_response(request=request, code=code, state=state)
             except ModWebAuthError as xcp:
                 log.warning("Mod web Discord OAuth callback rejected: %s", xcp)
-                raise _http_exception(400, str(xcp)) from xcp
+                error_url = f"/auth/error?{urlencode({'detail': str(xcp)[:500]})}"
+                return RedirectResponse(error_url, status_code=303)
+
+        @ui.page("/auth/error")
+        async def _oauth_failure(request: Request) -> None:
+            detail = request.query_params.get("detail")
+            self._render_oauth_failure_page(
+                ui=ui,
+                detail=detail if isinstance(detail, str) and detail else "Discord sign-in did not complete.",
+            )
+
+        @ui.page("/auth/about")
+        async def _about(request: Request) -> None:
+            del request
+            self._render_about_page(ui=ui)
 
         @nicegui_app.get("/auth/logout")
         def _logout(request: Request) -> RedirectResponse:
@@ -242,8 +271,14 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             *,
             title: str,
             support_text: str,
-            actions: tuple[tuple[str, str, str], ...],
+            actions: tuple[tuple[str, str, ModWebNotificationType], ...],
         ) -> None:
+            def _notify_action(message: str, tone: ModWebNotificationType) -> Callable[[], None]:
+                def notify() -> None:
+                    ui.notify(message, type=tone)
+
+                return notify
+
             self._apply_theme(ui=ui)
             with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
                 with ui.card().classes("mod-card w-full"):
@@ -255,10 +290,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                             for label, message, tone in actions:
                                 ui.button(
                                     label,
-                                    on_click=lambda preview_message=message, preview_tone=tone: ui.notify(
-                                        preview_message,
-                                        type=preview_tone,
-                                    ),
+                                    on_click=_notify_action(message, tone),
                                 ).classes("mod-list-button")
                         self._action_link(ui=ui, label="Back to Sign In", url=self.index_path(), compact=True)
 
@@ -273,6 +305,15 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             del request
             _require_dev_preview_enabled()
             self._render_auth_setup_page(ui=ui)
+
+        @ui.page("/mod-web/dev/error/oauth-failure")
+        async def _dev_oauth_failure(request: Request) -> None:
+            del request
+            _require_dev_preview_enabled()
+            self._render_oauth_failure_page(
+                ui=ui,
+                detail="Discord OAuth state did not match this browser session.",
+            )
 
         @ui.page("/mod-web/dev/error/page-unavailable")
         async def _dev_page_unavailable(request: Request) -> None:

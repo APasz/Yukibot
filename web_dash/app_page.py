@@ -27,6 +27,7 @@ from .app_page_minecraft import (
 from .app_page_sevendays import ModWebAppPageSevenDaysMixin
 from .app_page_updates import ModWebAppPageUpdateMixin
 from .constants import (
+    _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _APP_SECTION_QUERY_PARAM,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
@@ -49,6 +50,7 @@ from .runtime_imports import (
     Callable,
     Card,
     Checkbox,
+    ClientPackPolicy,
     Html,
     Input,
     Label,
@@ -61,6 +63,7 @@ from .runtime_imports import (
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
     NodeConsoleActionList,
+    NodeModEntry,
     NodeModMutationAction,
     NodeModSummary,
     NodeModUploadBatchResult,
@@ -88,6 +91,7 @@ from .types import (
     ModWebAppSectionKind,
     ModWebAppTabDefinition,
     ModWebBasePageModel,
+    ModWebModSortOrder,
     ModWebOverviewPageModel,
     ModWebPageLoadWarning,
     ModWebPageModel,
@@ -539,13 +543,12 @@ class ModWebAppPageMixin(
     def _enabled_app_activity_providers(model: ModWebBasePageModel) -> tuple[NodeAppActivityProviderEntry, ...]:
         return tuple(provider for provider in model.activity_providers if provider.enabled)
 
-    @classmethod
-    def _visible_app_activity_provider_badges(
-        cls,
+    @staticmethod
+    def _visible_app_activity_providers(
         *,
         app_stats: NodeAppRuntimeSummary | None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...],
-    ) -> tuple[str, ...]:
+    ) -> tuple[NodeAppActivityProviderEntry, ...]:
         if app_stats is None or not app_stats.running:
             return ()
         runtime_providers_by_id: dict[str, NodeAppActivityProviderEntry] = {
@@ -553,19 +556,72 @@ class ModWebAppPageMixin(
             for provider in app_stats.activity_providers
             if provider.enabled and provider.current_value is not None
         }
-        badges: list[str] = []
+        visible_providers: list[NodeAppActivityProviderEntry] = []
         for provider in activity_providers:
             runtime_provider = runtime_providers_by_id.get(provider.provider_id.casefold())
             if runtime_provider is None or runtime_provider.current_value is None:
                 continue
-            badges.append(
-                cls._app_activity_provider_badge_markup(
-                    provider_id=runtime_provider.provider_id,
-                    label=runtime_provider.label,
-                    current_value=runtime_provider.current_value,
-                )
+            visible_providers.append(runtime_provider)
+        return tuple(visible_providers)
+
+    @classmethod
+    def _visible_app_activity_provider_badges(
+        cls,
+        *,
+        app_stats: NodeAppRuntimeSummary | None,
+        activity_providers: tuple[NodeAppActivityProviderEntry, ...],
+    ) -> tuple[str, ...]:
+        return tuple(
+            cls._app_activity_provider_badge_markup(
+                provider_id=provider.provider_id,
+                label=provider.label,
+                current_value=provider.current_value,
             )
-        return tuple(badges)
+            for provider in cls._visible_app_activity_providers(
+                app_stats=app_stats,
+                activity_providers=activity_providers,
+            )
+            if provider.current_value is not None
+        )
+
+    def _app_activity_provider_tooltip_html(
+        self,
+        *,
+        provider: NodeAppActivityProviderEntry,
+        connected_player_names: tuple[str, ...] = (),
+    ) -> str:
+        current_value: str = provider.current_value or "Unavailable"
+        lines: list[str] = [provider.label]
+        provider_id: str = provider.provider_id.casefold()
+        if provider_id == "day" and current_value.startswith("D") and current_value[1:].isdigit():
+            lines.append(f"Current day: {int(current_value[1:])}")
+        elif provider_id == "stage":
+            tier_text, separator, schematic_name = current_value.partition(":")
+            if tier_text.startswith("T") and tier_text[1:].isdigit():
+                lines.append(f"Current tier: {int(tier_text[1:])}")
+                if separator and schematic_name.strip():
+                    lines.append(f"Schematic: {schematic_name.strip()}")
+            else:
+                lines.append(f"Current value: {current_value}")
+        elif provider_id == "time":
+            is_blood_moon: bool = current_value.startswith("!")
+            raw_value: str = current_value[1:] if is_blood_moon else current_value
+            if raw_value.startswith("D") and "/H" in raw_value:
+                day_text, hour_text = raw_value[1:].split("/H", 1)
+                if day_text.isdigit() and hour_text.isdigit():
+                    lines.extend((f"Day: {int(day_text)}", f"Hour: {int(hour_text)}"))
+                    if is_blood_moon:
+                        lines.append("Blood moon active")
+                else:
+                    lines.append(f"Current value: {current_value}")
+            else:
+                lines.append(f"Current value: {current_value}")
+        else:
+            lines.append(f"Current value: {current_value}")
+        if provider_id in {"player", "players"}:
+            lines.append("Connected players:" if connected_player_names else "No players connected")
+            lines.extend(connected_player_names)
+        return self._tooltip_lines_html(tuple(lines)) or provider.label
 
     @staticmethod
     def _app_activity_provider_badge_markup(*, provider_id: str, label: str, current_value: str) -> str:
@@ -608,7 +664,11 @@ class ModWebAppPageMixin(
                 ),
                 tone="black",
                 icon="speed",
-                tooltip_text="CPU",
+                tooltip_text=cls._app_resource_point_badge_tooltip(
+                    resource_name="CPU",
+                    running_points=resource_points.cpu_points_running,
+                    startup_points=resource_points.cpu_points_startup,
+                ),
             ),
             _ModWebBadgeSpec(
                 text=cls._app_resource_point_badge_text(
@@ -617,9 +677,24 @@ class ModWebAppPageMixin(
                 ),
                 tone="black",
                 icon="memory",
-                tooltip_text="RAM",
+                tooltip_text=cls._app_resource_point_badge_tooltip(
+                    resource_name="RAM",
+                    running_points=resource_points.ram_points_running,
+                    startup_points=resource_points.ram_points_startup,
+                ),
             ),
         )
+
+    @staticmethod
+    def _app_resource_point_badge_tooltip(
+        *,
+        resource_name: str,
+        running_points: int,
+        startup_points: int,
+    ) -> str:
+        if startup_points == running_points:
+            return f"{resource_name} resource points: {running_points}"
+        return f"{resource_name} resource points — running: {running_points}; startup: {startup_points}"
 
     @staticmethod
     def _app_resource_point_badge_text(*, running_points: int, startup_points: int) -> str:
@@ -680,6 +755,7 @@ class ModWebAppPageMixin(
                     text=node_name,
                     tone=initial_node_badge_tone,
                     extra_classes="mod-app-corner-badge mod-app-node-badge",
+                    tooltip_text=f"Node: {node_name}",
                 )
                 if color_hex := self._node_role_color_hex(node_name=node_name):
                     node_badge.style(self._node_badge_style(color_hex))
@@ -688,12 +764,14 @@ class ModWebAppPageMixin(
                     text=initial_runtime_details.relay_badge.text,
                     tone=initial_runtime_details.relay_badge.tone,
                     extra_classes="mod-app-corner-badge",
+                    tooltip_text=f"Chat relay support: {initial_runtime_details.relay_badge.text}",
                 )
                 version_badge = self._badge(
                     ui=ui,
                     text=initial_runtime_details.version_badge.text,
                     tone=initial_runtime_details.version_badge.tone,
                     extra_classes="mod-app-corner-badge",
+                    tooltip_text=f"Application version: {initial_runtime_details.version_badge.text}",
                 )
                 for badge in top_badges:
                     self._badge_spec(ui=ui, badge=badge, extra_classes="mod-app-corner-badge")
@@ -712,15 +790,15 @@ class ModWebAppPageMixin(
         def _apply_node_summary(system_summary: NodeSystemSummary | None) -> None:
             if node_badge_spec is not None:
                 return
-                self._set_badge_state(
-                    node_badge,
-                    node_name,
-                    self._app_page_node_badge_tone(
-                        node_name=node_name,
-                        system_summary=system_summary,
-                    ),
-                    extra_classes="mod-app-corner-badge mod-app-node-badge",
-                )
+            self._set_badge_state(
+                node_badge,
+                node_name,
+                self._app_page_node_badge_tone(
+                    node_name=node_name,
+                    system_summary=system_summary,
+                ),
+                extra_classes="mod-app-corner-badge mod-app-node-badge",
+            )
 
         def _apply_app_stats(app_stats: NodeAppRuntimeSummary | None) -> None:
             runtime_details = self._app_hero_runtime_details(app_stats)
@@ -855,14 +933,16 @@ class ModWebAppPageMixin(
                     )
             runtime_badge_row = ui.row().classes(f"{self._hero_badge_row_classes(fill=True)} w-full")
             with runtime_badge_row:
-                player_badge = self._badge(
-                    ui=ui,
-                    text=initial_runtime_details.player_count_badge.text
+                player_badge = ui.label(
+                    initial_runtime_details.player_count_badge.text
                     if initial_runtime_details.player_count_badge is not None
-                    else "",
-                    tone=initial_runtime_details.player_count_badge.tone
-                    if initial_runtime_details.player_count_badge is not None
-                    else "grey",
+                    else ""
+                ).classes(
+                    self._badge_class_name(
+                        tone=initial_runtime_details.player_count_badge.tone
+                        if initial_runtime_details.player_count_badge is not None
+                        else "grey"
+                    )
                 )
                 player_badge_tooltip, player_badge_tooltip_content = self._attach_html_tooltip(
                     ui=ui,
@@ -884,6 +964,10 @@ class ModWebAppPageMixin(
                     app_stats=initial_app_stats,
                     activity_providers=activity_providers,
                 )
+                initial_visible_activity_providers = self._visible_app_activity_providers(
+                    app_stats=initial_app_stats,
+                    activity_providers=activity_providers,
+                )
                 activity_badge_labels: tuple[Html, ...] = tuple(
                     cast(
                         Html,
@@ -892,6 +976,25 @@ class ModWebAppPageMixin(
                         ),
                     )
                     for index, _provider in enumerate(activity_providers)
+                )
+                activity_badge_tooltips = tuple(
+                    self._attach_html_tooltip(
+                        ui=ui,
+                        target=activity_badge_label,
+                        html=(
+                            self._app_activity_provider_tooltip_html(
+                                provider=initial_visible_activity_providers[index],
+                                connected_player_names=(
+                                    initial_app_stats.connected_player_names
+                                    if initial_app_stats is not None
+                                    else ()
+                                ),
+                            )
+                            if index < len(initial_visible_activity_providers)
+                            else ""
+                        ),
+                    )
+                    for index, activity_badge_label in enumerate(activity_badge_labels)
                 )
 
         def _apply_runtime(app_stats: NodeAppRuntimeSummary | None) -> None:
@@ -916,15 +1019,36 @@ class ModWebAppPageMixin(
                 app_stats=app_stats,
                 activity_providers=activity_providers,
             )
-            for activity_badge_label, activity_badge in zip(
-                activity_badge_labels,
-                visible_activity_badges,
-                strict=False,
+            visible_activity_providers = self._visible_app_activity_providers(
+                app_stats=app_stats,
+                activity_providers=activity_providers,
+            )
+            for index, (activity_badge_label, activity_badge, activity_provider) in enumerate(
+                zip(
+                    activity_badge_labels,
+                    visible_activity_badges,
+                    visible_activity_providers,
+                    strict=False,
+                )
             ):
                 activity_badge_label.set_content(activity_badge)
                 activity_badge_label.update()
+                activity_tooltip, activity_tooltip_content = activity_badge_tooltips[index]
+                self._set_html_tooltip_state(
+                    activity_tooltip,
+                    activity_tooltip_content,
+                    self._app_activity_provider_tooltip_html(
+                        provider=activity_provider,
+                        connected_player_names=app_stats.connected_player_names if app_stats is not None else (),
+                    ),
+                )
                 self._set_element_visibility(activity_badge_label, visible=True)
-            for activity_badge_label in activity_badge_labels[len(visible_activity_badges) :]:
+            for index, activity_badge_label in enumerate(
+                activity_badge_labels[len(visible_activity_badges) :],
+                start=len(visible_activity_badges),
+            ):
+                activity_tooltip, activity_tooltip_content = activity_badge_tooltips[index]
+                self._set_html_tooltip_state(activity_tooltip, activity_tooltip_content, "")
                 self._set_element_visibility(activity_badge_label, visible=False)
             self._set_element_visibility(
                 runtime_badge_row,
@@ -3284,6 +3408,51 @@ class ModWebAppPageMixin(
         self._render_blueprints_editor(ui=ui, model=model, user=user)
         return None
 
+    @staticmethod
+    def _resolve_client_pack_mod_names(
+        *,
+        mods: tuple[NodeModEntry, ...],
+        optional_names: frozenset[str],
+        choice_names: dict[str, str],
+    ) -> tuple[str, ...]:
+        optional_entries: dict[str, NodeModEntry] = {
+            entry.name: entry
+            for entry in mods
+            if entry.downloadable and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+        }
+        unknown_optional_names: frozenset[str] = optional_names.difference(optional_entries)
+        if unknown_optional_names:
+            raise ValueError(f"Unknown optional client-pack mods: {', '.join(sorted(unknown_optional_names))}")
+
+        choice_groups: dict[str, frozenset[str]] = {}
+        for entry in mods:
+            if not entry.downloadable or entry.client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
+                continue
+            group_name: str | None = entry.client_pack.choice_group
+            if group_name is None:
+                raise ValueError(f"Alternative client-pack mod {entry.name!r} has no choice group.")
+            choice_groups[group_name] = choice_groups.get(group_name, frozenset()).union({entry.name})
+        if choice_names.keys() != choice_groups.keys():
+            raise ValueError("Every client-pack choice group requires one selection.")
+        for group_name, selected_name in choice_names.items():
+            if selected_name not in choice_groups[group_name]:
+                raise ValueError(f"Invalid selection {selected_name!r} for client-pack group {group_name!r}.")
+
+        return tuple(
+            entry.name
+            for entry in mods
+            if entry.downloadable
+            and (
+                entry.client_pack.policy is ClientPackPolicy.REQUIRED
+                or (entry.client_pack.policy is ClientPackPolicy.OPTIONAL and entry.name in optional_names)
+                or (
+                    entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
+                    and entry.client_pack.choice_group is not None
+                    and choice_names[entry.client_pack.choice_group] == entry.name
+                )
+            )
+        )
+
     def _render_mods_section(
         self,
         *,
@@ -3295,9 +3464,37 @@ class ModWebAppPageMixin(
         checkboxes: dict[str, Checkbox] = {}
         mod_options = self._mod_options(model.mods.mods)
         show_search: bool = len(mod_options) > 1
+        show_sort: bool = len(mod_options) > 1
+        current_search_query: str = ""
+        current_sort_order: ModWebModSortOrder = ModWebModSortOrder.NEWEST
         downloadable_names: tuple[str, ...] = tuple[str, ...](
             entry.name for entry in model.mods.mods if entry.downloadable
         )
+        optional_client_entries: tuple[NodeModEntry, ...] = tuple(
+            entry
+            for entry in model.mods.mods
+            if entry.downloadable and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+        )
+        client_choice_groups: dict[str, tuple[NodeModEntry, ...]] = {}
+        for entry in model.mods.mods:
+            client_pack = entry.client_pack
+            if not entry.downloadable or client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
+                continue
+            if client_pack.choice_group is None:
+                raise ValueError(f"Alternative client-pack mod {entry.name!r} has no choice group.")
+            client_choice_groups[client_pack.choice_group] = (
+                *client_choice_groups.get(client_pack.choice_group, ()),
+                entry,
+            )
+        has_client_pack_choices: bool = bool(optional_client_entries or client_choice_groups)
+        client_choice_defaults: dict[str, str] = {}
+        for group_name, choices in client_choice_groups.items():
+            defaults: tuple[NodeModEntry, ...] = tuple(entry for entry in choices if entry.client_pack.default_choice)
+            if len(choices) < 2 or len(defaults) != 1:
+                raise ValueError(
+                    f"Client-pack choice group {group_name!r} requires at least two mods and exactly one default."
+                )
+            client_choice_defaults[group_name] = defaults[0].name
         can_delete_mods: bool = self._user_has_level(user, Power_Level.sudo)
         deletable_names: tuple[str, ...] = tuple[str, ...](
             entry.name for entry in model.mods.mods if can_delete_mods and not self._is_builtin_mod(entry)
@@ -3315,6 +3512,17 @@ class ModWebAppPageMixin(
         selection_button = None
         download_button = None
         delete_button = None
+        result_count_label: Label | None = None
+
+        def update_result_count(visible_count: int) -> None:
+            if result_count_label is None:
+                return
+            result_count_label.set_text(
+                self._mod_result_count_label(
+                    visible_count=visible_count,
+                    total_count=len(model.mods.mods),
+                )
+            )
 
         def selected_downloadable_mod_names_in_page_order() -> tuple[str, ...]:
             return tuple[str, ...](
@@ -3395,6 +3603,9 @@ class ModWebAppPageMixin(
             if selected_mod_names:
                 ui.notify("No selected mods are downloadable.", type="warning")
                 return
+            if has_client_pack_choices:
+                client_pack_dialog.open()
+                return
             await self._start_download(
                 ui=ui,
                 user=user,
@@ -3453,6 +3664,96 @@ class ModWebAppPageMixin(
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
+        optional_client_checkboxes: dict[str, Checkbox] = {}
+        client_choice_selects: dict[str, Select] = {}
+
+        async def download_configured_client_pack() -> None:
+            optional_names: frozenset[str] = frozenset(
+                mod_name
+                for mod_name, checkbox in optional_client_checkboxes.items()
+                if bool(_value_as_object(checkbox))
+            )
+            choice_names: dict[str, str] = {}
+            for group_name, select in client_choice_selects.items():
+                selected_name: str = _value_as_text(select)
+                choice_names[group_name] = selected_name
+            try:
+                mod_names: tuple[str, ...] = self._resolve_client_pack_mod_names(
+                    mods=model.mods.mods,
+                    optional_names=optional_names,
+                    choice_names=choice_names,
+                )
+            except ValueError as xcp:
+                ui.notify(str(xcp), type="warning")
+                return
+            if not mod_names:
+                ui.notify("Select at least one mod for the client pack.", type="warning")
+                return
+            client_pack_dialog.close()
+            query: str = urlencode({"selected_only": "true", "mod_name": list(mod_names)}, doseq=True)
+            await self._start_download(
+                ui=ui,
+                user=user,
+                model=model,
+                url=f"{self._download_base_url(model)}?{query}",
+                message=self._download_feedback_message(
+                    kind=ModDownloadKind.SELECTED,
+                    app_friendly=model.app_friendly,
+                    selected_count=len(mod_names),
+                ),
+                filenames=(f"{model.app_name}-client-pack.zip",),
+            )
+
+        client_pack_dialog = ui.dialog()
+        if has_client_pack_choices:
+            with client_pack_dialog:
+                with ui.card().classes("mod-card mod-dialog-card"):
+                    with ui.column().classes("w-full gap-4 p-5"):
+                        with ui.column().classes("gap-0"):
+                            ui.label("Configure Client Pack").classes("text-xl font-black mod-title-small")
+                            ui.label("Required mods are always included. Optional mods start selected.").classes(
+                                "mod-subtitle text-sm"
+                            )
+                        required_entries: tuple[NodeModEntry, ...] = tuple(
+                            entry
+                            for entry in model.mods.mods
+                            if entry.downloadable and entry.client_pack.policy is ClientPackPolicy.REQUIRED
+                        )
+                        if required_entries:
+                            with ui.column().classes("w-full gap-2"):
+                                ui.label("Required").classes("mod-stat-label")
+                                for entry in required_entries:
+                                    required_checkbox: Checkbox = ui.checkbox(
+                                        entry.friendly,
+                                        value=True,
+                                    ).props("dense")
+                                    required_checkbox.disable()
+                        if optional_client_entries:
+                            with ui.column().classes("w-full gap-2"):
+                                ui.label("Optional").classes("mod-stat-label")
+                                for entry in optional_client_entries:
+                                    optional_client_checkboxes[entry.name] = ui.checkbox(
+                                        entry.friendly,
+                                        value=True,
+                                    ).props("dense")
+                        if client_choice_groups:
+                            with ui.column().classes("w-full gap-3"):
+                                ui.label("Choose One").classes("mod-stat-label")
+                                for group_name, choices in client_choice_groups.items():
+                                    group_label: str = group_name.replace("_", " ").replace("-", " ").strip().title()
+                                    client_choice_selects[group_name] = (
+                                        ui.select(
+                                            {entry.name: entry.friendly for entry in choices},
+                                            value=client_choice_defaults[group_name],
+                                            label=group_label,
+                                        )
+                                        .props("filled square dense hide-bottom-space color=accent options-dark")
+                                        .classes("w-full mod-config-select")
+                                    )
+                        with ui.row().classes("w-full justify-end gap-2"):
+                            ui.button("Cancel", on_click=client_pack_dialog.close).classes("mod-list-button secondary")
+                            ui.button("Download", on_click=download_configured_client_pack).classes("mod-list-button")
+
         with ui.dialog() as delete_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
@@ -3468,11 +3769,13 @@ class ModWebAppPageMixin(
 
         with ui.card().classes(self._flat_tab_card_classes()):
             with ui.column().classes(self._tab_section_body_classes()):
-                self._render_flat_tab_header(
-                    ui=ui,
-                    title="Mods",
-                    description=self._mods_card_description(model.mods.summary),
-                )
+                mods_description: str | None = self._mods_card_description(model.mods.summary)
+                if mods_description is not None:
+                    self._render_flat_tab_header(
+                        ui=ui,
+                        title="Mods",
+                        description=mods_description,
+                    )
                 upload_picker_action: Callable[[], None] | None = None
                 if can_upload_mod:
 
@@ -3485,8 +3788,7 @@ class ModWebAppPageMixin(
                 def _mod_download_rows(search_query: str) -> None:
                     checkboxes.clear()
                     if not model.mods.mods:
-                        with ui.card().classes("mod-setting-card locked w-full"):
-                            ui.label("No mods are currently indexed for this app.").classes("mod-subtitle text-sm")
+                        update_result_count(0)
                         return
 
                     filtered_mods = self._filter_mod_entries(
@@ -3494,6 +3796,8 @@ class ModWebAppPageMixin(
                         options=mod_options,
                         search_query=search_query,
                     )
+                    filtered_mods = self._sort_mod_entries(filtered_mods, current_sort_order)
+                    update_result_count(len(filtered_mods))
                     if not filtered_mods:
                         with ui.card().classes("mod-setting-card locked w-full"):
                             ui.label("No mods match that search.").classes("mod-subtitle text-sm")
@@ -3523,7 +3827,14 @@ class ModWebAppPageMixin(
                                 checkbox.set_value(entry.name in selected_mod_names)
 
                 def _refresh_mod_rows(event: ModWebEventArgumentsContainer) -> None:
-                    _mod_download_rows.refresh(_event_args_as_text(event))
+                    nonlocal current_search_query
+                    current_search_query = _event_args_as_text(event)
+                    _mod_download_rows.refresh(current_search_query)
+
+                def _sort_mod_rows(event: ModWebEventArgumentsContainer) -> None:
+                    nonlocal current_sort_order
+                    current_sort_order = ModWebModSortOrder(_event_args_as_text(event))
+                    _mod_download_rows.refresh(current_search_query)
 
                 toolbar_bindings: _ModWebModToolbarBindings = self._render_mod_toolbar(
                     ui=ui,
@@ -3535,10 +3846,13 @@ class ModWebAppPageMixin(
                     upload_mod=upload_picker_action,
                     show_search=show_search,
                     on_search=_refresh_mod_rows if show_search else None,
+                    show_sort=show_sort,
+                    on_sort=_sort_mod_rows if show_sort else None,
                 )
                 selection_button: Button | None = toolbar_bindings.selection_button
                 download_button: Button | None = toolbar_bindings.download_button
                 delete_button: Button | None = toolbar_bindings.delete_button
+                result_count_label = toolbar_bindings.result_count_label
                 update_count()
 
                 if can_upload_mod:
@@ -3666,7 +3980,11 @@ class ModWebAppPageMixin(
                     kill_button.set_text(pending_label)
                     kill_button.disable()
             if pending_message is not None:
-                ui.notify(pending_message, type="info")
+                ui.notify(
+                    pending_message,
+                    type="info",
+                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+                )
             try:
                 result: NodeAppMutationResult = await self._mutate_app(model=model, action=action, user=user)
             except Exception as xcp:
@@ -3678,9 +3996,22 @@ class ModWebAppPageMixin(
                     xcp,
                 )
                 _apply_runtime_control_model(current_runtime_model, force=True)
-                ui.notify(f"App action failed: {xcp}", type="negative")
+                ui.notify(
+                    f"App action failed: {xcp}",
+                    type="negative",
+                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+                )
                 return
-            ui.notify(result.message, type="positive")
+            completion_message: str | None = self._app_action_completion_message(
+                pending_message=pending_message,
+                result_message=result.message,
+            )
+            if completion_message is not None:
+                ui.notify(
+                    completion_message,
+                    type="positive",
+                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+                )
             await asyncio.sleep(_DOWNLOAD_FEEDBACK_DELAY_SECONDS)
             if (
                 action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP, NodeAppMutationAction.KILL}
@@ -4117,33 +4448,61 @@ class ModWebAppPageMixin(
         upload_mod: Callable[[], object] | None = None,
         show_search: bool = False,
         on_search: Callable[[ModWebEventArgumentsContainer], None] | None = None,
+        show_sort: bool = False,
+        on_sort: Callable[[ModWebEventArgumentsContainer], None] | None = None,
     ) -> _ModWebModToolbarBindings:
         can_upload_mod: bool = upload_mod is not None and self._user_has_level(user, Power_Level.user)
         can_delete_mods: bool = self._user_has_level(user, Power_Level.sudo) and any(
             not self._is_builtin_mod(entry) for entry in model.mods.mods
         )
         show_bulk_mod_actions: bool = bool(model.mods.mods)
-        if not can_upload_mod and not show_bulk_mod_actions and not show_search:
-            return _ModWebModToolbarBindings(selection_button=None, download_button=None, delete_button=None)
+        if not can_upload_mod and not show_bulk_mod_actions and not show_search and not show_sort:
+            return _ModWebModToolbarBindings(
+                selection_button=None,
+                download_button=None,
+                delete_button=None,
+                result_count_label=None,
+            )
 
         selection_button: Button | None = None
         download_button: Button | None = None
         delete_button: Button | None = None
+        result_count_label: Label | None = None
 
         with ui.row().classes("mod-tab-toolbar mod-mods-toolbar w-full"):
-            if show_search:
-                if on_search is None:
-                    raise ValueError("Mod search handler is not available.")
-                search_input: Input = (
-                    ui.input(placeholder="Search mods")
-                    .props("filled square dense clearable hide-bottom-space color=accent")
-                    .classes("mod-config-search mod-settings-search mod-mods-toolbar-search")
-                )
-                search_input.on("update:model-value", on_search)
+            with ui.row().classes("mod-mods-toolbar-filters w-full"):
+                if show_search:
+                    if on_search is None:
+                        raise ValueError("Mod search handler is not available.")
+                    search_input: Input = (
+                        ui.input(placeholder="Search mods")
+                        .props("filled square dense clearable hide-bottom-space color=accent")
+                        .classes("mod-config-search mod-settings-search mod-mods-toolbar-search")
+                    )
+                    search_input.on("update:model-value", on_search)
+                if show_sort:
+                    if on_sort is None:
+                        raise ValueError("Mod sort handler is not available.")
+                    sort_select: Select = (
+                        ui.select(
+                            {order.value: order.label for order in ModWebModSortOrder},
+                            value=ModWebModSortOrder.NEWEST.value,
+                            label="Sort",
+                        )
+                        .props("filled square dense hide-bottom-space color=accent options-dark")
+                        .classes("mod-config-select mod-mods-toolbar-sort")
+                    )
+                    sort_select.on("update:model-value", on_sort)
+                result_count_label = ui.label(
+                    self._mod_result_count_label(
+                        visible_count=len(model.mods.mods),
+                        total_count=len(model.mods.mods),
+                    )
+                ).classes("mod-mods-toolbar-result-count")
             with ui.row().classes("mod-tab-toolbar-actions mod-mods-toolbar-actions"):
                 if can_upload_mod:
                     upload_button = ui.button("Upload", on_click=upload_mod).classes(
-                        "mod-list-button mod-toolbar-button mod-toolbar-button-fill"
+                        "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                     )
                     upload_button.on(
                         "click",
@@ -4156,7 +4515,7 @@ class ModWebAppPageMixin(
                         "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                     )
                     download_button = ui.button("", on_click=download_selected).classes(
-                        "mod-list-button mod-toolbar-button mod-toolbar-button-fill"
+                        "mod-list-button mod-toolbar-button mod-toolbar-button-fill mod-toolbar-primary"
                     )
                     if can_delete_mods:
                         delete_button = ui.button("", on_click=delete_selected).classes(
@@ -4166,6 +4525,7 @@ class ModWebAppPageMixin(
             selection_button=selection_button,
             download_button=download_button,
             delete_button=delete_button,
+            result_count_label=result_count_label,
         )
 
     @staticmethod
@@ -4228,14 +4588,10 @@ class ModWebAppPageMixin(
         return "Browse, edit, reload, and download app config files."
 
     @staticmethod
-    def _mods_card_description(summary: NodeModSummary) -> str:
+    def _mods_card_description(summary: NodeModSummary) -> str | None:
         if summary.total_count == 0:
-            return "No mods are currently indexed for this app."
-        if summary.downloadable_count == 0:
-            return "Browse the indexed mod inventory and inspect file details."
-        if summary.non_downloadable_count == 0:
-            return "Browse the indexed mod inventory, inspect details, and download any file."
-        return "Browse the indexed mod inventory, inspect details, and download available files."
+            return "No mods are currently indexed."
+        return None
 
     @staticmethod
     def _mods_header_badges(summary: NodeModSummary) -> tuple[_ModWebBadgeSpec, ...]:

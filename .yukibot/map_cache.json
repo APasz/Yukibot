@@ -1,12 +1,12 @@
 {
-  "entries": [
-    {
-      "content": "{\"worlds\":[{\"name\":\"minecraft_overworld\",\"display_name\":\"Overworld\",\"type\":\"normal\",\"order\":2},{\"name\":\"minecraft_nether\",\"display_name\":\"Nether\",\"type\":\"nether\",\"order\":1}]}",
-      "headers": [],
-      "media_type": "application/json",
-      "relative_path": "tiles/settings.json",
-      "updated_at_unix_ms": 1782518458713
-    }
-  ],
-  "version": 1
+    "entries": [
+        {
+            "content": "{\"worlds\":[{\"name\":\"minecraft_overworld\",\"display_name\":\"Overworld\",\"type\":\"normal\",\"order\":2},{\"name\":\"minecraft_nether\",\"display_name\":\"Nether\",\"type\":\"nether\",\"order\":1}]}",
+            "headers": [],
+            "media_type": "application/json",
+            "relative_path": "tiles/settings.json",
+            "updated_at_unix_ms": 1782718740850
+        }
+    ],
+    "version": 1
 }

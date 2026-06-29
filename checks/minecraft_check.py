@@ -73,6 +73,7 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
             "MouseTweaks-forge-mc1.20.1-2.25.1.jar": "2.25.1",
             "NoChatReports-FORGE-1.20.1-v2.2.2.jar": "2.2.2",
             "Searchables-forge-1.20.1-1.0.3.jar": "1.0.3",
+            "bellsandwhistles-0.4.5-1.20.x-Create6.0+.jar": "0.4.5",
         }
 
         for name, expected in cases.items():
@@ -84,6 +85,7 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
             "ChatImage-1.4.7+1.20.1+forge.jar": "Chat Image",
             "cloth-config-11.1.136-forge.jar": "Cloth Config",
             "NoChatReports-FORGE-1.20.1-v2.2.2.jar": "No Chat Reports",
+            "bellsandwhistles-0.4.5-1.20.x-Create6.0+.jar": "Bellsandwhistles",
         }
 
         for name, expected in cases.items():
@@ -91,6 +93,96 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
                 mod = Mod_MC(Mod_Config(name=name, directory=Path(".")))
                 mod.sync_metadata()
                 self.assertEqual(mod.friendly, expected)
+
+    def test_prefers_embedded_mod_display_names_across_supported_loaders(self) -> None:
+        metadata_cases = {
+            "forge.jar": (
+                "META-INF/mods.toml",
+                'modLoader="javafml"\n[[mods]]\nmodId="example"\ndisplayName="Forge Display Name"\n',
+                "Forge Display Name",
+            ),
+            "neoforge.jar": (
+                "META-INF/neoforge.mods.toml",
+                'modLoader="javafml"\n[[mods]]\nmodId="example"\ndisplayName="NeoForge Display Name"\n',
+                "NeoForge Display Name",
+            ),
+            "fabric.jar": (
+                "fabric.mod.json",
+                json.dumps({"schemaVersion": 1, "id": "example", "name": "Fabric Display Name"}),
+                "Fabric Display Name",
+            ),
+            "quilt.jar": (
+                "quilt.mod.json",
+                json.dumps(
+                    {
+                        "quilt_loader": {
+                            "id": "example",
+                            "metadata": {"name": "Quilt Display Name"},
+                        }
+                    }
+                ),
+                "Quilt Display Name",
+            ),
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            for filename, (metadata_path, metadata_text, expected) in metadata_cases.items():
+                with self.subTest(filename=filename):
+                    mod_path = directory / filename
+                    with zipfile.ZipFile(mod_path, "w") as archive:
+                        archive.writestr(metadata_path, metadata_text)
+                    mod = Mod_MC(Mod_Config(name=filename, directory=directory))
+                    mod.sync_metadata()
+                    self.assertEqual(mod.friendly, expected)
+
+    def test_embedded_display_name_does_not_override_filename_version(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            filename = "bellsandwhistles-0.4.5-1.20.x-Create6.0+.jar"
+            mod_path = directory / filename
+            with zipfile.ZipFile(mod_path, "w") as archive:
+                archive.writestr(
+                    "META-INF/mods.toml",
+                    'modLoader="javafml"\n[[mods]]\nmodId="bellsandwhistles"\n'
+                    'version="0.4.3-1.20.x"\ndisplayName="Create: Bells & Whistles"\n',
+                )
+
+            mod = Mod_MC(Mod_Config(name=filename, directory=directory))
+            mod.sync_metadata()
+
+            self.assertEqual(mod.friendly, "Create: Bells & Whistles")
+            self.assertEqual(mod.cfg.version, "0.4.5")
+
+    def test_reads_metadata_from_disabled_mod_archive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            filename = "example-forge-1.20.1-1.0.0.jar"
+            disabled_path = (directory / filename).with_suffix(".disabled")
+            with zipfile.ZipFile(disabled_path, "w") as archive:
+                archive.writestr(
+                    "META-INF/mods.toml",
+                    'modLoader="javafml"\n[[mods]]\nmodId="example"\ndisplayName="Disabled Example"\n',
+                )
+
+            mod = Mod_MC(Mod_Config(name=filename, directory=directory, enabled=False))
+            mod.sync_metadata()
+
+            self.assertEqual(mod.friendly, "Disabled Example")
+            self.assertFalse(mod.cfg.enabled)
+
+    def test_malformed_embedded_metadata_falls_back_to_filename(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            filename = "FallbackName-forge-1.20.1-1.0.0.jar"
+            mod_path = directory / filename
+            with zipfile.ZipFile(mod_path, "w") as archive:
+                archive.writestr("META-INF/mods.toml", "this is not = valid toml [[[")
+
+            mod = Mod_MC(Mod_Config(name=filename, directory=directory))
+            mod.sync_metadata()
+
+            self.assertEqual(mod.friendly, "Fallback Name")
 
     def test_squaremap_mod_is_server_only(self) -> None:
         mod = Mod_MC(Mod_Config(name="squaremap-forge-mc1.20.1-1.2.0.jar", directory=Path(".")))
@@ -217,7 +309,9 @@ class MinecraftBackgroundTaskCancellationTests(unittest.TestCase):
 
             self.assertTrue(changed)
             self.assertTrue(target_path.exists())
-            self.assertIn("[YUKI_MC_EVENT]", target_path.read_text(encoding="utf-8"))
+            script_source = target_path.read_text(encoding="utf-8")
+            self.assertIn("[YUKI_MC_EVENT]", script_source)
+            self.assertNotIn("PlayerEvents.advancement", script_source)
 
     def test_sync_kubejs_yuki_log_script_does_nothing_without_enabled_kubejs(self) -> None:
         with TemporaryDirectory() as temp_dir:

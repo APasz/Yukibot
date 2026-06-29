@@ -8,6 +8,7 @@ import re
 import shlex
 import tempfile
 import threading
+import tomllib
 import zipfile
 from asyncio.locks import Event
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -255,7 +256,17 @@ _MINECRAFT_MOD_VERSION_RE_PATTERNS = (
     ),
     re.compile(r"[-_](?P<version>v?\d+(?:\.\d+)+)$", re.IGNORECASE),
 )
+_MINECRAFT_MOD_COMPATIBILITY_SUFFIX_RE = re.compile(
+    r"^(?P<base>.+)-(?P<version>v?\d+(?:\.\d+)+)"
+    r"-(?:mc)?\d+(?:\.(?:\d+|x))+"
+    r"-[a-z][a-z0-9_]*\d+(?:\.\d+)*\+?$",
+    re.IGNORECASE,
+)
 _MINECRAFT_MOD_LOADER_TOKENS = frozenset({"forge", "fabric", "quilt", "neoforge"})
+_MINECRAFT_MOD_METADATA_MAX_BYTES = 1_048_576
+_MINECRAFT_FORGE_METADATA_PATHS = ("META-INF/neoforge.mods.toml", "META-INF/mods.toml")
+_MINECRAFT_FABRIC_METADATA_PATH = "fabric.mod.json"
+_MINECRAFT_QUILT_METADATA_PATH = "quilt.mod.json"
 _KUBEJS_MOD_BASE_NAME = "kubejs"
 _YUKIBOT_DATA_RELATIVE_PATH = Path(".yukibot")
 _LEGACY_YUKIBOT_DATA_RELATIVE_PATH = Path("yukibot")
@@ -324,14 +335,6 @@ PlayerEvents.chat(function (event) {
         player: playerName(event.player),
         uuid: playerUUID(event.player),
         message: String(event.message)
-    })
-})
-
-PlayerEvents.advancement(function (event) {
-    emit('advancement', {
-        player: playerName(event.player),
-        uuid: playerUUID(event.player),
-        advancement: String(event.advancement)
     })
 })
 
@@ -1940,6 +1943,8 @@ def _choose_loader_adjacent_version(before_raw: str | None, after_raw: str | Non
 
 def _detect_minecraft_mod_version(name: str) -> str | None:
     stem = Path(name).stem
+    if compatibility_match := _MINECRAFT_MOD_COMPATIBILITY_SUFFIX_RE.fullmatch(stem):
+        return compatibility_match.group("version").removeprefix("v")
     tokens = stem.split("-")
     for index, token in enumerate(tokens):
         if token.casefold() not in _MINECRAFT_MOD_LOADER_TOKENS:
@@ -1962,6 +1967,8 @@ def _detect_minecraft_mod_version(name: str) -> str | None:
 
 def _detect_minecraft_mod_base_name(name: str) -> str:
     stem = Path(name).stem
+    if compatibility_match := _MINECRAFT_MOD_COMPATIBILITY_SUFFIX_RE.fullmatch(stem):
+        return compatibility_match.group("base")
     patterns = (
         re.compile(
             r"^(?P<base>.+)-(?P<version>v?\d+(?:\.\d+)+)(?:\+(?:mc)?\d+(?:\.\d+)+)?\+(?:forge|fabric|quilt|neoforge)$",
@@ -1994,6 +2001,101 @@ def _detect_minecraft_mod_base_name(name: str) -> str:
 def _detect_minecraft_mod_friendly(name: str) -> str:
     base_name = _detect_minecraft_mod_base_name(name)
     return humanise_mod_identifier(base_name, split_single_camel=True)
+
+
+def _string_mapping(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    mapping = cast(Mapping[object, object], value)
+    if not all(isinstance(key, str) for key in mapping):
+        return None
+    return cast(Mapping[str, object], mapping)
+
+
+def _nonempty_metadata_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _forge_mod_display_name(payload: object) -> str | None:
+    metadata = _string_mapping(payload)
+    if metadata is None:
+        return None
+    raw_mods = metadata.get("mods")
+    if not isinstance(raw_mods, list):
+        return None
+    for raw_mod in cast(list[object], raw_mods):
+        mod = _string_mapping(raw_mod)
+        if mod is not None and (display_name := _nonempty_metadata_text(mod.get("displayName"))) is not None:
+            return display_name
+    return None
+
+
+def _fabric_mod_display_name(payload: object) -> str | None:
+    metadata = _string_mapping(payload)
+    return None if metadata is None else _nonempty_metadata_text(metadata.get("name"))
+
+
+def _quilt_mod_display_name(payload: object) -> str | None:
+    metadata = _string_mapping(payload)
+    quilt_loader = None if metadata is None else _string_mapping(metadata.get("quilt_loader"))
+    quilt_metadata = None if quilt_loader is None else _string_mapping(quilt_loader.get("metadata"))
+    return None if quilt_metadata is None else _nonempty_metadata_text(quilt_metadata.get("name"))
+
+
+def _read_minecraft_mod_metadata_entry(archive: zipfile.ZipFile, member_name: str) -> str | None:
+    try:
+        member = archive.getinfo(member_name)
+    except KeyError:
+        return None
+    if member.is_dir() or member.file_size > _MINECRAFT_MOD_METADATA_MAX_BYTES:
+        return None
+    try:
+        return archive.read(member).decode("utf-8-sig")
+    except (OSError, RuntimeError, UnicodeDecodeError, zipfile.BadZipFile):
+        return None
+
+
+def _minecraft_mod_metadata_display_name(pointer: Path) -> str | None:
+    if not pointer.is_file():
+        return None
+    try:
+        with zipfile.ZipFile(pointer, "r") as archive:
+            for member_name in _MINECRAFT_FORGE_METADATA_PATHS:
+                raw_metadata = _read_minecraft_mod_metadata_entry(archive, member_name)
+                if raw_metadata is None:
+                    continue
+                try:
+                    display_name = _forge_mod_display_name(tomllib.loads(raw_metadata))
+                except tomllib.TOMLDecodeError:
+                    continue
+                if display_name is not None:
+                    return display_name
+
+            raw_fabric_metadata = _read_minecraft_mod_metadata_entry(archive, _MINECRAFT_FABRIC_METADATA_PATH)
+            if raw_fabric_metadata is not None:
+                try:
+                    fabric_payload = cast(object, json.loads(raw_fabric_metadata))
+                    display_name = _fabric_mod_display_name(fabric_payload)
+                except json.JSONDecodeError:
+                    display_name = None
+                if display_name is not None:
+                    return display_name
+
+            raw_quilt_metadata = _read_minecraft_mod_metadata_entry(archive, _MINECRAFT_QUILT_METADATA_PATH)
+            if raw_quilt_metadata is not None:
+                try:
+                    quilt_payload = cast(object, json.loads(raw_quilt_metadata))
+                    display_name = _quilt_mod_display_name(quilt_payload)
+                except json.JSONDecodeError:
+                    display_name = None
+                if display_name is not None:
+                    return display_name
+    except (OSError, zipfile.BadZipFile):
+        return None
+    return None
 
 
 def _bundled_kubejs_yuki_log_script_source() -> str:
@@ -2074,7 +2176,6 @@ class KubeJsEventType(enum.StrEnum):
     PLAYER_JOIN = "player_join"
     PLAYER_LEAVE = "player_leave"
     CHAT = "chat"
-    ADVANCEMENT = "advancement"
     PLAYER_DEATH = "player_death"
 
 
@@ -2084,7 +2185,6 @@ class KubeJsEvent:
     player: str
     uuid: str | None = None
     message: str | None = None
-    advancement: str | None = None
     source: str | None = None
 
     def __post_init__(self) -> None:
@@ -2094,10 +2194,6 @@ class KubeJsEvent:
             raise ValueError("KubeJS event uuid must not be blank.")
         if self.event_type is KubeJsEventType.CHAT and (self.message is None or not self.message.strip()):
             raise ValueError("KubeJS chat event message must not be blank.")
-        if self.event_type is KubeJsEventType.ADVANCEMENT and (
-            self.advancement is None or not self.advancement.strip()
-        ):
-            raise ValueError("KubeJS advancement event must not be blank.")
 
 
 def _required_kubejs_player(payload: Mapping[str, object]) -> str:
@@ -2142,7 +2238,6 @@ def _parse_kubejs_event(line: str) -> KubeJsEvent | None:
             player=_required_kubejs_player(payload),
             uuid=_optional_kubejs_text(payload, "uuid"),
             message=_optional_kubejs_text(payload, "message"),
-            advancement=_optional_kubejs_text(payload, "advancement"),
             source=_optional_kubejs_text(payload, "source"),
         )
     except ValueError:
@@ -2200,7 +2295,7 @@ class Mod_MC(Mod):
         return _detect_minecraft_mod_version(self.name)
 
     def detect_friendly(self) -> str | None:
-        return _detect_minecraft_mod_friendly(self.name)
+        return _minecraft_mod_metadata_display_name(self.path) or _detect_minecraft_mod_friendly(self.name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3462,40 +3557,6 @@ class Matchers:
                 )
             )
             return
-        if event.event_type is KubeJsEventType.ADVANCEMENT:
-            if not self.app.cfg.relay_advancements:
-                return
-            assert event.advancement is not None
-            advancement_type = self.app.relay_advancement_term
-            advancement_title = event.advancement
-            app_friendly = getattr(self.app, "friendly", self.app.name)
-            notice = GameProgressNotice(
-                progress_kind=GameProgressKind.ADVANCEMENT,
-                label=advancement_type,
-                title=advancement_title,
-                source=RelayNoticeSource.APP_LOG,
-            )
-            embed_spec = notice_embed_spec(notice, app_name=app_friendly, author_name=event.player)
-            relay_embed = (
-                None
-                if embed_spec is None
-                else RelayEmbedPayload(
-                    title=embed_spec.title,
-                    description=embed_spec.description,
-                    color=self.app.manage_embed_color,
-                )
-            )
-            DC_Relay.add(
-                DC_Bound(
-                    self.app,
-                    f"{advancement_type}: {advancement_title}",
-                    event.player,
-                    relay_embed=relay_embed,
-                    notice=notice,
-                    player_avatar_uri=self._player_avatar_uri(event.player),
-                )
-            )
-            return
         return
 
     async def match_chat(self, line: str):
@@ -3516,8 +3577,6 @@ class Matchers:
                 )
 
     async def match_advancement(self, line: str):
-        if self.app._uses_kubejs_event_stream():
-            return
         if not self.app.cfg.relay_advancements:
             return
         if match := ADVANCEMENT_RE.match(line):

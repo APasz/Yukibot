@@ -48,14 +48,6 @@ PlayerEvents.chat(function (event) {
     })
 })
 
-PlayerEvents.advancement(function (event) {
-    emit('advancement', {
-        player: playerName(event.player),
-        uuid: playerUUID(event.player),
-        advancement: String(event.advancement)
-    })
-})
-
 EntityEvents.death(function (event) {
     var entity = event.entity
 

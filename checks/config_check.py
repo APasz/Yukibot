@@ -148,6 +148,14 @@ class ConfigPublicUrlTests(unittest.TestCase):
                 "http://10.0.0.173:3180",
             )
 
+    def test_parse_mod_web_build_sha_normalises_valid_commit(self) -> None:
+        self.assertEqual(config.parse_mod_web_build_sha(" ABCDEF123456 "), "abcdef123456")
+        self.assertIsNone(config.parse_mod_web_build_sha(None))
+
+    def test_parse_mod_web_build_sha_rejects_invalid_commit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "7-40 character hexadecimal"):
+            config.parse_mod_web_build_sha("not-a-commit")
+
     def test_resolve_node_api_base_url_uses_mod_web_host(self) -> None:
         self.assertEqual(
             config.resolve_node_api_base_url("http://mods.apasz.com:8088"),

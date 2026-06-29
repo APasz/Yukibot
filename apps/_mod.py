@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +12,7 @@ import aiofiles
 
 import config
 from _file import File_Utils
-from apps._config import App_Config, Mod_Config, ModDownloadBlockReason, ModType
+from apps._config import App_Config, ClientPackPolicy, Mod_Config, ModDownloadBlockReason, ModType
 
 log = logging.getLogger(__name__)
 _MOD_SEPARATOR_RE = re.compile(r"[_\-\s]+")
@@ -366,9 +366,31 @@ class Mod_Manager:
         await self.save_mods()
 
     async def save_mods(self):
+        self.validate_client_pack_configuration()
         lines = [m.cfg.model_dump_json() for m in self.index.values()]
         async with aiofiles.open(self.db_path, mode="w") as f:
             await f.write("\n".join(lines))
+
+    def validate_client_pack_configuration(self, mods: Iterable[Mod] | None = None) -> None:
+        choice_groups: dict[str, list[Mod]] = {}
+        for mod in self.index.values() if mods is None else mods:
+            client_pack = mod.cfg.client_pack
+            if client_pack.policy is ClientPackPolicy.REQUIRED:
+                continue
+            if not mod.downloadable:
+                raise ValueError(f"Client-pack mod {mod.name!r} must be downloadable")
+            if client_pack.policy is ClientPackPolicy.ALTERNATIVE:
+                assert client_pack.choice_group is not None
+                choice_groups.setdefault(client_pack.choice_group, []).append(mod)
+
+        for group_name, choices in choice_groups.items():
+            if len(choices) < 2:
+                raise ValueError(f"Client-pack choice group {group_name!r} requires at least two mods")
+            default_count: int = sum(1 for mod in choices if mod.cfg.client_pack.default_choice)
+            if default_count != 1:
+                raise ValueError(
+                    f"Client-pack choice group {group_name!r} requires exactly one default; found {default_count}"
+                )
 
     async def reload_mods(self):
         self.index.clear()
@@ -388,6 +410,7 @@ class Mod_Manager:
 
     async def remove(self, mod_name: str | Mod, *, override_coremod: bool = False) -> Mod:
         mod = self.get(mod_name)
+        self.validate_client_pack_configuration(entry for entry in self.index.values() if entry is not mod)
         await mod.uninstall(override_coremod)
         del self.index[mod.name]
         self._rebuild_lookup()
@@ -427,6 +450,8 @@ class Mod_Manager:
         reason: ModDownloadBlockReason | None,
     ) -> Mod:
         mod = self.get(mod_name)
+        if reason is not None and mod.cfg.client_pack.policy is not ClientPackPolicy.REQUIRED:
+            raise ValueError(f"Client-pack mod {mod.name!r} cannot be blocked from downloads")
         mod.cfg.download_block_reason = reason
         await self.save_mods()
         return mod

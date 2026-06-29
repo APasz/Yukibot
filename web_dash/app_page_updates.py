@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .constants import log
-from .nicegui_protocols import ModWebUi, ModWebValueContainer, _value_as_text
+from .nicegui_protocols import ModWebNotificationType, ModWebUi, ModWebValueContainer, _value_as_text
 from .runtime_imports import (
     AppUpdateInfo,
     AppUpdateOperationKind,
@@ -379,7 +379,7 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
 
         notify_client = nicegui_context.client
 
-        def _notify(message: str, *, tone: str) -> None:
+        def _notify(message: str, *, tone: ModWebNotificationType) -> None:
             with notify_client:
                 ui.notify(message, type=tone)
 

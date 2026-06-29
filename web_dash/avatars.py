@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from .runtime_imports import Path, Power_Level, base64, escape, lru_cache
+from .runtime_imports import Path, Power_Level, base64, escape, lru_cache, quote
+
+_DISCORD_AVATAR_SIZE_PIXELS = 128
 
 _USER_AVATAR_ICON_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "icon"
 _USER_AVATAR_SVG_TEMPLATE_PATH: Path = (
@@ -62,6 +64,19 @@ _USER_AVATAR_MIME_TYPE_BY_SUFFIX: dict[str, str] = {
 }
 
 
+def _discord_avatar_uri(*, user_id: int, avatar_hash: str | None) -> str | None:
+    if avatar_hash is None:
+        return None
+    normalised_avatar_hash = avatar_hash.strip()
+    if not normalised_avatar_hash:
+        return None
+    safe_avatar_hash = quote(normalised_avatar_hash, safe="")
+    return (
+        f"https://cdn.discordapp.com/avatars/{user_id}/{safe_avatar_hash}.png"
+        f"?size={_DISCORD_AVATAR_SIZE_PIXELS}"
+    )
+
+
 @lru_cache(maxsize=None)
 def _user_avatar_icon_data_uri(level: Power_Level) -> str | None:
     icon_path: Path = _USER_AVATAR_ICON_PATH_BY_LEVEL[level]
@@ -94,19 +109,27 @@ def _user_avatar_fallback_svg_data_uri(level: Power_Level) -> str:
     return f"data:image/svg+xml;base64,{encoded_svg}"
 
 
+@lru_cache(maxsize=None)
+def _user_avatar_data_uri(level: Power_Level) -> str:
+    return _user_avatar_icon_data_uri(level) or _user_avatar_fallback_svg_data_uri(level)
+
+
 @lru_cache(maxsize=1)
 def _user_avatar_fallback_svg_template() -> str:
     return _USER_AVATAR_SVG_TEMPLATE_PATH.read_text(encoding="utf-8").strip()
 
 
 __all__: tuple[str, ...] = (
+    "_DISCORD_AVATAR_SIZE_PIXELS",
     "_USER_AVATAR_ICON_DIRECTORY",
     "_USER_AVATAR_ICON_PATH_BY_LEVEL",
     "_USER_AVATAR_MIME_TYPE_BY_SUFFIX",
     "_USER_AVATAR_SVG_ACCENT_BY_LEVEL",
     "_USER_AVATAR_SVG_BADGE_MARKUP_BY_LEVEL",
+    "_discord_avatar_uri",
     "_user_avatar_fallback_svg_template",
     "_user_avatar_fallback_svg_data_uri",
     "_user_avatar_fallback_svg_markup",
+    "_user_avatar_data_uri",
     "_user_avatar_icon_data_uri",
 )

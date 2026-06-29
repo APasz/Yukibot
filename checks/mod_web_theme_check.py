@@ -37,8 +37,21 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("#popup.nicegui-error-popup", css)
         self.assertIn("#too_long_message_popup.nicegui-error-popup", css)
         self.assertIn(".mod-row", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-row-main \{.*?width: 100%;.*?max-width: 100%;.*?overflow: hidden;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-row-title,\s*\.mod-row-file \{.*?text-overflow: ellipsis;.*?white-space: nowrap;",
+        )
         self.assertIn(".mod-setting-badge-rail", css)
         self.assertIn(".mod-setting-badge", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-setting-badge-rail \{.*?top: -1px;.*?right: -1px;.*?bottom: -1px;",
+        )
+        self.assertRegex(css, r"(?s)\.mod-setting-badge \{.*?writing-mode: vertical-rl;.*?transform: none;")
         self.assertIn(".mod-corner-badges", css)
         self.assertIn(".mod-corner-badges-wide", css)
         self.assertIn(".mod-corner-badge-row-fill", css)
@@ -46,6 +59,12 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-node-badge-wrap", css)
         self.assertIn(".mod-card-hero", css)
         self.assertIn(".mod-card-hero::after", css)
+        self.assertIn("container-name: mod-app-hero", css)
+        self.assertIn("@container mod-app-hero (max-width: 44rem)", css)
+        self.assertRegex(
+            css,
+            r"(?s)@container mod-app-hero .*?\.mod-app-node-badge-wrap \{.*?position: relative;",
+        )
         self.assertIn(".mod-hero-app-title-block", css)
         self.assertIn(".mod-app-hero-starting::after", css)
         self.assertIn(".mod-app-hero-running::after", css)
@@ -55,6 +74,12 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-node-card:hover", css)
         self.assertIn(".mod-card-link:not(.mod-app-card-link):hover", css)
         self.assertIn(".mod-badge-link", css)
+        self.assertIn(".mod-badge-avatar", css)
+        self.assertRegex(css, r"(?s)\.mod-badge-avatar \{.*?padding: 0 !important;.*?overflow: hidden;")
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-badge-avatar-media > img \{.*?inset: 0;.*?width: 100%;.*?height: 100%;.*?object-fit: cover;",
+        )
         self.assertIn(".mod-app-activity-alert", css)
         self.assertIn(".mod-home-section-grid", css)
         self.assertIn(".mod-home-section", css)
@@ -87,6 +112,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("border: 3px solid transparent !important", css)
         self.assertIn(".mod-settings-search", css)
         self.assertIn(".mod-mods-toolbar-search", css)
+        self.assertIn(".mod-mods-toolbar-filters", css)
+        self.assertIn(".mod-mods-toolbar-result-count", css)
+        self.assertIn(".mod-list-button.mod-toolbar-primary", css)
+        self.assertIn(":is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__native", css)
         self.assertIn(".mod-hero-support", css)
         self.assertIn(".mod-hero-actions", css)
         self.assertIn(".mod-status-card", css)

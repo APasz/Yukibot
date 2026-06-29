@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import enum
+import hashlib
 import logging
 import secrets
-import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 from urllib.parse import urlencode
 
 import requests
+from diskcache import Cache
 from fastapi import Request  # pyright: ignore[reportMissingImports]
 from starlette.responses import RedirectResponse, Response  # pyright: ignore[reportMissingImports]
 
@@ -26,8 +30,12 @@ _SESSION_COOKIE_NAME = "yukibot_mod_web_session"
 _OAUTH_STATE_COOKIE_NAME = "yukibot_mod_web_oauth_state"
 _BYPASS_SUPPRESS_COOKIE_NAME = "yukibot_mod_web_bypass_suppressed"
 _OAUTH_STATE_TTL_SECONDS = 10 * 60
-_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
+_BROWSER_SESSION_TTL_SECONDS = 16 * 60 * 60
+_REMEMBERED_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 _DISCORD_REQUEST_TIMEOUT_SECONDS = 10.0
+_CACHE_PAYLOAD_VERSION = 1
+_SESSION_CACHE_KEY_PREFIX = "session:"
+_OAUTH_STATE_CACHE_KEY_PREFIX = "oauth_state:"
 _DEV_BYPASS_ACCOUNT_NAMES: dict[Power_Level, str] = {
     Power_Level.guest: "Dev Guest",
     Power_Level.visitor: "Dev Visitor",
@@ -50,6 +58,21 @@ class ModWebAuthError(ValueError):
     pass
 
 
+class ModWebSessionPersistence(enum.StrEnum):
+    BROWSER_SESSION = "browser_session"
+    REMEMBERED = "remembered"
+
+    @classmethod
+    def from_remembered(cls, remembered: bool) -> ModWebSessionPersistence:
+        return cls.REMEMBERED if remembered else cls.BROWSER_SESSION
+
+    @property
+    def ttl_seconds(self) -> int:
+        if self is ModWebSessionPersistence.BROWSER_SESSION:
+            return _BROWSER_SESSION_TTL_SECONDS
+        return _REMEMBERED_SESSION_TTL_SECONDS
+
+
 @dataclass(frozen=True, slots=True)
 class ModWebUser:
     discord_id: int
@@ -66,6 +89,7 @@ class ModWebUser:
 class ModWebSession:
     session_id: str
     user: ModWebUser
+    persistence: ModWebSessionPersistence
     created_at: int
     expires_at: int
 
@@ -74,15 +98,15 @@ class ModWebSession:
 class PendingOAuthState:
     state: str
     next_path: str
+    persistence: ModWebSessionPersistence
     expires_at: int
 
 
 class ModWebAuthService:
     def __init__(self, auth_config: config.ModWebAuthConfig | None = None) -> None:
         self._config = auth_config or config.MOD_WEB_AUTH
-        self._sessions: dict[str, ModWebSession] = {}
-        self._pending_states: dict[str, PendingOAuthState] = {}
-        self._lock = threading.Lock()
+        cache_directory: Path | None = self._config.session_cache_directory
+        self._cache = Cache(directory=None if cache_directory is None else str(cache_directory))
 
     @property
     def enabled(self) -> bool:
@@ -119,25 +143,30 @@ class ModWebAuthService:
     def redirect_url(self) -> str:
         return self._config.redirect_url
 
-    def login_redirect(self, *, next_path: str = "/") -> RedirectResponse:
+    def login_redirect(
+        self,
+        *,
+        next_path: str = "/",
+        persistence: ModWebSessionPersistence = ModWebSessionPersistence.BROWSER_SESSION,
+    ) -> RedirectResponse:
         if self.bypass_enabled:
-            return self.dev_login_response(level=Power_Level.user, next_path=next_path)
+            return self.dev_login_response(level=Power_Level.user, next_path=next_path, persistence=persistence)
         self._require_configured()
         state = secrets.token_urlsafe(32)
         pending = PendingOAuthState(
             state=state,
             next_path=self._safe_next_path(next_path),
+            persistence=persistence,
             expires_at=self._now() + _OAUTH_STATE_TTL_SECONDS,
         )
-        with self._lock:
-            self._prune_locked()
-            self._pending_states[state] = pending
+        self._store_pending_state(pending)
 
         authorize_url = self._authorize_url(state)
         log.info(
-            "Mod web login redirect created: redirect_uri=%s next_path=%s secure_cookies=%s",
+            "Mod web login redirect created: redirect_uri=%s next_path=%s persistence=%s secure_cookies=%s",
             self._config.redirect_url,
             pending.next_path,
+            pending.persistence.value,
             self._secure_cookies(),
         )
         response = RedirectResponse(authorize_url)
@@ -166,7 +195,7 @@ class ModWebAuthService:
         user = await asyncio.to_thread(self._fetch_user, token)
 
         response = RedirectResponse(pending.next_path)
-        self._set_session_cookie(response, self._create_session(user))
+        self._set_session_cookie(response, self._create_session(user, persistence=pending.persistence))
         response.delete_cookie(_OAUTH_STATE_COOKIE_NAME)
         response.delete_cookie(_BYPASS_SUPPRESS_COOKIE_NAME)
         log.info("Mod web login accepted: user_id=%s username=%s", user.discord_id, user.username)
@@ -175,6 +204,7 @@ class ModWebAuthService:
             user_id=user.discord_id,
             username=user.username,
             auth_kind="discord_oauth",
+            persistence=pending.persistence.value,
         )
         return response
 
@@ -189,27 +219,38 @@ class ModWebAuthService:
         session_id = request.cookies.get(_SESSION_COOKIE_NAME)
         if not session_id:
             return
-        with self._lock:
-            self._sessions.pop(session_id, None)
+        self._cache.delete(self._session_cache_key(session_id), retry=True)
 
     def current_session(self, request: Request) -> ModWebSession | None:
         session_id = request.cookies.get(_SESSION_COOKIE_NAME)
         if not session_id:
             return None
-        with self._lock:
-            self._prune_locked()
-            return self._sessions.get(session_id)
+        cache_key = self._session_cache_key(session_id)
+        raw: object = cast(object, self._cache.get(cache_key, retry=True))
+        if raw is None:
+            return None
+        session = self._session_from_cache_payload(raw, session_id=session_id)
+        if session.expires_at <= self._now():
+            self._cache.delete(cache_key, retry=True)
+            return None
+        return session
 
     def current_user(self, request: Request) -> ModWebUser | None:
         session = self.current_session(request)
         return session.user if session is not None else None
 
-    def dev_login_response(self, *, level: Power_Level, next_path: str = "/") -> RedirectResponse:
+    def dev_login_response(
+        self,
+        *,
+        level: Power_Level,
+        next_path: str = "/",
+        persistence: ModWebSessionPersistence = ModWebSessionPersistence.BROWSER_SESSION,
+    ) -> RedirectResponse:
         if not self.bypass_enabled:
             raise ModWebAuthError("Dev bypass login is not enabled.")
         user = self.dev_bypass_user(level)
         response = RedirectResponse(self._safe_next_path(next_path))
-        self._set_session_cookie(response, self._create_session(user))
+        self._set_session_cookie(response, self._create_session(user, persistence=persistence))
         response.delete_cookie(_BYPASS_SUPPRESS_COOKIE_NAME)
         audit_log(
             "security.mod_web_login",
@@ -217,6 +258,7 @@ class ModWebAuthService:
             username=user.username,
             auth_kind="dev_bypass",
             level=level.name,
+            persistence=persistence.value,
         )
         return response
 
@@ -295,44 +337,177 @@ class ModWebAuthService:
         cookie_state = request.cookies.get(_OAUTH_STATE_COOKIE_NAME)
         if cookie_state != state:
             raise ModWebAuthError("Discord OAuth state did not match this browser session.")
-        with self._lock:
-            self._prune_locked()
-            pending = self._pending_states.pop(state, None)
-        if pending is None:
+        raw: object = cast(
+            object,
+            self._cache.pop(self._oauth_state_cache_key(state), default=None, retry=True),
+        )
+        if raw is None:
+            raise ModWebAuthError("Discord OAuth state expired or was not started by this server.")
+        pending = self._pending_state_from_cache_payload(raw, state=state)
+        if pending.expires_at <= self._now():
             raise ModWebAuthError("Discord OAuth state expired or was not started by this server.")
         return pending
 
-    def _create_session(self, user: ModWebUser) -> ModWebSession:
+    def _create_session(
+        self,
+        user: ModWebUser,
+        *,
+        persistence: ModWebSessionPersistence = ModWebSessionPersistence.BROWSER_SESSION,
+    ) -> ModWebSession:
         now = self._now()
         session = ModWebSession(
             session_id=secrets.token_urlsafe(32),
             user=user,
+            persistence=persistence,
             created_at=now,
-            expires_at=now + _SESSION_TTL_SECONDS,
+            expires_at=now + persistence.ttl_seconds,
         )
-        with self._lock:
-            self._prune_locked()
-            self._sessions[session.session_id] = session
+        stored = self._cache.set(
+            self._session_cache_key(session.session_id),
+            self._session_cache_payload(session),
+            expire=persistence.ttl_seconds,
+            retry=True,
+        )
+        if not stored:
+            raise RuntimeError("Failed to persist the mod web session.")
         return session
 
     def _set_session_cookie(self, response: Response, session: ModWebSession) -> None:
+        if session.persistence is ModWebSessionPersistence.REMEMBERED:
+            response.set_cookie(
+                _SESSION_COOKIE_NAME,
+                session.session_id,
+                max_age=max(0, session.expires_at - self._now()),
+                httponly=True,
+                secure=self._secure_cookies(),
+                samesite="lax",
+            )
+            return
         response.set_cookie(
             _SESSION_COOKIE_NAME,
             session.session_id,
-            max_age=max(0, session.expires_at - self._now()),
             httponly=True,
             secure=self._secure_cookies(),
             samesite="lax",
         )
 
-    def _prune_locked(self) -> None:
-        now = self._now()
-        self._sessions = {
-            session_id: session for session_id, session in self._sessions.items() if session.expires_at > now
+    def close(self) -> None:
+        self._cache.close()
+
+    def _store_pending_state(self, pending: PendingOAuthState) -> None:
+        stored = self._cache.set(
+            self._oauth_state_cache_key(pending.state),
+            self._pending_state_cache_payload(pending),
+            expire=_OAUTH_STATE_TTL_SECONDS,
+            retry=True,
+        )
+        if not stored:
+            raise RuntimeError("Failed to persist the Discord OAuth state.")
+
+    @staticmethod
+    def _session_cache_payload(session: ModWebSession) -> dict[str, object]:
+        return {
+            "version": _CACHE_PAYLOAD_VERSION,
+            "discord_id": session.user.discord_id,
+            "username": session.user.username,
+            "global_name": session.user.global_name,
+            "avatar_hash": session.user.avatar_hash,
+            "persistence": session.persistence.value,
+            "created_at": session.created_at,
+            "expires_at": session.expires_at,
         }
-        self._pending_states = {
-            state: pending for state, pending in self._pending_states.items() if pending.expires_at > now
+
+    @staticmethod
+    def _pending_state_cache_payload(pending: PendingOAuthState) -> dict[str, object]:
+        return {
+            "version": _CACHE_PAYLOAD_VERSION,
+            "next_path": pending.next_path,
+            "persistence": pending.persistence.value,
+            "expires_at": pending.expires_at,
         }
+
+    @classmethod
+    def _session_from_cache_payload(cls, raw: object, *, session_id: str) -> ModWebSession:
+        payload = cls._cache_payload_mapping(raw, kind="session")
+        cls._validate_cache_payload_version(payload, kind="session")
+        return ModWebSession(
+            session_id=session_id,
+            user=ModWebUser(
+                discord_id=cls._cache_payload_int(payload, "discord_id", kind="session"),
+                username=cls._cache_payload_string(payload, "username", kind="session"),
+                global_name=cls._cache_payload_optional_string(payload, "global_name", kind="session"),
+                avatar_hash=cls._cache_payload_optional_string(payload, "avatar_hash", kind="session"),
+            ),
+            persistence=cls._cache_payload_persistence(payload, kind="session"),
+            created_at=cls._cache_payload_int(payload, "created_at", kind="session"),
+            expires_at=cls._cache_payload_int(payload, "expires_at", kind="session"),
+        )
+
+    @classmethod
+    def _pending_state_from_cache_payload(cls, raw: object, *, state: str) -> PendingOAuthState:
+        payload = cls._cache_payload_mapping(raw, kind="OAuth state")
+        cls._validate_cache_payload_version(payload, kind="OAuth state")
+        return PendingOAuthState(
+            state=state,
+            next_path=cls._safe_next_path(cls._cache_payload_string(payload, "next_path", kind="OAuth state")),
+            persistence=cls._cache_payload_persistence(payload, kind="OAuth state"),
+            expires_at=cls._cache_payload_int(payload, "expires_at", kind="OAuth state"),
+        )
+
+    @staticmethod
+    def _cache_payload_mapping(raw: object, *, kind: str) -> Mapping[str, object]:
+        if not isinstance(raw, Mapping):
+            raise ModWebAuthError(f"Persisted mod web {kind} must be an object.")
+        return cast(Mapping[str, object], raw)
+
+    @classmethod
+    def _validate_cache_payload_version(cls, payload: Mapping[str, object], *, kind: str) -> None:
+        version = cls._cache_payload_int(payload, "version", kind=kind)
+        if version != _CACHE_PAYLOAD_VERSION:
+            raise ModWebAuthError(f"Persisted mod web {kind} has unsupported version {version}.")
+
+    @staticmethod
+    def _cache_payload_int(payload: Mapping[str, object], field: str, *, kind: str) -> int:
+        value = payload.get(field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ModWebAuthError(f"Persisted mod web {kind} field {field!r} must be an integer.")
+        return value
+
+    @staticmethod
+    def _cache_payload_string(payload: Mapping[str, object], field: str, *, kind: str) -> str:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value:
+            raise ModWebAuthError(f"Persisted mod web {kind} field {field!r} must be a non-empty string.")
+        return value
+
+    @staticmethod
+    def _cache_payload_optional_string(
+        payload: Mapping[str, object], field: str, *, kind: str
+    ) -> str | None:
+        value = payload.get(field)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value:
+            raise ModWebAuthError(f"Persisted mod web {kind} field {field!r} must be null or a non-empty string.")
+        return value
+
+    @classmethod
+    def _cache_payload_persistence(
+        cls, payload: Mapping[str, object], *, kind: str
+    ) -> ModWebSessionPersistence:
+        value = cls._cache_payload_string(payload, "persistence", kind=kind)
+        try:
+            return ModWebSessionPersistence(value)
+        except ValueError as xcp:
+            raise ModWebAuthError(f"Persisted mod web {kind} has unknown persistence {value!r}.") from xcp
+
+    @staticmethod
+    def _session_cache_key(session_id: str) -> str:
+        return _SESSION_CACHE_KEY_PREFIX + hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _oauth_state_cache_key(state: str) -> str:
+        return _OAUTH_STATE_CACHE_KEY_PREFIX + hashlib.sha256(state.encode("utf-8")).hexdigest()
 
     def _require_configured(self) -> None:
         if not self.enabled or self._config.discord_client_id is None or self._config.discord_client_secret is None:

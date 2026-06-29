@@ -123,6 +123,8 @@ class EnvSettings(BaseSettings):
     mod_web_discord_client_id: str | None = None
     mod_web_discord_client_secret: str | None = None
     mod_web_auth_redirect_url: str | None = None
+    mod_web_session_cache_dir: str | None = None
+    mod_web_build_sha: str | None = None
     dir_tmp: str | None = None
     dir_opt: str | None = None
     exg_token: str | None = None
@@ -151,6 +153,22 @@ class AppScopes(enum.StrEnum):
     ets = "ets"
     factorio = "factorio"
     satisfactory = "satisfactory"
+
+    @property
+    def display_name(self) -> str:
+        match self:
+            case AppScopes.minecraft:
+                return "Minecraft"
+            case AppScopes.sevendays:
+                return "7 Days to Die"
+            case AppScopes.beammp:
+                return "BeamMP"
+            case AppScopes.ets:
+                return "Euro Truck Simulator 2"
+            case AppScopes.factorio:
+                return "Factorio"
+            case AppScopes.satisfactory:
+                return "Satisfactory"
 
 
 class ID_Platforms(enum.StrEnum):
@@ -1182,6 +1200,7 @@ class ModWebAuthConfig:
     discord_client_secret: str | None
     redirect_url: str
     bypass_enabled: bool = False
+    session_cache_directory: Path | None = None
 
     @property
     def enabled(self) -> bool:
@@ -1815,6 +1834,15 @@ def resolve_mod_web_auth_redirect_url(raw: str | None, *, mod_web_public_base_ur
     return urlunsplit((parsed.scheme, parsed.netloc, "/auth/discord/callback", "", ""))
 
 
+def parse_mod_web_build_sha(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", value):
+        raise ValueError("MOD_WEB_BUILD_SHA must be a 7-40 character hexadecimal Git commit SHA.")
+    return value
+
+
 def resolve_public_addr(raw: str | None, *, public_ip: str) -> str:
     if raw is None:
         return public_ip
@@ -1947,7 +1975,9 @@ MOD_WEB_AUTH = ModWebAuthConfig(
         mod_web_public_base_url=MOD_WEB_PUBLIC_BASE_URL,
     ),
     bypass_enabled=BYPASS_WEB_AUTH,
+    session_cache_directory=Path(_env_settings.mod_web_session_cache_dir or ".cache/mod_web_sessions"),
 )
+MOD_WEB_BUILD_SHA = parse_mod_web_build_sha(_env_settings.mod_web_build_sha)
 DATA_AUTHORITY_ENDPOINT = resolve_data_authority_endpoint(
     DATA_AUTHORITY_HOST,
     DATA_AUTHORITY_PORT,
@@ -2167,6 +2197,7 @@ class DisplayNameOverrides(BaseModel):
 class UserNames(BaseModel):
     account: str | None = None
     global_name: str | None = None
+    avatar_hash: str | None = None
     names: set[str] = Field(default_factory=set)
     nicknames: set[str] = Field(default_factory=set)
     games: dict[str, tuple[str | None, str | None]] = Field(default_factory=dict)
@@ -2324,6 +2355,7 @@ class Name_Cache(metaclass=Singleton):
 
     def _normalise_user(self, user: UserNames) -> bool:
         before = user.model_dump(mode="json")
+        user.avatar_hash = self._normalised_optional_text(user.avatar_hash, label="Discord avatar hash")
         user.guild_names = {int(guild_id): name for guild_id, name in user.guild_names.items() if name}
         for category in DisplayNameCategory:
             normalised_override = self._normalised_optional_text(
@@ -2436,6 +2468,7 @@ class Name_Cache(metaclass=Singleton):
             "user_id": user_id,
             "account": user.account,
             "global_name": user.global_name,
+            "avatar_hash": user.avatar_hash,
         }
         if guild_id is not None:
             scoped_guild_id = int(guild_id)
@@ -2461,6 +2494,10 @@ class Name_Cache(metaclass=Singleton):
         before = user.model_dump(mode="json")
         user.account = discord_user.username
         user.global_name = discord_user.global_name
+        user.avatar_hash = self._normalised_optional_text(
+            discord_user.avatar_hash,
+            label="Discord avatar hash",
+        )
         if isinstance(discord_user, hikari.Member):
             guild_id = int(discord_user.guild_id)
             if discord_user.nickname:
@@ -2659,12 +2696,18 @@ class Name_Cache(metaclass=Singleton):
         elif kind is NameMutationKind.SET_NAMES:
             account_in_event = "account" in event
             global_name_in_event = "global_name" in event
+            avatar_hash_in_event = "avatar_hash" in event
             raw_account = event.get("account")
             if account_in_event:
                 user.account = str(raw_account) if raw_account is not None else None
             raw_global_name = event.get("global_name")
             if global_name_in_event:
                 user.global_name = str(raw_global_name) if raw_global_name is not None else None
+            if avatar_hash_in_event:
+                user.avatar_hash = self._normalised_optional_text(
+                    event.get("avatar_hash"),
+                    label="Discord avatar hash",
+                )
             raw_guild_id = event.get("guild_id")
             raw_guild_names = event.get("guild_names")
             if raw_guild_id is not None and raw_guild_names is not None:
@@ -3113,6 +3156,10 @@ class Name_Cache(metaclass=Singleton):
             preferred_platform=preferred_platform,
             default=default,
         )
+
+    def discord_avatar_hash(self, user_id: int) -> str | None:
+        user = self.by_id.get(user_id)
+        return user.avatar_hash if user is not None else None
 
     def web_mention_name(
         self,

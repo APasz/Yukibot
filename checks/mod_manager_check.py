@@ -5,7 +5,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from _mod_ops import NonDownloadableModError, download_paths
-from apps._config import App_Config, ModDownloadBlockReason, ModType
+from apps._config import (
+    App_Config,
+    ClientPackConfig,
+    ClientPackPolicy,
+    ModDownloadBlockReason,
+    ModType,
+)
 from apps._mod import Mod, Mod_Manager
 
 
@@ -170,6 +176,63 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         reloaded = manager.get("example.zip")
         self.assertFalse(reloaded.downloadable)
         self.assertEqual(reloaded.cfg.download_block_reason, ModDownloadBlockReason.SERVER_ONLY)
+
+    async def test_client_pack_choice_group_persists_when_valid(self) -> None:
+        manager = self._build_manager()
+        first = await manager.add(self._write_source_file("first.zip"))
+        second = await manager.add(self._write_source_file("second.zip"))
+        first.cfg.client_pack = ClientPackConfig(
+            policy=ClientPackPolicy.ALTERNATIVE,
+            choice_group="map_renderer",
+            default_choice=True,
+        )
+        second.cfg.client_pack = ClientPackConfig(
+            policy=ClientPackPolicy.ALTERNATIVE,
+            choice_group="map_renderer",
+        )
+
+        await manager.save_mods()
+        await manager.reload_mods()
+
+        self.assertEqual(manager.get("first.zip").cfg.client_pack.choice_group, "map_renderer")
+        self.assertTrue(manager.get("first.zip").cfg.client_pack.default_choice)
+
+    async def test_client_pack_choice_group_requires_one_default(self) -> None:
+        manager = self._build_manager()
+        first = await manager.add(self._write_source_file("first.zip"))
+        second = await manager.add(self._write_source_file("second.zip"))
+        first.cfg.client_pack = ClientPackConfig(
+            policy=ClientPackPolicy.ALTERNATIVE,
+            choice_group="map_renderer",
+        )
+        second.cfg.client_pack = ClientPackConfig(
+            policy=ClientPackPolicy.ALTERNATIVE,
+            choice_group="map_renderer",
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly one default"):
+            await manager.save_mods()
+
+    async def test_remove_rejects_breaking_a_client_pack_choice_group_before_deleting_file(self) -> None:
+        manager = self._build_manager()
+        first = await manager.add(self._write_source_file("first.zip"))
+        second = await manager.add(self._write_source_file("second.zip"))
+        first.cfg.client_pack = ClientPackConfig(
+            policy=ClientPackPolicy.ALTERNATIVE,
+            choice_group="map_renderer",
+            default_choice=True,
+        )
+        second.cfg.client_pack = ClientPackConfig(
+            policy=ClientPackPolicy.ALTERNATIVE,
+            choice_group="map_renderer",
+        )
+        await manager.save_mods()
+
+        with self.assertRaisesRegex(ValueError, "at least two mods"):
+            await manager.remove(second)
+
+        self.assertTrue(second.path.exists())
+        self.assertIs(manager.get(second.name), second)
 
     async def test_download_paths_skip_blocked_mods_for_batch_downloads(self) -> None:
         manager = self._build_manager()
