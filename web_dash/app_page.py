@@ -949,10 +949,6 @@ class ModWebAppPageMixin(
                     target=player_badge,
                     html=(
                         self._player_count_tooltip_html(
-                            player_count=initial_app_stats.player_count if initial_app_stats is not None else None,
-                            player_capacity=initial_app_stats.player_capacity
-                            if initial_app_stats is not None
-                            else None,
                             connected_player_names=initial_app_stats.connected_player_names
                             if initial_app_stats is not None
                             else (),
@@ -1009,8 +1005,6 @@ class ModWebAppPageMixin(
                 player_badge_tooltip,
                 player_badge_tooltip_content,
                 self._player_count_tooltip_html(
-                    player_count=app_stats.player_count if app_stats is not None else None,
-                    player_capacity=app_stats.player_capacity if app_stats is not None else None,
                     connected_player_names=app_stats.connected_player_names if app_stats is not None else (),
                 )
                 or "",

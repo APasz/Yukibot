@@ -1208,8 +1208,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         extra_classes=runtime_badge_classes,
                     )
                     runtime_badge_tooltip_html: str | None = self._player_count_tooltip_html(
-                        player_count=app.player_count,
-                        player_capacity=app.player_capacity,
                         connected_player_names=app.connected_player_names,
                     )
                     if runtime_badge_tooltip_html is not None:

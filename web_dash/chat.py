@@ -598,8 +598,6 @@ class ModWebChatMixin(ModWebServiceSupport):
         app_status_label, app_status_tone = self._chat_app_status_badge(chat_surface.app_stats)
         player_count_badge = self._chat_player_count_badge(chat_surface.app_stats)
         player_count_tooltip_html: str | None = self._player_count_tooltip_html(
-            player_count=chat_surface.app_stats.player_count if chat_surface.app_stats is not None else None,
-            player_capacity=chat_surface.app_stats.player_capacity if chat_surface.app_stats is not None else None,
             connected_player_names=chat_surface.app_stats.connected_player_names
             if chat_surface.app_stats is not None
             else (),
@@ -726,8 +724,6 @@ class ModWebChatMixin(ModWebServiceSupport):
                 self._set_badge_state(app_status_badge_label, latest_status_label, latest_status_tone)
             if player_count_badge_label is not None:
                 player_count_tooltip_html = self._player_count_tooltip_html(
-                    player_count=next_app_stats.player_count if next_app_stats is not None else None,
-                    player_capacity=next_app_stats.player_capacity if next_app_stats is not None else None,
                     connected_player_names=next_app_stats.connected_player_names if next_app_stats is not None else (),
                 )
                 self._set_optional_badge_state(
@@ -1006,8 +1002,6 @@ class ModWebChatMixin(ModWebServiceSupport):
                                     ui=ui,
                                     target=player_count_badge_label,
                                     html=self._player_count_tooltip_html(
-                                        player_count=app_stats.player_count if app_stats is not None else None,
-                                        player_capacity=app_stats.player_capacity if app_stats is not None else None,
                                         connected_player_names=app_stats.connected_player_names
                                         if app_stats is not None
                                         else (),

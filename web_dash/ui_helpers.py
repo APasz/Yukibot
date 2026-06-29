@@ -626,23 +626,9 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
     def _player_count_tooltip_html(
         self,
         *,
-        player_count: int | None,
-        player_capacity: int | None,
         connected_player_names: tuple[str, ...],
     ) -> str | None:
-        if player_count is None or player_capacity is None:
-            return None
-        detail_lines: tuple[str, ...] = (
-            ("Connected players:", *connected_player_names)
-            if connected_player_names
-            else ("No players connected",)
-        )
-        lines: tuple[str, ...] = (
-            "Players",
-            f"Connected: {player_count} / {player_capacity}",
-            *detail_lines,
-        )
-        return self._tooltip_lines_html(lines)
+        return self._tooltip_lines_html(connected_player_names)
 
     @staticmethod
     def _app_list_api_actions_enabled(request: Request) -> bool:

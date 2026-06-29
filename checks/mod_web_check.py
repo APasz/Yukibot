@@ -5616,25 +5616,13 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(
             service._player_count_tooltip_html(
-                player_count=3,
-                player_capacity=20,
                 connected_player_names=("Yoko", "Bea", "Casey"),
             ),
-            "Players<br>Connected: 3 / 20<br>Connected players:<br>Yoko<br>Bea<br>Casey",
-        )
-        self.assertEqual(
-            service._player_count_tooltip_html(
-                player_count=3,
-                player_capacity=20,
-                connected_player_names=(),
-            ),
-            "Players<br>Connected: 3 / 20<br>No players connected",
+            "Yoko<br>Bea<br>Casey",
         )
         self.assertIsNone(
             service._player_count_tooltip_html(
-                player_count=3,
-                player_capacity=None,
-                connected_player_names=("Yoko",),
+                connected_player_names=(),
             )
         )
 
