@@ -153,10 +153,16 @@ class ChatEndpoint:
 @dataclass(frozen=True, slots=True)
 class ChatRoomUpdate:
     room_id: str
+    event: ChatEvent | None = None
+    revision: int = 0
 
     def __post_init__(self) -> None:
         if not self.room_id.strip():
             raise ValueError("Chat room update room id must not be empty.")
+        if self.event is not None and self.event.room_id.casefold() != self.room_id.casefold():
+            raise ValueError("Chat room update event room id is invalid.")
+        if self.revision < 0:
+            raise ValueError("Chat room update revision must not be negative.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +627,7 @@ class ChatHub(metaclass=Singleton):
         self._room_endpoints: dict[str, dict[str, ChatEndpoint]] = {}
         self._endpoint_rooms: dict[ChatEndpointId, set[str]] = {}
         self._history: dict[str, deque[ChatEvent]] = {}
+        self._room_revisions: dict[str, int] = {}
         self._room_subscribers: dict[str, dict[str, Callable[[ChatRoomUpdate], None]]] = {}
         self._lock = threading.RLock()
 
@@ -631,6 +638,7 @@ class ChatHub(metaclass=Singleton):
             room = self._room_endpoints.setdefault(room_id, {})
             room[endpoint.id.stable_key] = endpoint
             self._endpoint_rooms.setdefault(endpoint.id, set()).add(room_id)
+            self._increment_room_revision(room_id)
         log.debug("Chat endpoint bound: room=%s endpoint=%s", room_id, endpoint.id.stable_key)
         self._notify_room_subscribers(room_id)
 
@@ -642,6 +650,7 @@ class ChatHub(metaclass=Singleton):
         with self._lock:
             endpoints = self._room_endpoints.pop(room_id, {})
             history = self._history.pop(room_id, ())
+            self._increment_room_revision(room_id)
             for endpoint in endpoints.values():
                 rooms = self._endpoint_rooms.get(endpoint.id)
                 if rooms is None:
@@ -682,6 +691,7 @@ class ChatHub(metaclass=Singleton):
     def publish(self, event: ChatEvent) -> tuple[ChatEndpoint, ...]:
         with self._lock:
             self._history.setdefault(event.room_id, deque(maxlen=self._history_limit)).append(event)
+            self._increment_room_revision(event.room_id)
             targets = self.endpoints_for_room(event.room_id, exclude=event.source)
         log.debug(
             "Chat event published: room=%s source=%s targets=%s content_len=%s",
@@ -690,7 +700,7 @@ class ChatHub(metaclass=Singleton):
             len(targets),
             len(event.content),
         )
-        self._notify_room_subscribers(event.room_id)
+        self._notify_room_subscribers(event.room_id, event=event)
         return targets
 
     def subscribe(self, room_id: str, callback: Callable[[ChatRoomUpdate], None]) -> str:
@@ -712,17 +722,27 @@ class ChatHub(metaclass=Singleton):
             if not subscribers:
                 self._room_subscribers.pop(room_id, None)
 
-    def _notify_room_subscribers(self, room_id: str) -> None:
+    def _notify_room_subscribers(self, room_id: str, *, event: ChatEvent | None = None) -> None:
         with self._lock:
             callbacks = tuple(self._room_subscribers.get(room_id, {}).values())
+            revision = self._room_revisions.get(room_id, 0)
         if not callbacks:
             return
-        update = ChatRoomUpdate(room_id=room_id)
+        update = ChatRoomUpdate(room_id=room_id, event=event, revision=revision)
         for callback in callbacks:
             try:
                 callback(update)
             except Exception:
                 log.exception("Chat room subscriber callback failed: room=%s", room_id)
+
+    def room_revision(self, room_id: str) -> int:
+        with self._lock:
+            return self._room_revisions.get(room_id, 0)
+
+    def _increment_room_revision(self, room_id: str) -> int:
+        revision = self._room_revisions.get(room_id, 0) + 1
+        self._room_revisions[room_id] = revision
+        return revision
 
     def history(self, room_id: str, *, limit: int | None = None) -> tuple[ChatEvent, ...]:
         with self._lock:

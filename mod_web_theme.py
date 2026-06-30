@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -254,13 +255,6 @@ class ModWebTheme:
                     align-items: flex-end;
                     text-align: right;
                 }}
-                .mod-app-hero-status-label {{
-                    color: rgba(244, 244, 245, 0.66) !important;
-                    font-size: 0.72rem;
-                    font-weight: 800;
-                    letter-spacing: 0.16em;
-                    text-transform: uppercase;
-                }}
                 .mod-app-hero-status-value {{
                     font-size: clamp(1.1rem, 2vw, 1.45rem);
                     font-weight: 900;
@@ -271,6 +265,25 @@ class ModWebTheme:
                 .mod-app-hero-status-value-purple {{ color: #d8b4fe !important; }}
                 .mod-app-hero-status-value-warn {{ color: #fbbf24 !important; }}
                 .mod-app-hero-status-value-red {{ color: #f87171 !important; }}
+                .mod-app-hero-join-addresses {{
+                    max-width: min(32rem, 100%);
+                    margin-top: 0.2rem;
+                    align-items: flex-end;
+                    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+                    overflow-wrap: anywhere;
+                }}
+                .mod-app-hero-join-address {{
+                    color: rgba(244, 244, 245, 0.92) !important;
+                    font-size: 0.9rem;
+                    font-weight: 700;
+                    line-height: 1.25;
+                }}
+                .mod-app-hero-join-address-direct {{
+                    color: rgba(228, 228, 231, 0.58) !important;
+                    font-size: 0.74rem;
+                    font-weight: 600;
+                    line-height: 1.3;
+                }}
                 .mod-hero-support {{
                     max-width: min(42rem, 100%);
                     line-height: 1.35 !important;
@@ -1120,6 +1133,23 @@ class ModWebTheme:
                 }}
                 .mod-list-count {{ color: var(--mod-muted) !important; font-size: 0.88rem; font-weight: 800; }}
                 .mod-list {{ display: flex; flex-direction: column; gap: 0.4rem; }}
+                @supports (content-visibility: auto) {{
+                    .mod-list > .mod-card,
+                    .mod-save-grid > .mod-save-card,
+                    .mod-settings-grid > .mod-setting-card,
+                    .mod-recipe-browser-grid > .mod-recipe-browser-card,
+                    .mod-recipe-manage-list > .mod-recipe-manage-card,
+                    .mod-chat-timeline > .mod-chat-message {{
+                        content-visibility: auto;
+                        contain-intrinsic-size: auto 7rem;
+                    }}
+                    .mod-settings-grid > .mod-setting-card {{
+                        contain-intrinsic-size: auto 9rem;
+                    }}
+                    .mod-chat-timeline > .mod-chat-message {{
+                        contain-intrinsic-size: auto 5rem;
+                    }}
+                }}
                 .mod-tab-toolbar {{
                     display: flex;
                     gap: 0.6rem;
@@ -4063,6 +4093,7 @@ class ModWebTheme:
                         align-items: flex-start;
                         text-align: left;
                     }}
+                    .mod-app-hero-join-addresses {{ align-items: flex-start; }}
                     .mod-status-content {{
                         order: 2;
                         width: 100%;
@@ -4288,6 +4319,14 @@ class ModWebTheme:
             </style>
             """
 
+    def stylesheet(self) -> str:
+        html = self.css()
+        style_start = html.find("<style>")
+        style_end = html.rfind("</style>")
+        if style_start < 0 or style_end <= style_start:
+            raise RuntimeError("Mod web theme CSS wrapper is invalid.")
+        return html[style_start + len("<style>") : style_end]
+
 
 DEFAULT_MOD_WEB_THEME = ModWebTheme(
     name="void_square",
@@ -4319,6 +4358,9 @@ DEFAULT_MOD_WEB_THEME = ModWebTheme(
     ),
 )
 
+MOD_WEB_THEME_STYLESHEET = DEFAULT_MOD_WEB_THEME.stylesheet()
+MOD_WEB_THEME_VERSION = hashlib.sha256(MOD_WEB_THEME_STYLESHEET.encode("utf-8")).hexdigest()[:12]
+
 MOD_WEB_ACTION_BASE_CLASSES = "mod-action inline-flex items-center transition"
 
 
@@ -4337,4 +4379,9 @@ def apply_mod_web_theme(*, ui: Any, theme: ModWebTheme = DEFAULT_MOD_WEB_THEME) 
         info=palette.info,
         warning=palette.warning,
     )
-    ui.add_head_html(theme.css())
+    if theme is DEFAULT_MOD_WEB_THEME:
+        ui.add_head_html(
+            f'<link rel="stylesheet" href="/mod-web/assets/theme.css?v={MOD_WEB_THEME_VERSION}">'
+        )
+    else:
+        ui.add_head_html(theme.css())

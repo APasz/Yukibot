@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ from apps._config import (
 )
 from font_assets import font_assets
 
+from .assets import extract_html_tag_contents
 from .app_page_minecraft import (
     ModWebAppPageMinecraftMixin,
     _MinecraftRecipeBrowserEntry,
@@ -31,6 +33,7 @@ from .constants import (
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _APP_SECTION_QUERY_PARAM,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
+    _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
     log,
 )
 from .nicegui_protocols import (
@@ -286,8 +289,8 @@ class ModWebAppPageMixin(
         initial_system_summary: NodeSystemSummary | None = None,
         chat_surface: _ModWebChatSurfaceConfig | None = None,
     ) -> None:
-        if model.supports_chat != (chat_surface is not None):
-            raise ValueError("App page chat support and chat surface configuration are out of sync.")
+        if chat_surface is not None and not model.supports_chat:
+            raise ValueError("App page received chat configuration for an app without chat support.")
         self._apply_theme(ui=ui)
         current_model: ModWebBasePageModel = model
         last_system_summary: NodeSystemSummary | None = initial_system_summary
@@ -313,6 +316,8 @@ class ModWebAppPageMixin(
                             app_name=model.app_name,
                             title=model.app_friendly,
                             title_font_preset=model.app_title_font_preset,
+                            join_address=model.join_address,
+                            join_direct_ip_address=model.join_direct_ip_address,
                             activity_providers=self._enabled_app_activity_providers(model),
                             initial_app_stats=model.app_stats,
                             refresh_async_app_stats=hero_runtime_refresh,
@@ -323,6 +328,7 @@ class ModWebAppPageMixin(
                         model=model,
                         user=user,
                         refresh_async_runtime_model=refresh_async_runtime_model,
+                        poll_runtime_model=subscribe_app_state_updates is None,
                     )
             self._render_page_load_warnings(
                 ui=ui,
@@ -390,8 +396,8 @@ class ModWebAppPageMixin(
         initial_system_summary: NodeSystemSummary | None = None,
         chat_surface: _ModWebChatSurfaceConfig | None = None,
     ) -> None:
-        if model.supports_chat != (chat_surface is not None):
-            raise ValueError("Overview page chat support and chat surface configuration are out of sync.")
+        if chat_surface is not None and not model.supports_chat:
+            raise ValueError("Overview page received chat configuration for an app without chat support.")
         self._apply_theme(ui=ui)
         current_model: ModWebBasePageModel = model
         last_system_summary: NodeSystemSummary | None = initial_system_summary
@@ -417,6 +423,8 @@ class ModWebAppPageMixin(
                             app_name=model.app_name,
                             title=model.app_friendly,
                             title_font_preset=model.app_title_font_preset,
+                            join_address=model.join_address,
+                            join_direct_ip_address=model.join_direct_ip_address,
                             activity_providers=self._enabled_app_activity_providers(model),
                             initial_app_stats=model.app_stats,
                             refresh_async_app_stats=hero_runtime_refresh,
@@ -427,6 +435,7 @@ class ModWebAppPageMixin(
                         model=model,
                         user=user,
                         refresh_async_runtime_model=refresh_async_runtime_model,
+                        poll_runtime_model=subscribe_app_state_updates is None,
                     )
             self._render_page_load_warnings(
                 ui=ui,
@@ -913,6 +922,8 @@ class ModWebAppPageMixin(
         title_font_preset: str,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...],
         initial_app_stats: NodeAppRuntimeSummary | None,
+        join_address: str | None = None,
+        join_direct_ip_address: str | None = None,
         refresh_async_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]] | None = None,
     ) -> Callable[[NodeAppRuntimeSummary | None], None]:
         initial_runtime_details = self._app_hero_runtime_details(initial_app_stats)
@@ -927,10 +938,14 @@ class ModWebAppPageMixin(
                     if title_style is not None:
                         title_label.style(title_style)
                 with ui.column().classes("mod-app-hero-status gap-1"):
-                    ui.label("Status").classes("mod-app-hero-status-label")
                     status_value_label = ui.label(initial_runtime_details.status_text).classes(
                         f"mod-app-hero-status-value mod-app-hero-status-value-{initial_runtime_details.status_tone}"
                     )
+                    if join_address is not None:
+                        with ui.column().classes("mod-app-hero-join-addresses gap-0"):
+                            ui.label(join_address).classes("mod-app-hero-join-address")
+                            if join_direct_ip_address is not None:
+                                ui.label(join_direct_ip_address).classes("mod-app-hero-join-address-direct")
             runtime_badge_row = ui.row().classes(f"{self._hero_badge_row_classes(fill=True)} w-full")
             with runtime_badge_row:
                 player_badge = ui.label(
@@ -952,6 +967,11 @@ class ModWebAppPageMixin(
                             connected_player_names=initial_app_stats.connected_player_names
                             if initial_app_stats is not None
                             else (),
+                            fallback_text=(
+                                initial_runtime_details.player_count_badge.text
+                                if initial_runtime_details.player_count_badge is not None
+                                else None
+                            ),
                         )
                         or ""
                     ),
@@ -1006,6 +1026,11 @@ class ModWebAppPageMixin(
                 player_badge_tooltip_content,
                 self._player_count_tooltip_html(
                     connected_player_names=app_stats.connected_player_names if app_stats is not None else (),
+                    fallback_text=(
+                        runtime_details.player_count_badge.text
+                        if runtime_details.player_count_badge is not None
+                        else None
+                    ),
                 )
                 or "",
             )
@@ -1417,7 +1442,30 @@ class ModWebAppPageMixin(
 
     @staticmethod
     def _ensure_map_client_assets(ui: ModWebUi) -> None:
-        ui.add_head_html(ModWebAppPageMixin._map_client_assets_html())
+        version = ModWebAppPageMixin._map_client_asset_version()
+        ui.add_head_html(
+            f'<link rel="stylesheet" href="/mod-web/assets/map.css?v={version}">'
+            f'<script src="/mod-web/assets/map.js?v={version}"></script>'
+        )
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _map_client_stylesheet() -> str:
+        return extract_html_tag_contents(ModWebAppPageMixin._map_client_assets_html(), tag_name="style")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _map_client_script() -> str:
+        return extract_html_tag_contents(ModWebAppPageMixin._map_client_assets_html(), tag_name="script")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _map_client_asset_version() -> str:
+        content = (
+            ModWebAppPageMixin._map_client_stylesheet()
+            + ModWebAppPageMixin._map_client_script()
+        ).encode("utf-8")
+        return hashlib.sha256(content).hexdigest()[:12]
 
     @staticmethod
     def _map_client_assets_html() -> str:
@@ -3094,6 +3142,9 @@ class ModWebAppPageMixin(
                       }
                     }, 1000);
                     state.pollTimer = window.setInterval(() => {
+                      if (document.visibilityState !== "visible" || state.container.offsetParent === null) {
+                        return;
+                      }
                       void runMapSync(state, () =>
                         state.manifest && state.currentWorld
                           ? refreshAll(state)
@@ -3213,8 +3264,7 @@ class ModWebAppPageMixin(
             if next_tab_id not in tab_by_id:
                 return
             current_section_url = self._page_tab_url(current_section_url, tab_id=next_tab_id)
-            self._replace_browser_url(ui=ui, target_url=current_section_url)
-            set_section_chrome_visibility(next_tab_id)
+            ui.navigate.to(current_section_url)
 
         with ui.column().classes("w-full gap-3"):
             with ui.row().classes("mod-section-strip w-full items-start justify-between gap-3 flex-wrap"):
@@ -3224,6 +3274,8 @@ class ModWebAppPageMixin(
                             tab_by_id[tab.tab_id] = ui.tab(tab.tab_id, label=tab.label)
                 with ui.row().classes("mod-section-chrome items-start justify-end gap-3 flex-wrap"):
                     for tab in tabs:
+                        if tab.tab_id != initial_tab_id:
+                            continue
                         section_actions: tuple[_ModWebTabActionSpec, ...] = self._page_tab_actions(
                             model=model,
                             user=user,
@@ -3306,6 +3358,8 @@ class ModWebAppPageMixin(
             ).classes("mod-section-panels w-full"):
                 for tab in tabs:
                     with ui.tab_panel(tab_by_id[tab.tab_id]).classes("mod-section-panel w-full"):
+                        if tab.tab_id != initial_tab_id:
+                            continue
                         section_runtime_model = self._render_page_section(
                             ui=ui,
                             model=model,
@@ -3875,6 +3929,7 @@ class ModWebAppPageMixin(
         model: ModWebBasePageModel,
         user: ModWebUser,
         refresh_async_runtime_model: Callable[[], Awaitable[ModWebBasePageModel]] | None = None,
+        poll_runtime_model: bool = True,
     ) -> _ModWebRuntimeToolbarBindings:
         can_control_app_runtime: bool = self._user_has_level(
             user, required_app_mutation_level(NodeAppMutationAction.START)
@@ -4408,7 +4463,11 @@ class ModWebAppPageMixin(
                             "Properties",
                             on_click=details_dialog.open,
                         ).classes("mod-list-button secondary mod-toolbar-button")
-        if (can_control_app_runtime or can_kill_app_runtime) and refresh_async_runtime_model is not None:
+        if (
+            poll_runtime_model
+            and (can_control_app_runtime or can_kill_app_runtime)
+            and refresh_async_runtime_model is not None
+        ):
             def apply_runtime_control_model(runtime_model: ModWebBasePageModel) -> None:
                 _apply_runtime_control_model(runtime_model, force=False)
 
@@ -4470,7 +4529,10 @@ class ModWebAppPageMixin(
                         raise ValueError("Mod search handler is not available.")
                     search_input: Input = (
                         ui.input(placeholder="Search mods")
-                        .props("filled square dense clearable hide-bottom-space color=accent")
+                        .props(
+                            "filled square dense clearable hide-bottom-space color=accent "
+                            f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
+                        )
                         .classes("mod-config-search mod-settings-search mod-mods-toolbar-search")
                     )
                     search_input.on("update:model-value", on_search)

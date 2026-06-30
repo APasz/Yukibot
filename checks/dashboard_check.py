@@ -298,7 +298,10 @@ class DashboardOAuthTests(unittest.TestCase):
             RestartTarget.SYSTEM: config.PersistedRestartSchedule(enabled=False, hour=0, minute=0),
         }
 
-        with patch("cmd_dashboard.available_restart_targets", return_value=(RestartTarget.BOT, RestartTarget.SYSTEM)):
+        with patch(
+            "cmd_dashboard.available_maintenance_restart_targets",
+            return_value=(RestartTarget.BOT, RestartTarget.SYSTEM),
+        ):
             lines = DashboardEditorService._maintenance_schedule_lines(maintenance)
 
         self.assertEqual(lines, ["bot: 04:30", "system: off"])
@@ -307,7 +310,10 @@ class DashboardOAuthTests(unittest.TestCase):
         maintenance = MaintenanceService()
         maintenance._restart_warning = config.PersistedRestartWarning(lead_minutes=25)  # type: ignore[attr-defined]
 
-        with patch("cmd_dashboard.available_restart_targets", return_value=(RestartTarget.BOT, RestartTarget.SYSTEM)):
+        with patch(
+            "cmd_dashboard.available_maintenance_restart_targets",
+            return_value=(RestartTarget.BOT, RestartTarget.SYSTEM),
+        ):
             lines = DashboardEditorService._maintenance_warning_lines(maintenance)
 
         self.assertEqual(

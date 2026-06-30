@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -372,6 +373,35 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
             await main._refresh_portal_remote_state(acl)
 
         to_thread.assert_not_awaited()
+
+    async def test_portal_restart_request_exits_main_process_with_failure(self) -> None:
+        restart_handler: Callable[[], None] = Mock()
+        mod_web = Mock()
+
+        def _set_restart_handler(handler: Callable[[], None]) -> None:
+            nonlocal restart_handler
+            restart_handler = handler
+
+        async def _start(*, acl: object) -> None:
+            del acl
+            restart_handler()
+
+        mod_web.set_process_restart_handler.side_effect = _set_restart_handler
+        mod_web.start = AsyncMock(side_effect=_start)
+
+        with (
+            patch("main.Access_Control", return_value=Mock()),
+            patch("main.ModWebService", return_value=mod_web),
+            patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.LOCAL),
+            patch.object(config, "IS_RESTARTING", False),
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                await main._run_portal()
+
+            self.assertEqual(raised.exception.code, 1)
+            self.assertTrue(config.IS_RESTARTING)
+
+        mod_web.begin_shutdown.assert_called_once_with()
 
     def test_clear_managed_files_once_shortens_threshold_when_debug_disk_is_full(self) -> None:
         with TemporaryDirectory() as temp_dir:

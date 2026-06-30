@@ -12,6 +12,7 @@ from .constants import (
     _HIDDEN_SETTING_CYCLE_VARIANT_COUNT,
     _HIDDEN_SETTING_GLYPHS,
     _SAME_ORIGIN_NODE_PROXY_BASE,
+    _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
     log,
 )
 from .nicegui_protocols import (
@@ -861,7 +862,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         if show_search:
                             search_input: Input = (
                                 ui.input(placeholder="Search saves")
-                                .props("filled square dense clearable hide-bottom-space color=accent")
+                                .props(
+                                    "filled square dense clearable hide-bottom-space color=accent "
+                                    f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
+                                )
                                 .classes("mod-config-search mod-settings-search")
                             )
                             def _refresh_save_tiles(event: ModWebEventArgumentsContainer) -> None:
@@ -976,7 +980,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     if show_search:
                         search_input: Input = (
                             ui.input(placeholder="Search blueprints")
-                            .props("filled square dense clearable hide-bottom-space color=accent")
+                            .props(
+                                "filled square dense clearable hide-bottom-space color=accent "
+                                f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
+                            )
                             .classes("mod-config-search mod-settings-search")
                         )
 
@@ -1422,7 +1429,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
                     search_input = (
                         ui.input(placeholder="Search settings")
-                        .props("filled square dense clearable hide-bottom-space color=accent")
+                        .props(
+                            "filled square dense clearable hide-bottom-space color=accent "
+                            f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
+                        )
                         .classes("mod-config-search mod-settings-search")
                     )
                     def _refresh_setting_cards(event: ModWebEventArgumentsContainer) -> None:
@@ -1898,7 +1908,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 f"{required_level.name.title()} access is required to read config files for {model.app_friendly}."
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_config_content, node, model.app_name, config_id, user)
+        return await self._remote_config_content_async(node, model.app_name, config_id, user)
 
     async def _write_config_content(
         self,
@@ -1913,7 +1923,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 f"{model.config_write_level.name.title()} access is required to write config files for {model.app_friendly}."
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_config_write, node, model.app_name, config_id, content, user)
+        return await self._remote_config_write_async(node, model.app_name, config_id, content, user)
 
     async def _download_save(
         self,
@@ -2169,7 +2179,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not self._user_has_level(user, Power_Level.user):
             raise PermissionError(f"User access is required to delete blueprints for {model.app_friendly}.")
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_blueprint_delete, node, model.app_name, blueprint_id, user)
+        return await self._remote_blueprint_delete_async(node, model.app_name, blueprint_id, user)
 
     async def _upload_mods(
         self,
@@ -2233,7 +2243,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 f"{model.save_write_level.name.title()} access is required to rename saves for {model.app_friendly}."
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_save_rename, node, model.app_name, save_id, new_name, user)
+        return await self._remote_save_rename_async(node, model.app_name, save_id, new_name, user)
 
     async def _delete_save(
         self,
@@ -2247,7 +2257,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 f"{model.save_write_level.name.title()} access is required to delete saves for {model.app_friendly}."
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_save_delete, node, model.app_name, save_id, user)
+        return await self._remote_save_delete_async(node, model.app_name, save_id, user)
 
     async def _write_setting_value(
         self,
@@ -2258,7 +2268,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeSettingMutationResult:
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_setting_write, node, model.app_name, setting_key, value, user)
+        return await self._remote_setting_write_async(node, model.app_name, setting_key, value, user)
 
     async def _save_settings(
         self,
@@ -2267,7 +2277,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeSettingsActionResult:
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_settings_save, node, model.app_name, user)
+        return await self._remote_settings_save_async(node, model.app_name, user)
 
     async def _reload_settings(
         self,
@@ -2276,7 +2286,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeSettingsActionResult:
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_settings_reload, node, model.app_name, user)
+        return await self._remote_settings_reload_async(node, model.app_name, user)
 
     async def _read_console_action_list(
         self,
@@ -2287,7 +2297,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if model.console_actions is None:
             return None
         node = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_console_action_list, node, model.app_name, user)
+        return await self._remote_console_action_list_async(node, model.app_name, user)
 
     async def _execute_console_action(
         self,
@@ -2298,8 +2308,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         user: ModWebUser,
     ) -> NodeConsoleActionExecutionResult:
         node = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(
-            self._remote_execute_console_action,
+        return await self._remote_execute_console_action_async(
             node,
             model.app_name,
             action_key,

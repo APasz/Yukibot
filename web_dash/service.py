@@ -26,20 +26,35 @@ from .nicegui_protocols import (
 from .page_handlers import ModWebPageHandlersMixin
 from .routes import ModWebRoutesMixin
 from .runtime_imports import (
+    AbstractEventLoop,
     Access_Control,
     App,
     App_Manager,
+    Callable,
     ModWebUser,
+    NodeAppStateStreamEvent,
+    NodeConsoleStdoutSnapshot,
+    NodeStateStreamEvent,
     RelayTTSQueue,
+    aiohttp,
     asyncio,
     cast,
     config,
     escape,
+    requests,
     threading,
 )
 from .status import ModWebStatusMixin
+from .stream_broker import (
+    ConsoleStreamKey,
+    RemoteAppStreamKey,
+    RemoteChatStreamKey,
+    RemoteNodeStreamKey,
+    SharedAsyncStreamBroker,
+)
 from .streams import ModWebStreamsMixin
 from .tabs import ModWebTabsMixin
+from .types import RemoteChatBrokerEvent
 from .ui_helpers import ModWebUiHelpersMixin
 
 
@@ -66,6 +81,23 @@ class ModWebService(
         self._started = False
         self._routes_registered = False
         self._shutting_down = False
+        self._remote_http_session: aiohttp.ClientSession | None = None
+        self._remote_http_session_loop: AbstractEventLoop | None = None
+        self._remote_sync_http_local = threading.local()
+        self._remote_sync_http_sessions: list[requests.Session] = []
+        self._remote_sync_http_sessions_lock = threading.Lock()
+        self._remote_node_state_broker: SharedAsyncStreamBroker[RemoteNodeStreamKey, NodeStateStreamEvent] = (
+            SharedAsyncStreamBroker()
+        )
+        self._remote_app_state_broker: SharedAsyncStreamBroker[
+            RemoteAppStreamKey, NodeAppStateStreamEvent
+        ] = SharedAsyncStreamBroker()
+        self._remote_chat_broker: SharedAsyncStreamBroker[
+            RemoteChatStreamKey, RemoteChatBrokerEvent
+        ] = SharedAsyncStreamBroker()
+        self._console_stdout_broker: SharedAsyncStreamBroker[
+            ConsoleStreamKey, NodeConsoleStdoutSnapshot
+        ] = SharedAsyncStreamBroker()
 
     def set_manager(self, manager: App_Manager) -> None:
         self._backend.set_manager(manager)
@@ -80,6 +112,9 @@ class ModWebService(
 
     def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self._backend.set_chat_relay_service(chat_relay)
+
+    def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
+        self._backend.set_process_restart_handler(handler)
 
     @staticmethod
     def _web_display_name(user: ModWebUser) -> str:

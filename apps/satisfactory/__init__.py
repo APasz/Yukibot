@@ -86,6 +86,50 @@ _NETWORK_QUALITY_CHOICES: tuple[ChoiceOption, ...] = (
 )
 _NETWORK_QUALITY_CHOICE_SPEC: ChoiceSpec = ChoiceSpec(*_NETWORK_QUALITY_CHOICES)
 _NETWORK_QUALITY_VALUES: frozenset[str] = frozenset(opt.value for opt in _NETWORK_QUALITY_CHOICES)
+_SATISFACTORY_SCHEMATIC_NAMES: Mapping[str, str] = {
+    "Schematic_1-1": "Base Building",
+    "Schematic_1-2": "Logistics",
+    "Schematic_1-3": "Field Research",
+    "Schematic_2-1": "Part Assembly",
+    "Schematic_2-2": "Obstacle Clearing",
+    "Schematic_2-3": "Jump Pads",
+    "Schematic_2-5": "Resource Sink Bonus Program",
+    "Schematic_3-1": "Coal Power",
+    "Schematic_3-2": "Logistics Mk.2",
+    "Schematic_3-3": "Vehicular Transport",
+    "Schematic_3-4": "Basic Steel Production",
+    "Schematic_4-1": "Advanced Steel Production",
+    "Schematic_4-2": "Enhanced Asset Security",
+    "Schematic_4-3": "Expanded Power Infrastructure",
+    "Schematic_4-4": "Hypertubes",
+    "Schematic_4-5": "FICSIT Blueprints",
+    "Schematic_5-1": "Oil Processing",
+    "Schematic_5-2": "Industrial Manufacturing",
+    "Schematic_5-3": "Logistics Mk.3",
+    "Schematic_5-4": "Fluid Packaging",
+    "Schematic_5-5": "Petroleum Power",
+    "Schematic_6-1": "Logistics Mk.4",
+    "Schematic_6-2": "Jetpack",
+    "Schematic_6-3": "Monorail Train Technology",
+    "Schematic_6-5": "Pipeline Engineering Mk.2",
+    "Schematic_6-6": "FICSIT Blueprints Mk.2",
+    "Schematic_6-7": "Railway Signalling",
+    "Schematic_7-1": "Bauxite Refinement",
+    "Schematic_7-2": "Logistics Mk.5",
+    "Schematic_7-3": "Hazmat Suit",
+    "Schematic_7-4": "Aeronautical Engineering",
+    "Schematic_7-5": "Control System Development",
+    "Schematic_8-1": "Nuclear Power",
+    "Schematic_8-2": "Advanced Aluminum Production",
+    "Schematic_8-3": "Hoverpack",
+    "Schematic_8-4": "Leading-edge Production",
+    "Schematic_8-5": "Particle Enrichment",
+    "Schematic_9-1": "Matter Conversion",
+    "Schematic_9-2": "Quantum Encoding",
+    "Schematic_9-3": "FICSIT Blueprints Mk.3",
+    "Schematic_9-4": "Spatial Energy Regulation",
+    "Schematic_9-5": "Peak Efficiency",
+}
 _SATISFACTORY_BUILD_RE: Pattern[str] = re.compile(
     r"LogInit:\s+Build:\s+\+\+FactoryGame\+rel-main-(?P<version>\d+\.\d+\.\d+)-CL-(?P<build>\d+)",
     re.IGNORECASE,
@@ -1553,8 +1597,10 @@ def _normalise_active_schematic_label(raw: str | None) -> str | None:
     text = text.rsplit("/", 1)[-1]
     if "." in text:
         text = text.rsplit(".", 1)[-1]
-    text = text.removesuffix("_C").replace("_", " ").strip()
-    return text or None
+    schematic_id: str = text.removesuffix("_C")
+    if schematic_name := _SATISFACTORY_SCHEMATIC_NAMES.get(schematic_id):
+        return schematic_name
+    return schematic_id.replace("_", " ").strip() or None
 
 
 class Provider_SatisfactoryDay(AppActivityProvider["Satisfactory"]):

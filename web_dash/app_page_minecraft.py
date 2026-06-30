@@ -27,6 +27,7 @@ from .nicegui_protocols import (
     _event_args_as_text,
     _value_as_object,
 )
+from .constants import _SEARCH_INPUT_DEBOUNCE_MILLISECONDS
 from .runtime_imports import (
     Callable,
     ModWebUser,
@@ -871,7 +872,10 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                 with ui.row().classes("mod-recipe-browser-toolbar"):
                     search_input = (
                         ui.input("Search items", value=editor_state.search_text)
-                        .props("filled square dense clearable hide-bottom-space color=accent")
+                        .props(
+                            "filled square dense clearable hide-bottom-space color=accent "
+                            f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
+                        )
                         .classes("flex-1 min-w-[16rem] mod-config-search mod-recipe-field")
                     )
 

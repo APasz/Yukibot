@@ -78,6 +78,8 @@ from node_api import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
+    NodeConsoleStdoutStreamEvent,
+    NodeConsoleStdoutStreamEventKind,
     NodeDiscordSettingsMutationResult,
     NodeDownloadRequest,
     NodeFontSourceSettingsMutationResult,
@@ -87,6 +89,7 @@ from node_api import (
     NodeMinecraftRecipeWorkspaceState,
     NodeModMutationAction,
     NodeModMutationResult,
+    NodeModList,
     NodeModUploadBatchResult,
     NodeModUploadResult,
     NodeModUploadSource,
@@ -97,6 +100,7 @@ from node_api import (
     NodeSettingEntry,
     NodeSettingList,
     NodeStateStreamEvent,
+    NodeStateTopic,
     NodeSystemSummary,
     NodeWebChatRequest,
     RemoteRelayTTSForwarder,
@@ -1117,6 +1121,7 @@ class NodeApiTests(unittest.TestCase):
         hints = get_type_hints(route)
         self.assertIs(hints["request"], Request)
         self.assertIn("/api/node/ping", handlers)
+        self.assertIn("/api/node/restart", handlers)
         self.assertIn("/api/node/presence/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
 
@@ -1156,6 +1161,7 @@ class NodeApiTests(unittest.TestCase):
             room_id="minecraft_alpha",
             endpoint_count=1,
             events=(),
+            revision=4,
         )
         app_stats = NodeAppRuntimeSummary(
             running=True,
@@ -1171,17 +1177,64 @@ class NodeApiTests(unittest.TestCase):
             transition_state=NodeAppTransitionState.NONE,
             connected_player_names=("Yoko", "Bea"),
         )
+        delta = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.web_session("session-1"),
+            author=ChatAuthor(ChatAuthorKind.WEB_USER, "Tester"),
+            content="hello",
+        )
         event = NodeChatStreamEvent(
             kind=NodeChatStreamEventKind.RUNTIME_CHANGED,
             room_id="minecraft_alpha",
             snapshot=snapshot,
             app_stats=app_stats,
+            events=(delta,),
+            revision=5,
         )
 
         mapped = event.to_mapping()
         restored = NodeChatStreamEvent.from_mapping(mapped)
 
         self.assertEqual(restored, event)
+
+    def test_console_stdout_append_event_round_trips_and_applies(self) -> None:
+        initial = NodeConsoleStdoutSnapshot(
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            node="erin",
+            lines=("first", "second"),
+            truncated=False,
+            running=True,
+        )
+        event = NodeConsoleStdoutStreamEvent(
+            kind=NodeConsoleStdoutStreamEventKind.APPEND,
+            app_name=initial.app_name,
+            appended_lines=("third", "fourth"),
+            truncated=True,
+            running=True,
+        )
+
+        restored = NodeConsoleStdoutStreamEvent.from_mapping(event.to_mapping())
+        updated = restored.apply(initial, max_lines=3)
+
+        self.assertEqual(restored, event)
+        self.assertEqual(updated.lines, ("second", "third", "fourth"))
+        self.assertTrue(updated.truncated)
+
+    def test_console_stdout_overlap_detects_rolling_tail(self) -> None:
+        previous = NodeConsoleStdoutSnapshot(
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            node="erin",
+            lines=("first", "second", "third"),
+            truncated=False,
+            running=True,
+        )
+        updated = replace(previous, lines=("second", "third", "fourth"), truncated=True)
+
+        appended = NodeApiService._console_stdout_appended_lines(previous, updated)
+
+        self.assertEqual(appended, ("fourth",))
 
     def test_app_state_stream_event_round_trips_mapping(self) -> None:
         app_stats = NodeAppRuntimeSummary(
@@ -2222,6 +2275,8 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(entry.enabled)
         self.assertFalse(entry.supports_chat)
         self.assertIsNone(entry.map_url)
+        self.assertIsNone(entry.join_address)
+        self.assertIsNone(entry.join_direct_ip_address)
 
     def test_node_app_entry_accepts_canonical_power_level_parser_inputs(self) -> None:
         entry = NodeAppEntry.from_mapping(
@@ -2256,6 +2311,24 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(entry.map_url, map_url)
         self.assertEqual(entry.to_mapping()["map_url"], map_url)
+
+    def test_node_app_entry_round_trips_join_addresses(self) -> None:
+        entry = NodeAppEntry.from_mapping(
+            {
+                "name": "minecraft_alpha",
+                "friendly": "Minecraft Alpha",
+                "node": "erin",
+                "supports_mods": True,
+                "supports_configs": True,
+                "join_address": "play.example.test:25565",
+                "join_direct_ip_address": "203.0.113.10:25565",
+            }
+        )
+
+        self.assertEqual(entry.join_address, "play.example.test:25565")
+        self.assertEqual(entry.join_direct_ip_address, "203.0.113.10:25565")
+        self.assertEqual(entry.to_mapping()["join_address"], "play.example.test:25565")
+        self.assertEqual(entry.to_mapping()["join_direct_ip_address"], "203.0.113.10:25565")
 
     def test_missing_route_app_name_parses_app_paths(self) -> None:
         self.assertEqual(
@@ -2343,6 +2416,8 @@ class NodeApiTests(unittest.TestCase):
         app.cfg.lifecycle_notice_started = False
         app.cfg.lifecycle_notice_stopped = True
         app.cfg.lifecycle_notice_crashed = False
+        app.cfg.join_host = "play.example.test"
+        app.cfg.join_port = 25565
         app.cfg.resource_points = SimpleNamespace(
             running=SimpleNamespace(cpu_points=3, ram_points=6),
             startup_points=SimpleNamespace(cpu_points=5, ram_points=8),
@@ -2351,13 +2426,17 @@ class NodeApiTests(unittest.TestCase):
         app.chat_relay_outbound = True
         app.am_receiver = _DummyReceiver()
 
-        entry = NodeApiService().build_app_entry(
-            app,
-            transition_state=NodeAppTransitionState.STARTING,
-            player_count=2,
-            player_capacity=8,
-            connected_player_names=("Alice", "Bob"),
-        )
+        with (
+            patch.object(config, "PUBLIC_ADDR", "play.example.test"),
+            patch.object(config, "PUBLIC_IP", "203.0.113.10"),
+        ):
+            entry = NodeApiService().build_app_entry(
+                app,
+                transition_state=NodeAppTransitionState.STARTING,
+                player_count=2,
+                player_capacity=8,
+                connected_player_names=("Alice", "Bob"),
+            )
 
         self.assertEqual(entry.name, app.name)
         self.assertEqual(entry.node, config.MOD_WEB_SERVER.node_name)
@@ -2367,6 +2446,8 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.connected_player_names, ("Alice", "Bob"))
         self.assertTrue(entry.supports_chat)
         self.assertEqual(entry.map_url, "https://example.invalid/squaremap/?world=minecraft_overworld")
+        self.assertEqual(entry.join_address, "play.example.test:25565")
+        self.assertEqual(entry.join_direct_ip_address, "203.0.113.10:25565")
         self.assertEqual(entry.title_font_preset, AppTitleFont.MINECRAFT_TEN.value)
         self.assertEqual(entry.notes, "Keep two slots reserved for staff.")
         self.assertFalse(entry.lifecycle_notice_started)
@@ -3846,9 +3927,14 @@ class NodeApiTests(unittest.TestCase):
                 patch.object(NodeApiService, "_app_footprint_size_bytes", return_value=8),
             ):
                 service = NodeApiService()
-                model = asyncio.run(service.build_mod_list(app))
+                async def build_twice() -> tuple[NodeModList, NodeModList]:
+                    return await service.build_mod_list(app), await service.build_mod_list(app)
+
+                model, second_model = asyncio.run(build_twice())
 
         self.assertEqual(model.node, "erin")
+        self.assertEqual(second_model, model)
+        mod_manager.reload_mods.assert_awaited_once_with()
         self.assertEqual(model.summary.total_count, 1)
         self.assertEqual(model.summary.enabled_count, 1)
         self.assertEqual(model.summary.downloadable_count, 1)
@@ -3866,6 +3952,62 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(model.app_stats.relay_support.value, "bidirectional")
         self.assertEqual(model.app_stats.storage_percent, 42)
         self.assertEqual(model.app_stats.footprint_bytes, 8)
+
+    def test_cached_runtime_summary_single_flights_concurrent_requests(self) -> None:
+        app = _build_app(Mock())
+        summary = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version="1.0.0",
+            player_count=1,
+            player_capacity=8,
+            relay_support=ChatRelaySupport.NONE,
+            storage_percent=20,
+            storage_free_bytes=80,
+            storage_total_bytes=100,
+            footprint_bytes=42,
+        )
+        service = NodeApiService()
+
+        async def exercise() -> tuple[NodeAppRuntimeSummary, NodeAppRuntimeSummary]:
+            with patch.object(
+                service,
+                "build_app_runtime_summary",
+                new=AsyncMock(return_value=summary),
+            ) as build_summary:
+                first, second = await asyncio.gather(
+                    service.build_cached_app_runtime_summary(app),
+                    service.build_cached_app_runtime_summary(app),
+                )
+                build_summary.assert_awaited_once_with(app)
+                return first, second
+
+        first, second = asyncio.run(exercise())
+
+        self.assertEqual(first, summary)
+        self.assertEqual(second, summary)
+
+    def test_app_entry_cache_serves_stale_snapshot_when_refresh_fails(self) -> None:
+        service = NodeApiService()
+
+        async def exercise() -> tuple[tuple[NodeAppEntry, ...], tuple[NodeAppEntry, ...]]:
+            with (
+                patch.object(
+                    service,
+                    "_build_app_entries",
+                    new=AsyncMock(side_effect=((), RuntimeError("temporary failure"))),
+                ) as build_entries,
+                patch("node_api._NODE_APP_ENTRY_CACHE_TTL_SECONDS", 0),
+            ):
+                first = await service.list_apps()
+                second = await service.list_apps()
+                self.assertEqual(build_entries.await_count, 2)
+                return first, second
+
+        first, second = asyncio.run(exercise())
+
+        self.assertEqual(first, ())
+        self.assertEqual(second, ())
 
     def test_build_app_runtime_summary_reports_total_app_footprint(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -4183,6 +4325,45 @@ class NodeApiTests(unittest.TestCase):
                     ),
                 ],
             )
+
+        asyncio.run(exercise())
+
+    def test_local_node_system_subscription_does_not_build_app_entries(self) -> None:
+        async def exercise() -> None:
+            summary = NodeSystemSummary(
+                cpu_percent=10,
+                ram_percent=20,
+                ram_used_bytes=2,
+                ram_total_bytes=10,
+                storage_percent=30,
+                storage_free_bytes=20,
+                storage_total_bytes=30,
+            )
+            service = NodeApiService()
+            received = asyncio.Event()
+
+            def on_update(_event: NodeStateStreamEvent) -> None:
+                received.set()
+
+            with (
+                patch.object(
+                    service,
+                    "list_apps",
+                    new=AsyncMock(side_effect=AssertionError("App entries should not be built")),
+                ) as list_apps,
+                patch.object(service, "build_system_summary", return_value=summary),
+            ):
+                unsubscribe = service.subscribe_local_node_state(
+                    on_update,
+                    topics=frozenset({NodeStateTopic.SYSTEM}),
+                )
+                try:
+                    await asyncio.wait_for(received.wait(), timeout=0.2)
+                finally:
+                    unsubscribe()
+                    await asyncio.sleep(0)
+
+                list_apps.assert_not_awaited()
 
         asyncio.run(exercise())
 

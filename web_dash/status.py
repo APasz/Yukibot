@@ -362,7 +362,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
             return config.icon_markup
         return self._generic_error_icon_markup()
 
-    def _authorised_page_user(
+    async def _authorised_page_user(
         self, *, ui: ModWebUi, request: Request, required_level: Power_Level
     ) -> ModWebUser | None:
         if not self._auth.enabled:
@@ -370,7 +370,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
             return None
         user: ModWebUser | None = self._auth.current_user(request)
         if user is None:
-            self._render_login_page(
+            await self._render_login_page(
                 ui=ui,
                 next_path=self._request_path(request),
                 request=request,
@@ -434,10 +434,17 @@ class ModWebStatusMixin(ModWebServiceSupport):
             ),
         )
 
-    def _render_login_page(self, *, ui: ModWebUi, next_path: str, request: Request, show_api_actions: bool) -> None:
+    async def _render_login_page(
+        self,
+        *,
+        ui: ModWebUi,
+        next_path: str,
+        request: Request,
+        show_api_actions: bool,
+    ) -> None:
         self._apply_theme(ui=ui)
         simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
-        node_statuses: tuple[ModWebNodeStatus, ...] = self._login_node_statuses(
+        node_statuses: tuple[ModWebNodeStatus, ...] = await self._login_node_statuses_async(
             simulated_down_node_names=simulated_down_node_names
         )
         login_presence_badge_specs: list[_ModWebNodePresenceBadgeSpec] = []

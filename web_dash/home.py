@@ -190,11 +190,39 @@ class ModWebHomeMixin(ModWebServiceSupport):
         self._apply_theme(ui=ui)
         request_path: str = self._request_path(request)
         simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
-        sections: tuple[ModWebNodeAppSection, ...] = await self._home_app_sections(
-            user, simulated_down_node_names=simulated_down_node_names
+        simulated_down_keys = {node_name.casefold() for node_name in simulated_down_node_names}
+        summary_nodes = tuple(
+            node for node in self._node_links() if node.node_name.casefold() not in simulated_down_keys
         )
+
+        async def _load_system_summary(node: ModWebNodeLink) -> NodeSystemSummary | None:
+            return await self._remote_node_system_summary_or_none_async(
+                node,
+                user,
+                error_context="Remote mod web home system summary failed",
+            )
+
+        summary_tasks = tuple(
+            asyncio.create_task(_load_system_summary(node))
+            for node in summary_nodes
+        )
+        try:
+            sections: tuple[ModWebNodeAppSection, ...] = await self._home_app_sections(
+                user, simulated_down_node_names=simulated_down_node_names
+            )
+            summary_values = await asyncio.gather(*summary_tasks)
+        except BaseException:
+            for summary_task in summary_tasks:
+                summary_task.cancel()
+            await asyncio.gather(*summary_tasks, return_exceptions=True)
+            raise
+        system_summaries_by_node = {
+            node.node_name: summary for node, summary in zip(summary_nodes, summary_values, strict=True)
+        }
         home_node_summaries: tuple[ModWebHomeNodeSummary, ...] = await self._home_node_summaries(
-            sections=sections, user=user
+            sections=sections,
+            user=user,
+            system_summaries_by_node=system_summaries_by_node,
         )
         node_order: tuple[str, ...] = tuple[str, ...](section.node.node_name for section in sections)
         sections_by_node: dict[str, ModWebNodeAppSection] = {section.node.node_name: section for section in sections}
@@ -203,7 +231,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
         }
         dev_mode_enabled: bool = config.INDEV
         can_manage_node_configuration: bool = self._user_has_level(user, Power_Level.root)
-        simulated_down_keys: set[str] = {node_name.casefold() for node_name in simulated_down_node_names}
         node_settings_panel: _ModWebNodeSettingsPanelState | None = None
         node_dialog_simulate_button: Button | None = None
         node_capacity_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
@@ -1209,6 +1236,15 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     )
                     runtime_badge_tooltip_html: str | None = self._player_count_tooltip_html(
                         connected_player_names=app.connected_player_names,
+                        fallback_text=(
+                            runtime_badge.text
+                            if runtime_badge.text
+                            == self._player_count_snapshot_text(
+                                player_count=app.player_count,
+                                player_capacity=app.player_capacity,
+                            )
+                            else None
+                        ),
                     )
                     if runtime_badge_tooltip_html is not None:
                         self._attach_html_tooltip(ui=ui, target=runtime_badge_label, html=runtime_badge_tooltip_html)

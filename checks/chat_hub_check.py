@@ -16,6 +16,7 @@ from chat_hub import (
     ChatLinkVariant,
     ChatMessageReference,
     ChatReferenceKind,
+    ChatRoomUpdate,
 )
 from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource
 
@@ -119,6 +120,56 @@ class ChatHubTests(unittest.TestCase):
             hub.clear_room(room_id)
 
         self.assertEqual(updates, [])
+
+    def test_room_subscription_includes_published_event_delta(self) -> None:
+        hub = ChatHub()
+        room_id = "factorio_delta"
+        endpoint = ChatEndpoint(ChatEndpointId.app(room_id), "Factorio Delta")
+        event = ChatEvent(
+            room_id=room_id,
+            source=endpoint.id,
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="hello",
+        )
+        updates: list[ChatRoomUpdate] = []
+        hub.clear_room(room_id)
+        subscription_id = hub.subscribe(room_id, updates.append)
+
+        try:
+            hub.publish(event)
+        finally:
+            hub.unsubscribe(room_id, subscription_id)
+            hub.clear_room(room_id)
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].room_id, room_id)
+        self.assertEqual(updates[0].event, event)
+        self.assertGreater(updates[0].revision, 0)
+
+    def test_room_revision_advances_for_each_visible_change(self) -> None:
+        hub = ChatHub()
+        room_id = "factorio_revision"
+        endpoint = ChatEndpoint(ChatEndpointId.app(room_id), "Factorio Revision")
+        hub.clear_room(room_id)
+        initial_revision = hub.room_revision(room_id)
+
+        try:
+            hub.bind(room_id, endpoint)
+            bound_revision = hub.room_revision(room_id)
+            hub.publish(
+                ChatEvent(
+                    room_id=room_id,
+                    source=endpoint.id,
+                    author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+                    content="hello",
+                )
+            )
+            published_revision = hub.room_revision(room_id)
+        finally:
+            hub.clear_room(room_id)
+
+        self.assertEqual(bound_revision, initial_revision + 1)
+        self.assertEqual(published_revision, bound_revision + 1)
 
     def test_author_accepts_hex_colour_for_ui_display(self) -> None:
         author = ChatAuthor(ChatAuthorKind.DISCORD_USER, "Erin", color_hex="#aabbcc")

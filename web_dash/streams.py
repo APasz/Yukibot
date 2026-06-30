@@ -4,7 +4,6 @@ from .constants import (
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
     _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS,
-    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     log,
 )
 from .json_helpers import _json_object_from_text
@@ -19,7 +18,9 @@ from .runtime_imports import (
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeConsoleStdoutSnapshot,
+    NodeConsoleStdoutStreamEvent,
     NodeStateStreamEvent,
+    NodeStateTopic,
     NodeSystemSummary,
     aiohttp,
     asyncio,
@@ -30,6 +31,7 @@ from .runtime_imports import (
     urlunsplit,
 )
 from .service_base import ModWebServiceSupport
+from .stream_broker import ConsoleStreamKey, RemoteAppStreamKey, RemoteNodeStreamKey
 from .types import ModWebNodeLink
 
 _LOCAL_CONSOLE_STDOUT_SUBSCRIPTION_INTERVAL_SECONDS = 0.5
@@ -56,7 +58,8 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                 on_update(NodeAppStateStreamEvent.system(app_name=app.name, system_summary=event.system_summary))
                 if (not event.is_initial and event.system_summary is not None)
                 else None
-            )
+            ),
+            topics=frozenset({NodeStateTopic.SYSTEM}),
         )
 
         def _unsubscribe() -> None:
@@ -73,19 +76,17 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         user: ModWebUser,
         on_update: Callable[[NodeAppStateStreamEvent], None],
     ) -> Callable[[], None]:
-        stream_task = asyncio.create_task(
-            self._remote_app_state_stream_listener(
+        key = RemoteAppStreamKey(node=node, app_name=app_name.casefold())
+        return self._remote_app_state_broker.subscribe(
+            key=key,
+            callback=on_update,
+            listener_factory=lambda publish: self._remote_app_state_stream_listener(
                 node=node,
                 app_name=app_name,
                 user=user,
-                on_update=on_update,
-            )
+                on_update=publish,
+            ),
         )
-
-        def _unsubscribe() -> None:
-            stream_task.cancel()
-
-        return _unsubscribe
 
     def _create_remote_node_state_subscription(
         self,
@@ -94,18 +95,16 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         user: ModWebUser,
         on_update: Callable[[NodeStateStreamEvent], None],
     ) -> Callable[[], None]:
-        stream_task = asyncio.create_task(
-            self._remote_node_state_stream_listener(
+        key = RemoteNodeStreamKey(node=node)
+        return self._remote_node_state_broker.subscribe(
+            key=key,
+            callback=on_update,
+            listener_factory=lambda publish: self._remote_node_state_stream_listener(
                 node=node,
                 user=user,
-                on_update=on_update,
-            )
+                on_update=publish,
+            ),
         )
-
-        def _unsubscribe() -> None:
-            stream_task.cancel()
-
-        return _unsubscribe
 
     def _subscribe_local_app_console_stdout(
         self,
@@ -114,18 +113,16 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         max_lines: int,
         on_update: Callable[[NodeConsoleStdoutSnapshot], None],
     ) -> Callable[[], None]:
-        stream_task = asyncio.create_task(
-            self._local_app_console_stdout_listener(
+        key = ConsoleStreamKey(node=None, app_name=app.name.casefold(), max_lines=max_lines)
+        return self._console_stdout_broker.subscribe(
+            key=key,
+            callback=on_update,
+            listener_factory=lambda publish: self._local_app_console_stdout_listener(
                 app=app,
                 max_lines=max_lines,
-                on_update=on_update,
-            )
+                on_update=publish,
+            ),
         )
-
-        def _unsubscribe() -> None:
-            stream_task.cancel()
-
-        return _unsubscribe
 
     def _create_remote_console_stdout_subscription(
         self,
@@ -136,20 +133,18 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         user: ModWebUser,
         on_update: Callable[[NodeConsoleStdoutSnapshot], None],
     ) -> Callable[[], None]:
-        stream_task = asyncio.create_task(
-            self._remote_console_stdout_stream_listener(
+        key = ConsoleStreamKey(node=node, app_name=app_name.casefold(), max_lines=max_lines)
+        return self._console_stdout_broker.subscribe(
+            key=key,
+            callback=on_update,
+            listener_factory=lambda publish: self._remote_console_stdout_stream_listener(
                 node=node,
                 app_name=app_name,
                 max_lines=max_lines,
                 user=user,
-                on_update=on_update,
-            )
+                on_update=publish,
+            ),
         )
-
-        def _unsubscribe() -> None:
-            stream_task.cancel()
-
-        return _unsubscribe
 
     async def _remote_app_state_stream_listener(
         self,
@@ -167,40 +162,35 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     scopes=(NodeApiScope.APPS_READ, NodeApiScope.MODS_READ),
                     user=user,
                 )
-                timeout = aiohttp.ClientTimeout(
-                    total=None,
-                    connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                    sock_connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                )
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.ws_connect(
-                        self._remote_app_state_stream_url(node=node, app_name=app_name),
-                        headers={"Authorization": f"Bearer {token}"},
-                        heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
-                    ) as websocket:
-                        async for message in websocket:
-                            if message.type == aiohttp.WSMsgType.TEXT:
-                                payload_text: object = cast(object, message.data)
-                                payload = _json_object_from_text(
-                                    payload_text,
-                                    context="Remote app state stream message",
+                session = await self._remote_http_client()
+                async with session.ws_connect(
+                    self._remote_app_state_stream_url(node=node, app_name=app_name),
+                    headers={"Authorization": f"Bearer {token}"},
+                    heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
+                ) as websocket:
+                    async for message in websocket:
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            payload_text: object = cast(object, message.data)
+                            payload = _json_object_from_text(
+                                payload_text,
+                                context="Remote app state stream message",
+                            )
+                            event = NodeAppStateStreamEvent.from_mapping(payload)
+                            if event.app_name.casefold() != app_name.casefold():
+                                raise RuntimeError(
+                                    "Remote app state stream app mismatch: "
+                                    f"expected={app_name!r} got={event.app_name!r}"
                                 )
-                                event = NodeAppStateStreamEvent.from_mapping(payload)
-                                if event.app_name.casefold() != app_name.casefold():
-                                    raise RuntimeError(
-                                        "Remote app state stream app mismatch: "
-                                        f"expected={app_name!r} got={event.app_name!r}"
-                                    )
-                                on_update(event)
-                                continue
-                            if message.type in {
-                                aiohttp.WSMsgType.CLOSE,
-                                aiohttp.WSMsgType.CLOSED,
-                                aiohttp.WSMsgType.CLOSING,
-                            }:
-                                break
-                            if message.type == aiohttp.WSMsgType.ERROR:
-                                raise RuntimeError(f"Remote app state stream websocket error: {websocket.exception()}")
+                            on_update(event)
+                            continue
+                        if message.type in {
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSING,
+                        }:
+                            break
+                        if message.type == aiohttp.WSMsgType.ERROR:
+                            raise RuntimeError(f"Remote app state stream websocket error: {websocket.exception()}")
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
@@ -257,40 +247,41 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     scopes=(NodeApiScope.APP_CONTROL,),
                     user=user,
                 )
-                timeout = aiohttp.ClientTimeout(
-                    total=None,
-                    connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                    sock_connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                )
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.ws_connect(
-                        self._remote_console_stdout_stream_url(node=node, app_name=app_name, max_lines=max_lines),
-                        headers={"Authorization": f"Bearer {token}"},
-                        heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
-                    ) as websocket:
-                        async for message in websocket:
-                            if message.type == aiohttp.WSMsgType.TEXT:
-                                payload_text: object = cast(object, message.data)
-                                payload = _json_object_from_text(
-                                    payload_text,
-                                    context="Remote console stdout stream message",
-                                )
+                session = await self._remote_http_client()
+                async with session.ws_connect(
+                    self._remote_console_stdout_stream_url(node=node, app_name=app_name, max_lines=max_lines),
+                    headers={"Authorization": f"Bearer {token}"},
+                    heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
+                ) as websocket:
+                    current_snapshot: NodeConsoleStdoutSnapshot | None = None
+                    async for message in websocket:
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            payload_text: object = cast(object, message.data)
+                            payload = _json_object_from_text(
+                                payload_text,
+                                context="Remote console stdout stream message",
+                            )
+                            if "kind" in payload:
+                                stream_event = NodeConsoleStdoutStreamEvent.from_mapping(payload)
+                                snapshot = stream_event.apply(current_snapshot, max_lines=max_lines)
+                            else:
                                 snapshot = NodeConsoleStdoutSnapshot.from_mapping(payload)
-                                if snapshot.app_name.casefold() != app_name.casefold():
-                                    raise RuntimeError(
-                                        "Remote console stdout stream app mismatch: "
-                                        f"expected={app_name!r} got={snapshot.app_name!r}"
-                                    )
-                                on_update(snapshot)
-                                continue
-                            if message.type in {
-                                aiohttp.WSMsgType.CLOSE,
-                                aiohttp.WSMsgType.CLOSED,
-                                aiohttp.WSMsgType.CLOSING,
-                            }:
-                                break
-                            if message.type == aiohttp.WSMsgType.ERROR:
-                                raise RuntimeError(f"Remote console stdout websocket error: {websocket.exception()}")
+                            if snapshot.app_name.casefold() != app_name.casefold():
+                                raise RuntimeError(
+                                    "Remote console stdout stream app mismatch: "
+                                    f"expected={app_name!r} got={snapshot.app_name!r}"
+                                )
+                            current_snapshot = snapshot
+                            on_update(snapshot)
+                            continue
+                        if message.type in {
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSING,
+                        }:
+                            break
+                        if message.type == aiohttp.WSMsgType.ERROR:
+                            raise RuntimeError(f"Remote console stdout websocket error: {websocket.exception()}")
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
@@ -328,8 +319,7 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         previous_snapshot: NodeConsoleStdoutSnapshot | None = None
         while True:
             try:
-                next_snapshot = await asyncio.to_thread(
-                    self._remote_console_stdout,
+                next_snapshot = await self._remote_console_stdout_async(
                     node,
                     app_name,
                     max_lines=max_lines,
@@ -416,40 +406,35 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                     scopes=(NodeApiScope.APPS_READ,),
                     user=user,
                 )
-                timeout = aiohttp.ClientTimeout(
-                    total=None,
-                    connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                    sock_connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                )
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.ws_connect(
-                        self._remote_node_state_stream_url(node=node),
-                        headers={"Authorization": f"Bearer {token}"},
-                        heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
-                    ) as websocket:
-                        async for message in websocket:
-                            if message.type == aiohttp.WSMsgType.TEXT:
-                                payload_text: object = cast(object, message.data)
-                                payload = _json_object_from_text(
-                                    payload_text,
-                                    context="Remote node state stream message",
+                session = await self._remote_http_client()
+                async with session.ws_connect(
+                    self._remote_node_state_stream_url(node=node),
+                    headers={"Authorization": f"Bearer {token}"},
+                    heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
+                ) as websocket:
+                    async for message in websocket:
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            payload_text: object = cast(object, message.data)
+                            payload = _json_object_from_text(
+                                payload_text,
+                                context="Remote node state stream message",
+                            )
+                            event = NodeStateStreamEvent.from_mapping(payload)
+                            if event.node_name.casefold() != node.node_name.casefold():
+                                raise RuntimeError(
+                                    "Remote node state stream node mismatch: "
+                                    f"expected={node.node_name!r} got={event.node_name!r}"
                                 )
-                                event = NodeStateStreamEvent.from_mapping(payload)
-                                if event.node_name.casefold() != node.node_name.casefold():
-                                    raise RuntimeError(
-                                        "Remote node state stream node mismatch: "
-                                        f"expected={node.node_name!r} got={event.node_name!r}"
-                                    )
-                                on_update(event)
-                                continue
-                            if message.type in {
-                                aiohttp.WSMsgType.CLOSE,
-                                aiohttp.WSMsgType.CLOSED,
-                                aiohttp.WSMsgType.CLOSING,
-                            }:
-                                break
-                            if message.type == aiohttp.WSMsgType.ERROR:
-                                raise RuntimeError(f"Remote node state stream websocket error: {websocket.exception()}")
+                            on_update(event)
+                            continue
+                        if message.type in {
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSING,
+                        }:
+                            break
+                        if message.type == aiohttp.WSMsgType.ERROR:
+                            raise RuntimeError(f"Remote node state stream websocket error: {websocket.exception()}")
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:

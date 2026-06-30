@@ -6,25 +6,30 @@ from .constants import (
 )
 from .nicegui_protocols import ModWebUi
 from .runtime_imports import (
+    Awaitable,
     Callable,
     ModWebUser,
+    NodeAppEntry,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeBlueprintList,
     NodeConfigList,
     NodeConsoleActionList,
     NodeModList,
+    NodeModSummary,
     NodeSaveList,
     NodeSettingList,
     NodeStateStreamEvent,
     NodeSystemSummary,
     Power_Level,
     Request,
+    TypeVar,
+    aiohttp,
     app_scope_from_name,
     asyncio,
     cast,
     config,
-    requests,
+    replace,
 )
 from .service_base import ModWebServiceSupport
 from .types import (
@@ -41,19 +46,129 @@ from .types import (
 )
 
 
+PageSection = TypeVar("PageSection")
+
+
 class ModWebPageHandlersMixin(ModWebServiceSupport):
+    @staticmethod
+    def _requested_app_tab_id(*, request: Request, app_entry: NodeAppEntry, can_manage_app: bool) -> str:
+        available_tab_ids: list[str] = []
+        if app_entry.supports_mods:
+            available_tab_ids.append("mods")
+        if app_entry.supports_updates:
+            available_tab_ids.append("update")
+        if app_entry.supports_configs:
+            available_tab_ids.append("configs")
+        if app_entry.supports_settings and can_manage_app:
+            available_tab_ids.append("settings")
+        if app_entry.map_url is not None:
+            available_tab_ids.append("map")
+        if app_entry.supports_saves and can_manage_app:
+            available_tab_ids.append("saves")
+        if app_entry.supports_blueprints and can_manage_app:
+            available_tab_ids.append("blueprints")
+        if app_entry.supports_console_actions and can_manage_app:
+            available_tab_ids.append("console")
+        if app_entry.supports_chat:
+            available_tab_ids.append("chat")
+
+        query_params = getattr(request, "query_params", None)
+        get_query_value = getattr(query_params, "get", None)
+        raw_requested_tab_id = get_query_value("tab") if callable(get_query_value) else None
+        requested_tab_id = raw_requested_tab_id.strip().casefold() if isinstance(raw_requested_tab_id, str) else ""
+        app_scope = (app_entry.scope or app_scope_from_name(app_entry.name) or "").casefold()
+        if requested_tab_id == "recipes" and app_scope == "minecraft":
+            return requested_tab_id
+        if (
+            requested_tab_id == "sandbox"
+            and app_scope == "sevendays"
+            and app_entry.supports_sevendays_sandbox_options
+        ):
+            return requested_tab_id
+        if requested_tab_id in available_tab_ids:
+            return requested_tab_id
+        return available_tab_ids[0] if available_tab_ids else ""
+
+    @staticmethod
+    def _empty_remote_mod_list(
+        *,
+        app_entry: NodeAppEntry,
+        node: ModWebNodeLink,
+        app_stats: NodeAppRuntimeSummary | None = None,
+    ) -> NodeModList:
+        return NodeModList(
+            app_name=app_entry.name,
+            app_friendly=app_entry.friendly,
+            node=node.node_name,
+            summary=NodeModSummary(
+                total_count=0,
+                enabled_count=0,
+                disabled_count=0,
+                coremod_count=0,
+                downloadable_count=0,
+                non_downloadable_count=0,
+            ),
+            mods=(),
+            app_stats=app_stats,
+        )
+
+    @staticmethod
+    def _empty_remote_save_list(*, app_entry: NodeAppEntry, node: ModWebNodeLink) -> NodeSaveList:
+        return NodeSaveList(
+            app_name=app_entry.name,
+            app_friendly=app_entry.friendly,
+            node=node.node_name,
+            roots=(),
+            saves=(),
+        )
+
+    @staticmethod
+    def _empty_remote_blueprint_list(*, app_entry: NodeAppEntry, node: ModWebNodeLink) -> NodeBlueprintList:
+        return NodeBlueprintList(
+            app_name=app_entry.name,
+            app_friendly=app_entry.friendly,
+            node=node.node_name,
+            blueprints=(),
+        )
+
+    @staticmethod
+    def _empty_remote_setting_list(*, app_entry: NodeAppEntry, node: ModWebNodeLink) -> NodeSettingList:
+        return NodeSettingList(
+            app_name=app_entry.name,
+            app_friendly=app_entry.friendly,
+            node=node.node_name,
+            editable_count=0,
+            restricted_count=0,
+            has_pending_changes=False,
+            pending_change_count=0,
+            required_save_level_name=Power_Level.user.name,
+            required_reload_level_name=Power_Level.user.name,
+            settings=(),
+        )
+
+    @staticmethod
+    def _empty_remote_console_action_list(
+        *, app_entry: NodeAppEntry, node: ModWebNodeLink
+    ) -> NodeConsoleActionList:
+        return NodeConsoleActionList(
+            app_name=app_entry.name,
+            app_friendly=app_entry.friendly,
+            node=node.node_name,
+            actions=(),
+        )
+
     async def _safe_remote_optional_page_section(
         self,
         *,
         node: ModWebNodeLink,
         app_name: str,
         section_label: str,
-        fallback: object,
+        fallback: PageSection,
         load_warnings: list[ModWebPageLoadWarning],
-        operation: Callable[[], object],
-    ) -> object:
+        operation: Callable[[], Awaitable[PageSection]],
+    ) -> PageSection:
         try:
-            return await asyncio.to_thread(operation)
+            return await operation()
         except Exception as xcp:
             self._warn_page_section_load_failure(
                 context=f"Remote mod web app page: node={node.node_name} app={app_name} section={section_label}",
@@ -66,6 +181,15 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
     def _on_startup(self) -> None:
         self._startup_signal.set()
         log.info("Mod web startup event received")
+
+    async def _on_shutdown(self) -> None:
+        await asyncio.gather(
+            self._remote_node_state_broker.close(),
+            self._remote_app_state_broker.close(),
+            self._remote_chat_broker.close(),
+            self._console_stdout_broker.close(),
+        )
+        await self._close_remote_http_client()
 
     async def _app_links(self, user: ModWebUser) -> tuple[ModWebAppLink, ...]:
         current_node = self._current_node_link()
@@ -108,25 +232,35 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             sections[index] = section
         return tuple(cast(tuple[ModWebNodeAppSection, ...], tuple(sections)))
 
-    def _login_node_statuses(self, *, simulated_down_node_names: tuple[str, ...] = ()) -> tuple[ModWebNodeStatus, ...]:
-        statuses: list[ModWebNodeStatus] = []
+    async def _login_node_statuses_async(
+        self,
+        *,
+        simulated_down_node_names: tuple[str, ...] = (),
+    ) -> tuple[ModWebNodeStatus, ...]:
+        nodes = self._node_links()
         simulated_down_keys: set[str] = {node_name.casefold() for node_name in simulated_down_node_names}
-        for node in self._node_links():
-            if node.node_name.casefold() in simulated_down_keys:
-                statuses.append(self._simulated_remote_node_status(node))
-                continue
-            statuses.append(self._probe_node_status(node))
-        return tuple(statuses)
 
-    def _probe_node_status(self, node: ModWebNodeLink) -> ModWebNodeStatus:
+        async def _status(node: ModWebNodeLink) -> ModWebNodeStatus:
+            if node.node_name.casefold() in simulated_down_keys:
+                return self._simulated_remote_node_status(node)
+            return await self._probe_node_status_async(node)
+
+        return tuple(await asyncio.gather(*(_status(node) for node in nodes)))
+
+    async def _probe_node_status_async(self, node: ModWebNodeLink) -> ModWebNodeStatus:
         url = node.latency_probe_url or f"{self._absolute_node_api_base_url(node.api_base_url).rstrip('/')}/ping"
         try:
-            response = requests.get(url, timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT)
-        except requests.RequestException as xcp:
+            session = await self._remote_http_client()
+            async with session.get(
+                url,
+                timeout=self._aiohttp_client_timeout(_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT),
+            ) as response:
+                status_code = response.status
+        except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
             if not (self._shutting_down or config.IS_SHUTTINGDOWN):
                 log.warning("Remote mod web login status probe failed: node=%s error=%s", node.node_name, xcp)
             return ModWebNodeStatus(node=node, alive=False, detail=str(xcp))
-        return ModWebNodeStatus(node=node, alive=True, detail=f"HTTP {response.status_code}")
+        return ModWebNodeStatus(node=node, alive=True, detail=f"HTTP {status_code}")
 
     @staticmethod
     def _simulated_remote_node_error_text() -> str:
@@ -159,7 +293,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         )
 
     async def _render_node_page(self, *, ui: ModWebUi, node_name: str, request: Request) -> None:
-        user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.user)
+        user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.user)
         if user is None:
             return
         try:
@@ -200,7 +334,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         )
 
     async def _render_node_mods_page(self, *, ui: ModWebUi, node_name: str, app_name: str, request: Request) -> None:
-        user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
+        user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
         if user is None:
             return
         try:
@@ -218,6 +352,16 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             )
             can_manage_app = self._user_has_level(user, Power_Level.user)
             can_read_configs = app_entry.supports_configs and self._user_has_level(user, app_entry.config_read_level)
+            active_tab_id = self._requested_app_tab_id(
+                request=request,
+                app_entry=app_entry,
+                can_manage_app=can_manage_app,
+            )
+            resolved_app_scope = (
+                app_entry.scope.casefold()
+                if isinstance(app_entry.scope, str) and app_entry.scope.strip()
+                else app_scope_from_name(app_entry.name)
+            )
             load_warnings: list[ModWebPageLoadWarning] = []
             empty_configs = self._empty_config_list(
                 app_name=app_entry.name,
@@ -231,62 +375,94 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     section_label="Configs",
                     fallback=empty_configs,
                     load_warnings=load_warnings,
-                    operation=lambda: self._remote_config_list(node, app_name, user),
+                    operation=lambda: self._remote_config_list_async(node, app_name, user),
                 )
-                if can_read_configs
+                if can_read_configs and active_tab_id == "configs"
                 else asyncio.sleep(0, result=empty_configs)
             )
             if app_entry.supports_mods:
+                empty_mods = self._empty_remote_mod_list(app_entry=app_entry, node=node)
+                load_mods = active_tab_id in {"mods", "recipes"} or resolved_app_scope == "minecraft"
+                mods_job = (
+                    self._remote_mod_list_async(node, app_name, user)
+                    if load_mods
+                    else asyncio.sleep(0, result=empty_mods)
+                )
+                runtime_job = (
+                    asyncio.sleep(0, result=None)
+                    if load_mods
+                    else self._remote_app_runtime_summary_async(node, app_name, user)
+                )
+                empty_saves = (
+                    self._empty_remote_save_list(app_entry=app_entry, node=node)
+                    if app_entry.supports_saves and can_manage_app
+                    else None
+                )
+                empty_blueprints = (
+                    self._empty_remote_blueprint_list(app_entry=app_entry, node=node)
+                    if app_entry.supports_blueprints and can_manage_app
+                    else None
+                )
+                empty_settings = (
+                    self._empty_remote_setting_list(app_entry=app_entry, node=node)
+                    if app_entry.supports_settings and can_manage_app
+                    else None
+                )
+                empty_console_actions = (
+                    self._empty_remote_console_action_list(app_entry=app_entry, node=node)
+                    if app_entry.supports_console_actions and can_manage_app
+                    else None
+                )
                 saves_job = (
                     self._safe_remote_optional_page_section(
                         node=node,
                         app_name=app_name,
                         section_label="Saves",
-                        fallback=None,
+                        fallback=empty_saves,
                         load_warnings=load_warnings,
-                        operation=lambda: self._remote_save_list(node, app_name, user),
+                        operation=lambda: self._remote_save_list_async(node, app_name, user),
                     )
-                    if app_entry.supports_saves and can_manage_app
-                    else asyncio.sleep(0, result=None)
+                    if empty_saves is not None and active_tab_id == "saves"
+                    else asyncio.sleep(0, result=empty_saves)
                 )
                 blueprints_job = (
                     self._safe_remote_optional_page_section(
                         node=node,
                         app_name=app_name,
                         section_label="Blueprints",
-                        fallback=None,
+                        fallback=empty_blueprints,
                         load_warnings=load_warnings,
-                        operation=lambda: self._remote_blueprint_list(node, app_name, user),
+                        operation=lambda: self._remote_blueprint_list_async(node, app_name, user),
                     )
-                    if app_entry.supports_blueprints and can_manage_app
-                    else asyncio.sleep(0, result=None)
+                    if empty_blueprints is not None and active_tab_id == "blueprints"
+                    else asyncio.sleep(0, result=empty_blueprints)
                 )
                 settings_job = (
                     self._safe_remote_optional_page_section(
                         node=node,
                         app_name=app_name,
                         section_label="Settings",
-                        fallback=None,
+                        fallback=empty_settings,
                         load_warnings=load_warnings,
-                        operation=lambda: self._remote_setting_list(node, app_name, user),
+                        operation=lambda: self._remote_setting_list_async(node, app_name, user),
                     )
-                    if app_entry.supports_settings and can_manage_app
-                    else asyncio.sleep(0, result=None)
+                    if empty_settings is not None and active_tab_id == "settings"
+                    else asyncio.sleep(0, result=empty_settings)
                 )
                 console_actions_job = (
                     self._safe_remote_optional_page_section(
                         node=node,
                         app_name=app_name,
                         section_label="Console",
-                        fallback=None,
+                        fallback=empty_console_actions,
                         load_warnings=load_warnings,
-                        operation=lambda: self._remote_console_action_list(node, app_name, user),
+                        operation=lambda: self._remote_console_action_list_async(node, app_name, user),
                     )
-                    if app_entry.supports_console_actions and can_manage_app
-                    else asyncio.sleep(0, result=None)
+                    if empty_console_actions is not None and active_tab_id == "console"
+                    else asyncio.sleep(0, result=empty_console_actions)
                 )
                 remote_results = await asyncio.gather(
-                    asyncio.to_thread(self._remote_mod_list, node, app_name, user),
+                    mods_job,
                     configs_job,
                     saves_job,
                     blueprints_job,
@@ -297,6 +473,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         user,
                         error_context="Remote mod web app system summary failed",
                     ),
+                    runtime_job,
                 )
                 mods = cast(NodeModList, remote_results[0])
                 configs = cast(NodeConfigList, remote_results[1])
@@ -305,27 +482,28 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 settings = cast(NodeSettingList | None, remote_results[4])
                 console_actions = cast(NodeConsoleActionList | None, remote_results[5])
                 system_summary = cast(NodeSystemSummary | None, remote_results[6])
-                minecraft_scope = (
-                    app_entry.scope.casefold()
-                    if isinstance(app_entry.scope, str) and app_entry.scope.strip()
-                    else app_scope_from_name(app_entry.name)
-                )
+                if mods.app_stats is None and remote_results[7] is not None:
+                    mods = replace(mods, app_stats=cast(NodeAppRuntimeSummary, remote_results[7]))
                 minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None
                 minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None
-                if minecraft_scope == "minecraft":
-                    minecraft_recipes, minecraft_item_registry = await asyncio.to_thread(
-                        self._remote_minecraft_recipe_summaries,
+                if resolved_app_scope == "minecraft" and active_tab_id == "recipes":
+                    minecraft_recipes, minecraft_item_registry = await self._remote_minecraft_recipe_summaries_async(
                         node,
                         app_name,
                         user,
                     )
                 sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None
-                if minecraft_scope == "sevendays":
-                    sevendays_sandbox_options = await asyncio.to_thread(
-                        self._remote_sevendays_sandbox_options_summary,
+                if resolved_app_scope == "sevendays" and active_tab_id == "sandbox":
+                    sevendays_sandbox_options = await self._remote_sevendays_sandbox_options_summary_async(
                         node,
                         app_name,
                         user,
+                    )
+                elif app_entry.supports_sevendays_sandbox_options:
+                    sevendays_sandbox_options = ModWebSevenDaysSandboxOptionsSummary(
+                        data_path=".yukibot/sandbox_options.json",
+                        file_exists=False,
+                        app_version=mods.app_stats.version if mods.app_stats is not None else None,
                     )
                 model = self._remote_page_model(
                     node=node,
@@ -355,6 +533,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     resource_points=app_entry.resource_points,
                     app_title_font_preset=app_entry.title_font_preset,
                     app_notes=app_entry.notes,
+                    join_address=app_entry.join_address,
+                    join_direct_ip_address=app_entry.join_direct_ip_address,
                     lifecycle_notice_started=app_entry.lifecycle_notice_started,
                     lifecycle_notice_stopped=app_entry.lifecycle_notice_stopped,
                     lifecycle_notice_crashed=app_entry.lifecycle_notice_crashed,
@@ -385,7 +565,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         app_stats=model.app_stats,
                         include_runtime_updates=False,
                     )
-                    if model.supports_chat
+                    if model.supports_chat and active_tab_id == "chat"
                     else None
                 )
 
@@ -417,53 +597,73 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     chat_surface=chat_surface,
                 )
             else:
+                empty_saves = (
+                    self._empty_remote_save_list(app_entry=app_entry, node=node)
+                    if app_entry.supports_saves and can_manage_app
+                    else None
+                )
+                empty_blueprints = (
+                    self._empty_remote_blueprint_list(app_entry=app_entry, node=node)
+                    if app_entry.supports_blueprints and can_manage_app
+                    else None
+                )
+                empty_settings = (
+                    self._empty_remote_setting_list(app_entry=app_entry, node=node)
+                    if app_entry.supports_settings and can_manage_app
+                    else None
+                )
+                empty_console_actions = (
+                    self._empty_remote_console_action_list(app_entry=app_entry, node=node)
+                    if app_entry.supports_console_actions and can_manage_app
+                    else None
+                )
                 saves_job = (
                     self._safe_remote_optional_page_section(
                         node=node,
                         app_name=app_name,
                         section_label="Saves",
-                        fallback=None,
+                        fallback=empty_saves,
                         load_warnings=load_warnings,
-                        operation=lambda: self._remote_save_list(node, app_name, user),
+                        operation=lambda: self._remote_save_list_async(node, app_name, user),
                     )
-                    if app_entry.supports_saves and can_manage_app
-                    else asyncio.sleep(0, result=None)
+                    if empty_saves is not None and active_tab_id == "saves"
+                    else asyncio.sleep(0, result=empty_saves)
                 )
                 blueprints_job = (
                     self._safe_remote_optional_page_section(
                         node=node,
                         app_name=app_name,
                         section_label="Blueprints",
-                        fallback=None,
+                        fallback=empty_blueprints,
                         load_warnings=load_warnings,
-                        operation=lambda: self._remote_blueprint_list(node, app_name, user),
+                        operation=lambda: self._remote_blueprint_list_async(node, app_name, user),
                     )
-                    if app_entry.supports_blueprints and can_manage_app
-                    else asyncio.sleep(0, result=None)
+                    if empty_blueprints is not None and active_tab_id == "blueprints"
+                    else asyncio.sleep(0, result=empty_blueprints)
                 )
                 settings_job = (
                     self._safe_remote_optional_page_section(
                         node=node,
                         app_name=app_name,
                         section_label="Settings",
-                        fallback=None,
+                        fallback=empty_settings,
                         load_warnings=load_warnings,
-                        operation=lambda: self._remote_setting_list(node, app_name, user),
+                        operation=lambda: self._remote_setting_list_async(node, app_name, user),
                     )
-                    if app_entry.supports_settings and can_manage_app
-                    else asyncio.sleep(0, result=None)
+                    if empty_settings is not None and active_tab_id == "settings"
+                    else asyncio.sleep(0, result=empty_settings)
                 )
                 console_actions_job = (
                     self._safe_remote_optional_page_section(
                         node=node,
                         app_name=app_name,
                         section_label="Console",
-                        fallback=None,
+                        fallback=empty_console_actions,
                         load_warnings=load_warnings,
-                        operation=lambda: self._remote_console_action_list(node, app_name, user),
+                        operation=lambda: self._remote_console_action_list_async(node, app_name, user),
                     )
-                    if app_entry.supports_console_actions and can_manage_app
-                    else asyncio.sleep(0, result=None)
+                    if empty_console_actions is not None and active_tab_id == "console"
+                    else asyncio.sleep(0, result=empty_console_actions)
                 )
                 remote_results = await asyncio.gather(
                     configs_job,
@@ -515,6 +715,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     resource_points=app_entry.resource_points,
                     app_title_font_preset=app_entry.title_font_preset,
                     app_notes=app_entry.notes,
+                    join_address=app_entry.join_address,
+                    join_direct_ip_address=app_entry.join_direct_ip_address,
                     lifecycle_notice_started=app_entry.lifecycle_notice_started,
                     lifecycle_notice_stopped=app_entry.lifecycle_notice_stopped,
                     lifecycle_notice_crashed=app_entry.lifecycle_notice_crashed,
@@ -542,7 +744,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                         app_stats=model.app_stats,
                         include_runtime_updates=False,
                     )
-                    if model.supports_chat
+                    if model.supports_chat and active_tab_id == "chat"
                     else None
                 )
 

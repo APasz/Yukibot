@@ -108,7 +108,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             action for action in ordered_actions if self._user_can_mutate_mod(user=user, entry=entry, action=action)
         )
 
-    def _remote_app_mutation(
+    async def _remote_app_mutation_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -166,7 +166,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload["steam_update_selected_branch"] = steam_update_selected_branch
         if update_branch_id is not None:
             json_payload["update_branch_id"] = update_branch_id
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/mutate",
@@ -178,7 +178,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return NodeAppMutationResult.from_mapping(payload)
 
-    def _remote_minecraft_recipe_mutation(
+    async def _remote_minecraft_recipe_mutation_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -193,7 +193,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload["mutation_index"] = mutation_index
         if mutation is not None:
             json_payload["mutation"] = mutation.to_mapping()
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/minecraft/recipes/mutations",
@@ -205,8 +205,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return NodeMinecraftRecipeMutationResult.from_mapping(payload)
 
-    def _remote_node_capacity(self, node: ModWebNodeLink, user: ModWebUser) -> config.NodeCapacityProfile:
-        payload: dict[str, object] = self._remote_json(
+    async def _remote_node_capacity_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> config.NodeCapacityProfile:
+        payload = await self._remote_json_async(
             node=node,
             app_name=None,
             path="/node-capacity",
@@ -215,13 +219,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return config.NodeCapacityProfile.model_validate(payload)
 
-    def _remote_update_node_capacity(
+    async def _remote_update_node_capacity_async(
         self,
         node: ModWebNodeLink,
         capacity: config.NodeCapacityProfile,
         user: ModWebUser,
     ) -> NodeCapacityMutationResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=None,
             path="/node-capacity",
@@ -232,8 +236,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return NodeCapacityMutationResult.from_mapping(payload)
 
-    def _remote_node_font_sources(self, node: ModWebNodeLink, user: ModWebUser) -> config.NodeFontSourceSettings:
-        payload: dict[str, object] = self._remote_json(
+    async def _remote_node_font_sources_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> config.NodeFontSourceSettings:
+        payload = await self._remote_json_async(
             node=node,
             app_name=None,
             path="/node-font-sources",
@@ -242,13 +250,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return config.NodeFontSourceSettings.model_validate(payload)
 
-    def _remote_update_node_font_sources(
+    async def _remote_update_node_font_sources_async(
         self,
         node: ModWebNodeLink,
         settings: config.NodeFontSourceSettings,
         user: ModWebUser,
     ) -> NodeFontSourceSettingsMutationResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=None,
             path="/node-font-sources",
@@ -274,9 +282,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required for this mod action.")
         node = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(self._remote_mod_mutation, node, model.app_name, mod_name, action, user)
+        return await self._remote_mod_mutation_async(node, model.app_name, mod_name, action, user)
 
-    def _remote_mod_mutation(
+    async def _remote_mod_mutation_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -284,7 +292,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         action: NodeModMutationAction,
         user: ModWebUser,
     ) -> NodeModMutationResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/mods/{quote(mod_name, safe='')}/mutate",
@@ -390,31 +398,30 @@ class ModWebActionsMixin(ModWebServiceSupport):
         if not self._user_has_level(user, required_level):
             raise PermissionError(f"{required_level.name.title()} access is required for this app action.")
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(
-            self._remote_app_mutation,
-            node,
-            model.app_name,
-            action,
-            user,
-            friendly_name,
-            title_font_preset,
-            notes,
-            lifecycle_notice_started,
-            lifecycle_notice_stopped,
-            lifecycle_notice_crashed,
-            relay_notice_player_session,
-            relay_notice_player_death,
-            relay_notice_progress,
-            relay_advancements_enabled,
-            disabled_activity_provider_ids,
-            running_cpu_points,
-            running_ram_points,
-            startup_cpu_points,
-            startup_ram_points,
-            steam_update_enabled,
-            steam_update_selected_branch,
-            update_branch_id,
-            timeout_seconds,
+        return await self._remote_app_mutation_async(
+            node=node,
+            app_name=model.app_name,
+            action=action,
+            user=user,
+            friendly_name=friendly_name,
+            title_font_preset=title_font_preset,
+            notes=notes,
+            lifecycle_notice_started=lifecycle_notice_started,
+            lifecycle_notice_stopped=lifecycle_notice_stopped,
+            lifecycle_notice_crashed=lifecycle_notice_crashed,
+            relay_notice_player_session=relay_notice_player_session,
+            relay_notice_player_death=relay_notice_player_death,
+            relay_notice_progress=relay_notice_progress,
+            relay_advancements_enabled=relay_advancements_enabled,
+            disabled_activity_provider_ids=disabled_activity_provider_ids,
+            running_cpu_points=running_cpu_points,
+            running_ram_points=running_ram_points,
+            startup_cpu_points=startup_cpu_points,
+            startup_ram_points=startup_ram_points,
+            steam_update_enabled=steam_update_enabled,
+            steam_update_selected_branch=steam_update_selected_branch,
+            update_branch_id=update_branch_id,
+            timeout_seconds=timeout_seconds,
         )
 
     async def _append_minecraft_recipe_mutation(
@@ -427,15 +434,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
     ) -> NodeMinecraftRecipeMutationResult:
         self._require_user_level(user=user, required_level=Power_Level.sudo)
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(
-            self._remote_minecraft_recipe_mutation,
-            node,
-            model.app_name,
-            NodeMinecraftRecipeMutationAction.ADD,
-            None,
-            mutation,
-            user,
-            timeout_seconds,
+        return await self._remote_minecraft_recipe_mutation_async(
+            node=node,
+            app_name=model.app_name,
+            action=NodeMinecraftRecipeMutationAction.ADD,
+            mutation_index=None,
+            mutation=mutation,
+            user=user,
+            timeout_seconds=timeout_seconds,
         )
 
     async def _replace_minecraft_recipe_mutation(
@@ -449,15 +455,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
     ) -> NodeMinecraftRecipeMutationResult:
         self._require_user_level(user=user, required_level=Power_Level.sudo)
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(
-            self._remote_minecraft_recipe_mutation,
-            node,
-            model.app_name,
-            NodeMinecraftRecipeMutationAction.REPLACE,
-            mutation_index,
-            mutation,
-            user,
-            timeout_seconds,
+        return await self._remote_minecraft_recipe_mutation_async(
+            node=node,
+            app_name=model.app_name,
+            action=NodeMinecraftRecipeMutationAction.REPLACE,
+            mutation_index=mutation_index,
+            mutation=mutation,
+            user=user,
+            timeout_seconds=timeout_seconds,
         )
 
     async def _delete_minecraft_recipe_mutation(
@@ -470,26 +475,25 @@ class ModWebActionsMixin(ModWebServiceSupport):
     ) -> NodeMinecraftRecipeMutationResult:
         self._require_user_level(user=user, required_level=Power_Level.sudo)
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(
-            self._remote_minecraft_recipe_mutation,
-            node,
-            model.app_name,
-            NodeMinecraftRecipeMutationAction.DELETE,
-            mutation_index,
-            None,
-            user,
-            timeout_seconds,
+        return await self._remote_minecraft_recipe_mutation_async(
+            node=node,
+            app_name=model.app_name,
+            action=NodeMinecraftRecipeMutationAction.DELETE,
+            mutation_index=mutation_index,
+            mutation=None,
+            user=user,
+            timeout_seconds=timeout_seconds,
         )
 
     async def _node_capacity(self, *, node_name: str, user: ModWebUser) -> config.NodeCapacityProfile:
         self._require_user_level(user=user, required_level=Power_Level.root)
         node = self._remote_node_link(node_name)
-        return await asyncio.to_thread(self._remote_node_capacity, node, user)
+        return await self._remote_node_capacity_async(node, user)
 
     async def _node_font_sources(self, *, node_name: str, user: ModWebUser) -> config.NodeFontSourceSettings:
         self._require_user_level(user=user, required_level=Power_Level.root)
         node = self._remote_node_link(node_name)
-        return await asyncio.to_thread(self._remote_node_font_sources, node, user)
+        return await self._remote_node_font_sources_async(node, user)
 
     async def _update_node_capacity(
         self,
@@ -500,7 +504,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
     ) -> NodeCapacityMutationResult:
         self._require_user_level(user=user, required_level=Power_Level.root)
         node = self._remote_node_link(node_name)
-        return await asyncio.to_thread(self._remote_update_node_capacity, node, capacity, user)
+        return await self._remote_update_node_capacity_async(node, capacity, user)
 
     async def _update_node_font_sources(
         self,
@@ -511,7 +515,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
     ) -> NodeFontSourceSettingsMutationResult:
         self._require_user_level(user=user, required_level=Power_Level.root)
         node = self._remote_node_link(node_name)
-        return await asyncio.to_thread(self._remote_update_node_font_sources, node, settings, user)
+        return await self._remote_update_node_font_sources_async(node, settings, user)
 
     @staticmethod
     def _app_start_stop_action(model: ModWebBasePageModel) -> NodeAppMutationAction | None:

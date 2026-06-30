@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from relay_notices import notice_badge_spec, notice_hides_body_content, relay_notice_badge_spec_from_label
 
+from .assets import extract_html_tag_contents
 from .constants import (
     _CHAT_GROUP_WINDOW_SECONDS,
     _CHAT_HISTORY_LIMIT,
@@ -34,7 +36,6 @@ from .constants import (
     _CHAT_TIMELINE_BOTTOM_THRESHOLD_PX,
     _REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
     _REMOTE_CHAT_STREAM_RECONNECT_DELAY_SECONDS,
-    _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     _WEB_CHAT_MESSAGE_MAX_LENGTH,
     log,
 )
@@ -88,6 +89,7 @@ from .runtime_imports import (
     urlsplit,
 )
 from .service_base import ModWebServiceSupport
+from .stream_broker import RemoteChatStreamKey
 from .streams import ModWebStreamsMixin
 from .types import (
     ChatMediaPreviewKind,
@@ -100,10 +102,12 @@ from .types import (
     _ModWebChatPanelConfig,
     _ModWebChatPanelSignal,
     _ModWebChatSurfaceConfig,
+    RemoteChatBrokerEvent,
 )
 from .ui_helpers import ModWebUiHelpersMixin
 
 if TYPE_CHECKING:
+    from nicegui.element import Element
     from nicegui.elements.link import Link
     from nicegui.events import ScrollEventArguments
 
@@ -130,7 +134,11 @@ class ModWebChatMixin(ModWebServiceSupport):
         def _subscribe_updates(on_update: Callable[[_ModWebChatPanelSignal], None]) -> Callable[[], None]:
             room_subscription_id = ChatHub().subscribe(
                 room_id,
-                lambda _update: on_update(_ModWebChatPanelSignal.chat()),
+                lambda update: on_update(
+                    _ModWebChatPanelSignal.chat(
+                        events=() if update.event is None else (update.event,),
+                    )
+                ),
             )
             if include_runtime_updates:
                 unsubscribe_runtime = self._node_api.subscribe_local_app_runtime(
@@ -194,23 +202,24 @@ class ModWebChatMixin(ModWebServiceSupport):
         preferred_platform = cast(str | None, getattr(app, "preferred_name_platform", None))
 
         async def _refresh_snapshot() -> NodeChatRoomSnapshot:
-            return await asyncio.to_thread(self._remote_chat_snapshot, node, app_name, user)
+            return await self._remote_chat_snapshot_async(node, app_name, user)
 
         async def _send_message(request: _ModWebChatComposeRequest) -> ChatEvent:
-            return await asyncio.to_thread(
-                self._remote_publish_web_chat,
-                node,
-                app_name,
-                session_id,
-                user,
-                request,
-                self._web_chat_author_display_name(
+            return await self._remote_publish_web_chat_async(
+                node=node,
+                app_name=app_name,
+                session_id=session_id,
+                user=user,
+                request=request,
+                author_display_name=self._web_chat_author_display_name(
                     user,
                     scope=app_scope,
                     platforms=app_platforms,
                     preferred_platform=preferred_platform,
                 ),
             )
+
+        initial_snapshot = await _refresh_snapshot()
 
         def _subscribe_updates(on_update: Callable[[_ModWebChatPanelSignal], None]) -> Callable[[], None]:
             stream_healthy = False
@@ -223,15 +232,45 @@ class ModWebChatMixin(ModWebServiceSupport):
                 stream_healthy = healthy
                 fallback_wakeup.set()
 
-            stream_task = asyncio.create_task(
-                self._remote_chat_stream_listener(
+            key = RemoteChatStreamKey(node=node, app_name=app_name.casefold())
+
+            def _apply_broker_event(event: RemoteChatBrokerEvent) -> None:
+                if event.stream_healthy is not None:
+                    _set_stream_health(event.stream_healthy)
+                signal = event.signal
+                if signal is None:
+                    return
+                if include_runtime_updates:
+                    on_update(signal)
+                elif signal.chat_changed:
+                    on_update(
+                        _ModWebChatPanelSignal.chat(
+                            snapshot=signal.snapshot,
+                            events=signal.events,
+                        )
+                    )
+
+            async def _listen(publish: Callable[[RemoteChatBrokerEvent], None]) -> None:
+                await self._remote_chat_stream_listener(
                     node=node,
                     app_name=app_name,
                     user=user,
-                    on_update=on_update,
-                    include_runtime_updates=include_runtime_updates,
-                    on_stream_health_change=_set_stream_health,
+                    on_update=lambda signal: publish(
+                        RemoteChatBrokerEvent(signal=signal, stream_healthy=True)
+                    ),
+                    include_runtime_updates=True,
+                    on_stream_health_change=lambda healthy: publish(
+                        RemoteChatBrokerEvent(stream_healthy=healthy)
+                    ),
+                    after_revision=initial_snapshot.revision,
                 )
+                await asyncio.Event().wait()
+
+            unsubscribe_stream = self._remote_chat_broker.subscribe(
+                key=key,
+                callback=_apply_broker_event,
+                listener_factory=_listen,
+                replay_latest=True,
             )
             fallback_task = asyncio.create_task(
                 self._chat_stream_fallback_loop(
@@ -248,14 +287,14 @@ class ModWebChatMixin(ModWebServiceSupport):
             )
 
             def _unsubscribe() -> None:
-                stream_task.cancel()
+                unsubscribe_stream()
                 fallback_task.cancel()
                 fallback_wakeup.set()
 
             return _unsubscribe
 
         return _ModWebChatPanelConfig(
-            initial_snapshot=await _refresh_snapshot(),
+            initial_snapshot=initial_snapshot,
             refresh_snapshot=_refresh_snapshot,
             send_message=_send_message,
             subscribe_updates=_subscribe_updates,
@@ -351,8 +390,13 @@ class ModWebChatMixin(ModWebServiceSupport):
             map_url=resolved_app_entry.map_url,
         )
 
-    def _remote_chat_snapshot(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeChatRoomSnapshot:
-        payload = self._remote_json(
+    async def _remote_chat_snapshot_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeChatRoomSnapshot:
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/chat?{urlencode({'limit': _CHAT_HISTORY_LIMIT})}",
@@ -370,7 +414,9 @@ class ModWebChatMixin(ModWebServiceSupport):
         on_update: Callable[[_ModWebChatPanelSignal], None],
         include_runtime_updates: bool = True,
         on_stream_health_change: Callable[[bool], None] | None = None,
+        after_revision: int | None = None,
     ) -> None:
+        resume_revision = after_revision
         while True:
             stream_healthy = False
             try:
@@ -380,48 +426,48 @@ class ModWebChatMixin(ModWebServiceSupport):
                     scopes=(NodeApiScope.CHAT_READ, NodeApiScope.MODS_READ),
                     user=user,
                 )
-                timeout = aiohttp.ClientTimeout(
-                    total=None,
-                    connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                    sock_connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-                )
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.ws_connect(
-                        self._remote_chat_stream_url(node=node, app_name=app_name),
-                        headers={"Authorization": f"Bearer {token}"},
-                        heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
-                    ) as websocket:
-                        stream_healthy = True
-                        if on_stream_health_change is not None:
-                            on_stream_health_change(True)
-                        async for message in websocket:
-                            if message.type == aiohttp.WSMsgType.TEXT:
-                                payload_text: object = cast(object, message.data)
-                                payload = _json_object_from_text(
-                                    payload_text,
-                                    context="Remote chat stream message",
+                session = await self._remote_http_client()
+                async with session.ws_connect(
+                    self._remote_chat_stream_url(
+                        node=node,
+                        app_name=app_name,
+                        after_revision=resume_revision,
+                    ),
+                    headers={"Authorization": f"Bearer {token}"},
+                    heartbeat=_REMOTE_CHAT_STREAM_HEARTBEAT_SECONDS,
+                ) as websocket:
+                    stream_healthy = True
+                    if on_stream_health_change is not None:
+                        on_stream_health_change(True)
+                    async for message in websocket:
+                        if message.type == aiohttp.WSMsgType.TEXT:
+                            payload_text: object = cast(object, message.data)
+                            payload = _json_object_from_text(
+                                payload_text,
+                                context="Remote chat stream message",
+                            )
+                            event = NodeChatStreamEvent.from_mapping(payload)
+                            resume_revision = max(resume_revision or 0, event.revision)
+                            if event.room_id.casefold() != app_name.casefold():
+                                raise RuntimeError(
+                                    "Remote chat stream room id mismatch: "
+                                    f"expected={app_name!r} got={event.room_id!r}"
                                 )
-                                event = NodeChatStreamEvent.from_mapping(payload)
-                                if event.room_id.casefold() != app_name.casefold():
-                                    raise RuntimeError(
-                                        "Remote chat stream room id mismatch: "
-                                        f"expected={app_name!r} got={event.room_id!r}"
-                                    )
-                                signal = self._remote_chat_stream_signal(
-                                    event,
-                                    include_runtime_updates=include_runtime_updates,
-                                )
-                                if signal is not None:
-                                    on_update(signal)
-                                continue
-                            if message.type in {
-                                aiohttp.WSMsgType.CLOSE,
-                                aiohttp.WSMsgType.CLOSED,
-                                aiohttp.WSMsgType.CLOSING,
-                            }:
-                                break
-                            if message.type == aiohttp.WSMsgType.ERROR:
-                                raise RuntimeError(f"Remote chat stream websocket error: {websocket.exception()}")
+                            signal = self._remote_chat_stream_signal(
+                                event,
+                                include_runtime_updates=include_runtime_updates,
+                            )
+                            if signal is not None:
+                                on_update(signal)
+                            continue
+                        if message.type in {
+                            aiohttp.WSMsgType.CLOSE,
+                            aiohttp.WSMsgType.CLOSED,
+                            aiohttp.WSMsgType.CLOSING,
+                        }:
+                            break
+                        if message.type == aiohttp.WSMsgType.ERROR:
+                            raise RuntimeError(f"Remote chat stream websocket error: {websocket.exception()}")
             except asyncio.CancelledError:
                 raise
             except Exception as xcp:
@@ -471,10 +517,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         *,
         include_runtime_updates: bool = True,
     ) -> _ModWebChatPanelSignal | None:
-        chat_changed = event.snapshot is not None or event.kind in {
-            NodeChatStreamEventKind.INITIAL,
-            NodeChatStreamEventKind.CHAT_CHANGED,
-        }
+        chat_changed = bool(event.events) or event.snapshot is not None or event.kind is NodeChatStreamEventKind.CHAT_CHANGED
         runtime_changed = include_runtime_updates and (
             event.app_stats is not None
             or event.kind
@@ -490,16 +533,25 @@ class ModWebChatMixin(ModWebServiceSupport):
             runtime_changed=runtime_changed,
             snapshot=event.snapshot,
             app_stats=event.app_stats if include_runtime_updates else None,
+            events=event.events,
         )
 
     @staticmethod
-    def _remote_chat_stream_url(*, node: ModWebNodeLink, app_name: str) -> str:
-        return ModWebStreamsMixin._remote_websocket_url(
+    def _remote_chat_stream_url(
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        after_revision: int | None = None,
+    ) -> str:
+        url = ModWebStreamsMixin._remote_websocket_url(
             node=node,
             path=f"/apps/{quote(app_name, safe='')}/chat/stream",
         )
+        if after_revision is None:
+            return url
+        return f"{url}?{urlencode({'after_revision': after_revision})}"
 
-    def _remote_publish_web_chat(
+    async def _remote_publish_web_chat_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -508,7 +560,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         request: _ModWebChatComposeRequest,
         author_display_name: str,
     ) -> ChatEvent:
-        payload = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/chat",
@@ -533,7 +585,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         )
 
     async def _render_remote_chat_page(self, *, ui: ModWebUi, node_name: str, app_name: str, request: Request) -> None:
-        user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
+        user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
         if user is None:
             return
         try:
@@ -601,6 +653,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             connected_player_names=chat_surface.app_stats.connected_player_names
             if chat_surface.app_stats is not None
             else (),
+            fallback_text=player_count_badge.text if player_count_badge is not None else None,
         )
         with (
             ui.card()
@@ -702,15 +755,20 @@ class ModWebChatMixin(ModWebServiceSupport):
         endpoint_count_tooltip_content_display = endpoint_count_tooltip_content
         player_count_tooltip_display = player_count_tooltip
         player_count_tooltip_content_display = player_count_tooltip_content
+        initial_snapshot = chat_panel.initial_snapshot
         chat_scroll_area: ScrollArea | None = None
+        chat_timeline: Element | None = None
         chat_near_bottom = True
-        last_chat_signature: tuple[str, ...] | None = None
+        last_chat_signature: tuple[str, ...] = self._chat_history_signature(initial_snapshot.events)
+        current_chat_events: list[ChatEvent] = list(chat_panel.initial_snapshot.events)
+        rendered_chat_groups: list[tuple[tuple[str, ...], Element]] = []
         page_closed = False
         refresh_in_flight = False
         runtime_refresh_in_flight = False
         pending_chat_refresh = False
         pending_runtime_refresh = False
         pending_snapshot: NodeChatRoomSnapshot | None = None
+        pending_events: list[ChatEvent] = []
         pending_runtime_payload: NodeAppRuntimeSummary | None = None
         runtime_payload_pending = False
         push_refresh_running = False
@@ -723,12 +781,16 @@ class ModWebChatMixin(ModWebServiceSupport):
                 latest_status_label, latest_status_tone = self._chat_app_status_badge(next_app_stats)
                 self._set_badge_state(app_status_badge_label, latest_status_label, latest_status_tone)
             if player_count_badge_label is not None:
+                next_player_count_badge = self._chat_player_count_badge(next_app_stats)
                 player_count_tooltip_html = self._player_count_tooltip_html(
                     connected_player_names=next_app_stats.connected_player_names if next_app_stats is not None else (),
+                    fallback_text=(
+                        next_player_count_badge.text if next_player_count_badge is not None else None
+                    ),
                 )
                 self._set_optional_badge_state(
                     player_count_badge_label,
-                    self._chat_player_count_badge(next_app_stats),
+                    next_player_count_badge,
                 )
                 if player_count_tooltip_display is not None and player_count_tooltip_content_display is not None:
                     self._set_html_tooltip_state(
@@ -795,6 +857,7 @@ class ModWebChatMixin(ModWebServiceSupport):
 
         @ui.refreshable
         def _chat_messages(events: tuple[ChatEvent, ...]) -> None:
+            rendered_chat_groups.clear()
             if not events:
                 with ui.column().classes("mod-chat-empty w-full"):
                     ui.label("Relay quiet").classes("text-lg font-black mod-title-small")
@@ -803,13 +866,55 @@ class ModWebChatMixin(ModWebServiceSupport):
                     )
                 return
             for event_group in self._chat_event_groups(events):
-                self._render_chat_event_group(
+                group_root = self._render_chat_event_group(
                     ui=ui,
                     group=event_group,
                     room_id=chat_panel.initial_snapshot.room_id,
                     can_reply=can_send,
                     on_reply=set_reply_target,
                 )
+                rendered_chat_groups.append((tuple(event.id for event in event_group.events), group_root))
+
+        async def append_chat_events(events: tuple[ChatEvent, ...], *, force_scroll: bool) -> None:
+            nonlocal chat_near_bottom, current_chat_events, last_chat_signature
+            if not events or chat_timeline is None:
+                return
+            existing_event_ids = {event.id for event in current_chat_events}
+            new_events = tuple(event for event in events if event.id not in existing_event_ids)
+            if not new_events:
+                return
+            should_scroll_after_refresh = force_scroll or chat_near_bottom
+            if not current_chat_events:
+                current_chat_events.extend(new_events)
+                last_chat_signature = self._chat_history_signature(tuple(current_chat_events))
+                _chat_messages.refresh(tuple(current_chat_events))
+                if should_scroll_after_refresh:
+                    await scroll_chat_to_bottom()
+                    chat_near_bottom = True
+                return
+            with chat_timeline:
+                for event in new_events:
+                    group = _ModWebChatEventGroup(head_event=event, events=(event,))
+                    group_root = self._render_chat_event_group(
+                        ui=ui,
+                        group=group,
+                        room_id=chat_panel.initial_snapshot.room_id,
+                        can_reply=can_send,
+                        on_reply=set_reply_target,
+                    )
+                    rendered_chat_groups.append(((event.id,), group_root))
+            current_chat_events.extend(new_events)
+            while len(current_chat_events) > _CHAT_HISTORY_LIMIT and rendered_chat_groups:
+                removed_event_ids, removed_root = rendered_chat_groups.pop(0)
+                removed_root.delete()
+                removed_event_id_set = set(removed_event_ids)
+                current_chat_events = [
+                    event for event in current_chat_events if event.id not in removed_event_id_set
+                ]
+            last_chat_signature = self._chat_history_signature(tuple(current_chat_events))
+            if should_scroll_after_refresh:
+                await scroll_chat_to_bottom()
+                chat_near_bottom = True
 
         async def refresh_chat_messages(
             *,
@@ -818,14 +923,18 @@ class ModWebChatMixin(ModWebServiceSupport):
             snapshot_override: NodeChatRoomSnapshot | None = None,
             runtime_override: NodeAppRuntimeSummary | None = None,
             use_runtime_override: bool = False,
+            event_overrides: tuple[ChatEvent, ...] = (),
             force_scroll: bool = False,
         ) -> None:
-            nonlocal app_stats, chat_near_bottom, last_chat_signature, refresh_in_flight, runtime_refresh_in_flight
+            nonlocal app_stats, chat_near_bottom, current_chat_events, last_chat_signature
+            nonlocal refresh_in_flight, runtime_refresh_in_flight
             if page_closed:
                 return
             snapshot: NodeChatRoomSnapshot | None = None
             if snapshot_override is not None:
                 snapshot = snapshot_override
+            elif event_overrides:
+                snapshot = None
             elif refresh_snapshot and not refresh_in_flight:
                 refresh_in_flight = True
                 try:
@@ -855,6 +964,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                 finally:
                     runtime_refresh_in_flight = False
             if snapshot is None:
+                await append_chat_events(event_overrides, force_scroll=force_scroll)
                 return
             if (
                 endpoint_count_display is not None
@@ -868,11 +978,12 @@ class ModWebChatMixin(ModWebServiceSupport):
                     snapshot,
                 )
             events = snapshot.events
-            previous_signature = last_chat_signature or ()
+            previous_signature = last_chat_signature
             next_signature = self._chat_history_signature(events)
             changed = next_signature != previous_signature
             if changed:
                 should_scroll_after_refresh = force_scroll or chat_near_bottom
+                current_chat_events = list(events)
                 last_chat_signature = next_signature
                 _chat_messages.refresh(events)
                 if should_scroll_after_refresh:
@@ -881,6 +992,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             elif force_scroll:
                 await scroll_chat_to_bottom()
                 chat_near_bottom = True
+            await append_chat_events(event_overrides, force_scroll=force_scroll)
 
         loop = asyncio.get_running_loop()
 
@@ -888,6 +1000,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             nonlocal pending_chat_refresh
             nonlocal pending_runtime_refresh
             nonlocal pending_snapshot
+            nonlocal pending_events
             nonlocal pending_runtime_payload
             nonlocal runtime_payload_pending
             nonlocal push_refresh_running
@@ -899,17 +1012,20 @@ class ModWebChatMixin(ModWebServiceSupport):
                     refresh_snapshot = pending_chat_refresh
                     refresh_runtime = pending_runtime_refresh
                     snapshot_override = pending_snapshot
+                    event_overrides = tuple(pending_events)
                     runtime_override = pending_runtime_payload
                     use_runtime_override = runtime_payload_pending
                     pending_chat_refresh = False
                     pending_runtime_refresh = False
                     pending_snapshot = None
+                    pending_events.clear()
                     pending_runtime_payload = None
                     runtime_payload_pending = False
                     await refresh_chat_messages(
                         refresh_snapshot=refresh_snapshot,
                         refresh_runtime=refresh_runtime,
                         snapshot_override=snapshot_override,
+                        event_overrides=event_overrides,
                         runtime_override=runtime_override,
                         use_runtime_override=use_runtime_override,
                     )
@@ -918,7 +1034,7 @@ class ModWebChatMixin(ModWebServiceSupport):
 
         def request_push_refresh(signal: _ModWebChatPanelSignal) -> None:
             def _queue_refresh() -> None:
-                nonlocal pending_chat_refresh, pending_runtime_refresh, pending_snapshot, pending_runtime_payload
+                nonlocal pending_chat_refresh, pending_runtime_refresh, pending_snapshot, pending_events, pending_runtime_payload
                 nonlocal runtime_payload_pending
                 if page_closed:
                     return
@@ -926,6 +1042,8 @@ class ModWebChatMixin(ModWebServiceSupport):
                 pending_runtime_refresh = pending_runtime_refresh or signal.runtime_changed
                 if signal.snapshot is not None:
                     pending_snapshot = signal.snapshot
+                    pending_events.clear()
+                pending_events.extend(signal.events)
                 if signal.app_stats is not None:
                     pending_runtime_payload = signal.app_stats
                     runtime_payload_pending = True
@@ -948,7 +1066,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                 ui.notify("Chat relay is not available on this node.", type="negative")
                 return
             try:
-                await chat_panel.send_message(
+                sent_event = await chat_panel.send_message(
                     _ModWebChatComposeRequest(content=content, reply_to_event_id=reply_to_event_id)
                 )
             except Exception as xcp:
@@ -958,14 +1076,18 @@ class ModWebChatMixin(ModWebServiceSupport):
             message_input.set_value("")
             clear_reply_target()
             update_message_count()
-            await refresh_chat_messages(force_scroll=True)
+            await refresh_chat_messages(
+                refresh_snapshot=False,
+                refresh_runtime=False,
+                event_overrides=(sent_event,),
+                force_scroll=True,
+            )
 
         def update_message_count() -> None:
             if message_input is None or message_count_label is None:
                 return
             message_count_label.set_text(f"{len(_value_as_text(message_input))} / {_WEB_CHAT_MESSAGE_MAX_LENGTH}")
 
-        initial_snapshot = chat_panel.initial_snapshot
         panel_classes = "mod-chat-panel w-full"
         if embedded:
             panel_classes = f"{panel_classes} mod-chat-panel-embedded"
@@ -1005,6 +1127,11 @@ class ModWebChatMixin(ModWebServiceSupport):
                                         connected_player_names=app_stats.connected_player_names
                                         if app_stats is not None
                                         else (),
+                                        fallback_text=(
+                                            player_count_badge.text
+                                            if player_count_badge is not None
+                                            else None
+                                        ),
                                     )
                                     or "",
                                 )
@@ -1026,7 +1153,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                     "mod-chat-scroll-area w-full"
                 )
                 with chat_scroll_area:
-                    with ui.column().classes("mod-chat-timeline w-full"):
+                    with ui.column().classes("mod-chat-timeline w-full") as chat_timeline:
                         _chat_messages(initial_events)
             initial_scroll_timer = ui.timer(0.1, queue_chat_scroll_to_bottom, once=True)
             self._register_timer_cleanup(ui=ui, timer=initial_scroll_timer)
@@ -1087,7 +1214,18 @@ class ModWebChatMixin(ModWebServiceSupport):
 
     @staticmethod
     def _ensure_chat_client_script(ui: ModWebUi) -> None:
-        ui.add_head_html(ModWebChatMixin._chat_client_script())
+        version = ModWebChatMixin._chat_client_asset_version()
+        ui.add_head_html(f'<script src="/mod-web/assets/chat.js?v={version}"></script>')
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _chat_client_javascript() -> str:
+        return extract_html_tag_contents(ModWebChatMixin._chat_client_script(), tag_name="script")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _chat_client_asset_version() -> str:
+        return hashlib.sha256(ModWebChatMixin._chat_client_javascript().encode("utf-8")).hexdigest()[:12]
 
     @staticmethod
     def _chat_history_append_count(previous_event_ids: tuple[str, ...], next_event_ids: tuple[str, ...]) -> int:
@@ -1643,10 +1781,12 @@ class ModWebChatMixin(ModWebServiceSupport):
         room_id: str,
         can_reply: bool,
         on_reply: Callable[[ChatEvent], None],
-    ) -> None:
+    ) -> Element:
         head_event = group.head_event
         event_badges = self._chat_event_badges(head_event)
-        with ui.element("article").classes(f"mod-chat-message {self._chat_event_source_class(head_event)} w-full"):
+        with ui.element("article").classes(
+            f"mod-chat-message {self._chat_event_source_class(head_event)} w-full"
+        ) as group_root:
             with ui.column().classes("mod-chat-message-inner w-full"):
                 with ui.row().classes("mod-chat-message-head w-full items-center justify-between gap-2 flex-wrap"):
                     with ui.row().classes("mod-chat-author-row items-center gap-2 min-w-0"):
@@ -1679,6 +1819,7 @@ class ModWebChatMixin(ModWebServiceSupport):
                             can_reply=can_reply,
                             on_reply=on_reply,
                         )
+        return group_root
 
     def _render_chat_event_entry(
         self,

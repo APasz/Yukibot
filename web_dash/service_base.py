@@ -4,7 +4,15 @@ from typing import TYPE_CHECKING, overload
 
 from .backend import ModWebDashboardBackend
 from .nicegui_protocols import AsyncRefresh, ModWebFastApiApp, ModWebRouteUi, WebChatRelayPublisher
+from .stream_broker import (
+    ConsoleStreamKey,
+    RemoteAppStreamKey,
+    RemoteChatStreamKey,
+    RemoteNodeStreamKey,
+    SharedAsyncStreamBroker,
+)
 from .runtime_imports import (
+    AbstractEventLoop,
     Access_Control,
     App_Manager,
     Awaitable,
@@ -20,6 +28,7 @@ from .runtime_imports import (
     ModWebUser,
     NodeApiService,
     NodeAppEntry,
+    NodeAppStateStreamEvent,
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
@@ -43,13 +52,16 @@ from .runtime_imports import (
     NodeSettingMutationResult,
     NodeSettingsActionResult,
     NodeSystemSummary,
+    NodeStateStreamEvent,
     Path,
     Power_Level,
     RedirectResponse,
     StarletteResponse,
     Tooltip,
+    aiohttp,
     cast,
     config,
+    requests,
     threading,
 )
 from .types import (
@@ -70,6 +82,7 @@ from .types import (
     ModWebTitleStat,
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
+    RemoteChatBrokerEvent,
     _ModWebKillControlState,
     _ModWebStartStopControlState,
     _ModWebStatusPageConfig,
@@ -86,6 +99,48 @@ class ModWebServiceSupport:
     _started: bool = False
     _routes_registered: bool = False
     _shutting_down: bool = False
+    _remote_http_session: aiohttp.ClientSession | None = None
+    _remote_http_session_loop: AbstractEventLoop | None = None
+    _remote_sync_http_local: threading.local = cast(threading.local, cast(object, None))
+    _remote_sync_http_sessions: list[requests.Session] = cast(list[requests.Session], cast(object, None))
+    _remote_sync_http_sessions_lock: threading.Lock = cast(threading.Lock, cast(object, None))
+    _remote_node_state_broker: SharedAsyncStreamBroker[
+        RemoteNodeStreamKey, NodeStateStreamEvent
+    ] = cast(SharedAsyncStreamBroker[RemoteNodeStreamKey, NodeStateStreamEvent], cast(object, None))
+    _remote_app_state_broker: SharedAsyncStreamBroker[
+        RemoteAppStreamKey, NodeAppStateStreamEvent
+    ] = cast(SharedAsyncStreamBroker[RemoteAppStreamKey, NodeAppStateStreamEvent], cast(object, None))
+    _remote_chat_broker: SharedAsyncStreamBroker[
+        RemoteChatStreamKey, RemoteChatBrokerEvent
+    ] = cast(SharedAsyncStreamBroker[RemoteChatStreamKey, RemoteChatBrokerEvent], cast(object, None))
+    _console_stdout_broker: SharedAsyncStreamBroker[
+        ConsoleStreamKey, NodeConsoleStdoutSnapshot
+    ] = cast(SharedAsyncStreamBroker[ConsoleStreamKey, NodeConsoleStdoutSnapshot], cast(object, None))
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_http_client"]
+    ) -> Callable[[], Awaitable[aiohttp.ClientSession]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_aiohttp_client_timeout"]
+    ) -> Callable[[float | tuple[float, float]], aiohttp.ClientTimeout]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_close_remote_http_client"]) -> Callable[[], Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_sync_http_client"]) -> Callable[[], requests.Session]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_on_shutdown"]) -> Callable[[], Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_map_client_stylesheet"]) -> Callable[[], str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_map_client_script"]) -> Callable[[], str]: ...
 
     @overload
     def __getattr__(self, name: Literal["_action_link"]) -> Callable[..., None]: ...
@@ -157,7 +212,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_attach_html_tooltip"]) -> Callable[..., tuple[Tooltip, Html]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_authorised_page_user"]) -> Callable[..., ModWebUser | None]: ...
+    def __getattr__(
+        self, name: Literal["_authorised_page_user"]
+    ) -> Callable[..., Awaitable[ModWebUser | None]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_badge"]) -> Callable[..., Label]: ...
@@ -212,6 +269,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_chat_player_count_badge"]) -> Callable[..., _ModWebBadgeSpec | None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_chat_client_javascript"]) -> Callable[[], str]: ...
 
     @overload
     def __getattr__(self, name: Literal["_chat_room_app"]) -> Callable[..., object | None]: ...
@@ -334,7 +394,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_login_node_status_badge_tone"]) -> Callable[..., BadgeTone]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_login_node_statuses"]) -> Callable[..., tuple[ModWebNodeStatus, ...]]: ...
+    def __getattr__(
+        self, name: Literal["_login_node_statuses_async"]
+    ) -> Callable[..., Awaitable[tuple[ModWebNodeStatus, ...]]]: ...
 
     @overload
     def __getattr__(
@@ -441,21 +503,12 @@ class ModWebServiceSupport:
     ) -> Callable[..., Callable[[], None]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_app_entry"]) -> Callable[..., NodeAppEntry]: ...
-
-    @overload
     def __getattr__(self, name: Literal["_remote_app_entry_async"]) -> Callable[..., Awaitable[NodeAppEntry]]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_remote_app_runtime_summary"]) -> Callable[..., NodeAppRuntimeSummary]: ...
 
     @overload
     def __getattr__(
         self, name: Literal["_remote_app_runtime_summary_async"]
     ) -> Callable[..., Awaitable[NodeAppRuntimeSummary]]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_remote_apps"]) -> Callable[..., tuple[NodeAppEntry, ...]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_apps_async"]) -> Callable[..., Awaitable[tuple[NodeAppEntry, ...]]]: ...
@@ -466,19 +519,29 @@ class ModWebServiceSupport:
     ) -> Callable[..., Awaitable[_ModWebChatSurfaceConfig]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_config_content"]) -> Callable[..., NodeConfigContent]: ...
+    def __getattr__(
+        self, name: Literal["_remote_config_content_async"]
+    ) -> Callable[..., Awaitable[NodeConfigContent]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_config_list"]) -> Callable[..., NodeConfigList]: ...
+    def __getattr__(
+        self, name: Literal["_remote_config_list_async"]
+    ) -> Callable[..., Awaitable[NodeConfigList]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_config_write"]) -> Callable[..., NodeConfigContent]: ...
+    def __getattr__(
+        self, name: Literal["_remote_config_write_async"]
+    ) -> Callable[..., Awaitable[NodeConfigContent]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_console_action_list"]) -> Callable[..., NodeConsoleActionList]: ...
+    def __getattr__(
+        self, name: Literal["_remote_console_action_list_async"]
+    ) -> Callable[..., Awaitable[NodeConsoleActionList]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_console_stdout"]) -> Callable[..., NodeConsoleStdoutSnapshot]: ...
+    def __getattr__(
+        self, name: Literal["_remote_console_stdout_async"]
+    ) -> Callable[..., Awaitable[NodeConsoleStdoutSnapshot]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_download_redirect"]) -> Callable[..., RedirectResponse]: ...
@@ -488,11 +551,8 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(
-        self, name: Literal["_remote_execute_console_action"]
-    ) -> Callable[..., NodeConsoleActionExecutionResult]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_remote_json"]) -> Callable[..., dict[str, object]]: ...
+        self, name: Literal["_remote_execute_console_action_async"]
+    ) -> Callable[..., Awaitable[NodeConsoleActionExecutionResult]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_json_async"]) -> Callable[..., Awaitable[dict[str, object]]]: ...
@@ -503,21 +563,22 @@ class ModWebServiceSupport:
     ) -> Callable[..., Awaitable[tuple[bytes, str | None, tuple[tuple[str, str], ...]]]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_mod_list"]) -> Callable[..., NodeModList]: ...
+    def __getattr__(
+        self, name: Literal["_remote_mod_list_async"]
+    ) -> Callable[..., Awaitable[NodeModList]]: ...
 
     @overload
     def __getattr__(
-        self, name: Literal["_remote_minecraft_recipe_summaries"]
-    ) -> Callable[..., tuple[ModWebMinecraftRecipeBookSummary, ModWebMinecraftItemRegistrySummary]]: ...
+        self, name: Literal["_remote_minecraft_recipe_summaries_async"]
+    ) -> Callable[
+        ..., Awaitable[tuple[ModWebMinecraftRecipeBookSummary, ModWebMinecraftItemRegistrySummary]]
+    ]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_mod_uploads"]) -> Callable[..., NodeModUploadBatchResult]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_node_link"]) -> Callable[..., ModWebNodeLink]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_remote_node_system_summary"]) -> Callable[..., NodeSystemSummary]: ...
 
     @overload
     def __getattr__(
@@ -539,42 +600,60 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_portal_redirect"]) -> Callable[..., RedirectResponse | None]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_blueprint_delete"]) -> Callable[..., NodeBlueprintMutationResult]: ...
+    def __getattr__(
+        self, name: Literal["_remote_blueprint_delete_async"]
+    ) -> Callable[..., Awaitable[NodeBlueprintMutationResult]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_blueprint_list"]) -> Callable[..., NodeBlueprintList]: ...
+    def __getattr__(
+        self, name: Literal["_remote_blueprint_list_async"]
+    ) -> Callable[..., Awaitable[NodeBlueprintList]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_blueprint_upload"]) -> Callable[..., NodeBlueprintMutationResult]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_save_list"]) -> Callable[..., NodeSaveList]: ...
+    def __getattr__(
+        self, name: Literal["_remote_save_list_async"]
+    ) -> Callable[..., Awaitable[NodeSaveList]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_save_delete"]) -> Callable[..., NodeSaveMutationResult]: ...
+    def __getattr__(
+        self, name: Literal["_remote_save_delete_async"]
+    ) -> Callable[..., Awaitable[NodeSaveMutationResult]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_save_rename"]) -> Callable[..., NodeSaveMutationResult]: ...
+    def __getattr__(
+        self, name: Literal["_remote_save_rename_async"]
+    ) -> Callable[..., Awaitable[NodeSaveMutationResult]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_save_upload"]) -> Callable[..., NodeSaveMutationResult]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_setting_list"]) -> Callable[..., NodeSettingList]: ...
+    def __getattr__(
+        self, name: Literal["_remote_setting_list_async"]
+    ) -> Callable[..., Awaitable[NodeSettingList]]: ...
 
     @overload
     def __getattr__(
-        self, name: Literal["_remote_sevendays_sandbox_options_summary"]
-    ) -> Callable[..., ModWebSevenDaysSandboxOptionsSummary]: ...
+        self, name: Literal["_remote_sevendays_sandbox_options_summary_async"]
+    ) -> Callable[..., Awaitable[ModWebSevenDaysSandboxOptionsSummary]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_setting_write"]) -> Callable[..., NodeSettingMutationResult]: ...
+    def __getattr__(
+        self, name: Literal["_remote_setting_write_async"]
+    ) -> Callable[..., Awaitable[NodeSettingMutationResult]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_settings_reload"]) -> Callable[..., NodeSettingsActionResult]: ...
+    def __getattr__(
+        self, name: Literal["_remote_settings_reload_async"]
+    ) -> Callable[..., Awaitable[NodeSettingsActionResult]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_settings_save"]) -> Callable[..., NodeSettingsActionResult]: ...
+    def __getattr__(
+        self, name: Literal["_remote_settings_save_async"]
+    ) -> Callable[..., Awaitable[NodeSettingsActionResult]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_token"]) -> Callable[..., str]: ...

@@ -109,6 +109,9 @@ class ModWebDashboardBackend:
         self._chat_relay = chat_relay
         self._node_api.set_chat_relay_service(chat_relay)
 
+    def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
+        self._node_api.set_process_restart_handler(handler)
+
     def replace_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self.set_chat_relay_service(chat_relay)
 

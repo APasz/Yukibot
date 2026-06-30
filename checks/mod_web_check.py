@@ -38,9 +38,9 @@ from apps.minecraft import (
     MinecraftCookingRecipe,
     MinecraftItemRegistrySnapshot,
     MinecraftRecipeBook,
-    MinecraftRecipeKind,
     MinecraftRecipeIngredient,
     MinecraftRecipeItemStack,
+    MinecraftRecipeKind,
     MinecraftRecipeRemoval,
     MinecraftRecipeRemovalFilter,
     MinecraftShapedRecipe,
@@ -60,6 +60,7 @@ from chat_hub import (
     ChatMediaProvider,
     ChatMessageReference,
     ChatReferenceKind,
+    ChatRoomUpdate,
 )
 from config import BotConfiguration, BotMetadataSnapshot, ModWebServerConfig
 from font_assets import FontAssetEntry, font_assets
@@ -86,9 +87,9 @@ from node_api import (
     NodeConsoleActionList,
     NodeConsoleActionParameter,
     NodeMinecraftItemRegistryState,
+    NodeMinecraftRecipeBookState,
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationResult,
-    NodeMinecraftRecipeBookState,
     NodeMinecraftRecipeWorkspaceState,
     NodeModEntry,
     NodeModList,
@@ -119,7 +120,6 @@ from relay_notices import (
     PlayerSessionNotice,
     RelayNoticeSource,
 )
-from web_dash.backend import ModWebDashboardBackend
 from web_dash.app_page import (
     _MinecraftRecipeDragPayload,
     _MinecraftRecipeEditorIngredientKind,
@@ -128,11 +128,14 @@ from web_dash.app_page import (
     _MinecraftRecipeEditorSelection,
     _MinecraftRecipeEditorState,
 )
-from web_dash.links import current_node_app_url
+from web_dash.assets import AssetContentEncoding, CacheableTextAsset, extract_html_tag_contents
+from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS
+from web_dash.links import current_node_app_url
 from web_dash.models import _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
 from web_dash.nicegui_protocols import ModWebUi
 from web_dash.service import ModWebService
+from web_dash.stream_broker import SharedAsyncStreamBroker
 from web_dash.types import (
     ModDownloadKind,
     ModWebAppLink,
@@ -146,8 +149,6 @@ from web_dash.types import (
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
     ModWebModSortOrder,
-    ModWebSevenDaysSandboxOptionEntry,
-    ModWebSevenDaysSandboxOptionsSummary,
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
@@ -158,6 +159,8 @@ from web_dash.types import (
     ModWebPageModel,
     ModWebSearchOption,
     ModWebSettingControlKind,
+    ModWebSevenDaysSandboxOptionEntry,
+    ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
     _ModWebAppCardBadgeSpec,
     _ModWebBadgeSpec,
@@ -293,6 +296,71 @@ class _FakeCleanupTimer:
 
 
 class ModWebTests(unittest.TestCase):
+    def test_cacheable_text_asset_selects_best_supported_encoding(self) -> None:
+        asset = CacheableTextAsset.build(text="repeated content " * 20, media_type="text/plain")
+
+        brotli_body = asset.select_content("gzip;q=0.4, br;q=0.9")
+        gzip_body = asset.select_content("br;q=0, gzip")
+        plain_body = asset.select_content("identity")
+
+        self.assertEqual(brotli_body.encoding, AssetContentEncoding.BROTLI)
+        self.assertEqual(gzip_body.encoding, AssetContentEncoding.GZIP)
+        self.assertIsNone(plain_body.encoding)
+        self.assertEqual(plain_body.content, asset.content)
+
+    def test_extract_html_tag_contents_combines_matching_blocks(self) -> None:
+        html = "<style>.first { color: red; }</style><style>.second { color: blue; }</style>"
+
+        extracted = extract_html_tag_contents(html, tag_name="style")
+
+        self.assertEqual(extracted, ".first { color: red; }\n.second { color: blue; }")
+
+    def test_shared_stream_broker_reuses_listener_and_replays_latest_event(self) -> None:
+        async def exercise() -> None:
+            broker = SharedAsyncStreamBroker[str, int](reconnect_delay_seconds=0)
+            listener_started = asyncio.Event()
+            listener_cancelled = asyncio.Event()
+            listener_calls = 0
+            first_events: list[int] = []
+            second_events: list[int] = []
+
+            async def listener(publish: Callable[[int], None]) -> None:
+                nonlocal listener_calls
+                listener_calls += 1
+                publish(7)
+                listener_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    listener_cancelled.set()
+
+            unsubscribe_first = broker.subscribe(
+                key="node",
+                callback=first_events.append,
+                listener_factory=listener,
+            )
+            await asyncio.wait_for(listener_started.wait(), timeout=0.2)
+            unsubscribe_second = broker.subscribe(
+                key="node",
+                callback=second_events.append,
+                listener_factory=listener,
+                replay_latest=True,
+            )
+
+            self.assertEqual(listener_calls, 1)
+            self.assertEqual(first_events, [7])
+            self.assertEqual(second_events, [7])
+            self.assertEqual(broker.subscriber_count("node"), 2)
+
+            unsubscribe_first()
+            self.assertEqual(broker.subscriber_count("node"), 1)
+            unsubscribe_second()
+            await asyncio.wait_for(listener_cancelled.wait(), timeout=0.2)
+            self.assertEqual(broker.subscriber_count("node"), 0)
+            await broker.close()
+
+        asyncio.run(exercise())
+
     @staticmethod
     def _config_entry(
         *,
@@ -1211,10 +1279,17 @@ class ModWebTests(unittest.TestCase):
             api_url="/api/node-proxy/erin/apps",
             is_current=False,
         )
-        response: SimpleNamespace = SimpleNamespace(status_code=401)
+        class ResponseContext:
+            async def __aenter__(self) -> SimpleNamespace:
+                return SimpleNamespace(status=401)
 
-        with patch("web_dash.page_handlers.requests.get", return_value=response):
-            status: ModWebNodeStatus = ModWebService()._probe_node_status(node)
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        session = Mock()
+        session.get.return_value = ResponseContext()
+        with patch.object(ModWebService, "_remote_http_client", new=AsyncMock(return_value=session)):
+            status = asyncio.run(ModWebService()._probe_node_status_async(node))
 
         self.assertEqual(status, ModWebNodeStatus(node=node, alive=True, detail="HTTP 401"))
 
@@ -1227,12 +1302,24 @@ class ModWebTests(unittest.TestCase):
             api_url="/api/node-proxy/erin/apps",
             is_current=False,
         )
-        response: SimpleNamespace = SimpleNamespace(status_code=200)
+        class ResponseContext:
+            async def __aenter__(self) -> SimpleNamespace:
+                return SimpleNamespace(status=200)
 
-        with patch("web_dash.page_handlers.requests.get", return_value=response) as get_request:
-            ModWebService()._probe_node_status(node)
+            async def __aexit__(self, *_args: object) -> None:
+                return None
 
-        get_request.assert_called_once_with("https://erin.example/api/node/ping", timeout=(2.0, 4.0))
+        session = Mock()
+        session.get.return_value = ResponseContext()
+        with patch.object(ModWebService, "_remote_http_client", new=AsyncMock(return_value=session)):
+            asyncio.run(ModWebService()._probe_node_status_async(node))
+
+        session.get.assert_called_once()
+        call_kwargs = session.get.call_args.kwargs
+        self.assertEqual(session.get.call_args.args, ("https://erin.example/api/node/ping",))
+        self.assertIsNone(call_kwargs["timeout"].total)
+        self.assertEqual(call_kwargs["timeout"].connect, 2.0)
+        self.assertEqual(call_kwargs["timeout"].sock_read, 4.0)
 
     def test_probe_node_status_marks_request_failure_down(self) -> None:
         node: ModWebNodeLink = ModWebNodeLink(
@@ -1244,8 +1331,10 @@ class ModWebTests(unittest.TestCase):
             is_current=False,
         )
 
-        with patch("web_dash.page_handlers.requests.get", side_effect=requests.RequestException("timeout")):
-            status: ModWebNodeStatus = ModWebService()._probe_node_status(node)
+        session = Mock()
+        session.get.side_effect = aiohttp.ClientConnectionError("timeout")
+        with patch.object(ModWebService, "_remote_http_client", new=AsyncMock(return_value=session)):
+            status = asyncio.run(ModWebService()._probe_node_status_async(node))
 
         self.assertFalse(status.alive)
         self.assertEqual(status.node, node)
@@ -1272,10 +1361,10 @@ class ModWebTests(unittest.TestCase):
 
         with (
             patch.object(ModWebService, "_node_links", return_value=(local_node, remote_node)),
-            patch.object(ModWebService, "_probe_node_status") as probe_node_status,
+            patch.object(ModWebService, "_probe_node_status_async", new=AsyncMock()) as probe_node_status,
         ):
             probe_node_status.side_effect = [ModWebNodeStatus(node=local_node, alive=True)]
-            statuses = service._login_node_statuses(simulated_down_node_names=("erin",))
+            statuses = asyncio.run(service._login_node_statuses_async(simulated_down_node_names=("erin",)))
 
         self.assertEqual(
             statuses,
@@ -1289,7 +1378,49 @@ class ModWebTests(unittest.TestCase):
                 ),
             ),
         )
-        probe_node_status.assert_called_once_with(local_node)
+        probe_node_status.assert_awaited_once_with(local_node)
+
+    def test_login_node_statuses_probe_nodes_concurrently(self) -> None:
+        async def exercise() -> tuple[ModWebNodeStatus, ...]:
+            service = ModWebService()
+            first_node = ModWebNodeLink(
+                node_name="yuki",
+                label="Yuki",
+                url="/",
+                api_base_url="/api/node",
+                api_url="/api/node/apps",
+                is_current=True,
+            )
+            second_node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            started_nodes: list[ModWebNodeLink] = []
+            all_started = asyncio.Event()
+
+            async def fake_probe(node: ModWebNodeLink) -> ModWebNodeStatus:
+                started_nodes.append(node)
+                if len(started_nodes) == 2:
+                    all_started.set()
+                await asyncio.wait_for(all_started.wait(), timeout=0.2)
+                return ModWebNodeStatus(node=node, alive=True)
+
+            with (
+                patch.object(ModWebService, "_node_links", return_value=(first_node, second_node)),
+                patch.object(ModWebService, "_probe_node_status_async", side_effect=fake_probe),
+            ):
+                statuses = await service._login_node_statuses_async()
+
+            self.assertEqual(started_nodes, [first_node, second_node])
+            return statuses
+
+        statuses = asyncio.run(exercise())
+
+        self.assertEqual([status.node.node_name for status in statuses], ["yuki", "erin"])
 
     def test_friendly_remote_node_error_text_hides_connection_details(self) -> None:
         try:
@@ -1327,8 +1458,7 @@ class ModWebTests(unittest.TestCase):
             is_current=False,
         )
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
-        response = Mock(status_code=200)
-        response.json.return_value = {
+        payload = {
             "app_name": "sevendays_alpha",
             "app_friendly": "7D2D Alpha",
             "node": "erin",
@@ -1347,17 +1477,28 @@ class ModWebTests(unittest.TestCase):
             },
         }
 
-        with (
-            patch.object(ModWebService, "_remote_token", return_value="test-token"),
-            patch("web_dash.models.requests.delete", return_value=response) as delete_request,
-        ):
-            result = ModWebService()._remote_save_delete(node, "sevendays_alpha", "save-abcd1234/AlphaWorld", user)
+        with patch.object(
+            ModWebService,
+            "_remote_json_async",
+            new=AsyncMock(return_value=payload),
+        ) as remote_json:
+            result = asyncio.run(
+                ModWebService()._remote_save_delete_async(
+                    node,
+                    "sevendays_alpha",
+                    "save-abcd1234/AlphaWorld",
+                    user,
+                )
+            )
 
         self.assertEqual(result.save.label, "AlphaWorld")
-        delete_request.assert_called_once_with(
-            "https://erin.example/api/node/apps/sevendays_alpha/saves/save-abcd1234/AlphaWorld",
-            headers={"Authorization": "Bearer test-token"},
-            timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="sevendays_alpha",
+            path="/apps/sevendays_alpha/saves/save-abcd1234/AlphaWorld",
+            scopes=(NodeApiScope.SAVES_WRITE,),
+            user=user,
+            method="DELETE",
         )
 
     def test_login_node_status_badge_marks_current_node_alive(self) -> None:
@@ -1407,9 +1548,9 @@ class ModWebTests(unittest.TestCase):
 
         with (
             patch.object(ModWebService, "_node_links", return_value=(local_node,)),
-            patch.object(ModWebService, "_probe_node_status") as probe_node_status,
+            patch.object(ModWebService, "_probe_node_status_async", new=AsyncMock()) as probe_node_status,
         ):
-            statuses = service._login_node_statuses(simulated_down_node_names=("yuki",))
+            statuses = asyncio.run(service._login_node_statuses_async(simulated_down_node_names=("yuki",)))
 
         self.assertEqual(
             statuses,
@@ -1422,7 +1563,7 @@ class ModWebTests(unittest.TestCase):
                 ),
             ),
         )
-        probe_node_status.assert_not_called()
+        probe_node_status.assert_not_awaited()
 
     def test_build_system_title_stats_formats_cpu_ram_and_storage(self) -> None:
         title_stats: tuple[ModWebTitleStat, ...] = ModWebService._build_system_title_stats(
@@ -2343,7 +2484,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(links[0].chat_url, "/mod-web/nodes/erin/chat/minecraft_alpha")
         self.assertIsNone(links[0].player_count)
 
-    def test_remote_apps_uses_presence_timeout(self) -> None:
+    def test_remote_apps_uses_standard_request_timeout(self) -> None:
         service: ModWebService = ModWebService()
         node: ModWebNodeLink = ModWebNodeLink(
             node_name="erin",
@@ -2355,17 +2496,110 @@ class ModWebTests(unittest.TestCase):
         )
         user: ModWebUser = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
 
-        with patch.object(ModWebService, "_remote_json", return_value={"apps": []}) as remote_json:
-            self.assertEqual(service._remote_apps(node, user), ())
+        with patch.object(
+            ModWebService,
+            "_remote_json_async",
+            new=AsyncMock(return_value={"apps": []}),
+        ) as remote_json:
+            self.assertEqual(asyncio.run(service._remote_apps_async(node, user)), ())
 
-        remote_json.assert_called_once_with(
+        remote_json.assert_awaited_once_with(
             node=node,
             app_name=None,
             path="/apps",
             scopes=(NodeApiScope.APPS_READ,),
             user=user,
-            timeout=(2.0, 4.0),
         )
+
+    def test_remote_app_entry_uses_app_specific_endpoint(self) -> None:
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        expected = NodeAppEntry(
+            name="sevendays_alpha",
+            friendly="7D2D Alpha",
+            node="erin",
+            running=True,
+            enabled=True,
+            supports_mods=True,
+            supports_configs=True,
+        )
+
+        with patch.object(
+            service,
+            "_remote_json_async",
+            new=AsyncMock(return_value=expected.to_mapping()),
+        ) as remote_json:
+            entry = asyncio.run(service._remote_app_entry_async(node, expected.name, user))
+
+        self.assertEqual(entry, replace(expected, color_hex="#B91C1C"))
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name=expected.name,
+            path="/apps/sevendays_alpha",
+            scopes=(NodeApiScope.APPS_READ,),
+            user=user,
+        )
+
+    def test_remote_json_async_retries_transient_get_timeout(self) -> None:
+        class TimeoutContext:
+            async def __aenter__(self) -> object:
+                raise aiohttp.SocketTimeoutError("slow response")
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        class SuccessResponse:
+            status = 200
+
+            async def json(self) -> dict[str, object]:
+                return {"apps": []}
+
+        class SuccessContext:
+            async def __aenter__(self) -> SuccessResponse:
+                return SuccessResponse()
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        session = Mock()
+        session.get.side_effect = (TimeoutContext(), SuccessContext())
+
+        with (
+            patch.object(service, "_remote_token", return_value="test-token"),
+            patch.object(service, "_remote_http_client", new=AsyncMock(return_value=session)),
+            patch("web_dash.models.asyncio.sleep", new=AsyncMock()) as retry_sleep,
+        ):
+            payload = asyncio.run(
+                service._remote_json_async(
+                    node=node,
+                    app_name=None,
+                    path="/apps",
+                    scopes=(NodeApiScope.APPS_READ,),
+                    user=user,
+                )
+            )
+
+        self.assertEqual(payload, {"apps": []})
+        self.assertEqual(session.get.call_count, 2)
+        retry_sleep.assert_awaited_once()
 
     def test_remote_node_system_summary_or_none_async_returns_none_on_failure(self) -> None:
         async def exercise() -> None:
@@ -2449,12 +2683,16 @@ class ModWebTests(unittest.TestCase):
             resource_points=None,
             app_title_font_preset=AppTitleFont.AUTO.value,
             app_notes=None,
+            join_address="play.example.test:25565",
+            join_direct_ip_address="203.0.113.10:25565",
             lifecycle_notice_started=True,
             lifecycle_notice_stopped=True,
             lifecycle_notice_crashed=True,
         )
 
         self.assertEqual(model.map_api_url, "/api/node/apps/minecraft%20alpha/map")
+        self.assertEqual(model.join_address, "play.example.test:25565")
+        self.assertEqual(model.join_direct_ip_address, "203.0.113.10:25565")
         self.assertEqual(model.download_all_url, "/api/node/apps/minecraft%20alpha/mods/download?enabled_only=false")
         self.assertEqual(
             model.download_enabled_url,
@@ -2685,6 +2923,9 @@ class ModWebTests(unittest.TestCase):
         )
         load_warnings: list[ModWebPageLoadWarning] = []
 
+        async def unavailable_section() -> None:
+            raise RuntimeError("Satisfactory API is unavailable.")
+
         result = asyncio.run(
             service._safe_remote_optional_page_section(
                 node=node,
@@ -2692,7 +2933,7 @@ class ModWebTests(unittest.TestCase):
                 section_label="Saves",
                 fallback=None,
                 load_warnings=load_warnings,
-                operation=lambda: (_ for _ in ()).throw(RuntimeError("Satisfactory API is unavailable.")),
+                operation=unavailable_section,
             )
         )
 
@@ -3821,22 +4062,44 @@ class ModWebTests(unittest.TestCase):
             app_name="minecraft_alpha",
             title="Minecraft Alpha",
             title_font_preset=AppTitleFont.DEFAULT,
+            join_address="play.example.test:25565",
+            join_direct_ip_address="203.0.113.10:25565",
             activity_providers=activity_providers,
             initial_app_stats=initial_stats,
         )
 
         self.assertEqual(hero_card.replaced_classes, "mod-card mod-card-hero w-full mod-app-hero-running")
-        self.assertEqual(ui.label_texts[:3], ["Minecraft Alpha", "Status", "Running"])
-        self.assertEqual(ui.label_texts, ["Minecraft Alpha", "Status", "Running", ""])
+        self.assertEqual(ui.label_texts[:2], ["Minecraft Alpha", "Running"])
+        self.assertEqual(
+            ui.label_texts,
+            [
+                "Minecraft Alpha",
+                "Running",
+                "play.example.test:25565",
+                "203.0.113.10:25565",
+                "",
+            ],
+        )
+        self.assertEqual(ui.labels[2].class_value, "mod-app-hero-join-address")
+        self.assertEqual(ui.labels[3].class_value, "mod-app-hero-join-address-direct")
         self.assertEqual(ui.html_contents, ["", "Day 2", "Day Counter<br>Current day: 2"])
 
         apply_runtime(updated_stats)
 
         self.assertEqual(hero_card.replaced_classes, "mod-card mod-card-hero w-full mod-app-hero-starting")
-        self.assertEqual(ui.label_texts, ["Minecraft Alpha", "Status", "Running", ""])
+        self.assertEqual(
+            ui.label_texts,
+            [
+                "Minecraft Alpha",
+                "Running",
+                "play.example.test:25565",
+                "203.0.113.10:25565",
+                "",
+            ],
+        )
         self.assertEqual(ui.html_elements[1].content, "Day 2")
         self.assertEqual(ui.html_elements[2].content, "")
-        self.assertEqual(ui.labels[2].text, "Starting")
+        self.assertEqual(ui.labels[1].text, "Starting")
 
     def test_render_page_disables_hero_runtime_polling_when_live_app_updates_are_subscribed(self) -> None:
         class FakeContainer:
@@ -3884,6 +4147,8 @@ class ModWebTests(unittest.TestCase):
                     app_name="minecraft_alpha",
                     app_friendly="Minecraft Alpha",
                     app_title_font_preset=AppTitleFont.DEFAULT,
+                    join_address=None,
+                    join_direct_ip_address=None,
                     activity_providers=(),
                     node_name="yuki",
                 ),
@@ -5617,14 +5882,18 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             service._player_count_tooltip_html(
                 connected_player_names=("Yoko", "Bea", "Casey"),
+                fallback_text="3 / 20",
             ),
             "Yoko<br>Bea<br>Casey",
         )
-        self.assertIsNone(
+        self.assertEqual(
             service._player_count_tooltip_html(
-                connected_player_names=(),
-            )
+                connected_player_names=("", "  "),
+                fallback_text="3 / 20",
+            ),
+            "3 / 20",
         )
+        self.assertIsNone(service._player_count_tooltip_html(connected_player_names=()))
 
     def test_local_chat_panel_config_subscribes_to_room_and_runtime_updates(self) -> None:
         service = ModWebService()
@@ -5667,7 +5936,7 @@ class ModWebTests(unittest.TestCase):
             unsubscribe = panel.subscribe_updates(on_update)
             room_callback = subscribe_mock.call_args.args[1]
             runtime_callback = service._node_api.subscribe_local_app_runtime.call_args.args[1]
-            room_callback(object())
+            room_callback(ChatRoomUpdate(room_id="minecraft_alpha"))
             runtime_callback(NodeAppStateStreamEvent.runtime(app_name="minecraft_alpha", app_stats=runtime_stats))
             unsubscribe()
 
@@ -5765,7 +6034,7 @@ class ModWebTests(unittest.TestCase):
             assert panel.subscribe_updates is not None
             unsubscribe = panel.subscribe_updates(on_update)
             room_callback = subscribe_mock.call_args.args[1]
-            room_callback(object())
+            room_callback(ChatRoomUpdate(room_id="minecraft_alpha"))
             unsubscribe()
 
         self.assertEqual(on_update.call_args_list, [call(_ModWebChatPanelSignal.chat())])
@@ -6243,6 +6512,22 @@ class ModWebTests(unittest.TestCase):
                 )
             ),
             _ModWebChatPanelSignal.both(snapshot=snapshot, app_stats=app_stats),
+        )
+        delta = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.web_session("session-1"),
+            author=ChatAuthor(ChatAuthorKind.WEB_USER, "Tester"),
+            content="hello",
+        )
+        self.assertEqual(
+            ModWebService._remote_chat_stream_signal(
+                NodeChatStreamEvent(
+                    kind=NodeChatStreamEventKind.CHAT_CHANGED,
+                    room_id="minecraft_alpha",
+                    events=(delta,),
+                )
+            ),
+            _ModWebChatPanelSignal.chat(events=(delta,)),
         )
         self.assertEqual(
             ModWebService._remote_chat_stream_signal(
@@ -8047,7 +8332,11 @@ class ModWebTests(unittest.TestCase):
             service,
             "_user_has_level",
             side_effect=lambda _user, level: level in {Power_Level.user, Power_Level.admin},
-        ), patch.object(service, "_remote_mod_mutation", return_value=expected_result) as remote_mod_mutation:
+        ), patch.object(
+            service,
+            "_remote_mod_mutation_async",
+            new=AsyncMock(return_value=expected_result),
+        ) as remote_mod_mutation:
             result = asyncio.run(
                 service._mutate_mod(
                     model=model,
@@ -8057,7 +8346,7 @@ class ModWebTests(unittest.TestCase):
                 )
             )
 
-        remote_mod_mutation.assert_called_once()
+        remote_mod_mutation.assert_awaited_once()
         self.assertEqual(result, expected_result)
 
     def test_mutate_mod_rejects_admin_delete_without_sudo(self) -> None:
@@ -10578,12 +10867,14 @@ class ModWebTests(unittest.TestCase):
                 ).to_mapping(),
             ),
         )
-        service._remote_json = Mock(return_value=workspace_state.to_mapping())  # type: ignore[method-assign]
+        service._remote_json_async = AsyncMock(return_value=workspace_state.to_mapping())  # type: ignore[method-assign]
 
-        recipe_summary, item_registry_summary = service._remote_minecraft_recipe_summaries(
-            node,
-            "minecraft_alpha",
-            user,
+        recipe_summary, item_registry_summary = asyncio.run(
+            service._remote_minecraft_recipe_summaries_async(
+                node,
+                "minecraft_alpha",
+                user,
+            )
         )
 
         self.assertEqual(recipe_summary.data_path, ".yukibot/recipes.json")
@@ -10633,7 +10924,7 @@ class ModWebTests(unittest.TestCase):
         acl._roles[42] = Power_Level.sudo
         service.set_acl(acl)
         service._remote_node_link = Mock(return_value=node)  # type: ignore[method-assign]
-        service._remote_json = Mock(return_value=payload)  # type: ignore[method-assign]
+        service._remote_json_async = AsyncMock(return_value=payload)  # type: ignore[method-assign]
 
         result = asyncio.run(
             service._append_minecraft_recipe_mutation(
@@ -10653,8 +10944,8 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(result.message, "Saved Minecraft recipe change for Minecraft Alpha.")
-        service._remote_json.assert_called_once()
-        call_kwargs = service._remote_json.call_args.kwargs
+        service._remote_json_async.assert_awaited_once()  # type: ignore[attr-defined]
+        call_kwargs = service._remote_json_async.call_args.kwargs  # type: ignore[attr-defined]
         self.assertEqual(call_kwargs["node"], node)
         self.assertEqual(call_kwargs["app_name"], "minecraft_alpha")
         self.assertEqual(call_kwargs["path"], "/apps/minecraft_alpha/minecraft/recipes/mutations")
@@ -10703,12 +10994,12 @@ class ModWebTests(unittest.TestCase):
             )
             render_page = Mock()
 
-            service._authorised_page_user = Mock(return_value=user)  # type: ignore[method-assign]
+            service._authorised_page_user = AsyncMock(return_value=user)  # type: ignore[method-assign]
             service._remote_node_link = Mock(return_value=node)  # type: ignore[method-assign]
             service._remote_app_entry_async = AsyncMock(return_value=app_entry)  # type: ignore[method-assign]
-            service._remote_mod_list = Mock(return_value=mods)  # type: ignore[method-assign]
+            service._remote_mod_list_async = AsyncMock(return_value=mods)  # type: ignore[method-assign]
             service._remote_node_system_summary_or_none_async = AsyncMock(return_value=None)  # type: ignore[method-assign]
-            service._remote_minecraft_recipe_summaries = Mock(  # type: ignore[method-assign]
+            service._remote_minecraft_recipe_summaries_async = AsyncMock(  # type: ignore[method-assign]
                 return_value=(recipe_summary, item_registry_summary)
             )
             service._render_page = render_page  # type: ignore[method-assign]
@@ -10718,12 +11009,96 @@ class ModWebTests(unittest.TestCase):
                 ui=cast(ModWebUi, cast(object, SimpleNamespace())),
                 node_name="erin",
                 app_name="minecraft_alpha",
-                request=cast(Any, SimpleNamespace()),
+                request=cast(Any, SimpleNamespace(query_params={"tab": "recipes"})),
             )
 
             model = cast(ModWebPageModel, render_page.call_args.kwargs["model"])
             self.assertEqual(model.minecraft_recipes, recipe_summary)
             self.assertEqual(model.minecraft_item_registry, item_registry_summary)
+
+        asyncio.run(exercise())
+
+    def test_render_node_mods_page_only_loads_requested_config_section(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            app_entry = NodeAppEntry(
+                name="factorio_alpha",
+                friendly="Factorio Alpha",
+                node="erin",
+                running=True,
+                enabled=True,
+                supports_mods=True,
+                supports_configs=True,
+                scope="factorio",
+                config_read_level=Power_Level.visitor,
+            )
+            configs = NodeConfigList(
+                app_name="factorio_alpha",
+                app_friendly="Factorio Alpha",
+                node="erin",
+                configs=(),
+            )
+            app_stats = NodeAppRuntimeSummary(
+                running=True,
+                enabled=True,
+                version="2.0.0",
+                player_count=0,
+                player_capacity=8,
+                relay_support=ChatRelaySupport.NONE,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                footprint_bytes=None,
+            )
+            render_page = Mock()
+            remote_mod_list = AsyncMock(side_effect=AssertionError("Mods should be deferred"))
+            remote_config_list = AsyncMock(return_value=configs)
+            with (
+                patch.object(service, "_authorised_page_user", new=AsyncMock(return_value=user)),
+                patch.object(service, "_user_has_level", return_value=True),
+                patch.object(service, "_remote_node_link", return_value=node),
+                patch.object(service, "_remote_app_entry_async", new=AsyncMock(return_value=app_entry)),
+                patch.object(service, "_remote_mod_list_async", new=remote_mod_list),
+                patch.object(service, "_remote_config_list_async", new=remote_config_list),
+                patch.object(
+                    service,
+                    "_remote_app_runtime_summary_async",
+                    new=AsyncMock(return_value=app_stats),
+                ),
+                patch.object(
+                    service,
+                    "_remote_node_system_summary_or_none_async",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch.object(service, "_render_page", new=render_page),
+                patch.object(
+                    service,
+                    "_request_path",
+                    return_value="/mod-web/nodes/erin/mods/factorio_alpha?tab=configs",
+                ),
+            ):
+                await service._render_node_mods_page(
+                    ui=cast(ModWebUi, cast(object, SimpleNamespace())),
+                    node_name="erin",
+                    app_name="factorio_alpha",
+                    request=cast(Any, SimpleNamespace(query_params={"tab": "configs"})),
+                )
+
+            remote_mod_list.assert_not_awaited()
+            remote_config_list.assert_awaited_once_with(node, "factorio_alpha", user)
+            model = cast(ModWebPageModel, render_page.call_args.kwargs["model"])
+            self.assertEqual(model.configs, configs)
+            self.assertEqual(model.mods.mods, ())
+            self.assertEqual(model.app_stats, app_stats)
 
         asyncio.run(exercise())
 
@@ -10900,9 +11275,15 @@ class ModWebTests(unittest.TestCase):
 
     def test_map_client_assets_are_vendored_locally(self) -> None:
         assets_html = ModWebService._map_client_assets_html()
+        stylesheet = ModWebService._map_client_stylesheet()
+        script = ModWebService._map_client_script()
 
         self.assertNotIn("https://unpkg.com", assets_html)
         self.assertIn("Leaflet", assets_html)
+        self.assertIn(".leaflet-container", stylesheet)
+        self.assertIn("window.modWebMap", script)
+        self.assertNotIn("<style>", stylesheet)
+        self.assertNotIn("<script>", script)
 
     def test_render_map_section_places_controls_inside_shared_tab_toolbar(self) -> None:
         class FakeHtmlElement:
@@ -10975,6 +11356,10 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(len(ui.html_fragments), 1)
         self.assertEqual(len(ui.html_elements), 1)
         self.assertEqual(ui.html_elements[0].class_names, ["w-full"])
+        self.assertEqual(len(ui.head_html), 1)
+        self.assertIn('/mod-web/assets/map.css?v=', ui.head_html[0])
+        self.assertIn('/mod-web/assets/map.js?v=', ui.head_html[0])
+        self.assertNotIn("Leaflet", ui.head_html[0])
         markup = ui.html_fragments[0]
         self.assertIn("mod-tab-toolbar mod-tab-toolbar-surface mod-map-toolbar", markup)
         self.assertIn('class="mod-map-toolbar-main"', markup)

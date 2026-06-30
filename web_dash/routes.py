@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
+from starlette.middleware.gzip import GZipMiddleware
 
 from font_assets import font_assets
+from mod_web_theme import MOD_WEB_THEME_STYLESHEET
 
+from .assets import CacheableTextAsset, cacheable_text_asset
 from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
 from .nicegui_protocols import ModWebFastApiApp, ModWebNotificationType, ModWebRouteUi
 from .runtime_imports import (
@@ -22,7 +25,6 @@ from .runtime_imports import (
     RedirectResponse,
     Request,
     StarletteResponse,
-    asyncio,
     config,
     quote,
     requests,
@@ -46,6 +48,30 @@ class _ModWebClientMapErrorReport(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=False)
 
 class ModWebRoutesMixin(ModWebServiceSupport):
+    @staticmethod
+    def _static_text_asset_response(
+        *,
+        request: Request,
+        asset: CacheableTextAsset,
+    ) -> StarletteResponse:
+        cache_headers = {
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "ETag": f'"{asset.version}"',
+            "Vary": "Accept-Encoding",
+        }
+        if_none_match = request.headers.get("if-none-match")
+        validators = () if if_none_match is None else tuple(value.strip() for value in if_none_match.split(","))
+        if "*" in validators or cache_headers["ETag"] in validators:
+            return StarletteResponse(status_code=304, headers=cache_headers)
+        selected = asset.select_content(request.headers.get("accept-encoding"))
+        if selected.encoding is not None:
+            cache_headers["Content-Encoding"] = selected.encoding.value
+        return StarletteResponse(
+            content=selected.content,
+            media_type=asset.media_type,
+            headers=cache_headers,
+        )
+
     @staticmethod
     def _minecraft_item_icon_remote_path(*, app_name: str, item_id: str) -> str:
         return (
@@ -74,6 +100,8 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         return (target.path or "/") == request_path and target.query == normalized_request_query
 
     def _register_routes(self, *, nicegui_app: ModWebFastApiApp, ui: ModWebRouteUi) -> None:
+        nicegui_app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
+
         @nicegui_app.middleware("http")
         async def _log_mod_web_request(
             request: Request,
@@ -158,7 +186,36 @@ class ModWebRoutesMixin(ModWebServiceSupport):
 
         nicegui_app.on_page_exception(_handle_page_exception)
         nicegui_app.on_startup(self._on_startup)
+        nicegui_app.on_shutdown(self._on_shutdown)
         self._backend.register_node_api_routes(nicegui_app)
+
+        @nicegui_app.get("/mod-web/assets/theme.css")
+        async def _theme_stylesheet(request: Request) -> StarletteResponse:
+            return self._static_text_asset_response(
+                request=request,
+                asset=cacheable_text_asset(MOD_WEB_THEME_STYLESHEET, "text/css"),
+            )
+
+        @nicegui_app.get("/mod-web/assets/map.css")
+        async def _map_stylesheet(request: Request) -> StarletteResponse:
+            return self._static_text_asset_response(
+                request=request,
+                asset=cacheable_text_asset(self._map_client_stylesheet(), "text/css"),
+            )
+
+        @nicegui_app.get("/mod-web/assets/map.js")
+        async def _map_script(request: Request) -> StarletteResponse:
+            return self._static_text_asset_response(
+                request=request,
+                asset=cacheable_text_asset(self._map_client_script(), "text/javascript"),
+            )
+
+        @nicegui_app.get("/mod-web/assets/chat.js")
+        async def _chat_script(request: Request) -> StarletteResponse:
+            return self._static_text_asset_response(
+                request=request,
+                asset=cacheable_text_asset(self._chat_client_javascript(), "text/javascript"),
+            )
 
         @nicegui_app.get("/mod-web/assets/fonts/{asset_path:path}")
         async def _font_asset(asset_path: str) -> FileResponse:
@@ -174,7 +231,11 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 raise _http_exception(404, "Font asset not found.") from xcp
             if resolved_path.suffix.casefold() not in {".woff", ".woff2"} or not resolved_path.is_file():
                 raise _http_exception(404, "Font asset not found.")
-            return FileResponse(path=Path(resolved_path), filename=resolved_path.name)
+            return FileResponse(
+                path=Path(resolved_path),
+                filename=resolved_path.name,
+                headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            )
 
         @nicegui_app.get("/auth/login")
         def _login(request: Request, next_path: str | None = None, remember: bool = False) -> RedirectResponse:
@@ -656,7 +717,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         async def _proxy_mods(node_name: str, app_name: str, request: Request) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            mods = await asyncio.to_thread(self._remote_mod_list, node, app_name, user)
+            mods = await self._remote_mod_list_async(node, app_name, user)
             return mods.to_mapping()
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods/download")
@@ -685,7 +746,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             node = self._remote_node_link(node_name)
             app_entry = await self._remote_app_entry_async(node, app_name, user)
             self._require_user_level(user=user, required_level=app_entry.config_read_level)
-            configs = await asyncio.to_thread(self._remote_config_list, node, app_name, user)
+            configs = await self._remote_config_list_async(node, app_name, user)
             return configs.to_mapping()
 
         @nicegui_app.get(
@@ -712,7 +773,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         async def _proxy_saves(node_name: str, app_name: str, request: Request) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.user)
             node = self._remote_node_link(node_name)
-            saves = await asyncio.to_thread(self._remote_save_list, node, app_name, user)
+            saves = await self._remote_save_list_async(node, app_name, user)
             return saves.to_mapping()
 
         @nicegui_app.get(
@@ -743,7 +804,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             node = self._remote_node_link(node_name)
             app_entry = await self._remote_app_entry_async(node, app_name, user)
             self._require_user_level(user=user, required_level=app_entry.config_read_level)
-            content = await asyncio.to_thread(self._remote_config_content, node, app_name, config_id, user)
+            content = await self._remote_config_content_async(node, app_name, config_id, user)
             return content.to_mapping()
 
         @nicegui_app.put(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/configs/{{config_id:path}}")
@@ -761,14 +822,14 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             content = payload.get("content")
             if not isinstance(content, str):
                 raise _http_exception(400, "Config content is invalid.")
-            updated = await asyncio.to_thread(self._remote_config_write, node, app_name, config_id, content, user)
+            updated = await self._remote_config_write_async(node, app_name, config_id, content, user)
             return updated.to_mapping()
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/settings")
         async def _proxy_settings(node_name: str, app_name: str, request: Request) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.user)
             node = self._remote_node_link(node_name)
-            settings = await asyncio.to_thread(self._remote_setting_list, node, app_name, user)
+            settings = await self._remote_setting_list_async(node, app_name, user)
             return settings.to_mapping()
 
         @nicegui_app.put(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/settings/{{setting_key}}")
@@ -784,21 +845,21 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             value = payload.get("value")
             if not isinstance(value, str):
                 raise _http_exception(400, "Setting value is invalid.")
-            updated = await asyncio.to_thread(self._remote_setting_write, node, app_name, setting_key, value, user)
+            updated = await self._remote_setting_write_async(node, app_name, setting_key, value, user)
             return updated.to_mapping()
 
         @nicegui_app.post(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/settings/save")
         async def _proxy_settings_save(node_name: str, app_name: str, request: Request) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.user)
             node = self._remote_node_link(node_name)
-            result = await asyncio.to_thread(self._remote_settings_save, node, app_name, user)
+            result = await self._remote_settings_save_async(node, app_name, user)
             return result.to_mapping()
 
         @nicegui_app.post(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/settings/reload")
         async def _proxy_settings_reload(node_name: str, app_name: str, request: Request) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.user)
             node = self._remote_node_link(node_name)
-            result = await asyncio.to_thread(self._remote_settings_reload, node, app_name, user)
+            result = await self._remote_settings_reload_async(node, app_name, user)
             return result.to_mapping()
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods/{{mod_name}}/download")
@@ -816,7 +877,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         @ui.page("/")
         async def _home_page(request: Request) -> None:
             traffic_log.info("Rendering mod web home page")
-            user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
+            user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
             if user is not None:
                 await self._render_home_page(
                     ui=ui,
@@ -828,7 +889,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         @ui.page("/mod-web")
         async def _mod_web_home_page(request: Request) -> None:
             traffic_log.info("Rendering mod web home page: path=/mod-web")
-            user = self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
+            user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
             if user is not None:
                 await self._render_home_page(
                     ui=ui,

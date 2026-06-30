@@ -380,18 +380,26 @@ class _ModWebChatPanelSignal:
     runtime_changed: bool = False
     snapshot: NodeChatRoomSnapshot | None = None
     app_stats: NodeAppRuntimeSummary | None = None
+    events: tuple[ChatEvent, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.chat_changed and not self.runtime_changed:
             raise ValueError("Chat panel signal must refresh chat or runtime state.")
         if self.snapshot is not None and not self.chat_changed:
             raise ValueError("Chat panel signal snapshot requires chat refresh.")
+        if self.events and not self.chat_changed:
+            raise ValueError("Chat panel signal deltas require chat refresh.")
         if self.app_stats is not None and not self.runtime_changed:
             raise ValueError("Chat panel signal runtime payload requires runtime refresh.")
 
     @classmethod
-    def chat(cls, *, snapshot: NodeChatRoomSnapshot | None = None) -> "_ModWebChatPanelSignal":
-        return cls(chat_changed=True, snapshot=snapshot)
+    def chat(
+        cls,
+        *,
+        snapshot: NodeChatRoomSnapshot | None = None,
+        events: tuple[ChatEvent, ...] = (),
+    ) -> "_ModWebChatPanelSignal":
+        return cls(chat_changed=True, snapshot=snapshot, events=events)
 
     @classmethod
     def runtime(cls, *, app_stats: NodeAppRuntimeSummary | None = None) -> "_ModWebChatPanelSignal":
@@ -403,13 +411,25 @@ class _ModWebChatPanelSignal:
         *,
         snapshot: NodeChatRoomSnapshot | None = None,
         app_stats: NodeAppRuntimeSummary | None = None,
+        events: tuple[ChatEvent, ...] = (),
     ) -> "_ModWebChatPanelSignal":
         return cls(
             chat_changed=True,
             runtime_changed=True,
             snapshot=snapshot,
             app_stats=app_stats,
+            events=events,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteChatBrokerEvent:
+    signal: _ModWebChatPanelSignal | None = None
+    stream_healthy: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.signal is None and self.stream_healthy is None:
+            raise ValueError("Remote chat broker events require a signal or health state.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -626,6 +646,8 @@ class ModWebBasePageModel:
     update_status: AppUpdateStatus | None = field(default=None, kw_only=True)
     resource_points: NodeAppResourcePointSummary | None = field(default=None, kw_only=True)
     app_notes: str | None = field(default=None, kw_only=True)
+    join_address: str | None = field(default=None, kw_only=True)
+    join_direct_ip_address: str | None = field(default=None, kw_only=True)
     lifecycle_notice_started: bool = field(default=True, kw_only=True)
     lifecycle_notice_stopped: bool = field(default=True, kw_only=True)
     lifecycle_notice_crashed: bool = field(default=True, kw_only=True)

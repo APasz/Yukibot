@@ -5,6 +5,7 @@ import unittest
 from mod_web_theme import (
     DEFAULT_MOD_WEB_THEME,
     MOD_WEB_ACTION_BASE_CLASSES,
+    MOD_WEB_THEME_STYLESHEET,
     apply_mod_web_theme,
     mod_web_badge_class,
 )
@@ -310,7 +311,8 @@ class ModWebThemeTests(unittest.TestCase):
             },
         )
         self.assertIsNotNone(ui.head_html)
-        self.assertIn(".mod-card", str(ui.head_html))
+        self.assertIn('/mod-web/assets/theme.css?v=', str(ui.head_html))
+        self.assertIn("content-visibility: auto", MOD_WEB_THEME_STYLESHEET)
 
     def test_action_base_class_stays_on_mod_action_system(self) -> None:
         self.assertIn("mod-action", MOD_WEB_ACTION_BASE_CLASSES)

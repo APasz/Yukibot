@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -91,7 +91,7 @@ from apps.minecraft import (
     minecraft_recipe_mutation_with_id,
 )
 from apps.sevendays import SevenDays
-from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub
+from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub, ChatRoomUpdate
 from font_assets import font_assets
 from map_annotations import (
     AppMapAnnotationStore,
@@ -110,12 +110,18 @@ if TYPE_CHECKING:
 
 _NODE_API_PREFIX = "/api/node"
 _NODE_TOKEN_TTL_SECONDS = 15 * 60
+_NODE_RESTART_DELAY_SECONDS = 0.25
 _RELAY_TTS_FORWARD_TTL_SECONDS = 60
 _APP_PLAYER_COUNT_TIMEOUT_SECONDS = 1.5
 _APP_FOOTPRINT_CACHE_TTL_SECONDS = 60.0
 _APP_TRANSITION_TTL_SECONDS = 15.0
+_NODE_APP_ENTRY_CACHE_TTL_SECONDS = 5.0
+_NODE_SYSTEM_SUMMARY_CACHE_TTL_SECONDS = 1.0
+_LIVE_APP_RUNTIME_CACHE_TTL_SECONDS = 0.5
+_FULL_APP_RUNTIME_CACHE_TTL_SECONDS = 2.0
+_MOD_INVENTORY_CACHE_TTL_SECONDS = 5.0
 _LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS = 0.75
-_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 1.0
+_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 2.0
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
 _SQUAREMAP_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -372,6 +378,8 @@ class NodeAppEntry:
     save_write_level: Power_Level = Power_Level.sudo
     color_hex: str | None = None
     map_url: str | None = None
+    join_address: str | None = None
+    join_direct_ip_address: str | None = None
     resource_points: NodeAppResourcePointSummary | None = None
     title_font_preset: str = AppTitleFont.AUTO.value
     notes: str | None = field(default=None, kw_only=True)
@@ -418,6 +426,8 @@ class NodeAppEntry:
         save_write_level = _power_level(payload, "save_write_level", default=Power_Level.sudo)
         color_hex = payload.get("color_hex")
         map_url = payload.get("map_url")
+        join_address = _optional_string(payload, "join_address")
+        join_direct_ip_address = _optional_string(payload, "join_direct_ip_address")
         raw_resource_points = payload.get("resource_points")
         raw_title_font_preset = payload.get("title_font_preset", AppTitleFont.AUTO.value)
         lifecycle_notice_started = payload.get("lifecycle_notice_started", True)
@@ -478,6 +488,8 @@ class NodeAppEntry:
             raise ValueError("Node app entry color_hex is invalid.")
         if map_url is not None and not isinstance(map_url, str):
             raise ValueError("Node app entry map_url is invalid.")
+        if join_direct_ip_address is not None and join_address is None:
+            raise ValueError("Node app entry direct join address requires a primary join address.")
         if not isinstance(raw_title_font_preset, str):
             raise ValueError("Node app entry title_font_preset is invalid.")
         try:
@@ -551,6 +563,8 @@ class NodeAppEntry:
             save_write_level=save_write_level,
             color_hex=color_hex,
             map_url=map_url,
+            join_address=join_address,
+            join_direct_ip_address=join_direct_ip_address,
             resource_points=(
                 NodeAppResourcePointSummary.from_mapping(cast(Mapping[str, object], raw_resource_points))
                 if raw_resource_points is not None
@@ -604,6 +618,8 @@ class NodeAppEntry:
             "save_write_level": self.save_write_level.name,
             "color_hex": self.color_hex,
             "map_url": self.map_url,
+            "join_address": self.join_address,
+            "join_direct_ip_address": self.join_direct_ip_address,
             "resource_points": self.resource_points.to_mapping() if self.resource_points is not None else None,
             "title_font_preset": self.title_font_preset,
             "lifecycle_notice_started": self.lifecycle_notice_started,
@@ -1637,14 +1653,16 @@ class NodeStateStreamEvent:
         cls,
         *,
         node_name: str,
-        app_entries: tuple[NodeAppEntry, ...],
-        system_summary: NodeSystemSummary,
+        app_entries: tuple[NodeAppEntry, ...] | None = None,
+        system_summary: NodeSystemSummary | None = None,
     ) -> "NodeStateStreamEvent":
+        if app_entries is None and system_summary is None:
+            raise ValueError("Initial node state events require app or system state.")
         return cls(
             node_name=node_name,
             is_initial=True,
-            apps_changed=True,
-            system_changed=True,
+            apps_changed=app_entries is not None,
+            system_changed=system_summary is not None,
             app_entries=app_entries,
             system_summary=system_summary,
         )
@@ -1742,10 +1760,50 @@ class _NodeLocalAppRuntimeWatchState:
     task: asyncio.Task[None] | None = None
 
 
+class NodeStateTopic(StrEnum):
+    APPS = "apps"
+    SYSTEM = "system"
+
+
+_ALL_NODE_STATE_TOPICS: frozenset[NodeStateTopic] = frozenset(NodeStateTopic)
+
+
+@dataclass(slots=True)
+class _NodeLocalNodeStateSubscription:
+    callback: Callable[[NodeStateStreamEvent], None]
+    topics: frozenset[NodeStateTopic]
+    initial_sent: bool = False
+
+
 @dataclass(slots=True)
 class _NodeLocalNodeStateWatchState:
-    callbacks: dict[str, Callable[[NodeStateStreamEvent], None]] = field(default_factory=dict)
+    subscriptions: dict[str, _NodeLocalNodeStateSubscription] = field(default_factory=dict)
     task: asyncio.Task[None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TimedNodeAppEntries:
+    captured_at_seconds: float
+    entries: tuple[NodeAppEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _TimedNodeSystemSummary:
+    captured_at_seconds: float
+    summary: NodeSystemSummary
+
+
+@dataclass(frozen=True, slots=True)
+class _TimedAppRuntimeSummary:
+    captured_at_seconds: float
+    summary: NodeAppRuntimeSummary
+
+
+@dataclass(frozen=True, slots=True)
+class _TimedModInventory:
+    captured_at_seconds: float
+    summary: NodeModSummary
+    mods: tuple[NodeModEntry, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2726,6 +2784,89 @@ class NodeConsoleStdoutSnapshot:
         }
 
 
+class NodeConsoleStdoutStreamEventKind(StrEnum):
+    INITIAL = "initial"
+    APPEND = "append"
+    RESET = "reset"
+
+
+@dataclass(frozen=True, slots=True)
+class NodeConsoleStdoutStreamEvent:
+    kind: NodeConsoleStdoutStreamEventKind
+    app_name: str
+    snapshot: NodeConsoleStdoutSnapshot | None = None
+    appended_lines: tuple[str, ...] = ()
+    truncated: bool = False
+    running: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.app_name.strip():
+            raise ValueError("Console stdout stream app name must not be empty.")
+        if self.kind in {NodeConsoleStdoutStreamEventKind.INITIAL, NodeConsoleStdoutStreamEventKind.RESET}:
+            if self.snapshot is None or self.snapshot.app_name.casefold() != self.app_name.casefold():
+                raise ValueError("Console stdout stream snapshots are invalid.")
+            if self.appended_lines:
+                raise ValueError("Console stdout snapshot events cannot append lines.")
+        elif self.snapshot is not None:
+            raise ValueError("Console stdout append events cannot contain snapshots.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleStdoutStreamEvent":
+        try:
+            kind = NodeConsoleStdoutStreamEventKind(_required_string(payload, "kind"))
+        except ValueError as xcp:
+            raise ValueError("Console stdout stream event kind is invalid.") from xcp
+        raw_snapshot = payload.get("snapshot")
+        if raw_snapshot is not None and not isinstance(raw_snapshot, Mapping):
+            raise ValueError("Console stdout stream snapshot is invalid.")
+        raw_appended_lines = payload.get("appended_lines", ())
+        if not isinstance(raw_appended_lines, Sequence) or isinstance(raw_appended_lines, (str, bytes)):
+            raise ValueError("Console stdout appended lines are invalid.")
+        appended_lines = tuple(raw_appended_lines)
+        if any(not isinstance(line, str) for line in appended_lines):
+            raise ValueError("Console stdout appended lines are invalid.")
+        return cls(
+            kind=kind,
+            app_name=_required_string(payload, "app_name"),
+            snapshot=NodeConsoleStdoutSnapshot.from_mapping(raw_snapshot) if raw_snapshot is not None else None,
+            appended_lines=cast(tuple[str, ...], appended_lines),
+            truncated=_required_bool(payload, "truncated"),
+            running=_required_bool(payload, "running"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "kind": self.kind.value,
+            "app_name": self.app_name,
+            "snapshot": self.snapshot.to_mapping() if self.snapshot is not None else None,
+            "appended_lines": list(self.appended_lines),
+            "truncated": self.truncated,
+            "running": self.running,
+        }
+
+    def apply(
+        self,
+        previous: NodeConsoleStdoutSnapshot | None,
+        *,
+        max_lines: int,
+    ) -> NodeConsoleStdoutSnapshot:
+        if max_lines <= 0:
+            raise ValueError("Console stdout stream max lines must be positive.")
+        if self.snapshot is not None:
+            return self.snapshot
+        if previous is None:
+            raise ValueError("Console stdout append event requires an initial snapshot.")
+        lines = (*previous.lines, *self.appended_lines)
+        return NodeConsoleStdoutSnapshot(
+            app_name=previous.app_name,
+            app_friendly=previous.app_friendly,
+            node=previous.node,
+            lines=tuple(lines[-max_lines:]),
+            truncated=self.truncated,
+            running=self.running,
+        )
+
+
 class NodeConsoleActionExecuteRequest(BaseModel):
     value: str | None = None
 
@@ -2790,6 +2931,11 @@ class NodeChatRoomSnapshot:
     endpoint_count: int
     events: tuple[ChatEvent, ...]
     endpoint_summaries: tuple[NodeChatEndpointSummary, ...] = ()
+    revision: int = 0
+
+    def __post_init__(self) -> None:
+        if self.revision < 0:
+            raise ValueError("Chat room snapshot revision must not be negative.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeChatRoomSnapshot":
@@ -2814,6 +2960,7 @@ class NodeChatRoomSnapshot:
             endpoint_count=_required_int(payload, "endpoint_count"),
             endpoint_summaries=tuple(endpoint_summaries),
             events=tuple(events),
+            revision=_optional_int(payload, "revision") or 0,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -2822,6 +2969,7 @@ class NodeChatRoomSnapshot:
             "endpoint_count": self.endpoint_count,
             "endpoint_summaries": [summary.to_mapping() for summary in self.endpoint_summaries],
             "events": [event.to_mapping() for event in self.events],
+            "revision": self.revision,
         }
 
 
@@ -2837,12 +2985,18 @@ class NodeChatStreamEvent:
     room_id: str
     snapshot: NodeChatRoomSnapshot | None = None
     app_stats: NodeAppRuntimeSummary | None = None
+    events: tuple[ChatEvent, ...] = ()
+    revision: int = 0
 
     def __post_init__(self) -> None:
         if not self.room_id.strip():
             raise ValueError("Node chat stream event room id is invalid.")
         if self.snapshot is not None and self.snapshot.room_id.casefold() != self.room_id.casefold():
             raise ValueError("Node chat stream event snapshot room id is invalid.")
+        if any(event.room_id.casefold() != self.room_id.casefold() for event in self.events):
+            raise ValueError("Node chat stream event delta room id is invalid.")
+        if self.revision < 0:
+            raise ValueError("Node chat stream event revision must not be negative.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeChatStreamEvent":
@@ -2853,15 +3007,25 @@ class NodeChatStreamEvent:
             raise ValueError("Node chat stream event kind is invalid.") from xcp
         raw_snapshot = payload.get("snapshot")
         raw_app_stats = payload.get("app_stats")
+        raw_events = payload.get("events", ())
         if raw_snapshot is not None and not isinstance(raw_snapshot, Mapping):
             raise ValueError("Node chat stream event snapshot is invalid.")
         if raw_app_stats is not None and not isinstance(raw_app_stats, Mapping):
             raise ValueError("Node chat stream event app_stats are invalid.")
+        if not isinstance(raw_events, Sequence) or isinstance(raw_events, (str, bytes)):
+            raise ValueError("Node chat stream event deltas are invalid.")
+        events: list[ChatEvent] = []
+        for raw_event in raw_events:
+            if not isinstance(raw_event, Mapping):
+                raise ValueError("Node chat stream event delta is invalid.")
+            events.append(ChatEvent.from_mapping(raw_event))
         return cls(
             kind=kind,
             room_id=_required_string(payload, "room_id"),
             snapshot=NodeChatRoomSnapshot.from_mapping(raw_snapshot) if raw_snapshot is not None else None,
             app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
+            events=tuple(events),
+            revision=_optional_int(payload, "revision") or 0,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -2870,6 +3034,8 @@ class NodeChatStreamEvent:
             "room_id": self.room_id,
             "snapshot": self.snapshot.to_mapping() if self.snapshot is not None else None,
             "app_stats": self.app_stats.to_mapping() if self.app_stats is not None else None,
+            "events": [event.to_mapping() for event in self.events],
+            "revision": self.revision,
         }
 
 
@@ -3122,8 +3288,19 @@ class NodeApiService:
         self._relay_tts_service: RelayTTSQueue | None = None
         self._acl: Access_Control | None = None
         self._web_auth: ModWebAuthService | None = None
+        self._process_restart_handler: Callable[[], None] | None = None
         self._app_footprint_cache: dict[str, NodeAppFootprintSnapshot] = {}
         self._app_transition_cache: dict[str, NodeAppTransitionSnapshot] = {}
+        self._app_entries_cache: _TimedNodeAppEntries | None = None
+        self._app_entries_cache_lock = asyncio.Lock()
+        self._system_summary_cache: _TimedNodeSystemSummary | None = None
+        self._system_summary_cache_lock = threading.RLock()
+        self._live_runtime_cache: dict[str, _TimedAppRuntimeSummary] = {}
+        self._live_runtime_cache_locks: dict[str, asyncio.Lock] = {}
+        self._full_runtime_cache: dict[str, _TimedAppRuntimeSummary] = {}
+        self._full_runtime_cache_locks: dict[str, asyncio.Lock] = {}
+        self._mod_inventory_cache: dict[str, _TimedModInventory] = {}
+        self._mod_inventory_cache_locks: dict[str, asyncio.Lock] = {}
         self._app_mutation_tasks: dict[str, asyncio.Task[None]] = {}
         self._local_runtime_watchers: dict[str, _NodeLocalAppRuntimeWatchState] = {}
         self._local_runtime_watch_lock = threading.RLock()
@@ -3142,12 +3319,30 @@ class NodeApiService:
 
     def set_manager(self, manager: App_Manager) -> None:
         self._manager = manager
+        self._invalidate_state_caches()
+
+    def _invalidate_state_caches(self, *, app_name: str | None = None) -> None:
+        self._app_entries_cache = None
+        with self._system_summary_cache_lock:
+            self._system_summary_cache = None
+        if app_name is None:
+            self._live_runtime_cache.clear()
+            self._full_runtime_cache.clear()
+        else:
+            self._live_runtime_cache.pop(app_name.casefold(), None)
+            self._full_runtime_cache.pop(app_name.casefold(), None)
+
+    def _invalidate_mod_inventory(self, app_name: str) -> None:
+        self._mod_inventory_cache.pop(app_name.casefold(), None)
 
     def set_acl(self, acl: Access_Control) -> None:
         self._acl = acl
 
     def set_web_auth(self, web_auth: ModWebAuthService) -> None:
         self._web_auth = web_auth
+
+    def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
+        self._process_restart_handler = handler
 
     def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self._chat_relay = chat_relay
@@ -3182,9 +3377,39 @@ class NodeApiService:
             self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
             return {"node": self.node_name, "apps": [entry.to_mapping() for entry in await self.list_apps()]}
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}")
+        async def _app_summary(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API app summary request: node=%s app=%s", self.node_name, app_name)
+            self._require_access(
+                request,
+                access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.APPS_READ,),
+            )
+            app = self._resolve_app(app_name)
+            return (await self.build_live_app_entry(app)).to_mapping()
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/ping")
         async def _ping() -> Response:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/restart")
+        async def _restart_node(request: Request, access_token: str | None = None) -> Response:
+            traffic_log.info("Node API restart request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
+                raise _http_exception(404, "Process restart is only available on the Portal node.")
+            if self._process_restart_handler is None:
+                raise _http_exception(503, "Portal process restart handler is unavailable.")
+            asyncio.get_running_loop().call_later(
+                _NODE_RESTART_DELAY_SECONDS,
+                self._process_restart_handler,
+            )
+            return Response(status_code=status.HTTP_202_ACCEPTED)
 
         @nicegui_app.websocket(f"{_NODE_API_PREFIX}/presence/stream")
         async def _presence_stream(websocket: WebSocket) -> None:
@@ -3340,6 +3565,7 @@ class NodeApiService:
             websocket: WebSocket,
             app_name: str,
             access_token: str | None = None,
+            after_revision: int | None = None,
         ) -> None:
             traffic_log.info("Node API chat stream request: node=%s app=%s", self.node_name, app_name)
             self._require_websocket_token_access(
@@ -3353,7 +3579,11 @@ class NodeApiService:
                 self._require_chat_relay_app(app)
             except HTTPException as xcp:
                 raise self._websocket_exception_from_http(xcp) from xcp
-            await self._serve_chat_stream(websocket=websocket, app=app)
+            await self._serve_chat_stream(
+                websocket=websocket,
+                app=app,
+                after_revision=after_revision,
+            )
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods")
         async def _list_mods(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
@@ -3369,7 +3599,7 @@ class NodeApiService:
             traffic_log.info("Node API runtime summary request: node=%s app=%s", self.node_name, app_name)
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
             app = self._resolve_app(app_name)
-            return (await self.build_app_runtime_summary(app)).to_mapping()
+            return (await self.build_cached_app_runtime_summary(app)).to_mapping()
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/sevendays/sandbox-options")
         async def _sevendays_sandbox_options(
@@ -4385,28 +4615,62 @@ class NodeApiService:
         self._routes_registered = True
 
     async def list_apps(self) -> tuple[NodeAppEntry, ...]:
+        now = time.monotonic()
+        cached = self._app_entries_cache
+        if cached is not None and now - cached.captured_at_seconds < _NODE_APP_ENTRY_CACHE_TTL_SECONDS:
+            return cached.entries
+        if cached is not None and self._app_entries_cache_lock.locked():
+            return cached.entries
+        async with self._app_entries_cache_lock:
+            now = time.monotonic()
+            cached = self._app_entries_cache
+            if cached is not None and now - cached.captured_at_seconds < _NODE_APP_ENTRY_CACHE_TTL_SECONDS:
+                return cached.entries
+            try:
+                entries = await self._build_app_entries()
+            except Exception as xcp:
+                if cached is None:
+                    raise
+                self._app_entries_cache = _TimedNodeAppEntries(
+                    captured_at_seconds=time.monotonic(),
+                    entries=cached.entries,
+                )
+                log.warning(
+                    "Node API app entry refresh failed; serving stale entries: node=%s error=%s",
+                    self.node_name,
+                    xcp,
+                )
+                return cached.entries
+            self._app_entries_cache = _TimedNodeAppEntries(
+                captured_at_seconds=time.monotonic(),
+                entries=entries,
+            )
+            return entries
+
+    async def _build_app_entries(self) -> tuple[NodeAppEntry, ...]:
         manager: App_Manager = self._require_manager()
         apps = tuple(sorted(manager.apps.values(), key=lambda item: item.friendly.casefold()))
-        player_snapshots = await asyncio.gather(*(self._app_player_snapshot(app) for app in apps))
-        entries: list[NodeAppEntry] = []
-        for app, player_snapshot in zip(apps, player_snapshots, strict=True):
-            player_count: int | None = None
-            player_capacity: int | None = None
-            connected_player_names: tuple[str, ...] = ()
-            if player_snapshot is not None:
-                player_count = player_snapshot.player_count
-                player_capacity = player_snapshot.player_capacity
-                connected_player_names = player_snapshot.connected_player_names
-            entries.append(
-                self.build_app_entry(
-                    app,
-                    transition_state=self._cached_app_transition_state(app.name),
-                    player_count=player_count,
-                    player_capacity=player_capacity,
-                    connected_player_names=connected_player_names,
-                )
-            )
-        return tuple(entries)
+        return tuple(await asyncio.gather(*(self._build_live_app_entry(app) for app in apps)))
+
+    async def build_live_app_entry(self, app: App) -> NodeAppEntry:
+        now = time.monotonic()
+        cached = self._app_entries_cache
+        if cached is not None and now - cached.captured_at_seconds < _NODE_APP_ENTRY_CACHE_TTL_SECONDS:
+            app_key = app.name.casefold()
+            for entry in cached.entries:
+                if entry.name.casefold() == app_key:
+                    return entry
+        return await self._build_live_app_entry(app)
+
+    async def _build_live_app_entry(self, app: App) -> NodeAppEntry:
+        player_snapshot = await self._app_player_snapshot(app)
+        return self.build_app_entry(
+            app,
+            transition_state=self._cached_app_transition_state(app.name),
+            player_count=None if player_snapshot is None else player_snapshot.player_count,
+            player_capacity=None if player_snapshot is None else player_snapshot.player_capacity,
+            connected_player_names=() if player_snapshot is None else player_snapshot.connected_player_names,
+        )
 
     def build_app_entry(
         self,
@@ -4462,6 +4726,8 @@ class NodeApiService:
             save_write_level=app.save_file_write_level,
             color_hex=self.app_color_hex(app.manage_embed_color),
             map_url=app.public_map_url,
+            join_address=app.cfg.join_address,
+            join_direct_ip_address=app.cfg.join_direct_ip_address,
             resource_points=self._app_resource_point_summary(app),
             title_font_preset=getattr(app.cfg, "title_font_preset", AppTitleFont.AUTO.value),
             notes=getattr(app.cfg, "notes", None),
@@ -4763,16 +5029,19 @@ class NodeApiService:
         app: App,
         action: NodeAppMutationAction,
     ) -> None:
-        if action is NodeAppMutationAction.START:
-            await manager.launch(app)
-            return
-        if action is NodeAppMutationAction.STOP:
-            await manager.end(app.name)
-            return
-        if action is NodeAppMutationAction.KILL:
-            await manager.kill(app.name)
-            return
-        raise ValueError(f"Unsupported app runtime mutation action: {action}")
+        try:
+            if action is NodeAppMutationAction.START:
+                await manager.launch(app)
+                return
+            if action is NodeAppMutationAction.STOP:
+                await manager.end(app.name)
+                return
+            if action is NodeAppMutationAction.KILL:
+                await manager.kill(app.name)
+                return
+            raise ValueError(f"Unsupported app runtime mutation action: {action}")
+        finally:
+            self._invalidate_state_caches(app_name=app.name)
 
     @staticmethod
     def app_color_hex(color: int | None) -> str | None:
@@ -4797,7 +5066,24 @@ class NodeApiService:
             startup_defined=getattr(resource_points, "startup", None) is not None,
         )
 
-    def build_system_summary(self) -> NodeSystemSummary:
+    def build_system_summary(self, *, force_refresh: bool = False) -> NodeSystemSummary:
+        with self._system_summary_cache_lock:
+            now = time.monotonic()
+            cached = self._system_summary_cache
+            if (
+                not force_refresh
+                and cached is not None
+                and now - cached.captured_at_seconds < _NODE_SYSTEM_SUMMARY_CACHE_TTL_SECONDS
+            ):
+                return cached.summary
+            summary = self._build_system_summary_uncached()
+            self._system_summary_cache = _TimedNodeSystemSummary(
+                captured_at_seconds=time.monotonic(),
+                summary=summary,
+            )
+            return summary
+
+    def _build_system_summary_uncached(self) -> NodeSystemSummary:
         cpu_percent: int | None = None
         ram_percent: int | None = None
         ram_used_bytes: int | None = None
@@ -4945,6 +5231,7 @@ class NodeApiService:
             endpoint_count=len(endpoint_summaries),
             events=hub.history(app.name, limit=bounded_limit),
             endpoint_summaries=endpoint_summaries,
+            revision=hub.room_revision(app.name),
         )
 
     def _chat_endpoint_summaries(
@@ -5105,25 +5392,53 @@ class NodeApiService:
         return NodeRelayTTSResult(queued=True, spoken=spoken, queue_size=queue_size)
 
     async def build_mod_list(self, app: App) -> NodeModList:
-        await app.has_mod_manager.reload_mods()
-        mods = tuple(app.has_mod_manager.list_mods())
-        app_stats = await self.build_app_runtime_summary(app)
-        traffic_log.info("Node API built mod list: node=%s app=%s mods=%s", self.node_name, app.name, len(mods))
+        inventory, app_stats = await asyncio.gather(
+            self._cached_mod_inventory(app),
+            self.build_cached_app_runtime_summary(app),
+        )
+        traffic_log.info(
+            "Node API built mod list: node=%s app=%s mods=%s",
+            self.node_name,
+            app.name,
+            len(inventory.mods),
+        )
         return NodeModList(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            summary=NodeModSummary(
-                total_count=len(mods),
-                enabled_count=sum(1 for mod in mods if mod.cfg.enabled),
-                disabled_count=sum(1 for mod in mods if not mod.cfg.enabled),
-                coremod_count=sum(1 for mod in mods if mod.counts_as_coremod),
-                downloadable_count=sum(1 for mod in mods if mod.downloadable),
-                non_downloadable_count=sum(1 for mod in mods if not mod.downloadable),
-            ),
-            mods=tuple(self._mod_entry(mod) for mod in mods),
+            summary=inventory.summary,
+            mods=inventory.mods,
             app_stats=app_stats,
         )
+
+    async def _cached_mod_inventory(self, app: App) -> _TimedModInventory:
+        app_key = app.name.casefold()
+        now = time.monotonic()
+        cached = self._mod_inventory_cache.get(app_key)
+        if cached is not None and now - cached.captured_at_seconds < _MOD_INVENTORY_CACHE_TTL_SECONDS:
+            return cached
+        lock = self._mod_inventory_cache_locks.setdefault(app_key, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            cached = self._mod_inventory_cache.get(app_key)
+            if cached is not None and now - cached.captured_at_seconds < _MOD_INVENTORY_CACHE_TTL_SECONDS:
+                return cached
+            await app.has_mod_manager.reload_mods()
+            mods = tuple(app.has_mod_manager.list_mods())
+            inventory = _TimedModInventory(
+                captured_at_seconds=time.monotonic(),
+                summary=NodeModSummary(
+                    total_count=len(mods),
+                    enabled_count=sum(1 for mod in mods if mod.cfg.enabled),
+                    disabled_count=sum(1 for mod in mods if not mod.cfg.enabled),
+                    coremod_count=sum(1 for mod in mods if mod.counts_as_coremod),
+                    downloadable_count=sum(1 for mod in mods if mod.downloadable),
+                    non_downloadable_count=sum(1 for mod in mods if not mod.downloadable),
+                ),
+                mods=tuple(self._mod_entry(mod) for mod in mods),
+            )
+            self._mod_inventory_cache[app_key] = inventory
+            return inventory
 
     async def build_app_runtime_summary(
         self,
@@ -5198,8 +5513,45 @@ class NodeApiService:
             activity_providers=activity_providers,
         )
 
+    async def build_cached_app_runtime_summary(self, app: App) -> NodeAppRuntimeSummary:
+        app_key = app.name.casefold()
+        now = time.monotonic()
+        cached = self._full_runtime_cache.get(app_key)
+        if cached is not None and now - cached.captured_at_seconds < _FULL_APP_RUNTIME_CACHE_TTL_SECONDS:
+            return cached.summary
+        lock = self._full_runtime_cache_locks.setdefault(app_key, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            cached = self._full_runtime_cache.get(app_key)
+            if cached is not None and now - cached.captured_at_seconds < _FULL_APP_RUNTIME_CACHE_TTL_SECONDS:
+                return cached.summary
+            summary = await self.build_app_runtime_summary(app)
+            timed_summary = _TimedAppRuntimeSummary(
+                captured_at_seconds=time.monotonic(),
+                summary=summary,
+            )
+            self._full_runtime_cache[app_key] = timed_summary
+            self._live_runtime_cache[app_key] = timed_summary
+            return summary
+
     async def build_live_app_runtime_summary(self, app: App) -> NodeAppRuntimeSummary:
-        return await self.build_app_runtime_summary(app, include_storage=False, include_footprint=False)
+        app_key = app.name.casefold()
+        now = time.monotonic()
+        cached = self._live_runtime_cache.get(app_key)
+        if cached is not None and now - cached.captured_at_seconds < _LIVE_APP_RUNTIME_CACHE_TTL_SECONDS:
+            return cached.summary
+        lock = self._live_runtime_cache_locks.setdefault(app_key, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            cached = self._live_runtime_cache.get(app_key)
+            if cached is not None and now - cached.captured_at_seconds < _LIVE_APP_RUNTIME_CACHE_TTL_SECONDS:
+                return cached.summary
+            summary = await self.build_app_runtime_summary(app, include_storage=False, include_footprint=False)
+            self._live_runtime_cache[app_key] = _TimedAppRuntimeSummary(
+                captured_at_seconds=time.monotonic(),
+                summary=summary,
+            )
+            return summary
 
     def build_map_manifest(self, app: App) -> MapManifest:
         manifest, _ = self._build_map_manifest_result(app)
@@ -5573,11 +5925,18 @@ class NodeApiService:
     def subscribe_local_node_state(
         self,
         callback: Callable[[NodeStateStreamEvent], None],
+        *,
+        topics: frozenset[NodeStateTopic] = _ALL_NODE_STATE_TOPICS,
     ) -> Callable[[], None]:
+        if not topics:
+            raise ValueError("Local node state subscriptions require at least one topic.")
         subscription_id = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
         with self._local_node_state_watch_lock:
-            self._local_node_state_watcher.callbacks[subscription_id] = callback
+            self._local_node_state_watcher.subscriptions[subscription_id] = _NodeLocalNodeStateSubscription(
+                callback=callback,
+                topics=topics,
+            )
             task = self._local_node_state_watcher.task
             if task is None or task.done():
                 self._local_node_state_watcher.task = loop.create_task(self._watch_local_node_state())
@@ -5604,8 +5963,8 @@ class NodeApiService:
     def _unsubscribe_local_node_state(self, subscription_id: str) -> None:
         task_to_cancel: asyncio.Task[None] | None = None
         with self._local_node_state_watch_lock:
-            self._local_node_state_watcher.callbacks.pop(subscription_id, None)
-            if self._local_node_state_watcher.callbacks:
+            self._local_node_state_watcher.subscriptions.pop(subscription_id, None)
+            if self._local_node_state_watcher.subscriptions:
                 return
             task_to_cancel = self._local_node_state_watcher.task
             self._local_node_state_watcher.task = None
@@ -5702,12 +6061,18 @@ class NodeApiService:
         try:
             while not self._shutting_down:
                 with self._local_node_state_watch_lock:
-                    callbacks = tuple(self._local_node_state_watcher.callbacks.values())
-                    if not callbacks:
+                    subscriptions = tuple(self._local_node_state_watcher.subscriptions.values())
+                    if not subscriptions:
                         return
                 try:
-                    app_entries = await self.list_apps()
-                    system_summary = self.build_system_summary()
+                    needs_apps = any(NodeStateTopic.APPS in subscription.topics for subscription in subscriptions)
+                    needs_system = any(NodeStateTopic.SYSTEM in subscription.topics for subscription in subscriptions)
+                    app_entries = await self.list_apps() if needs_apps else last_entries
+                    system_summary = (
+                        self._stream_system_summary(self.build_system_summary())
+                        if needs_system
+                        else last_system_summary
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as xcp:
@@ -5715,42 +6080,51 @@ class NodeApiService:
                     await asyncio.sleep(_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS)
                     continue
 
-                event: NodeStateStreamEvent | None = None
-                if not has_state:
-                    event = NodeStateStreamEvent.initial(
-                        node_name=self.node_name,
-                        app_entries=app_entries,
-                        system_summary=system_summary,
-                    )
-                else:
-                    apps_changed = app_entries != last_entries
-                    system_changed = system_summary != last_system_summary
-                    if apps_changed and system_changed:
+                apps_changed = app_entries is not None and ((not has_state) or app_entries != last_entries)
+                system_changed = system_summary is not None and (
+                    (not has_state) or system_summary != last_system_summary
+                )
+                for subscription in subscriptions:
+                    include_apps = NodeStateTopic.APPS in subscription.topics
+                    include_system = NodeStateTopic.SYSTEM in subscription.topics
+                    event: NodeStateStreamEvent | None = None
+                    if not subscription.initial_sent:
+                        event = NodeStateStreamEvent.initial(
+                            node_name=self.node_name,
+                            app_entries=app_entries if include_apps else None,
+                            system_summary=system_summary if include_system else None,
+                        )
+                    elif include_apps and apps_changed and include_system and system_changed:
+                        if app_entries is None or system_summary is None:
+                            raise RuntimeError("Combined node state update is incomplete.")
                         event = NodeStateStreamEvent.both(
                             node_name=self.node_name,
                             app_entries=app_entries,
                             system_summary=system_summary,
                         )
-                    elif apps_changed:
-                        event = NodeStateStreamEvent.apps(
-                            node_name=self.node_name,
-                            app_entries=app_entries,
-                        )
-                    elif system_changed:
+                    elif include_apps and apps_changed:
+                        if app_entries is None:
+                            raise RuntimeError("App node state update is incomplete.")
+                        event = NodeStateStreamEvent.apps(node_name=self.node_name, app_entries=app_entries)
+                    elif include_system and system_changed:
+                        if system_summary is None:
+                            raise RuntimeError("System node state update is incomplete.")
                         event = NodeStateStreamEvent.system(
                             node_name=self.node_name,
                             system_summary=system_summary,
                         )
-
-                if event is not None:
-                    for callback in callbacks:
-                        try:
-                            callback(event)
-                        except Exception:
-                            log.exception("Node API local node state subscriber callback failed: node=%s", self.node_name)
+                    if event is None:
+                        continue
+                    try:
+                        subscription.callback(event)
+                        subscription.initial_sent = True
+                    except Exception:
+                        log.exception("Node API local node state subscriber callback failed: node=%s", self.node_name)
+                if needs_apps:
                     last_entries = app_entries
+                if needs_system:
                     last_system_summary = system_summary
-                    has_state = True
+                has_state = True
 
                 await asyncio.sleep(_LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS)
         except asyncio.CancelledError:
@@ -5759,6 +6133,17 @@ class NodeApiService:
             with self._local_node_state_watch_lock:
                 if self._local_node_state_watcher.task is current_task:
                     self._local_node_state_watcher.task = None
+
+    @staticmethod
+    def _stream_system_summary(summary: NodeSystemSummary) -> NodeSystemSummary:
+        def _minute_bucket(seconds: int | None) -> int | None:
+            return None if seconds is None else (seconds // 60) * 60
+
+        return replace(
+            summary,
+            bot_uptime_seconds=_minute_bucket(summary.bot_uptime_seconds),
+            uptime_seconds=_minute_bucket(summary.uptime_seconds),
+        )
 
     def _require_websocket_token_access(
         self,
@@ -5808,27 +6193,51 @@ class NodeApiService:
             code = status.WS_1011_INTERNAL_ERROR
         return WebSocketException(code=code, reason=str(error.detail))
 
-    async def _serve_chat_stream(self, *, websocket: WebSocket, app: App) -> None:
+    async def _serve_chat_stream(
+        self,
+        *,
+        websocket: WebSocket,
+        app: App,
+        after_revision: int | None = None,
+    ) -> None:
         await websocket.accept()
-        update_queue: asyncio.Queue[NodeChatStreamEventKind] = asyncio.Queue()
+        update_queue: asyncio.Queue[NodeChatStreamEvent] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
-        def _enqueue_update(kind: NodeChatStreamEventKind) -> None:
+        def _enqueue_update(event: NodeChatStreamEvent) -> None:
             def _queue_put() -> None:
-                update_queue.put_nowait(kind)
+                update_queue.put_nowait(event)
 
             try:
                 loop.call_soon_threadsafe(_queue_put)
             except RuntimeError:
                 return
 
-        room_subscription_id = ChatHub().subscribe(
-            app.name,
-            lambda _update: _enqueue_update(NodeChatStreamEventKind.CHAT_CHANGED),
-        )
+        def _enqueue_chat_update(update: ChatRoomUpdate) -> None:
+            _enqueue_update(
+                NodeChatStreamEvent(
+                    kind=NodeChatStreamEventKind.CHAT_CHANGED,
+                    room_id=app.name,
+                    snapshot=(
+                        self.build_chat_room_snapshot(app, limit=_NODE_CHAT_HISTORY_LIMIT)
+                        if update.event is None
+                        else None
+                    ),
+                    events=() if update.event is None else (update.event,),
+                    revision=update.revision,
+                )
+            )
+
+        room_subscription_id = ChatHub().subscribe(app.name, _enqueue_chat_update)
         unsubscribe_runtime = self.subscribe_local_app_runtime(
             app.name,
-            lambda _update: _enqueue_update(NodeChatStreamEventKind.RUNTIME_CHANGED),
+            lambda update: _enqueue_update(
+                NodeChatStreamEvent(
+                    kind=NodeChatStreamEventKind.RUNTIME_CHANGED,
+                    room_id=app.name,
+                    app_stats=update.app_stats,
+                )
+            ),
         )
 
         async def _wait_for_disconnect() -> None:
@@ -5837,27 +6246,48 @@ class NodeApiService:
                 if message.get("type") == "websocket.disconnect":
                     return
 
-        async def _send_stream_event(kind: NodeChatStreamEventKind) -> None:
-            include_runtime = kind in {NodeChatStreamEventKind.INITIAL, NodeChatStreamEventKind.RUNTIME_CHANGED}
-            include_snapshot = kind in {
-                NodeChatStreamEventKind.INITIAL,
-                NodeChatStreamEventKind.CHAT_CHANGED,
-                NodeChatStreamEventKind.RUNTIME_CHANGED,
-            }
-            snapshot = self.build_chat_room_snapshot(app, limit=_NODE_CHAT_HISTORY_LIMIT) if include_snapshot else None
-            app_stats = await self.build_live_app_runtime_summary(app) if include_runtime else None
+        async def _send_stream_event(event: NodeChatStreamEvent) -> None:
+            app_stats = event.app_stats
+            if event.kind in {NodeChatStreamEventKind.INITIAL, NodeChatStreamEventKind.RUNTIME_CHANGED}:
+                if app_stats is None:
+                    app_stats = await self.build_live_app_runtime_summary(app)
             await websocket.send_json(
                 NodeChatStreamEvent(
-                    kind=kind,
-                    room_id=app.name,
-                    snapshot=snapshot,
+                    kind=event.kind,
+                    room_id=event.room_id,
+                    snapshot=event.snapshot,
                     app_stats=app_stats,
+                    events=event.events,
+                    revision=event.revision,
                 ).to_mapping()
+            )
+
+        def _merge_stream_events(first: NodeChatStreamEvent, second: NodeChatStreamEvent) -> NodeChatStreamEvent:
+            merged_events = second.events if second.snapshot is not None else first.events + second.events
+            return NodeChatStreamEvent(
+                kind=(
+                    NodeChatStreamEventKind.RUNTIME_CHANGED
+                    if NodeChatStreamEventKind.RUNTIME_CHANGED in {first.kind, second.kind}
+                    else NodeChatStreamEventKind.CHAT_CHANGED
+                ),
+                room_id=app.name,
+                snapshot=second.snapshot if second.snapshot is not None else first.snapshot,
+                app_stats=second.app_stats if second.app_stats is not None else first.app_stats,
+                events=merged_events,
+                revision=max(first.revision, second.revision),
             )
 
         disconnect_task = asyncio.create_task(_wait_for_disconnect())
         try:
-            await _send_stream_event(NodeChatStreamEventKind.INITIAL)
+            initial_snapshot = self.build_chat_room_snapshot(app, limit=_NODE_CHAT_HISTORY_LIMIT)
+            await _send_stream_event(
+                NodeChatStreamEvent(
+                    kind=NodeChatStreamEventKind.INITIAL,
+                    room_id=app.name,
+                    snapshot=initial_snapshot if after_revision != initial_snapshot.revision else None,
+                    revision=initial_snapshot.revision,
+                )
+            )
             while True:
                 queue_task = asyncio.create_task(update_queue.get())
                 done, _pending = await asyncio.wait(
@@ -5869,16 +6299,10 @@ class NodeApiService:
                     with suppress(asyncio.CancelledError):
                         await queue_task
                     return
-                update_kind = queue_task.result()
-                pending_kinds: set[NodeChatStreamEventKind] = {update_kind}
+                merged_event = queue_task.result()
                 while not update_queue.empty():
-                    pending_kinds.add(update_queue.get_nowait())
-                merged_kind = (
-                    NodeChatStreamEventKind.RUNTIME_CHANGED
-                    if NodeChatStreamEventKind.RUNTIME_CHANGED in pending_kinds
-                    else NodeChatStreamEventKind.CHAT_CHANGED
-                )
-                await _send_stream_event(merged_kind)
+                    merged_event = _merge_stream_events(merged_event, update_queue.get_nowait())
+                await _send_stream_event(merged_event)
         except WebSocketDisconnect:
             return
         finally:
@@ -5950,7 +6374,7 @@ class NodeApiService:
                 NodeStateStreamEvent.initial(
                     node_name=self.node_name,
                     app_entries=await self.list_apps(),
-                    system_summary=self.build_system_summary(),
+                    system_summary=self._stream_system_summary(self.build_system_summary()),
                 )
             )
             while True:
@@ -6025,7 +6449,10 @@ class NodeApiService:
             _enqueue_runtime_update,
             include_update_state=True,
         )
-        unsubscribe_node = self.subscribe_local_node_state(_enqueue_node_update)
+        unsubscribe_node = self.subscribe_local_node_state(
+            _enqueue_node_update,
+            topics=frozenset({NodeStateTopic.SYSTEM}),
+        )
 
         async def _wait_for_disconnect() -> None:
             while True:
@@ -6042,7 +6469,7 @@ class NodeApiService:
                 NodeAppStateStreamEvent.initial(
                     app_name=app.name,
                     app_stats=await self.build_live_app_runtime_summary(app),
-                    system_summary=self.build_system_summary(),
+                    system_summary=self._stream_system_summary(self.build_system_summary()),
                     update_info=app.update_info,
                     update_status=app.update_status,
                 )
@@ -6087,14 +6514,22 @@ class NodeApiService:
                 if message.get("type") == "websocket.disconnect":
                     return
 
-        async def _send_snapshot(snapshot: NodeConsoleStdoutSnapshot) -> None:
-            await websocket.send_json(snapshot.to_mapping())
+        async def _send_event(event: NodeConsoleStdoutStreamEvent) -> None:
+            await websocket.send_json(event.to_mapping())
 
         disconnect_task = asyncio.create_task(_wait_for_disconnect())
         previous_snapshot: NodeConsoleStdoutSnapshot | None = None
         try:
             initial_snapshot = self.build_console_stdout_snapshot(app=app, max_lines=max_lines)
-            await _send_snapshot(initial_snapshot)
+            await _send_event(
+                NodeConsoleStdoutStreamEvent(
+                    kind=NodeConsoleStdoutStreamEventKind.INITIAL,
+                    app_name=app.name,
+                    snapshot=initial_snapshot,
+                    truncated=initial_snapshot.truncated,
+                    running=initial_snapshot.running,
+                )
+            )
             previous_snapshot = initial_snapshot
             while True:
                 interval_task = asyncio.create_task(asyncio.sleep(_LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS))
@@ -6109,7 +6544,24 @@ class NodeApiService:
                     return
                 next_snapshot = self.build_console_stdout_snapshot(app=app, max_lines=max_lines)
                 if next_snapshot != previous_snapshot:
-                    await _send_snapshot(next_snapshot)
+                    appended_lines = self._console_stdout_appended_lines(previous_snapshot, next_snapshot)
+                    if appended_lines is None:
+                        event = NodeConsoleStdoutStreamEvent(
+                            kind=NodeConsoleStdoutStreamEventKind.RESET,
+                            app_name=app.name,
+                            snapshot=next_snapshot,
+                            truncated=next_snapshot.truncated,
+                            running=next_snapshot.running,
+                        )
+                    else:
+                        event = NodeConsoleStdoutStreamEvent(
+                            kind=NodeConsoleStdoutStreamEventKind.APPEND,
+                            app_name=app.name,
+                            appended_lines=appended_lines,
+                            truncated=next_snapshot.truncated,
+                            running=next_snapshot.running,
+                        )
+                    await _send_event(event)
                     previous_snapshot = next_snapshot
         except WebSocketDisconnect:
             return
@@ -6118,6 +6570,21 @@ class NodeApiService:
             with suppress(asyncio.CancelledError):
                 await disconnect_task
             await self._close_websocket_quietly(websocket)
+
+    @staticmethod
+    def _console_stdout_appended_lines(
+        previous: NodeConsoleStdoutSnapshot,
+        updated: NodeConsoleStdoutSnapshot,
+    ) -> tuple[str, ...] | None:
+        if previous.app_name.casefold() != updated.app_name.casefold():
+            raise ValueError("Cannot compare console stdout snapshots for different apps.")
+        if not previous.lines:
+            return updated.lines
+        max_overlap = min(len(previous.lines), len(updated.lines))
+        for overlap in range(max_overlap, 0, -1):
+            if previous.lines[-overlap:] == updated.lines[:overlap]:
+                return updated.lines[overlap:]
+        return None
 
     @staticmethod
     async def _close_websocket_quietly(websocket: WebSocket) -> None:
@@ -6349,6 +6816,7 @@ class NodeApiService:
         else:
             raise ValueError(f"Unsupported app mutation action: {action}")
 
+        self._invalidate_state_caches(app_name=app.name)
         app_stats: NodeAppRuntimeSummary = await self.build_app_runtime_summary(app)
         traffic_log.info(
             "Node API app mutated: node=%s app=%s action=%s actor=%s",
@@ -6387,6 +6855,7 @@ class NodeApiService:
         await self._require_acl().perm_check(actor_user_id, Power_Level.root)
         manager = self._require_manager()
         updated_capacity = manager.set_node_capacity(capacity)
+        self._invalidate_state_caches()
         return NodeCapacityMutationResult(
             node=self.node_name,
             message=f"Updated node capacity for {self.node_name}.",
@@ -6816,6 +7285,7 @@ class NodeApiService:
             actor_user_id,
         )
         mod_entries: tuple[NodeModEntry, ...] = tuple(self._mod_entry(uploaded_mod) for uploaded_mod in uploaded_mods)
+        self._invalidate_mod_inventory(app.name)
         return NodeModUploadBatchResult(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -7366,6 +7836,7 @@ class NodeApiService:
             action.value,
             actor_user_id,
         )
+        self._invalidate_mod_inventory(app.name)
         return NodeModMutationResult(
             app_name=app.name,
             app_friendly=app.friendly,

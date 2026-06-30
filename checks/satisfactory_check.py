@@ -33,6 +33,7 @@ from apps.satisfactory import (
     SatisfactorySettings,
     SatisfactorySettingsSnapshot,
     _build_satisfactory_activity_providers,
+    _normalise_active_schematic_label,
     _parse_api_endpoint,
     detect_satisfactory_version,
 )
@@ -956,7 +957,21 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
         stage_status = await providers_by_id["stage"].get()
 
         self.assertEqual(day_status, "D2")
-        self.assertEqual(stage_status, "T3: Schematic 3-2")
+        self.assertEqual(stage_status, "T3: Logistics Mk.2")
+
+    def test_active_schematic_label_uses_base_game_display_name(self) -> None:
+        self.assertEqual(
+            _normalise_active_schematic_label(
+                "/Game/FactoryGame/Schematics/Progression/Schematic_8-2.Schematic_8-2_C"
+            ),
+            "Advanced Aluminum Production",
+        )
+
+    def test_active_schematic_label_preserves_unknown_schematic_fallback(self) -> None:
+        self.assertEqual(
+            _normalise_active_schematic_label("/Example/Modded_Schematic.Modded_Schematic_C"),
+            "Modded Schematic",
+        )
 
     async def test_shared_terminate_cancels_stuck_stderr_task(self) -> None:
         app = object.__new__(_DummyApp)

@@ -31,7 +31,7 @@ from cmd_dashboard import CMD_Dashboard, DashboardEditorService
 from cmd_misc import group_misc
 from cmd_music import MusicService, group_music
 from cmd_online import CMD_Online, OnlineEditorService
-from cmd_ops import available_restart_targets, group_ops, reset_voice_runtime_services
+from cmd_ops import available_maintenance_restart_targets, group_ops, reset_voice_runtime_services
 from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, VoiceTTSService, group_voice
 from config import Activity_Provider, Name_Cache
 from font_assets import font_assets
@@ -321,18 +321,36 @@ async def _run_portal() -> None:
     )
     acl = Access_Control()
     mod_web = ModWebService()
-    await mod_web.start(acl=acl)
-
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-    refresh_task: asyncio.Task[None] | None = None
-    if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
-        refresh_task = asyncio.create_task(_portal_authority_refresh_loop(acl=acl, stop_event=stop_event))
+    restart_requested = False
 
     def _request_stop() -> None:
+        if stop_event.is_set():
+            return
         log.info("Stopping portal profile")
         mod_web.begin_shutdown()
         stop_event.set()
+
+    def _request_restart() -> None:
+        nonlocal restart_requested
+        if stop_event.is_set():
+            return
+        restart_requested = True
+        config.IS_RESTARTING = True
+        log.critical("Restarting portal profile")
+        mod_web.begin_shutdown()
+        stop_event.set()
+
+    def _schedule_restart() -> None:
+        loop.call_soon_threadsafe(_request_restart)
+
+    mod_web.set_process_restart_handler(_schedule_restart)
+    await mod_web.start(acl=acl)
+
+    refresh_task: asyncio.Task[None] | None = None
+    if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
+        refresh_task = asyncio.create_task(_portal_authority_refresh_loop(acl=acl, stop_event=stop_event))
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         with suppress(NotImplementedError):
@@ -345,6 +363,8 @@ async def _run_portal() -> None:
             refresh_task.cancel()
             with suppress(asyncio.CancelledError):
                 await refresh_task
+    if restart_requested:
+        raise SystemExit(1)
 
 
 async def _refresh_portal_remote_state(acl: Access_Control) -> None:
@@ -689,7 +709,7 @@ def main():
     @client.task(lightbulb.uniformtrigger(minutes=1, wait_first=False), max_failures=100)
     async def task_maintenance_restarts(maintenance: MaintenanceService, manager: App_Manager):
         maintenance.reload()
-        available_targets = available_restart_targets(profile)
+        available_targets = available_maintenance_restart_targets(profile)
         now = datetime.now().astimezone()
         due_warnings = maintenance.due_restart_warnings(now=now, available_targets=available_targets)
         for warning in due_warnings:

@@ -627,8 +627,13 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         self,
         *,
         connected_player_names: tuple[str, ...],
+        fallback_text: str | None = None,
     ) -> str | None:
-        return self._tooltip_lines_html(connected_player_names)
+        if player_names_html := self._tooltip_lines_html(connected_player_names):
+            return player_names_html
+        if fallback_text is None:
+            return None
+        return self._tooltip_lines_html((fallback_text,))
 
     @staticmethod
     def _app_list_api_actions_enabled(request: Request) -> bool:

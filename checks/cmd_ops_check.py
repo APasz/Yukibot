@@ -7,6 +7,7 @@ import lightbulb
 import pytest
 
 import cmd_ops
+import config
 from restart_targets import RestartTarget
 
 
@@ -15,6 +16,20 @@ def _restart_context() -> SimpleNamespace:
         user=SimpleNamespace(id=1234, display_name="Tester"),
         defer=AsyncMock(),
     )
+
+
+def test_portal_restart_target_is_only_available_to_yuki() -> None:
+    yuki_targets = cmd_ops.available_restart_targets(config.BOT_PROFILES[config.BotProfileName.YUKI])
+
+    assert RestartTarget.PORTAL in yuki_targets
+    for profile_name in (config.BotProfileName.ERIN, config.BotProfileName.PORTAL):
+        assert RestartTarget.PORTAL not in cmd_ops.available_restart_targets(config.BOT_PROFILES[profile_name])
+
+
+def test_portal_restart_target_is_not_available_to_maintenance() -> None:
+    targets = cmd_ops.available_maintenance_restart_targets(config.BOT_PROFILES[config.BotProfileName.YUKI])
+
+    assert RestartTarget.PORTAL not in targets
 
 
 @pytest.mark.anyio
@@ -95,6 +110,40 @@ async def test_restart_command_invocation_passes_auto_restart_flag_to_helper() -
         True,
         True,
     )
+
+
+@pytest.mark.anyio
+async def test_restart_command_invocation_uses_portal_handler() -> None:
+    command = object.__new__(cmd_ops.CMD_OpsRestart)
+    command.target = RestartTarget.PORTAL.value
+    command.silent = True
+    command.auto_restart_running_app = False
+    ctx = _restart_context()
+    acl = SimpleNamespace(perm_check=AsyncMock())
+
+    with (
+        patch("cmd_ops.restart_portal", new=AsyncMock()) as portal_restart_mock,
+        patch("cmd_ops.restart_host_or_bot", new=AsyncMock()) as local_restart_mock,
+    ):
+        await cmd_ops.CMD_OpsRestart.invoke(command, ctx, acl, Mock(), Mock())
+
+    acl.perm_check.assert_awaited_once_with(1234, cmd_ops.restart_required_level(RestartTarget.PORTAL))
+    portal_restart_mock.assert_awaited_once_with(ctx, acl, True)
+    local_restart_mock.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_restart_portal_rejects_non_yuki_profile() -> None:
+    ctx = _restart_context()
+    acl = SimpleNamespace(perm_check=AsyncMock())
+
+    with (
+        patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.ERIN]),
+        pytest.raises(ValueError, match="only available from the Yuki profile"),
+    ):
+        await cmd_ops.restart_portal(ctx, acl, False)
+
+    acl.perm_check.assert_not_awaited()
 
 
 class _FakeDiContext:

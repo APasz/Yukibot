@@ -4,23 +4,28 @@ import logging
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 import hikari
 import lightbulb
 import psutil
+import requests
 
 import config
 from _manager import App_Manager
 from config import Singleton
+from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
 
 log = logging.getLogger(__name__)
 _IGNORED_SYSTEM_MOUNTPOINTS = frozenset({"/boot", "/boot/efi", "/efi"})
 _DISK_DISCOVERY_REFRESH_INTERVAL = timedelta(minutes=1)
+_PORTAL_RESTART_REQUEST_TIMEOUT_SECONDS: Final[int] = 10
+_PORTAL_RESTART_TOKEN_TTL_SECONDS: Final[int] = 60
 
 
 class Stats_CPU:
@@ -634,6 +639,55 @@ class Stats_System(metaclass=Singleton):
     def update(self):
         with self._lock:
             self._update_unlocked()
+
+
+async def restart_portal(
+    ctx: lightbulb.Context,
+    *,
+    silent: bool = False,
+) -> None:
+    token_secret = config.MOD_WEB_SERVER.token_secret
+    if token_secret is None:
+        log.error("Portal restart failed because the node API token secret is not configured")
+        await ctx.respond("Unable to restart Portal.", flags=hikari.MessageFlag.EPHEMERAL)
+        return
+
+    portal_node_name = config.BotProfileName.PORTAL.value
+    token = issue_node_token(
+        secret=token_secret,
+        grant=NodeAccessGrant(
+            subject=f"web:{ctx.user.id}",
+            node=portal_node_name,
+            app=None,
+            scopes=frozenset({NodeApiScope.NODE_MANAGE}),
+            expires_at=int(time.time()) + _PORTAL_RESTART_TOKEN_TTL_SECONDS,
+        ),
+    )
+    portal_node_api_url = config.resolve_node_api_base_url(config.MOD_WEB_SERVER.public_base_url)
+    try:
+        await asyncio.to_thread(
+            _request_portal_restart,
+            f"{portal_node_api_url.rstrip('/')}/restart",
+            token,
+        )
+    except requests.RequestException as xcp:
+        log.error("Portal restart failed: %s", xcp)
+        await ctx.respond("Unable to restart Portal.", flags=hikari.MessageFlag.EPHEMERAL)
+        return
+
+    flags: hikari.MessageFlag | hikari.UndefinedType = (
+        hikari.MessageFlag.EPHEMERAL if silent else hikari.UNDEFINED
+    )
+    await ctx.respond("Portal restarting.", flags=flags)
+
+
+def _request_portal_restart(url: str, token: str) -> None:
+    response = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=_PORTAL_RESTART_REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
 
 
 async def restart(

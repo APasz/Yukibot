@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from subprocess import CompletedProcess
+from typing import Final
+
+from restart_targets import PORTAL_SYSTEMD_UNIT
 
 REPO_ROOT: Path = Path(__file__).resolve().parent
 PLACEHOLDER_USER = "your-ssh-user"
@@ -23,8 +26,7 @@ PLACEHOLDER_PASSWORD = "replace-me"
 PLACEHOLDER_REMOTE_ROOT: PurePosixPath = PurePosixPath("/path/to/Yukibot")
 SSH_CONNECTION_TIMEOUT_SECONDS = 5
 SSH_CONTROL_PERSIST_SECONDS = 30
-PORTAL_RESTART_DELAY_SECONDS = 1
-BOT_RESTART_DELAY_SECONDS = 5
+RESTART_INTERVAL_SECONDS: Final[int] = 5
 REMOTE_MKDIR_PATH = "/bin/mkdir"
 REMOTE_CAT_PATH = "/bin/cat"
 REMOTE_RM_PATH = "/bin/rm"
@@ -94,7 +96,7 @@ REMOTE_TARGETS: dict[TargetName, RemoteTarget] = {
         user="debian",
         password="scheme-python-dingo",
         remote_root=PurePosixPath("/home/debian/yukiportal"),
-        restart_command="/usr/bin/sudo /usr/bin/systemctl restart yukiportal.service",
+        restart_command=f"/usr/bin/sudo /usr/bin/systemctl restart {PORTAL_SYSTEMD_UNIT}",
     ),
     TargetName.WAKUSEI: RemoteTarget(
         name=TargetName.WAKUSEI,
@@ -567,16 +569,17 @@ def restart_remote(session: RemoteSession) -> None:
 
 
 def restart_delay_seconds(target: RemoteTarget, restart_targets: list[RemoteTarget]) -> int:
-    if target.name is TargetName.PORTAL:
-        return PORTAL_RESTART_DELAY_SECONDS
-    return BOT_RESTART_DELAY_SECONDS
+    ordered_target_names = [restart_target.name for restart_target in ordered_restart_targets(restart_targets)]
+    if target.name not in ordered_target_names:
+        raise ValueError(f"{target.name.value} is not included in the restart targets")
+    return 0 if ordered_target_names[0] is target.name else RESTART_INTERVAL_SECONDS
 
 
 def ordered_restart_targets(targets: list[RemoteTarget]) -> list[RemoteTarget]:
     priority: dict[TargetName, int] = {
-        TargetName.PORTAL: 0,
-        TargetName.WAKUSEI: 1,
-        TargetName.KOUSEI: 2,
+        TargetName.WAKUSEI: 0,
+        TargetName.KOUSEI: 1,
+        TargetName.PORTAL: 2,
     }
     return sorted(targets, key=lambda target: priority[target.name])
 

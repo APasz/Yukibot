@@ -33,7 +33,7 @@ from _editor_session import startup_editor_prefix
 from _manager import App_Manager
 from _security import Access_Control, Power_Level
 from _sys import Stats_Disk, Stats_System
-from cmd_ops import available_restart_targets
+from cmd_ops import available_maintenance_restart_targets
 from config import Name_Cache
 from maintenance import MaintenanceService
 from online import Online_Tracker
@@ -1300,10 +1300,9 @@ class DashboardEditorService:
             return EditorResponse.ephemeral("Dashboard state is invalid.")
 
         try:
-            available_targets = set(available_restart_targets(config.ACTIVE_BOT_PROFILE))
+            available_targets = set(available_maintenance_restart_targets(config.ACTIVE_BOT_PROFILE))
             updates: dict[RestartTarget, tuple[int, int] | None] = {}
-            for target in RestartTarget:
-                field_id = _MAINTENANCE_SCHEDULE_FIELD_IDS[target]
+            for target, field_id in _MAINTENANCE_SCHEDULE_FIELD_IDS.items():
                 raw_value = req.values.get(field_id, "")
                 if target not in available_targets:
                     if raw_value.strip():
@@ -1968,8 +1967,8 @@ class DashboardEditorService:
     @staticmethod
     def _maintenance_schedule_lines(maintenance: MaintenanceService) -> list[str]:
         lines: list[str] = []
-        available_targets = set(available_restart_targets(config.ACTIVE_BOT_PROFILE))
-        for target in RestartTarget:
+        available_targets = set(available_maintenance_restart_targets(config.ACTIVE_BOT_PROFILE))
+        for target in _MAINTENANCE_SCHEDULE_FIELD_IDS:
             if target not in available_targets:
                 continue
             schedule = maintenance.schedule_for(target)
@@ -1982,7 +1981,7 @@ class DashboardEditorService:
     def _maintenance_warning_lines(maintenance: MaintenanceService) -> list[str]:
         available_targets = [
             target.value
-            for target in available_restart_targets(config.ACTIVE_BOT_PROFILE)
+            for target in available_maintenance_restart_targets(config.ACTIVE_BOT_PROFILE)
             if target in {RestartTarget.BOT, RestartTarget.SYSTEM}
         ]
         applies_to = ", ".join(available_targets) if available_targets else "none"

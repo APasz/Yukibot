@@ -162,8 +162,15 @@ class UpdateRemotesTests(unittest.TestCase):
 
         self.assertEqual(wakusei_path.name, "yukibot-wakusei-run-123.ssh")
 
-    def test_ordered_restart_targets_prioritises_wakusei_before_kousei(self) -> None:
+    def test_ordered_restart_targets_puts_yuki_first_and_portal_last(self) -> None:
         targets = [
+            rupdater.RemoteTarget(
+                name=rupdater.TargetName.PORTAL,
+                host="wakusei.apasz.com",
+                user="bot",
+                password="secret",
+                remote_root=PurePosixPath("/srv/portal"),
+            ),
             rupdater.RemoteTarget(
                 name=rupdater.TargetName.KOUSEI,
                 host="kousei.apasz.com",
@@ -182,7 +189,10 @@ class UpdateRemotesTests(unittest.TestCase):
 
         ordered = rupdater.ordered_restart_targets(targets)
 
-        self.assertEqual([target.name for target in ordered], [rupdater.TargetName.WAKUSEI, rupdater.TargetName.KOUSEI])
+        self.assertEqual(
+            [target.name for target in ordered],
+            [rupdater.TargetName.WAKUSEI, rupdater.TargetName.KOUSEI, rupdater.TargetName.PORTAL],
+        )
 
     def test_restart_delay_seconds_waits_for_kousei_after_wakusei(self) -> None:
         targets = [
@@ -204,7 +214,23 @@ class UpdateRemotesTests(unittest.TestCase):
 
         delay_seconds = rupdater.restart_delay_seconds(targets[1], targets)
 
-        self.assertEqual(delay_seconds, rupdater.KOUSEI_RESTART_DELAY_SECONDS)
+        self.assertEqual(delay_seconds, rupdater.RESTART_INTERVAL_SECONDS)
+
+    def test_restart_delay_seconds_waits_between_each_ordered_target(self) -> None:
+        targets = [
+            rupdater.RemoteTarget(
+                name=name,
+                host="wakusei.apasz.com",
+                user="bot",
+                password="secret",
+                remote_root=PurePosixPath(f"/srv/{name.value}"),
+            )
+            for name in (rupdater.TargetName.WAKUSEI, rupdater.TargetName.KOUSEI, rupdater.TargetName.PORTAL)
+        ]
+
+        delay_seconds = [rupdater.restart_delay_seconds(target, targets) for target in targets]
+
+        self.assertEqual(delay_seconds, [0, rupdater.RESTART_INTERVAL_SECONDS, rupdater.RESTART_INTERVAL_SECONDS])
 
     def test_restart_delay_seconds_is_zero_for_single_target_restart(self) -> None:
         target = rupdater.RemoteTarget(

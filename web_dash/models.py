@@ -19,7 +19,8 @@ from apps.minecraft import (
 from apps.sevendays import SevenDays, SevenDaysSandboxOptionsSnapshot
 
 from .constants import (
-    _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
+    _REMOTE_NODE_GET_MAX_ATTEMPTS,
+    _REMOTE_NODE_GET_RETRY_DELAY_SECONDS,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     _REMOTE_NODE_TOKEN_TTL_SECONDS,
     _SAME_ORIGIN_NODE_PROXY_BASE,
@@ -136,7 +137,57 @@ class _LocalAppPageData:
     load_warnings: tuple[ModWebPageLoadWarning, ...] = ()
 
 
+class _RemoteNodeHttpError(RuntimeError):
+    def __init__(self, *, url: str, status_code: int, detail: str) -> None:
+        self.url = url
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"Remote node rejected the request: url={url} status={status_code} detail={detail}")
+
+
 class ModWebModelsMixin(ModWebServiceSupport):
+    def _remote_sync_http_client(self) -> requests.Session:
+        session = cast(requests.Session | None, getattr(self._remote_sync_http_local, "session", None))
+        if session is not None:
+            return session
+        session = requests.Session()
+        self._remote_sync_http_local.session = session
+        with self._remote_sync_http_sessions_lock:
+            self._remote_sync_http_sessions.append(session)
+        return session
+
+    async def _remote_http_client(self) -> aiohttp.ClientSession:
+        current_loop = asyncio.get_running_loop()
+        session = self._remote_http_session
+        if session is not None and self._remote_http_session_loop is not current_loop:
+            if not session.closed:
+                await session.close()
+            session = None
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(
+                    total=None,
+                    connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+                    sock_connect=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+                ),
+                connector=aiohttp.TCPConnector(limit=100, limit_per_host=20, ttl_dns_cache=300),
+            )
+            self._remote_http_session = session
+            self._remote_http_session_loop = current_loop
+        return session
+
+    async def _close_remote_http_client(self) -> None:
+        with self._remote_sync_http_sessions_lock:
+            sync_sessions = tuple(self._remote_sync_http_sessions)
+            self._remote_sync_http_sessions.clear()
+        for sync_session in sync_sessions:
+            sync_session.close()
+        session = self._remote_http_session
+        self._remote_http_session = None
+        self._remote_http_session_loop = None
+        if session is not None and not session.closed:
+            await session.close()
+
     _PORTAL_OWNED_PATH_PREFIXES: tuple[str, ...] = (
         "/auth/",
         "/mod-web/assets/",
@@ -636,6 +687,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             resource_points=page_data.app_entry.resource_points,
             app_title_font_preset=page_data.app_entry.title_font_preset,
             app_notes=page_data.app_entry.notes,
+            join_address=page_data.app_entry.join_address,
+            join_direct_ip_address=page_data.app_entry.join_direct_ip_address,
             lifecycle_notice_started=page_data.app_entry.lifecycle_notice_started,
             lifecycle_notice_stopped=page_data.app_entry.lifecycle_notice_stopped,
             lifecycle_notice_crashed=page_data.app_entry.lifecycle_notice_crashed,
@@ -693,6 +746,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             resource_points=page_data.app_entry.resource_points,
             app_title_font_preset=page_data.app_entry.title_font_preset,
             app_notes=page_data.app_entry.notes,
+            join_address=page_data.app_entry.join_address,
+            join_direct_ip_address=page_data.app_entry.join_direct_ip_address,
             lifecycle_notice_started=page_data.app_entry.lifecycle_notice_started,
             lifecycle_notice_stopped=page_data.app_entry.lifecycle_notice_stopped,
             lifecycle_notice_crashed=page_data.app_entry.lifecycle_notice_crashed,
@@ -752,6 +807,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         lifecycle_notice_started: bool,
         lifecycle_notice_stopped: bool,
         lifecycle_notice_crashed: bool,
+        join_address: str | None = None,
+        join_direct_ip_address: str | None = None,
         relay_notice_player_session: bool | None = None,
         relay_notice_player_death: bool | None = None,
         relay_notice_progress: bool | None = None,
@@ -798,6 +855,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     update_status=update_status,
                     resource_points=resource_points,
                     app_notes=app_notes,
+                    join_address=join_address,
+                    join_direct_ip_address=join_direct_ip_address,
                     lifecycle_notice_started=lifecycle_notice_started,
                     lifecycle_notice_stopped=lifecycle_notice_stopped,
                     lifecycle_notice_crashed=lifecycle_notice_crashed,
@@ -859,6 +918,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         lifecycle_notice_started: bool,
         lifecycle_notice_stopped: bool,
         lifecycle_notice_crashed: bool,
+        join_address: str | None = None,
+        join_direct_ip_address: str | None = None,
         relay_notice_player_session: bool | None = None,
         relay_notice_player_death: bool | None = None,
         relay_notice_progress: bool | None = None,
@@ -903,6 +964,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     update_status=update_status,
                     resource_points=resource_points,
                     app_notes=app_notes,
+                    join_address=join_address,
+                    join_direct_ip_address=join_direct_ip_address,
                     lifecycle_notice_started=lifecycle_notice_started,
                     lifecycle_notice_stopped=lifecycle_notice_stopped,
                     lifecycle_notice_crashed=lifecycle_notice_crashed,
@@ -981,17 +1044,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 return node
         raise _http_exception(404, f"Unknown node: {node_name}")
 
-    def _remote_apps(self, node: ModWebNodeLink, user: ModWebUser) -> tuple[NodeAppEntry, ...]:
-        payload: dict[str, object] = self._remote_json(
-            node=node,
-            app_name=None,
-            path="/apps",
-            scopes=(NodeApiScope.APPS_READ,),
-            user=user,
-            timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
-        )
-        return self._remote_apps_from_payload(payload)
-
     async def _remote_apps_async(self, node: ModWebNodeLink, user: ModWebUser) -> tuple[NodeAppEntry, ...]:
         payload: dict[str, object] = await self._remote_json_async(
             node=node,
@@ -999,7 +1051,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
             path="/apps",
             scopes=(NodeApiScope.APPS_READ,),
             user=user,
-            timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
         )
         return self._remote_apps_from_payload(payload)
 
@@ -1017,22 +1068,32 @@ class ModWebModelsMixin(ModWebServiceSupport):
             )
         return tuple[NodeAppEntry, ...](sorted(apps, key=lambda app: app.friendly.casefold()))
 
-    def _remote_app_entry(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeAppEntry:
-        key: str = app_name.casefold()
-        for entry in self._remote_apps(node, user):
-            if entry.name.casefold() == key:
-                return self._resolved_remote_app_entry(entry)
-        raise RuntimeError(f"Remote node did not expose app {app_name!r}.")
-
     async def _remote_app_entry_async(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeAppEntry:
-        key: str = app_name.casefold()
-        for entry in await self._remote_apps_async(node, user):
-            if entry.name.casefold() == key:
-                return self._resolved_remote_app_entry(entry)
-        raise RuntimeError(f"Remote node did not expose app {app_name!r}.")
+        try:
+            payload = await self._remote_json_async(
+                node=node,
+                app_name=app_name,
+                path=f"/apps/{quote(app_name, safe='')}",
+                scopes=(NodeApiScope.APPS_READ,),
+                user=user,
+            )
+        except _RemoteNodeHttpError as xcp:
+            if xcp.status_code != 404:
+                raise
+            app_key = app_name.casefold()
+            for entry in await self._remote_apps_async(node, user):
+                if entry.name.casefold() == app_key:
+                    return entry
+            raise RuntimeError(f"Remote node did not expose app {app_name!r}.") from xcp
+        return self._resolved_remote_app_entry(NodeAppEntry.from_mapping(payload))
 
-    def _remote_mod_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeModList:
-        payload: dict[str, object] = self._remote_json(
+    async def _remote_mod_list_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeModList:
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/mods",
@@ -1041,7 +1102,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeModList.from_mapping(payload)
 
-    def _remote_minecraft_recipe_summaries(
+    async def _remote_minecraft_recipe_summaries_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -1056,7 +1117,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             file_exists=False,
         )
         try:
-            payload: dict[str, object] = self._remote_json(
+            payload = await self._remote_json_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/minecraft/recipes",
@@ -1124,7 +1185,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             )
         return recipe_summary, item_registry_summary
 
-    def _remote_sevendays_sandbox_options_summary(
+    async def _remote_sevendays_sandbox_options_summary_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -1132,7 +1193,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
     ) -> ModWebSevenDaysSandboxOptionsSummary:
         default_data_path = ".yukibot/sandbox_options.json"
         try:
-            payload: dict[str, object] = self._remote_json(
+            payload = await self._remote_json_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/sevendays/sandbox-options",
@@ -1196,7 +1257,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 opened_handles.append(handle)
                 request_data.append(("filename", upload_name))
                 request_files.append(("upload", (upload_name, handle, "application/octet-stream")))
-            response: Response = requests.post(
+            response: Response = self._remote_sync_http_client().post(
                 url,
                 data=request_data,
                 files=request_files,
@@ -1219,8 +1280,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
         return NodeModUploadBatchResult.from_mapping(_json_object(payload, context="Remote node response"))
 
-    def _remote_config_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeConfigList:
-        payload: dict[str, object] = self._remote_json(
+    async def _remote_config_list_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeConfigList:
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/configs",
@@ -1229,8 +1295,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeConfigList.from_mapping(payload)
 
-    def _remote_save_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeSaveList:
-        payload: dict[str, object] = self._remote_json(
+    async def _remote_save_list_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeSaveList:
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/saves",
@@ -1239,8 +1310,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSaveList.from_mapping(payload)
 
-    def _remote_blueprint_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeBlueprintList:
-        payload: dict[str, object] = self._remote_json(
+    async def _remote_blueprint_list_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeBlueprintList:
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/blueprints",
@@ -1268,7 +1344,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/saves/upload"
         try:
             with upload_path.open("rb") as handle:
-                response: Response = requests.post(
+                response: Response = self._remote_sync_http_client().post(
                     url,
                     data={"root_id": root_id, "filename": upload_name},
                     files={"upload": (upload_name, handle, "application/octet-stream")},
@@ -1311,7 +1387,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 handle = upload_path.open("rb")
                 opened_handles.append(handle)
                 request_files.append(("upload", (upload_name, handle, "application/octet-stream")))
-            response: Response = requests.post(
+            response: Response = self._remote_sync_http_client().post(
                 url,
                 data={"session_name": session_name},
                 files=request_files,
@@ -1334,7 +1410,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
         return NodeBlueprintMutationResult.from_mapping(_json_object(payload, context="Remote node response"))
 
-    def _remote_save_rename(
+    async def _remote_save_rename_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -1342,7 +1418,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         new_name: str,
         user: ModWebUser,
     ) -> NodeSaveMutationResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}/rename",
@@ -1353,14 +1429,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSaveMutationResult.from_mapping(payload)
 
-    def _remote_save_delete(
+    async def _remote_save_delete_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
         save_id: str,
         user: ModWebUser,
     ) -> NodeSaveMutationResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/saves/{quote(save_id, safe='/')}",
@@ -1370,14 +1446,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSaveMutationResult.from_mapping(payload)
 
-    def _remote_blueprint_delete(
+    async def _remote_blueprint_delete_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
         blueprint_id: str,
         user: ModWebUser,
     ) -> NodeBlueprintMutationResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/blueprints/{quote(blueprint_id, safe='/')}",
@@ -1386,18 +1462,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
             method="DELETE",
         )
         return NodeBlueprintMutationResult.from_mapping(payload)
-
-    def _remote_app_runtime_summary(
-        self, node: ModWebNodeLink, app_name: str, user: ModWebUser
-    ) -> NodeAppRuntimeSummary:
-        payload: dict[str, object] = self._remote_json(
-            node=node,
-            app_name=app_name,
-            path=f"/apps/{quote(app_name, safe='')}/runtime",
-            scopes=(NodeApiScope.MODS_READ,),
-            user=user,
-        )
-        return NodeAppRuntimeSummary.from_mapping(payload)
 
     async def _remote_app_runtime_summary_async(
         self,
@@ -1414,17 +1478,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeAppRuntimeSummary.from_mapping(payload)
 
-    def _remote_node_system_summary(self, node: ModWebNodeLink, user: ModWebUser) -> NodeSystemSummary:
-        payload: dict[str, object] = self._remote_json(
-            node=node,
-            app_name=None,
-            path="/system",
-            scopes=(NodeApiScope.APPS_READ,),
-            user=user,
-            timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
-        )
-        return NodeSystemSummary.from_mapping(payload)
-
     async def _remote_node_system_summary_async(self, node: ModWebNodeLink, user: ModWebUser) -> NodeSystemSummary:
         payload: dict[str, object] = await self._remote_json_async(
             node=node,
@@ -1432,7 +1485,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
             path="/system",
             scopes=(NodeApiScope.APPS_READ,),
             user=user,
-            timeout=_REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
         )
         return NodeSystemSummary.from_mapping(payload)
 
@@ -1461,14 +1513,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
             return False
         return app_name in start_blocked_app_ids
 
-    def _remote_config_content(
+    async def _remote_config_content_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
         config_id: str,
         user: ModWebUser,
     ) -> NodeConfigContent:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/configs/{quote(config_id, safe='/')}",
@@ -1477,7 +1529,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeConfigContent.from_mapping(payload)
 
-    def _remote_config_write(
+    async def _remote_config_write_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -1485,7 +1537,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         content: str,
         user: ModWebUser,
     ) -> NodeConfigContent:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/configs/{quote(config_id, safe='/')}",
@@ -1496,8 +1548,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeConfigContent.from_mapping(payload)
 
-    def _remote_setting_list(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeSettingList:
-        payload: dict[str, object] = self._remote_json(
+    async def _remote_setting_list_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeSettingList:
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/settings",
@@ -1506,7 +1563,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSettingList.from_mapping(payload)
 
-    def _remote_setting_write(
+    async def _remote_setting_write_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -1514,7 +1571,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         value: str,
         user: ModWebUser,
     ) -> NodeSettingMutationResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/settings/{quote(setting_key, safe='')}",
@@ -1525,8 +1582,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSettingMutationResult.from_mapping(payload)
 
-    def _remote_settings_save(self, node: ModWebNodeLink, app_name: str, user: ModWebUser) -> NodeSettingsActionResult:
-        payload: dict[str, object] = self._remote_json(
+    async def _remote_settings_save_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeSettingsActionResult:
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/settings/save",
@@ -1536,10 +1598,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSettingsActionResult.from_mapping(payload)
 
-    def _remote_settings_reload(
-        self, node: ModWebNodeLink, app_name: str, user: ModWebUser
+    async def _remote_settings_reload_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
     ) -> NodeSettingsActionResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/settings/reload",
@@ -1549,13 +1614,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSettingsActionResult.from_mapping(payload)
 
-    def _remote_console_action_list(
+    async def _remote_console_action_list_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
         user: ModWebUser,
     ) -> NodeConsoleActionList:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/console-actions",
@@ -1564,7 +1629,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeConsoleActionList.from_mapping(payload)
 
-    def _remote_console_stdout(
+    async def _remote_console_stdout_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -1572,7 +1637,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         max_lines: int,
         user: ModWebUser,
     ) -> NodeConsoleStdoutSnapshot:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/console/stdout?max_lines={max_lines}",
@@ -1582,7 +1647,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeConsoleStdoutSnapshot.from_mapping(payload)
 
-    def _remote_execute_console_action(
+    async def _remote_execute_console_action_async(
         self,
         node: ModWebNodeLink,
         app_name: str,
@@ -1590,7 +1655,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         raw_value: str | None,
         user: ModWebUser,
     ) -> NodeConsoleActionExecutionResult:
-        payload: dict[str, object] = self._remote_json(
+        payload = await self._remote_json_async(
             node=node,
             app_name=app_name,
             path=f"/apps/{quote(app_name, safe='')}/console-actions/{quote(action_key, safe='')}",
@@ -1601,63 +1666,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeConsoleActionExecutionResult.from_mapping(payload)
 
-    def _remote_json(
-        self,
-        *,
-        node: ModWebNodeLink,
-        app_name: str | None,
-        path: str,
-        scopes: tuple[NodeApiScope, ...],
-        user: ModWebUser,
-        method: str = "GET",
-        json_payload: Mapping[str, object] | None = None,
-        timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
-    ) -> dict[str, object]:
-        token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
-        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
-        url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
-        try:
-            if method == "GET":
-                response = requests.get(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=timeout,
-                )
-            elif method == "PUT":
-                response = requests.put(
-                    url,
-                    json=_json_request_object(json_payload),
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=timeout,
-                )
-            elif method == "POST":
-                response: Response = requests.post(
-                    url,
-                    json=_json_request_object(json_payload),
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=timeout,
-                )
-            elif method == "DELETE":
-                response = requests.delete(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    timeout=timeout,
-                )
-            else:
-                raise ValueError(f"Unsupported remote node request method: {method}")
-        except requests.RequestException as xcp:
-            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"Remote node rejected the request: url={url} status={response.status_code} "
-                f"detail={self._response_detail(response)}"
-            )
-        try:
-            payload: object = cast(object, response.json())
-        except ValueError as xcp:
-            raise RuntimeError("Remote node returned invalid JSON.") from xcp
-        return _json_object(payload, context="Remote node response")
-
     async def _remote_json_async(
         self,
         *,
@@ -1666,37 +1674,59 @@ class ModWebModelsMixin(ModWebServiceSupport):
         path: str,
         scopes: tuple[NodeApiScope, ...],
         user: ModWebUser,
-        method: str = "GET",
+        method: Literal["GET", "PUT", "POST", "DELETE"] = "GET",
         json_payload: Mapping[str, object] | None = None,
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> dict[str, object]:
         token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
         node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
         url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
-        try:
-            async with aiohttp.ClientSession(timeout=self._aiohttp_client_timeout(timeout)) as session:
+        session = await self._remote_http_client()
+        request_timeout = self._aiohttp_client_timeout(timeout)
+        max_attempts = _REMOTE_NODE_GET_MAX_ATTEMPTS if method == "GET" else 1
+        for attempt in range(1, max_attempts + 1):
+            try:
                 if method == "GET":
-                    response_context = session.get(url, headers={"Authorization": f"Bearer {token}"})
+                    response_context = session.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=request_timeout,
+                    )
                 else:
                     response_context = session.request(
                         method,
                         url,
                         headers={"Authorization": f"Bearer {token}"},
                         json=_json_request_object(json_payload),
+                        timeout=request_timeout,
                     )
                 async with response_context as response:
                     if response.status >= 400:
-                        raise RuntimeError(
-                            f"Remote node rejected the request: url={url} status={response.status} "
-                            f"detail={await self._aiohttp_response_detail(response)}"
+                        raise _RemoteNodeHttpError(
+                            url=url,
+                            status_code=response.status,
+                            detail=await self._aiohttp_response_detail(response),
                         )
                     try:
                         payload: object = cast(object, await response.json())
                     except (aiohttp.ContentTypeError, ValueError, json.JSONDecodeError) as xcp:
                         raise RuntimeError("Remote node returned invalid JSON.") from xcp
-        except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
-            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
-        return _json_object(payload, context="Remote node response")
+                return _json_object(payload, context="Remote node response")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
+                if attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}"
+                    ) from xcp
+                log.warning(
+                    "Remote node GET failed; retrying: url=%s attempt=%s/%s error=%s: %s",
+                    url,
+                    attempt,
+                    max_attempts,
+                    type(xcp).__name__,
+                    xcp,
+                )
+                await asyncio.sleep(_REMOTE_NODE_GET_RETRY_DELAY_SECONDS)
+        raise RuntimeError("Remote node request attempts were unexpectedly exhausted.")
 
     async def _remote_bytes_async(
         self,
@@ -1712,21 +1742,25 @@ class ModWebModelsMixin(ModWebServiceSupport):
         node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
         url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
-            async with aiohttp.ClientSession(timeout=self._aiohttp_client_timeout(timeout)) as session:
-                async with session.get(url, headers={"Authorization": f"Bearer {token}"}) as response:
-                    if response.status >= 400:
-                        raise RuntimeError(
-                            f"Remote node rejected the request: url={url} status={response.status} "
-                            f"detail={await self._aiohttp_response_detail(response)}"
-                        )
-                    content = await response.read()
-                    media_type = response.headers.get("Content-Type")
-                    forwarded_headers = tuple(
-                        (header_name, header_value)
-                        for header_name in ("Cache-Control", "ETag", "Last-Modified", "Expires")
-                        if (header_value := response.headers.get(header_name))
+            session = await self._remote_http_client()
+            async with session.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=self._aiohttp_client_timeout(timeout),
+            ) as response:
+                if response.status >= 400:
+                    raise RuntimeError(
+                        f"Remote node rejected the request: url={url} status={response.status} "
+                        f"detail={await self._aiohttp_response_detail(response)}"
                     )
-                    return content, media_type, forwarded_headers
+                content = await response.read()
+                media_type = response.headers.get("Content-Type")
+                forwarded_headers = tuple(
+                    (header_name, header_value)
+                    for header_name in ("Cache-Control", "ETag", "Last-Modified", "Expires")
+                    if (header_value := response.headers.get(header_name))
+                )
+                return content, media_type, forwarded_headers
         except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
             raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
 
@@ -1735,13 +1769,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
         if isinstance(timeout, tuple):
             connect_timeout, read_timeout = timeout
             return aiohttp.ClientTimeout(
-                total=connect_timeout + read_timeout,
+                total=None,
                 connect=connect_timeout,
                 sock_connect=connect_timeout,
                 sock_read=read_timeout,
             )
         return aiohttp.ClientTimeout(
-            total=timeout,
+            total=None,
             connect=timeout,
             sock_connect=timeout,
             sock_read=timeout,
@@ -2190,6 +2224,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         *,
         sections: tuple[ModWebNodeAppSection, ...],
         user: ModWebUser,
+        system_summaries_by_node: Mapping[str, NodeSystemSummary | None] | None = None,
     ) -> tuple[ModWebHomeNodeSummary, ...]:
         summaries: list[ModWebHomeNodeSummary | None] = [None] * len(sections)
         remote_jobs: list[tuple[int, ModWebNodeAppSection]] = []
@@ -2199,6 +2234,12 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     node=section.node,
                     app_count=len(section.app_links),
                     system_summary=None,
+                )
+            elif system_summaries_by_node is not None:
+                summaries[index] = ModWebHomeNodeSummary(
+                    node=section.node,
+                    app_count=len(section.app_links),
+                    system_summary=system_summaries_by_node.get(section.node.node_name),
                 )
             else:
                 remote_jobs.append((index, section))
