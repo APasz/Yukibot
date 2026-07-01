@@ -786,6 +786,41 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
         root_select: Select | None = None
         save_upload_control: Upload | None = None
+        direct_save_transfer_id: int | None = None
+
+        def ensure_direct_save_transfer() -> int | None:
+            nonlocal direct_save_transfer_id
+            if direct_save_transfer_id is not None:
+                return direct_save_transfer_id
+            try:
+                direct_save_transfer_id = self._start_direct_upload_transfer(
+                    model=model,
+                    user=user,
+                    label="Save upload",
+                    detail_text=f"Sending a save directly to {model.app_friendly}.",
+                )
+            except RuntimeError as xcp:
+                ui.notify(f"Upload started, but tray tracking is unavailable: {xcp}", type="warning")
+            return direct_save_transfer_id
+
+        def finish_direct_save_transfer(*, error: str | None) -> None:
+            nonlocal direct_save_transfer_id
+            transfer_id: int | None = direct_save_transfer_id
+            direct_save_transfer_id = None
+            if transfer_id is None:
+                return
+            if error is None:
+                self._backend.complete_transfer(
+                    transfer_id=transfer_id,
+                    detail_text=f"Uploaded a save for {model.app_friendly}.",
+                )
+            else:
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=error)
+
+        def interrupt_direct_save_transfer() -> None:
+            if direct_save_transfer_id is None:
+                return
+            finish_direct_save_transfer(error="Save upload was interrupted because the app page was closed.")
 
         def selected_save_root_id() -> str:
             selected_root_value: str | None = (
@@ -816,23 +851,31 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 f"Upload acknowledged. Sending the save directly to {model.app_friendly}.",
                 type="info",
             )
+            ensure_direct_save_transfer()
 
         def direct_save_upload_succeeded() -> None:
+            finish_direct_save_transfer(error=None)
             upload_dialog.close()
             ui.notify(f"Uploaded the save for {model.app_friendly}.", type="positive")
             ui.navigate.reload()
 
         def direct_save_upload_failed() -> None:
+            error = f"Save upload failed before {model.app_friendly} accepted it."
+            ensure_direct_save_transfer()
+            finish_direct_save_transfer(error=error)
             ui.notify(
-                f"Save upload failed before {model.app_friendly} accepted it. "
+                f"{error} "
                 "The node may be unavailable, out of temporary space, or may have rejected the file.",
                 type="negative",
                 multi_line=True,
             )
 
         def direct_save_upload_rejected() -> None:
+            error = "The selected save was rejected before upload."
+            ensure_direct_save_transfer()
+            finish_direct_save_transfer(error=error)
             ui.notify(
-                "The selected save was rejected before upload. Check the file type and upload limits.",
+                f"{error} Check the file type and upload limits.",
                 type="warning",
             )
 
@@ -864,6 +907,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             refresh_direct_save_upload_target,
                         )
                         self._register_timer_cleanup(ui=ui, timer=direct_save_upload_token_timer)
+                        self._register_client_cleanup(ui=ui, cleanup=interrupt_direct_save_transfer)
                         if root_select is not None:
                             root_select.on("update:model-value", lambda: refresh_direct_save_upload_target())
                     ui.label("ZIP archives are uploaded directly into the selected save target.").classes(

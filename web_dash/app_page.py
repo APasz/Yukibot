@@ -3688,6 +3688,41 @@ class ModWebAppPageMixin(
             ui.navigate.reload()
 
         inline_upload_control: Upload | None = None
+        direct_upload_transfer_id: int | None = None
+
+        def ensure_direct_upload_transfer() -> int | None:
+            nonlocal direct_upload_transfer_id
+            if direct_upload_transfer_id is not None:
+                return direct_upload_transfer_id
+            try:
+                direct_upload_transfer_id = self._start_direct_upload_transfer(
+                    model=model,
+                    user=user,
+                    label="Mod upload",
+                    detail_text=f"Sending mods directly to {model.app_friendly}.",
+                )
+            except RuntimeError as xcp:
+                ui.notify(f"Upload started, but tray tracking is unavailable: {xcp}", type="warning")
+            return direct_upload_transfer_id
+
+        def finish_direct_upload_transfer(*, error: str | None) -> None:
+            nonlocal direct_upload_transfer_id
+            transfer_id: int | None = direct_upload_transfer_id
+            direct_upload_transfer_id = None
+            if transfer_id is None:
+                return
+            if error is None:
+                self._backend.complete_transfer(
+                    transfer_id=transfer_id,
+                    detail_text=f"Installed mods for {model.app_friendly}.",
+                )
+            else:
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=error)
+
+        def interrupt_direct_upload_transfer() -> None:
+            if direct_upload_transfer_id is None:
+                return
+            finish_direct_upload_transfer(error="Mod upload was interrupted because the app page was closed.")
 
         def open_upload_picker() -> None:
             if inline_upload_control is None:
@@ -3708,22 +3743,30 @@ class ModWebAppPageMixin(
                 f"Upload acknowledged. Sending mods directly to {model.app_friendly}.",
                 type="info",
             )
+            ensure_direct_upload_transfer()
 
         def direct_upload_succeeded() -> None:
+            finish_direct_upload_transfer(error=None)
             ui.notify(f"Uploaded mods for {model.app_friendly}.", type="positive")
             ui.navigate.reload()
 
         def direct_upload_failed() -> None:
+            error = f"Mod upload failed before {model.app_friendly} accepted it."
+            ensure_direct_upload_transfer()
+            finish_direct_upload_transfer(error=error)
             ui.notify(
-                f"Mod upload failed before {model.app_friendly} accepted it. "
+                f"{error} "
                 "The node may be unavailable, out of temporary space, or may have rejected the files.",
                 type="negative",
                 multi_line=True,
             )
 
         def direct_upload_rejected() -> None:
+            error = "The selected mod files were rejected before upload."
+            ensure_direct_upload_transfer()
+            finish_direct_upload_transfer(error=error)
             ui.notify(
-                "The selected mod files were rejected before upload. Check file and batch limits.",
+                f"{error} Check file and batch limits.",
                 type="warning",
             )
 
@@ -3933,6 +3976,7 @@ class ModWebAppPageMixin(
                         refresh_direct_upload_target,
                     )
                     self._register_timer_cleanup(ui=ui, timer=direct_upload_token_timer)
+                    self._register_client_cleanup(ui=ui, cleanup=interrupt_direct_upload_transfer)
                     with inline_upload_control.add_slot("list"):
                         with ui.element("div").classes("mod-mod-list-drop-shell w-full"):
                             _mod_download_rows("")

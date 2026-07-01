@@ -575,6 +575,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_direct_save_upload_target"]) -> Callable[..., ModWebDirectUploadTarget]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_start_direct_upload_transfer"]) -> Callable[..., int]: ...
+
+    @overload
     def __getattr__(
         self, name: Literal["_remote_execute_console_action_async"]
     ) -> Callable[..., Awaitable[NodeConsoleActionExecutionResult]]: ...

@@ -1332,6 +1332,23 @@ class ModWebModelsMixin(ModWebServiceSupport):
             authorization_header=f"Bearer {token}",
         )
 
+    def _start_direct_upload_transfer(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        label: str,
+        detail_text: str,
+    ) -> int:
+        transfer_ids: tuple[int, ...] = self._backend.start_upload_transfers(
+            user_id=user.discord_id,
+            filenames=(label,),
+            detail_text=detail_text,
+            node_color_hex=self._node_role_color_hex(node_name=model.node_name),
+            app_color_hex=model.app_color_hex,
+        )
+        return transfer_ids[0]
+
     async def _remote_config_list_async(
         self,
         node: ModWebNodeLink,

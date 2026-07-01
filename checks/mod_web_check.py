@@ -566,6 +566,36 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(len(notifications), 4)
 
+    def test_home_navigation_warns_while_upload_is_active(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        navigated_to: list[str] = []
+        notifications: list[tuple[str, str | None]] = []
+        ui = cast(
+            ModWebUi,
+            cast(
+                object,
+                SimpleNamespace(
+                    navigate=SimpleNamespace(to=navigated_to.append),
+                    notify=lambda message, type=None: notifications.append((message, type)),
+                ),
+            ),
+        )
+        transfer_id = service._backend.start_upload_transfers(
+            user_id=user.discord_id,
+            filenames=("Mod upload",),
+            detail_text="Sending mods directly.",
+        )[0]
+
+        self.assertFalse(service._navigate_home(ui=ui, user=user))
+        self.assertEqual(navigated_to, [])
+        self.assertEqual(notifications[0][1], "warning")
+
+        service._backend.fail_transfer(transfer_id=transfer_id, detail_text="Interrupted.")
+
+        self.assertTrue(service._navigate_home(ui=ui, user=user))
+        self.assertEqual(navigated_to, [service.index_path()])
+
     def test_persist_uploaded_file_for_transfer_updates_backend_progress(self) -> None:
         service = ModWebService()
         transfer_id = service._backend.start_upload_transfers(
@@ -8635,6 +8665,10 @@ class ModWebTests(unittest.TestCase):
         class FakeUi:
             def __init__(self) -> None:
                 self.buttons: list[FakeButton] = []
+                self.cleanups: list[Callable[..., object]] = []
+                self.context = SimpleNamespace(
+                    client=SimpleNamespace(on_delete=lambda cleanup: self.cleanups.append(cleanup))
+                )
                 self.navigate = SimpleNamespace(reload=lambda: None)
                 self.upload_control = FakeUpload()
                 self.upload_kwargs: dict[str, object] = {}
@@ -8798,6 +8832,18 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ui.upload_control.props["field-name"], "upload")
         self.assertTrue(ui.upload_control.props["batch"])
         self.assertEqual(set(ui.upload_control.handlers), {"start", "uploaded", "failed", "rejected"})
+        ui.upload_control.handlers["start"]()
+        active_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
+        self.assertEqual(active_transfer.label, "Mod upload")
+        self.assertIs(active_transfer.state, ModWebNotificationTrayItemState.ACTIVE)
+        ui.upload_control.handlers["uploaded"]()
+        completed_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
+        self.assertIs(completed_transfer.state, ModWebNotificationTrayItemState.SUCCESS)
+        ui.upload_control.handlers["start"]()
+        ui.cleanups[0]()
+        interrupted_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
+        self.assertIs(interrupted_transfer.state, ModWebNotificationTrayItemState.ERROR)
+        self.assertIn("interrupted", interrupted_transfer.detail_text or "")
         self.assertEqual(
             can_select_by_mod,
             {
@@ -9131,6 +9177,7 @@ class ModWebTests(unittest.TestCase):
                 object,
                 SimpleNamespace(
                     app_friendly="Factorio",
+                    app_color_hex="#DC6B0F",
                     node_name="yuki",
                     app_name="factorio",
                     supports_save_uploads=True,
@@ -9231,7 +9278,12 @@ class ModWebTests(unittest.TestCase):
             )
 
             ui.upload_control.handlers["start"]()
+            active_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
+            self.assertEqual(active_transfer.label, "Save upload")
+            self.assertIs(active_transfer.state, ModWebNotificationTrayItemState.ACTIVE)
             ui.upload_control.handlers["failed"]()
+            failed_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
+            self.assertIs(failed_transfer.state, ModWebNotificationTrayItemState.ERROR)
             ui.upload_control.handlers["rejected"]()
             self.assertEqual([tone for _message, tone in ui.notifications], ["info", "negative", "warning"])
             self.assertIn("Upload acknowledged", ui.notifications[0][0])
