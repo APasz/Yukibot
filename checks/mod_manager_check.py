@@ -10,6 +10,7 @@ from apps._config import (
     ClientPackConfig,
     ClientPackPolicy,
     ModDownloadBlockReason,
+    ModMetadataOverrides,
     ModType,
 )
 from apps._mod import Mod, Mod_Manager
@@ -18,6 +19,14 @@ from apps._mod import Mod, Mod_Manager
 class _FileMod(Mod):
     async def install(self, src: Path, atomic: bool = True) -> None:
         await self._handle_drop(src, atomic)
+
+
+class _DetectedServerMod(_FileMod):
+    def default_mod_type(self) -> ModType:
+        return ModType.SERVER_ONLY
+
+    def default_download_block_reason(self) -> ModDownloadBlockReason | None:
+        return ModDownloadBlockReason.SERVER_ONLY
 
 
 class ModManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -35,7 +44,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         Mod_Manager._instances.clear()
         self._temp_dir.cleanup()
 
-    def _build_manager(self) -> Mod_Manager:
+    def _build_manager(self, *, mod_cls: type[Mod] = _FileMod) -> Mod_Manager:
         app_cfg = App_Config(
             name="test_app",
             instance_key="test",
@@ -46,7 +55,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
             join_host="127.0.0.1",
             scope="test",
         )
-        return Mod_Manager(app_cfg, mod_cls=_FileMod, db_path=self.db_path)
+        return Mod_Manager(app_cfg, mod_cls=mod_cls, db_path=self.db_path)
 
     def _write_source_file(self, name: str = "example.zip") -> Path:
         source_dir = self.temp_path / "incoming"
@@ -176,6 +185,53 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         reloaded = manager.get("example.zip")
         self.assertFalse(reloaded.downloadable)
         self.assertEqual(reloaded.cfg.download_block_reason, ModDownloadBlockReason.SERVER_ONLY)
+
+    async def test_update_properties_persists_classification_and_metadata_overrides(self) -> None:
+        manager = self._build_manager()
+        await manager.add(self._write_source_file())
+
+        updated = await manager.update_properties(
+            "example.zip",
+            mod_type=ModType.CLIENT,
+            download_block_reason=ModDownloadBlockReason.ARTIFACT,
+            metadata_overrides=ModMetadataOverrides(
+                friendly_name="Example Client Mod",
+                version="2.4.0",
+                origin="curated",
+            ),
+        )
+
+        self.assertEqual(updated.mod_type, ModType.CLIENT)
+        self.assertEqual(updated.friendly, "Example Client Mod")
+        self.assertEqual(updated.version, "2.4.0")
+        self.assertEqual(updated.origin, "curated")
+        self.assertIs(manager.get("Example Client Mod"), updated)
+
+        await manager.reload_mods()
+
+        reloaded = manager.get("example.zip")
+        self.assertEqual(reloaded.mod_type, ModType.CLIENT)
+        self.assertEqual(reloaded.download_block_reason, ModDownloadBlockReason.ARTIFACT)
+        self.assertEqual(reloaded.cfg.metadata_overrides.friendly_name, "Example Client Mod")
+        self.assertEqual(reloaded.version, "2.4.0")
+        self.assertEqual(reloaded.origin, "curated")
+
+    async def test_explicit_regular_classification_overrides_detected_server_type(self) -> None:
+        manager = self._build_manager(mod_cls=_DetectedServerMod)
+        detected = await manager.add(self._write_source_file())
+        self.assertEqual(detected.mod_type, ModType.SERVER_ONLY)
+
+        await manager.update_properties(
+            detected,
+            mod_type=ModType.REGULAR,
+            download_block_reason=None,
+            metadata_overrides=ModMetadataOverrides(),
+        )
+        await manager.reload_mods()
+
+        reloaded = manager.get("example.zip")
+        self.assertEqual(reloaded.mod_type, ModType.REGULAR)
+        self.assertIsNone(reloaded.download_block_reason)
 
     async def test_client_pack_choice_group_persists_when_valid(self) -> None:
         manager = self._build_manager()

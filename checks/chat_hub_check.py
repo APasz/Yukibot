@@ -22,6 +22,18 @@ from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeS
 
 
 class ChatHubTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._clear_chat_hub()
+
+    def tearDown(self) -> None:
+        self._clear_chat_hub()
+
+    @staticmethod
+    def _clear_chat_hub() -> None:
+        hub = ChatHub()
+        for room_id in hub.bound_room_ids():
+            hub.clear_room(room_id)
+
     def test_publish_records_history_and_excludes_source_endpoint(self) -> None:
         hub = ChatHub()
         room_id = "minecraft_alpha"

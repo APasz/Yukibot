@@ -5,6 +5,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,15 @@ import aiofiles
 
 import config
 from _file import File_Utils
-from apps._config import App_Config, ClientPackPolicy, Mod_Config, ModDownloadBlockReason, ModType
+from apps._config import (
+    App_Config,
+    ClientPackPolicy,
+    Mod_Config,
+    ModClassificationOverride,
+    ModDownloadBlockReason,
+    ModMetadataOverrides,
+    ModType,
+)
 
 log = logging.getLogger(__name__)
 _MOD_SEPARATOR_RE = re.compile(r"[_\-\s]+")
@@ -52,15 +61,16 @@ class Mod(ABC):
         "Mod_Config"
         self.name = cfg.name
         "Name of mod"
-        self.friendly = nice_name or cfg.name
+        self.friendly = cfg.metadata_overrides.friendly_name or nice_name or cfg.name
         # Path(cfg.name).stem.strip().replace("_", " ").replace("-", " ").title()
         "Hopefully more user friendly name"
         self.directory = cfg.directory
         "Directory of app's mods folder"
-        if cfg.mod_type is ModType.REGULAR:
-            cfg.mod_type = self.default_mod_type()
-        if cfg.download_block_reason is None:
-            cfg.download_block_reason = self.default_download_block_reason()
+        if cfg.classification_override is None:
+            if cfg.mod_type is ModType.REGULAR:
+                cfg.mod_type = self.default_mod_type()
+            if cfg.download_block_reason is None:
+                cfg.download_block_reason = self.default_download_block_reason()
 
     @property
     def enabled_path(self) -> Path:
@@ -92,41 +102,61 @@ class Mod(ABC):
 
     @property
     def downloadable(self) -> bool:
-        return self.cfg.download_block_reason is None
+        return self.download_block_reason is None
 
     @property
     def mod_type(self) -> ModType:
+        if self.cfg.classification_override is not None:
+            return self.cfg.classification_override.mod_type
         return self.cfg.mod_type
 
     @property
+    def download_block_reason(self) -> ModDownloadBlockReason | None:
+        if self.cfg.classification_override is not None:
+            return self.cfg.classification_override.download_block_reason
+        return self.cfg.download_block_reason
+
+    @property
+    def version(self) -> str | None:
+        return self.cfg.metadata_overrides.version or self.cfg.version
+
+    @property
+    def origin(self) -> str:
+        return self.cfg.metadata_overrides.origin or self.cfg.origin
+
+    @property
+    def added(self) -> datetime:
+        return self.cfg.metadata_overrides.added or self.cfg.added
+
+    @property
     def is_coremod_type(self) -> bool:
-        return self.cfg.mod_type is ModType.COREMOD
+        return self.mod_type is ModType.COREMOD
 
     @property
     def is_builtin(self) -> bool:
-        return self.cfg.mod_type is ModType.BUILTIN
+        return self.mod_type is ModType.BUILTIN
 
     @property
     def is_server_only(self) -> bool:
-        return self.cfg.mod_type is ModType.SERVER_ONLY
+        return self.mod_type is ModType.SERVER_ONLY
 
     @property
     def is_client(self) -> bool:
-        return self.cfg.mod_type is ModType.CLIENT
+        return self.mod_type is ModType.CLIENT
 
     @property
     def is_protected(self) -> bool:
-        return self.cfg.mod_type in (ModType.COREMOD, ModType.BUILTIN)
+        return self.mod_type in (ModType.COREMOD, ModType.BUILTIN)
 
     @property
     def counts_as_coremod(self) -> bool:
-        return self.cfg.mod_type in (ModType.COREMOD, ModType.BUILTIN)
+        return self.mod_type in (ModType.COREMOD, ModType.BUILTIN)
 
     @property
     def download_block_label(self) -> str | None:
-        if self.cfg.download_block_reason is None:
+        if self.download_block_reason is None:
             return None
-        return self.cfg.download_block_reason.label
+        return self.download_block_reason.label
 
     def default_mod_type(self) -> ModType:
         return ModType.REGULAR
@@ -160,7 +190,9 @@ class Mod(ABC):
         detected_version = self.detect_version()
         if detected_version is not None or self.cfg.version is None:
             self.cfg.version = detected_version
-        if not self._explicit_friendly:
+        if self.cfg.metadata_overrides.friendly_name is not None:
+            self.friendly = self.cfg.metadata_overrides.friendly_name
+        elif not self._explicit_friendly:
             detected_friendly = self.detect_friendly()
             if detected_friendly is not None and detected_friendly.strip():
                 self.friendly = detected_friendly.strip()
@@ -437,10 +469,15 @@ class Mod_Manager:
 
     async def set_coremod(self, mod_name: str | Mod, state: bool) -> Mod:
         mod = self.get(mod_name)
-        if state:
-            mod.cfg.mod_type = ModType.COREMOD
-        elif mod.is_coremod_type:
-            mod.cfg.mod_type = ModType.REGULAR
+        if not state and not mod.is_coremod_type:
+            return mod
+        next_mod_type = ModType.COREMOD if state else ModType.REGULAR
+        if mod.cfg.classification_override is not None:
+            mod.cfg.classification_override = mod.cfg.classification_override.model_copy(
+                update={"mod_type": next_mod_type}
+            )
+        elif state or mod.is_coremod_type:
+            mod.cfg.mod_type = next_mod_type
         await self.save_mods()
         return mod
 
@@ -452,8 +489,46 @@ class Mod_Manager:
         mod = self.get(mod_name)
         if reason is not None and mod.cfg.client_pack.policy is not ClientPackPolicy.REQUIRED:
             raise ValueError(f"Client-pack mod {mod.name!r} cannot be blocked from downloads")
-        mod.cfg.download_block_reason = reason
+        if mod.cfg.classification_override is not None:
+            mod.cfg.classification_override = mod.cfg.classification_override.model_copy(
+                update={"download_block_reason": reason}
+            )
+        else:
+            mod.cfg.download_block_reason = reason
         await self.save_mods()
+        return mod
+
+    async def update_properties(
+        self,
+        mod_name: str | Mod,
+        *,
+        mod_type: ModType,
+        download_block_reason: ModDownloadBlockReason | None,
+        metadata_overrides: ModMetadataOverrides,
+    ) -> Mod:
+        mod = self.get(mod_name)
+        if mod_type is ModType.BUILTIN:
+            raise ValueError("Mods cannot be converted to built-in mods")
+        if download_block_reason is ModDownloadBlockReason.BUILTIN:
+            raise ValueError("The built-in download block reason is reserved for detected built-in mods")
+        previous_classification_override = mod.cfg.classification_override
+        previous_metadata_overrides = mod.cfg.metadata_overrides
+        previous_friendly = mod.friendly
+        try:
+            mod.cfg.classification_override = ModClassificationOverride(
+                mod_type=mod_type,
+                download_block_reason=download_block_reason,
+            )
+            mod.cfg.metadata_overrides = metadata_overrides
+            mod.sync_metadata()
+            self._rebuild_lookup()
+            await self.save_mods()
+        except Exception:
+            mod.cfg.classification_override = previous_classification_override
+            mod.cfg.metadata_overrides = previous_metadata_overrides
+            mod.friendly = previous_friendly
+            self._rebuild_lookup()
+            raise
         return mod
 
     def get(self, name: str | Mod) -> Mod:

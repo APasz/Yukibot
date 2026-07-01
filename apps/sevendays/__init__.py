@@ -1882,7 +1882,7 @@ class SevenDays(App[App_Config]):
             log.exception("Failed to clean up %s for %s", label, self.name)
 
     async def _cleanup_runtime_components(self) -> None:
-        startup_sandbox_options_task = self._startup_sandbox_options_task
+        startup_sandbox_options_task = getattr(self, "_startup_sandbox_options_task", None)
         self._startup_sandbox_options_task = None
         if startup_sandbox_options_task is not None:
             startup_sandbox_options_task.cancel()
@@ -1999,7 +1999,7 @@ class SevenDays(App[App_Config]):
         return bool(await self._relay.send("getsandboxoptions"))
 
     def _schedule_startup_sandbox_options_request(self) -> None:
-        existing_task = self._startup_sandbox_options_task
+        existing_task = getattr(self, "_startup_sandbox_options_task", None)
         if existing_task is not None and not existing_task.done():
             return
         self._startup_sandbox_options_task = asyncio.create_task(

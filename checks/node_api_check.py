@@ -24,7 +24,15 @@ import config
 from _manager import AppStartBlocker, AppStartBlockerKind
 from _security import Access_Control, Power_Level
 from apps._app import App, AppActivityProvider, AppActivityProviderMetadata, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
-from apps._config import App_Config, AppTitleFont, AppVersion, Mod_Config, ModDownloadBlockReason, ModType
+from apps._config import (
+    App_Config,
+    AppTitleFont,
+    AppVersion,
+    Mod_Config,
+    ModDownloadBlockReason,
+    ModMetadataOverrides,
+    ModType,
+)
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod
@@ -95,6 +103,7 @@ from node_api import (
     NodeMinecraftRecipeWorkspaceState,
     NodeModMutationAction,
     NodeModMutationResult,
+    NodeModPropertiesUpdateRequest,
     NodeModList,
     NodeModUploadBatchResult,
     NodeModUploadResult,
@@ -3263,6 +3272,62 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(getattr(raised.exception, "status_code"), 409)
         manager.set_enabled.assert_not_awaited()
+
+    def test_update_mod_properties_persists_typed_values_with_sudo_access(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mod_path = Path(temp_dir) / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            mod = _TestMod(Mod_Config(name=mod_path.name, directory=Path(temp_dir)))
+            overrides = ModMetadataOverrides(
+                friendly_name="Example Override",
+                version="3.0.0",
+                origin="curated",
+            )
+            updated = _TestMod(
+                Mod_Config(
+                    name=mod_path.name,
+                    directory=Path(temp_dir),
+                    mod_type=ModType.CLIENT,
+                    download_block_reason=ModDownloadBlockReason.ARTIFACT,
+                    metadata_overrides=overrides,
+                )
+            )
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = mod
+            manager.update_properties = AsyncMock(return_value=updated)
+            app = _build_app(manager)
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+
+            result = asyncio.run(
+                service.update_mod_properties(
+                    app=app,
+                    mod_name=mod.name,
+                    update=NodeModPropertiesUpdateRequest(
+                        mod_type=ModType.CLIENT,
+                        download_block_reason=ModDownloadBlockReason.ARTIFACT,
+                        metadata_overrides=overrides,
+                    ),
+                    actor_user_id=42,
+                )
+            )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        manager.update_properties.assert_awaited_once_with(
+            mod,
+            mod_type=ModType.CLIENT,
+            download_block_reason=ModDownloadBlockReason.ARTIFACT,
+            metadata_overrides=overrides,
+        )
+        self.assertEqual(result.action, NodeModMutationAction.UPDATE_PROPERTIES)
+        self.assertIsNotNone(result.mod)
+        assert result.mod is not None
+        self.assertEqual(result.mod.friendly, "Example Override")
+        self.assertEqual(result.mod.version, "3.0.0")
+        self.assertEqual(result.mod.metadata_overrides, overrides)
 
     def test_mutate_app_start_blocks_when_another_app_is_running(self) -> None:
         service = NodeApiService()

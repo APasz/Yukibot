@@ -169,6 +169,19 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-details-dialog-card", css)
         self.assertIn(".mod-app-details-section", css)
         self.assertIn(".mod-app-details-field", css)
+        self.assertIn(".mod-mod-override-field", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-override-field input::placeholder \{.*?opacity: 1 !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-override-datetime input\[type=datetime-local\] \{.*?color-scheme: dark;",
+        )
+        self.assertIn(
+            ".mod-mod-override-datetime input[type=datetime-local]::-webkit-calendar-picker-indicator",
+            css,
+        )
         self.assertIn(".mod-app-details-notes", css)
         self.assertIn(".mod-app-details-toggle", css)
         self.assertIn(".mod-app-details-state-button", css)

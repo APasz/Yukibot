@@ -18,7 +18,9 @@
         },
         "version": {
             "main": "3.0.0",
-            "build": 259
+            "build": 259,
+            "steam_build": 23906567,
+            "steam_branch": "public"
         },
         "steam_update": {
             "app_id": 294420,

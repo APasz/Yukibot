@@ -2281,7 +2281,7 @@ class Mod_MC(Mod):
 
     def sync_metadata(self) -> None:
         super().sync_metadata()
-        if _is_squaremap_mod_name(self.name):
+        if _is_squaremap_mod_name(self.name) and self.cfg.classification_override is None:
             self.cfg.mod_type = ModType.SERVER_ONLY
             if self.cfg.download_block_reason is None:
                 self.cfg.download_block_reason = ModDownloadBlockReason.SERVER_ONLY

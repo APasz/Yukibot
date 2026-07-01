@@ -24,7 +24,14 @@ import config
 from _minecraft_heads import minecraft_dev_bypass_head_data_uri
 from _security import Access_Control, Power_Level
 from apps._app import AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
-from apps._config import AppTitleFont, ClientPackConfig, ClientPackPolicy, ModType
+from apps._config import (
+    AppTitleFont,
+    ClientPackConfig,
+    ClientPackPolicy,
+    ModDownloadBlockReason,
+    ModMetadataOverrides,
+    ModType,
+)
 from apps._updater import (
     AppUpdateBranchState,
     AppUpdateInfo,
@@ -9013,6 +9020,94 @@ class ModWebTests(unittest.TestCase):
                 )
 
         self.assertEqual(str(raised.exception), "Sudo access is required for this mod action.")
+
+    def test_update_mod_properties_sends_typed_classification_and_overrides(self) -> None:
+        service = ModWebService()
+        entry = self._mod_entry(name="alpha.jar")
+        overrides = ModMetadataOverrides(
+            friendly_name="Alpha Override",
+            version="2.0.0",
+            origin="curated",
+        )
+        updated_entry = replace(
+            entry,
+            friendly="Alpha Override",
+            mod_type=ModType.CLIENT,
+            downloadable=False,
+            download_block_reason=ModDownloadBlockReason.ARTIFACT.value,
+            download_block_label=ModDownloadBlockReason.ARTIFACT.label,
+            version="2.0.0",
+            origin="curated",
+            metadata_overrides=overrides,
+        )
+        expected_result = NodeModMutationResult(
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            node="yuki",
+            mod_name=entry.name,
+            action=NodeModMutationAction.UPDATE_PROPERTIES,
+            message="Updated properties for Alpha Override.",
+            mod=updated_entry,
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    node_name="yuki",
+                    app_name="minecraft_alpha",
+                ),
+            ),
+        )
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="https://yuki.example/api/node",
+            api_url="/api/node-proxy/yuki/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_json_async",
+                new=AsyncMock(return_value=expected_result.to_mapping()),
+            ) as remote_json,
+        ):
+            result = asyncio.run(
+                service._update_mod_properties(
+                    model=model,
+                    entry=entry,
+                    mod_type=ModType.CLIENT,
+                    download_block_reason=ModDownloadBlockReason.ARTIFACT,
+                    metadata_overrides=overrides,
+                    user=user,
+                )
+            )
+
+        self.assertEqual(result, expected_result)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="minecraft_alpha",
+            path="/apps/minecraft_alpha/mods/alpha.jar/properties",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={
+                "mod_type": "client",
+                "download_block_reason": "artifact",
+                "metadata_overrides": {
+                    "friendly_name": "Alpha Override",
+                    "version": "2.0.0",
+                    "origin": "curated",
+                    "added": None,
+                },
+            },
+        )
 
     def test_render_saves_editor_uses_direct_upload_and_settings_search_styling(self) -> None:
         class FakeContainer:

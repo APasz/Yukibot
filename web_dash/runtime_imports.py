@@ -14,6 +14,7 @@ import time
 from asyncio.events import AbstractEventLoop
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from enum import Enum
 from functools import lru_cache
 from html import escape
@@ -70,6 +71,7 @@ from apps._config import (
     ClientPackConfig,
     ClientPackPolicy,
     ModDownloadBlockReason,
+    ModMetadataOverrides,
     ModType,
     SteamUpdateBranch,
     SteamUpdatePreset,
@@ -222,6 +224,7 @@ __all__: tuple[str, ...] = (
     "Mapping",
     "ModType",
     "ModDownloadBlockReason",
+    "ModMetadataOverrides",
     "ModWebAuthError",
     "ModWebAuthService",
     "ModWebSessionPersistence",
@@ -327,6 +330,7 @@ __all__: tuple[str, ...] = (
     "color_int_to_hex",
     "config",
     "dataclass",
+    "datetime",
     "escape",
     "field",
     "hashlib",

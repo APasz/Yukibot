@@ -3526,6 +3526,36 @@ class ModWebTheme:
                     font-size: 0.9rem !important;
                     font-weight: 850 !important;
                 }}
+                .mod-mod-override-field .q-field__control {{
+                    border-color: rgba(113, 113, 122, 0.92) !important;
+                    background:
+                        linear-gradient(180deg, rgba(139, 92, 246, 0.1), rgba(139, 92, 246, 0.015)),
+                        rgba(15, 15, 22, 0.99) !important;
+                }}
+                .mod-mod-override-field .q-field__label {{
+                    color: #d8b4fe !important;
+                    opacity: 1 !important;
+                }}
+                .mod-mod-override-field .q-field__native,
+                .mod-mod-override-field .q-field__input {{
+                    color: #fafafa !important;
+                    -webkit-text-fill-color: #fafafa !important;
+                    opacity: 1 !important;
+                }}
+                .mod-mod-override-field input::placeholder {{
+                    color: #b8b8c2 !important;
+                    -webkit-text-fill-color: #b8b8c2 !important;
+                    opacity: 1 !important;
+                }}
+                .mod-mod-override-datetime .q-field__control,
+                .mod-mod-override-datetime input[type=datetime-local] {{
+                    color-scheme: dark;
+                }}
+                .mod-mod-override-datetime input[type=datetime-local]::-webkit-calendar-picker-indicator {{
+                    filter: invert(88%) sepia(8%) saturate(491%) hue-rotate(201deg) brightness(106%);
+                    cursor: pointer;
+                    opacity: 0.95;
+                }}
                 .mod-app-details-point-field .q-field__control {{
                     min-height: 2.55rem;
                     padding: 0 0.45rem !important;

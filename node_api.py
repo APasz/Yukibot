@@ -68,6 +68,7 @@ from apps._config import (
     AppTitleFont,
     ClientPackConfig,
     ModDownloadBlockReason,
+    ModMetadataOverrides,
     ModType,
     normalise_activity_provider_ids,
     normalise_app_title_font,
@@ -890,6 +891,7 @@ class NodeModEntry:
     added: str
     size_bytes: int
     size_text: str
+    metadata_overrides: ModMetadataOverrides = field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = field(default_factory=ClientPackConfig)
 
     @property
@@ -915,6 +917,9 @@ class NodeModEntry:
         raw_client_pack = payload.get("client_pack")
         if raw_client_pack is not None and not isinstance(raw_client_pack, Mapping):
             raise ValueError("Node mod client_pack is invalid.")
+        raw_metadata_overrides = payload.get("metadata_overrides")
+        if raw_metadata_overrides is not None and not isinstance(raw_metadata_overrides, Mapping):
+            raise ValueError("Node mod metadata overrides are invalid.")
         if raw_mod_type is not None:
             mod_type = ModType(raw_mod_type)
         elif download_block_reason == ModDownloadBlockReason.BUILTIN.value:
@@ -937,6 +942,11 @@ class NodeModEntry:
             added=added,
             size_bytes=size_bytes,
             size_text=size_text,
+            metadata_overrides=(
+                ModMetadataOverrides()
+                if raw_metadata_overrides is None
+                else ModMetadataOverrides.model_validate(dict(raw_metadata_overrides))
+            ),
             client_pack=(
                 ClientPackConfig()
                 if raw_client_pack is None
@@ -959,6 +969,7 @@ class NodeModEntry:
             "added": self.added,
             "size_bytes": self.size_bytes,
             "size_text": self.size_text,
+            "metadata_overrides": self.metadata_overrides.model_dump(mode="json"),
             "client_pack": self.client_pack.model_dump(mode="json"),
         }
 
@@ -968,6 +979,7 @@ class NodeModMutationAction(StrEnum):
     DISABLE = "disable"
     TOGGLE_COREMOD = "toggle_coremod"
     TOGGLE_DOWNLOAD_BLOCK = "toggle_download_block"
+    UPDATE_PROPERTIES = "update_properties"
     DELETE = "delete"
 
 
@@ -981,6 +993,7 @@ def required_mod_mutation_level(
     if action in {
         NodeModMutationAction.TOGGLE_COREMOD,
         NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK,
+        NodeModMutationAction.UPDATE_PROPERTIES,
         NodeModMutationAction.DELETE,
     }:
         return Power_Level.sudo
@@ -989,6 +1002,12 @@ def required_mod_mutation_level(
 
 class NodeModMutationRequest(BaseModel):
     action: NodeModMutationAction
+
+
+class NodeModPropertiesUpdateRequest(BaseModel):
+    mod_type: ModType
+    download_block_reason: ModDownloadBlockReason | None
+    metadata_overrides: ModMetadataOverrides
 
 
 @dataclass(frozen=True, slots=True)
@@ -4602,6 +4621,37 @@ class NodeApiService:
                 app=app,
                 mod_name=mod_name,
                 action=mutation_request.action,
+                actor_user_id=actor_user_id,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.put(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/properties")
+        async def _update_mod_properties(
+            app_name: str,
+            mod_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API mod properties update request: node=%s app=%s mod=%s",
+                self.node_name,
+                app_name,
+                mod_name,
+            )
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+            update_request = NodeModPropertiesUpdateRequest.model_validate(payload)
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            result = await self.update_mod_properties(
+                app=self._resolve_app(app_name),
+                mod_name=mod_name,
+                update=update_request,
                 actor_user_id=actor_user_id,
             )
             return result.to_mapping()
@@ -8641,6 +8691,51 @@ class NodeApiService:
             mod=result_mod_entry,
         )
 
+    async def update_mod_properties(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        update: NodeModPropertiesUpdateRequest,
+        actor_user_id: int,
+    ) -> NodeModMutationResult:
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        mod: Mod = manager.get(mod_name)
+        await self._require_acl().perm_check(
+            actor_user_id,
+            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+        )
+        if mod.is_builtin:
+            raise _http_exception(409, "Built-in mod properties cannot be changed.")
+        try:
+            updated_mod = await manager.update_properties(
+                mod,
+                mod_type=update.mod_type,
+                download_block_reason=update.download_block_reason,
+                metadata_overrides=update.metadata_overrides,
+            )
+        except ValueError as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+
+        traffic_log.info(
+            "Node API mod properties updated: node=%s app=%s mod=%s actor=%s",
+            self.node_name,
+            app.name,
+            mod.name,
+            actor_user_id,
+        )
+        self._invalidate_mod_inventory(app.name)
+        return NodeModMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            mod_name=mod.name,
+            action=NodeModMutationAction.UPDATE_PROPERTIES,
+            message=f"Updated properties for {updated_mod.friendly}.",
+            mod=self._mod_entry(updated_mod),
+        )
+
     def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction:
         if not app.supports_console_actions:
             raise _http_exception(404, f"{app.friendly} does not support console actions.")
@@ -9406,15 +9501,16 @@ class NodeApiService:
             mod_type=mod.mod_type,
             coremod=mod.is_coremod_type,
             downloadable=mod.downloadable,
-            download_block_reason=mod.cfg.download_block_reason.value
-            if mod.cfg.download_block_reason is not None
+            download_block_reason=mod.download_block_reason.value
+            if mod.download_block_reason is not None
             else None,
             download_block_label=mod.download_block_label,
-            origin=mod.cfg.origin,
-            version=mod.cfg.version,
-            added=mod.cfg.added.isoformat(sep=" ", timespec="seconds"),
+            origin=mod.origin,
+            version=mod.version,
+            added=mod.added.isoformat(sep=" ", timespec="seconds"),
             size_bytes=size_bytes,
             size_text=Utilities.humanise_bytes(size_bytes),
+            metadata_overrides=mod.cfg.metadata_overrides,
             client_pack=mod.cfg.client_pack,
         )
 

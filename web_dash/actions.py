@@ -17,6 +17,7 @@ from .runtime_imports import (
     Checkbox,
     ClientPackPolicy,
     ModDownloadBlockReason,
+    ModMetadataOverrides,
     ModType,
     ModWebUser,
     NodeApiScope,
@@ -41,6 +42,7 @@ from .runtime_imports import (
     assert_never,
     asyncio,
     config,
+    datetime,
     quote,
     required_app_mutation_level,
     required_app_mutation_scope,
@@ -106,8 +108,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
     ) -> tuple[NodeModMutationAction, ...]:
         ordered_actions: tuple[NodeModMutationAction, ...] = (
             NodeModMutationAction.DISABLE if entry.enabled else NodeModMutationAction.ENABLE,
-            NodeModMutationAction.TOGGLE_COREMOD,
-            NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK,
             NodeModMutationAction.DELETE,
         )
         return tuple(
@@ -414,6 +414,38 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return NodeModMutationResult.from_mapping(payload)
 
+    async def _update_mod_properties(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        mod_type: ModType,
+        download_block_reason: ModDownloadBlockReason | None,
+        metadata_overrides: ModMetadataOverrides,
+        user: ModWebUser,
+    ) -> NodeModMutationResult:
+        if self._is_builtin_mod(entry):
+            raise PermissionError("Built-in mod properties cannot be changed from mod web.")
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to edit mod properties.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=f"/apps/{quote(model.app_name, safe='')}/mods/{quote(entry.name, safe='')}/properties",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={
+                "mod_type": mod_type.value,
+                "download_block_reason": (
+                    download_block_reason.value if download_block_reason is not None else None
+                ),
+                "metadata_overrides": metadata_overrides.model_dump(mode="json"),
+            },
+        )
+        return NodeModMutationResult.from_mapping(payload)
+
     @staticmethod
     def _mod_action_label(action: NodeModMutationAction, entry: NodeModEntry) -> str:
         match action:
@@ -425,6 +457,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return "Coremod"
             case NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
                 return "Unblock" if not entry.downloadable else "Block"
+            case NodeModMutationAction.UPDATE_PROPERTIES:
+                return "Save Properties"
             case NodeModMutationAction.DELETE:
                 return "Delete"
             case _:
@@ -441,6 +475,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return "mod-list-button state-core-on" if entry.coremod else "mod-list-button state-core-off"
             case NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
                 return "mod-list-button state-blocked" if not entry.downloadable else "mod-list-button state-open"
+            case NodeModMutationAction.UPDATE_PROPERTIES:
+                return "mod-list-button"
             case NodeModMutationAction.DELETE:
                 return "mod-list-button danger"
             case _:
@@ -795,6 +831,51 @@ class ModWebActionsMixin(ModWebServiceSupport):
         version_text: str = entry.version or "Unknown"
         block_text: str = entry.download_block_label or entry.download_block_reason or "None"
         available_actions = self._available_mod_actions(user=user, entry=entry)
+        can_edit_properties: bool = not self._is_builtin_mod(entry) and self._user_has_level(
+            user,
+            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+        )
+
+        async def save_properties() -> None:
+            try:
+                selected_mod_type = ModType(str(mod_type_select.value))
+                selected_block_reason_text = str(download_block_reason_select.value or "").strip()
+                selected_block_reason = (
+                    None
+                    if not selected_block_reason_text
+                    else ModDownloadBlockReason(selected_block_reason_text)
+                )
+                metadata_overrides = ModMetadataOverrides(
+                    friendly_name=str(friendly_name_override_input.value or ""),
+                    version=str(version_override_input.value or ""),
+                    origin=str(origin_override_input.value or ""),
+                    added=(
+                        None
+                        if not str(added_override_input.value or "").strip()
+                        else datetime.fromisoformat(str(added_override_input.value))
+                    ),
+                )
+                result = await self._update_mod_properties(
+                    model=model,
+                    entry=entry,
+                    mod_type=selected_mod_type,
+                    download_block_reason=selected_block_reason,
+                    metadata_overrides=metadata_overrides,
+                    user=user,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Mod properties update failed: node=%s app=%s mod=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    entry.name,
+                    xcp,
+                )
+                ui.notify(f"Mod properties update failed: {xcp}", type="negative")
+                return
+            dialog.close()
+            ui.notify(result.message, type="positive")
+            ui.navigate.reload()
 
         async def run_mod_action(action: NodeModMutationAction) -> None:
             try:
@@ -838,7 +919,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         ui.button("Delete", on_click=confirm_delete).classes("mod-list-button danger")
 
         with ui.dialog() as dialog:
-            with ui.card().classes("mod-card mod-dialog-card"):
+            with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
                     with ui.column().classes("gap-0"):
                         ui.label(entry.friendly).classes("text-xl font-black mod-title-small")
@@ -865,6 +946,94 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                 label="Choice group",
                                 value=entry.client_pack.choice_group,
                             )
+                    if can_edit_properties:
+                        with ui.column().classes("w-full gap-3 mod-app-details-section"):
+                            ui.label("Classification").classes("mod-stat-label")
+                            with ui.row().classes("w-full gap-2 flex-wrap"):
+                                mod_type_select = (
+                                    ui.select(
+                                        {
+                                            mod_type.value: mod_type.label
+                                            for mod_type in ModType
+                                            if mod_type is not ModType.BUILTIN
+                                        },
+                                        value=entry.mod_type.value,
+                                        label="Type",
+                                    )
+                                    .props("filled square dense hide-bottom-space color=accent options-dark")
+                                    .classes("mod-app-details-field")
+                                )
+                                download_block_reason_select = (
+                                    ui.select(
+                                        {
+                                            "": "None",
+                                            **{
+                                                reason.value: reason.label
+                                                for reason in ModDownloadBlockReason
+                                                if reason is not ModDownloadBlockReason.BUILTIN
+                                            },
+                                        },
+                                        value=entry.download_block_reason or "",
+                                        label="Download block reason",
+                                    )
+                                    .props("filled square dense hide-bottom-space color=accent options-dark")
+                                    .classes("mod-app-details-field")
+                                )
+                            ui.button(
+                                "Overrides",
+                                on_click=lambda: overrides_section.set_visibility(True),
+                            ).classes("mod-list-button secondary")
+                            with ui.column().classes("w-full gap-2") as overrides_section:
+                                ui.label("Overrides").classes("mod-stat-label")
+                                ui.label(
+                                    "Blank values continue using metadata detected from the mod file."
+                                ).classes("mod-subtitle text-xs")
+                                friendly_name_override_input = (
+                                    ui.input(
+                                        "Display name",
+                                        value=entry.metadata_overrides.friendly_name or "",
+                                        placeholder=entry.friendly,
+                                    )
+                                    .props("filled square dense clearable hide-bottom-space color=accent maxlength=80")
+                                    .classes("mod-app-details-field mod-mod-override-field")
+                                )
+                                version_override_input = (
+                                    ui.input(
+                                        "Version",
+                                        value=entry.metadata_overrides.version or "",
+                                        placeholder=entry.version or "Unknown",
+                                    )
+                                    .props("filled square dense clearable hide-bottom-space color=accent")
+                                    .classes("mod-app-details-field mod-mod-override-field")
+                                )
+                                origin_override_input = (
+                                    ui.input(
+                                        "Origin",
+                                        value=entry.metadata_overrides.origin or "",
+                                        placeholder=entry.origin,
+                                    )
+                                    .props("filled square dense clearable hide-bottom-space color=accent")
+                                    .classes("mod-app-details-field mod-mod-override-field")
+                                )
+                                added_override_input = (
+                                    ui.input(
+                                        "Added",
+                                        value=(
+                                            ""
+                                            if entry.metadata_overrides.added is None
+                                            else entry.metadata_overrides.added.isoformat(timespec="minutes")
+                                        ),
+                                        placeholder=entry.added,
+                                    )
+                                    .props(
+                                        "filled square dense clearable hide-bottom-space color=accent "
+                                        "type=datetime-local"
+                                    )
+                                    .classes(
+                                        "mod-app-details-field mod-mod-override-field mod-mod-override-datetime"
+                                    )
+                                )
+                            overrides_section.set_visibility(False)
                     if available_actions:
                         with ui.column().classes("gap-2"):
                             ui.label("Privileged Actions").classes("mod-stat-label")
@@ -879,8 +1048,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         self._mod_action_label(action, entry),
                                         on_click=on_click,
                                     ).classes(self._mod_action_button_classes(action, entry))
-                    with ui.row().classes("w-full justify-end"):
+                    with ui.row().classes("w-full justify-end gap-2"):
                         ui.button("Close", on_click=dialog.close).classes("mod-list-button secondary")
+                        if can_edit_properties:
+                            ui.button("Save", on_click=save_properties).classes("mod-list-button")
         return dialog
 
     @staticmethod

@@ -616,6 +616,34 @@ class ModType(enum.StrEnum):
                 return "Client"
 
 
+class ModMetadataOverrides(BaseModel):
+    """Optional operator-supplied mod metadata shown in place of detected values."""
+
+    friendly_name: str | None = None
+    version: str | None = None
+    origin: str | None = None
+    added: datetime | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("friendly_name")
+    @classmethod
+    def validate_friendly_name(cls, raw: str | None) -> str | None:
+        return normalise_optional_friendly_name(raw)
+
+    @field_validator("version", "origin")
+    @classmethod
+    def normalise_text(cls, raw: str | None) -> str | None:
+        return normalise_optional_text(raw)
+
+
+class ModClassificationOverride(BaseModel):
+    """Operator-selected classification that takes precedence over automatic detection."""
+
+    mod_type: ModType
+    download_block_reason: ModDownloadBlockReason | None = None
+
+
 class ClientPackPolicy(enum.StrEnum):
     REQUIRED = "required"
     OPTIONAL = "optional"
@@ -1007,6 +1035,8 @@ class Mod_Config(BaseModel):
     origin: str = "manual"
     mod_type: ModType = ModType.REGULAR
     download_block_reason: ModDownloadBlockReason | None = None
+    classification_override: ModClassificationOverride | None = None
+    metadata_overrides: ModMetadataOverrides = Field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = Field(default_factory=ClientPackConfig)
 
     model_config = ConfigDict(arbitrary_types_allowed=True, str_strip_whitespace=True)
