@@ -90,6 +90,7 @@ class EnvSettings(BaseSettings):
     bot_profile: str | None = None
     indev: str | None = None
     bypass_web_auth: str | None = None
+    allow_unauth_node_api: str | None = None
     data_authority_host: str | None = None
     data_authority_token: str | None = None
     data_authority_timeout_seconds: str | None = None
@@ -401,23 +402,68 @@ class PersistedDiskPreferences(BaseModel):
 
 class PersistedRestartSchedule(BaseModel):
     enabled: bool = False
-    hour: int = 0
-    minute: int = 0
-    last_triggered_at: datetime | None = None
+    interval_minutes: int = Field(default=24 * 60, strict=True)
+    anchor_timestamp: int | None = Field(default=None, strict=True)
+    last_triggered_timestamp: int | None = Field(default=None, strict=True)
+    skipped_through_timestamp: int | None = Field(default=None, strict=True)
 
-    @field_validator("hour")
+    @model_validator(mode="before")
     @classmethod
-    def _validate_hour(cls, value: int) -> int:
-        if value < 0 or value > 23:
-            raise ValueError("maintenance restart hour must be between 0 and 23.")
+    def _migrate_daily_schedule(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload: dict[str, object] = dict(value)
+        is_legacy_daily = "interval_minutes" not in payload
+        hour = payload.pop("hour", 0)
+        minute = payload.pop("minute", 0)
+        if is_legacy_daily and payload.get("enabled") and isinstance(hour, int) and isinstance(minute, int):
+            now = datetime.now().astimezone()
+            anchor_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if anchor_at <= now:
+                anchor_at += timedelta(days=1)
+            payload["anchor_timestamp"] = int(anchor_at.timestamp())
+        if is_legacy_daily:
+            payload["interval_minutes"] = 24 * 60
+
+        interval_minutes = payload.get("interval_minutes", 24 * 60)
+        if isinstance(interval_minutes, bool) or not isinstance(interval_minutes, int):
+            raise ValueError("maintenance restart interval must be a whole number of minutes.")
+        for legacy_name, timestamp_name in (
+            ("last_triggered_at", "last_triggered_timestamp"),
+            ("anchor_at", "anchor_timestamp"),
+        ):
+            raw_value = payload.pop(legacy_name, None)
+            if raw_value is None or timestamp_name in payload:
+                continue
+            if isinstance(raw_value, str):
+                raw_value = datetime.fromisoformat(raw_value)
+            if not isinstance(raw_value, datetime) or raw_value.utcoffset() is None:
+                raise ValueError(f"maintenance restart {legacy_name} must include a timezone.")
+            timestamp = int(raw_value.timestamp())
+            if legacy_name == "anchor_at" and payload.get("last_triggered_timestamp") is None:
+                timestamp += int(interval_minutes) * 60
+            payload[timestamp_name] = timestamp
+        return payload
+
+    @field_validator("interval_minutes")
+    @classmethod
+    def _validate_interval_minutes(cls, value: int) -> int:
+        if value < 60 or value > 7 * 24 * 60:
+            raise ValueError("maintenance restart interval must be between 60 and 10080 minutes.")
         return value
 
-    @field_validator("minute")
+    @field_validator("anchor_timestamp", "last_triggered_timestamp", "skipped_through_timestamp")
     @classmethod
-    def _validate_minute(cls, value: int) -> int:
-        if value < 0 or value > 59:
-            raise ValueError("maintenance restart minute must be between 0 and 59.")
+    def _validate_timestamp(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("maintenance restart timestamps must be positive Unix seconds.")
         return value
+
+    @model_validator(mode="after")
+    def _validate_enabled_anchor(self) -> "PersistedRestartSchedule":
+        if self.enabled and self.anchor_timestamp is None:
+            raise ValueError("enabled maintenance restart schedules require an anchor time.")
+        return self
 
 
 class PersistedRestartWarning(BaseModel):
@@ -1514,8 +1560,12 @@ def _binding_hosts_overlap(left: str, right: str) -> bool:
 
 ACTIVE_BOT_PROFILE = BOT_PROFILES[_parse_bot_profile(_env_settings.bot_profile)]
 DATA_AUTHORITY_MODE = _data_authority_mode(ACTIVE_BOT_PROFILE)
-INDEV = bool(_env_settings.indev)
+INDEV = _parse_env_flag(_env_settings.indev, var_name="INDEV")
 BYPASS_WEB_AUTH = INDEV and _parse_env_flag(_env_settings.bypass_web_auth, var_name="BYPASS_WEB_AUTH")
+ALLOW_UNAUTH_NODE_API = _parse_env_flag(
+    _env_settings.allow_unauth_node_api,
+    var_name="ALLOW_UNAUTH_NODE_API",
+)
 DATA_AUTHORITY_HOST = _env_settings.data_authority_host
 DATA_AUTHORITY_TOKEN = _env_settings.data_authority_token
 DATA_AUTHORITY_TIMEOUT_SECONDS = _parse_timeout_seconds(_env_settings.data_authority_timeout_seconds, default=2.0)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import avatars as mod_web_avatars
 from .constants import (
@@ -9,7 +11,8 @@ from .constants import (
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
     log,
 )
-from .nicegui_protocols import ModWebUi, _value_as_text
+from .links import mod_web_node_system_path
+from .nicegui_protocols import ModWebUi, _value_as_bool, _value_as_text
 from .runtime_imports import (
     AbstractEventLoop,
     AppUpdateInfo,
@@ -19,28 +22,130 @@ from .runtime_imports import (
     Button,
     Callable,
     Card,
+    Checkbox,
     Enum,
+    Html,
     Input,
     Label,
+    Select,
     ModWebUser,
     NodeAppEntry,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
     NodeStateStreamEvent,
+    NodeRestartScheduleEntry,
+    NodeRestartScheduleState,
+    NodeSystemHistory,
+    NodeSystemAction,
+    NodeSystemSample,
     NodeSystemSummary,
     Power_Level,
     Request,
     asyncio,
+    app_scope_from_name,
     cast,
     config,
+    MaintenanceService,
+    MAX_RESTART_INTERVAL_MINUTES,
+    MIN_RESTART_INTERVAL_MINUTES,
     dataclass,
     escape,
     mod_web_badge_class,
     quote,
     replace,
+    RestartTarget,
 )
+from .utils import _format_uptime_seconds
 
 _KEEP_PAGE_MODEL_VALUE = object()
+_CLIENT_TIMEZONE_VALUE = "client"
+_RESTART_TIMEZONE_OPTIONS: dict[str, str] = {
+    _CLIENT_TIMEZONE_VALUE: "Client local time",
+    "UTC": "UTC",
+    "Europe/London": "London",
+    "Australia/Melbourne": "Melbourne",
+    "Europe/Helsinki": "Helsinki",
+}
+_RESTART_DISPLAY_TIMEZONES: tuple[tuple[str, str], ...] = (
+    ("UTC", "UTC"),
+    ("London", "Europe/London"),
+    ("Melbourne", "Australia/Melbourne"),
+    ("Helsinki", "Europe/Helsinki"),
+)
+_RESTART_SCHEDULE_FIELD_PROPS = "filled square dense hide-bottom-space color=accent"
+
+
+class _RestartWeekday(Enum):
+    MONDAY = "monday"
+    TUESDAY = "tuesday"
+    WEDNESDAY = "wednesday"
+    THURSDAY = "thursday"
+    FRIDAY = "friday"
+    SATURDAY = "saturday"
+    SUNDAY = "sunday"
+
+
+_RESTART_WEEKDAYS: tuple[_RestartWeekday, ...] = tuple(_RestartWeekday)
+_RESTART_WEEKDAY_OPTIONS: dict[str, str] = {
+    weekday.value: weekday.value.title() for weekday in _RESTART_WEEKDAYS
+}
+
+
+def _restart_interval_parts(interval_minutes: int) -> tuple[int, int, int]:
+    days, remaining = divmod(interval_minutes, 24 * 60)
+    hours, minutes = divmod(remaining, 60)
+    return days, hours, minutes
+
+
+def _restart_interval_from_parts(*, days: int, hours: int, minutes: int) -> int:
+    if days < 0 or hours < 0 or minutes < 0 or hours > 23 or minutes > 59:
+        raise ValueError("Use 0–23 hours and 0–59 minutes.")
+    interval_minutes = days * 24 * 60 + hours * 60 + minutes
+    if not MIN_RESTART_INTERVAL_MINUTES <= interval_minutes <= MAX_RESTART_INTERVAL_MINUTES:
+        raise ValueError("The interval must be between 1 hour and 1 week.")
+    return interval_minutes
+
+
+def _restart_anchor_timestamp(
+    weekday: _RestartWeekday,
+    time_value: str,
+    timezone_name: str,
+    *,
+    now_timestamp: int | None = None,
+) -> int:
+    try:
+        local_time = time.fromisoformat(time_value)
+    except ValueError as xcp:
+        raise ValueError("Choose an anchor time.") from xcp
+    if local_time.tzinfo is not None or local_time.second != 0 or local_time.microsecond != 0:
+        raise ValueError("The anchor time must use local hours and minutes.")
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as xcp:
+        raise ValueError("The selected timezone is unavailable.") from xcp
+    local_now = (
+        datetime.now(timezone)
+        if now_timestamp is None
+        else datetime.fromtimestamp(now_timestamp, timezone)
+    )
+    days_ahead = (_RESTART_WEEKDAYS.index(weekday) - local_now.weekday()) % len(_RESTART_WEEKDAYS)
+    local_date = (local_now + timedelta(days=days_ahead)).date()
+    local_datetime = datetime.combine(local_date, local_time)
+    if local_datetime <= local_now.replace(tzinfo=None):
+        local_datetime += timedelta(days=len(_RESTART_WEEKDAYS))
+    earlier = local_datetime.replace(tzinfo=timezone, fold=0)
+    later = local_datetime.replace(tzinfo=timezone, fold=1)
+    round_trip = earlier.astimezone(ZoneInfo("UTC")).astimezone(timezone).replace(tzinfo=None)
+    if round_trip != local_datetime:
+        raise ValueError("That local time does not exist because of daylight saving.")
+    if earlier.utcoffset() != later.utcoffset():
+        raise ValueError("That local time is ambiguous because of daylight saving. Choose another time or UTC.")
+    return int(earlier.timestamp())
+
+
+def _format_restart_timestamp(timestamp: int, timezone_name: str) -> str:
+    scheduled_at = datetime.fromtimestamp(timestamp, ZoneInfo(timezone_name))
+    return scheduled_at.strftime("%a, %d %b %Y · %H:%M %Z")
 from .service_base import ModWebServiceSupport
 from .ui_helpers import ModWebUiHelpersMixin
 from .types import (
@@ -61,6 +166,7 @@ from .types import (
 
 if TYPE_CHECKING:
     from nicegui.element import Element
+    from nicegui.elements.dialog import Dialog
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +189,27 @@ class _ModWebHomeNodeStatSpec:
     running_text: str
     running_tone: BadgeTone
     running_tooltip: str | None = None
+
+
+class _ModWebSystemChartMetric(Enum):
+    CPU = "cpu"
+    RAM = "ram"
+    STORAGE = "storage"
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebSystemChartSeries:
+    metric: _ModWebSystemChartMetric
+    label: str
+    color_hex: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebSystemActionSpec:
+    action: NodeSystemAction
+    title: str
+    button_label: str
+    required_target: RestartTarget | None = None
 
 
 class _ModWebNodeSettingsFieldKey(Enum):
@@ -136,6 +263,31 @@ class _ModWebNodeSettingsPanelState:
 
 
 _HOME_APPS_ICON: str = "apps"
+
+_SYSTEM_CHART_SERIES: tuple[_ModWebSystemChartSeries, ...] = (
+    _ModWebSystemChartSeries(metric=_ModWebSystemChartMetric.CPU, label="CPU", color_hex="#a78bfa"),
+    _ModWebSystemChartSeries(metric=_ModWebSystemChartMetric.RAM, label="RAM", color_hex="#38bdf8"),
+    _ModWebSystemChartSeries(metric=_ModWebSystemChartMetric.STORAGE, label="Storage", color_hex="#f59e0b"),
+)
+
+_SYSTEM_ACTION_SPECS: tuple[_ModWebSystemActionSpec, ...] = (
+    _ModWebSystemActionSpec(
+        action=NodeSystemAction.RESTART_PROCESS,
+        title="Restart Bot",
+        button_label="Restart Bot",
+    ),
+    _ModWebSystemActionSpec(
+        action=NodeSystemAction.REBOOT_HOST,
+        title="Restart System",
+        button_label="Restart System",
+    ),
+    _ModWebSystemActionSpec(
+        action=NodeSystemAction.RESTART_PORTAL,
+        title="Restart Portal",
+        button_label="Restart Portal",
+        required_target=RestartTarget.PORTAL,
+    ),
+)
 
 
 _NODE_SETTINGS_CAPACITY_FIELD_ROWS: tuple[tuple[_ModWebNodeSettingsNumberFieldSpec, ...], ...] = (
@@ -231,6 +383,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         }
         dev_mode_enabled: bool = config.INDEV
         can_manage_node_configuration: bool = self._user_has_level(user, Power_Level.root)
+        can_view_node_system: bool = self._user_has_level(user, Power_Level.sudo)
         node_settings_panel: _ModWebNodeSettingsPanelState | None = None
         node_dialog_simulate_button: Button | None = None
         node_capacity_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
@@ -529,6 +682,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             self._render_live_home_node_stats(
                                 ui=ui,
                                 initial_summaries=home_node_summaries,
+                                system_page_enabled=can_view_node_system,
                             )
                         )
 
@@ -703,17 +857,232 @@ class ModWebHomeMixin(ModWebServiceSupport):
             )
         return tuple[_ModWebHomeNodeStatSpec, ...](node_stats)
 
+    @staticmethod
+    def _system_chart_sample_value(
+        sample: NodeSystemSample,
+        metric: _ModWebSystemChartMetric,
+    ) -> int | None:
+        match metric:
+            case _ModWebSystemChartMetric.CPU:
+                return sample.cpu_percent
+            case _ModWebSystemChartMetric.RAM:
+                return sample.ram_percent
+            case _ModWebSystemChartMetric.STORAGE:
+                return sample.storage_percent
+
+    @staticmethod
+    def _append_node_system_history(
+        history: NodeSystemHistory,
+        summary: NodeSystemSummary,
+    ) -> NodeSystemHistory:
+        if summary.captured_at_epoch_seconds is None:
+            return history
+        sample = NodeSystemSample.from_summary(summary)
+        samples = list(history.samples)
+        if samples and sample.captured_at_epoch_seconds < samples[-1].captured_at_epoch_seconds:
+            samples = []
+        if samples:
+            elapsed = sample.captured_at_epoch_seconds - samples[-1].captured_at_epoch_seconds
+            if elapsed < history.sample_interval_seconds:
+                samples[-1] = sample
+            else:
+                samples.append(sample)
+        else:
+            samples.append(sample)
+        cutoff = sample.captured_at_epoch_seconds - history.retention_seconds
+        retained = tuple(item for item in samples if item.captured_at_epoch_seconds >= cutoff)
+        return replace(history, samples=retained)
+
+    @classmethod
+    def _node_system_history_svg(cls, history: NodeSystemHistory) -> str:
+        plot_left = 48.0
+        plot_top = 20.0
+        plot_width = 832.0
+        plot_height = 196.0
+        samples = history.samples
+        if not samples:
+            return (
+                '<div class="mod-system-chart-empty">'
+                "Collecting telemetry. The first historical sample will appear shortly."
+                "</div>"
+            )
+        end_time = samples[-1].captured_at_epoch_seconds
+        start_time = end_time - history.retention_seconds
+        time_span = max(1, end_time - start_time)
+
+        def _point(sample: NodeSystemSample, value: int) -> tuple[float, float]:
+            x = plot_left + (
+                (sample.captured_at_epoch_seconds - start_time) / time_span
+            ) * plot_width
+            y = plot_top + ((100 - min(100, max(0, value))) / 100) * plot_height
+            return x, y
+
+        paths: list[str] = []
+        legend: list[str] = []
+        for index, series in enumerate(_SYSTEM_CHART_SERIES):
+            commands: list[str] = []
+            segment_open = False
+            for sample in samples:
+                value = cls._system_chart_sample_value(sample, series.metric)
+                if value is None:
+                    segment_open = False
+                    continue
+                x, y = _point(sample, value)
+                commands.append(f"{'L' if segment_open else 'M'} {x:.1f} {y:.1f}")
+                segment_open = True
+            if commands:
+                paths.append(
+                    f'<path class="mod-system-chart-line" stroke="{series.color_hex}" d="{" ".join(commands)}"/>'
+                )
+            legend_x = plot_left + index * 122
+            legend.append(
+                f'<g transform="translate({legend_x:.0f},244)">'
+                f'<circle r="4" fill="{series.color_hex}"/>'
+                f'<text x="10" y="4">{series.label}</text>'
+                "</g>"
+            )
+
+        grid_lines: list[str] = []
+        for percent in (0, 25, 50, 75, 100):
+            y = plot_top + ((100 - percent) / 100) * plot_height
+            grid_lines.append(
+                f'<line x1="{plot_left:.0f}" y1="{y:.1f}" x2="{plot_left + plot_width:.0f}" y2="{y:.1f}"/>'
+                f'<text x="{plot_left - 9:.0f}" y="{y + 4:.1f}" text-anchor="end">{percent}%</text>'
+            )
+        return (
+            '<svg class="mod-system-chart" viewBox="0 0 900 260" role="img" '
+            'aria-label="CPU, RAM, and storage usage over the last hour">'
+            f'<g class="mod-system-chart-grid">{"".join(grid_lines)}</g>'
+            f'<g>{"".join(paths)}</g>'
+            '<g class="mod-system-chart-axis-labels">'
+            f'<text x="{plot_left:.0f}" y="232">60m ago</text>'
+            f'<text x="{plot_left + plot_width:.0f}" y="232" text-anchor="end">Now</text>'
+            "</g>"
+            f'<g class="mod-system-chart-legend">{"".join(legend)}</g>'
+            "</svg>"
+        )
+
+    @staticmethod
+    def _node_system_scope_badges(app_entries: tuple[NodeAppEntry, ...]) -> tuple[_ModWebBadgeSpec, ...]:
+        scope_running_state: dict[str, bool] = {}
+        for entry in app_entries:
+            resolved_scope = entry.scope or app_scope_from_name(entry.name)
+            if resolved_scope is not None and resolved_scope.strip():
+                scope_value = resolved_scope.strip().casefold()
+                scope_running_state[scope_value] = scope_running_state.get(scope_value, False) or entry.running
+        if not scope_running_state:
+            return (_ModWebBadgeSpec(text="No app scopes", tone="grey"),)
+
+        known_scopes = tuple(scope for scope in config.AppScopes if scope.value in scope_running_state)
+        known_scope_values = {scope.value for scope in known_scopes}
+        badges: list[_ModWebBadgeSpec] = [
+            _ModWebBadgeSpec(
+                text=scope.display_name,
+                tone="purple" if scope_running_state[scope.value] else "grey",
+            )
+            for scope in known_scopes
+        ]
+        badges.extend(
+            _ModWebBadgeSpec(
+                text=scope_value.replace("_", " ").title(),
+                tone="purple" if scope_running_state[scope_value] else "grey",
+            )
+            for scope_value in sorted(scope_running_state.keys() - known_scope_values)
+        )
+        return tuple(badges)
+
+    @staticmethod
+    def _node_system_uptime_badges(system_summary: NodeSystemSummary) -> tuple[_ModWebBadgeSpec, ...]:
+        badges: list[_ModWebBadgeSpec] = []
+        if system_summary.uptime_seconds is not None:
+            badges.append(
+                _ModWebBadgeSpec(
+                    text=_format_uptime_seconds(system_summary.uptime_seconds),
+                    tone="black",
+                    icon="dns",
+                    tooltip_text="System uptime",
+                )
+            )
+        if system_summary.bot_uptime_seconds is not None:
+            badges.append(
+                _ModWebBadgeSpec(
+                    text=_format_uptime_seconds(system_summary.bot_uptime_seconds),
+                    tone="black",
+                    icon="smart_toy",
+                    tooltip_text="Yukibot uptime",
+                )
+            )
+        return tuple(badges)
+
+    @classmethod
+    def _node_system_operational_badges(
+        cls,
+        system_summary: NodeSystemSummary,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
+        system_uptime = _ModWebBadgeSpec(
+            text=(
+                "Unavailable"
+                if system_summary.uptime_seconds is None
+                else _format_uptime_seconds(system_summary.uptime_seconds)
+            ),
+            tone="black" if system_summary.uptime_seconds is not None else "grey",
+            icon="dns",
+            tooltip_text="System uptime",
+        )
+        bot_uptime = _ModWebBadgeSpec(
+            text=(
+                "Unavailable"
+                if system_summary.bot_uptime_seconds is None
+                else _format_uptime_seconds(system_summary.bot_uptime_seconds)
+            ),
+            tone="black" if system_summary.bot_uptime_seconds is not None else "grey",
+            icon="smart_toy",
+            tooltip_text="Yukibot uptime",
+        )
+        cpu_points = cls._node_resource_point_badge(
+            available_points=system_summary.cpu_points_available,
+            capacity_points=system_summary.cpu_points_capacity,
+            icon="speed",
+            tooltip_text="CPU",
+        ) or _ModWebBadgeSpec(text="Unavailable", tone="grey", icon="speed", tooltip_text="CPU")
+        ram_points = cls._node_resource_point_badge(
+            available_points=system_summary.ram_points_available,
+            capacity_points=system_summary.ram_points_capacity,
+            icon="memory",
+            tooltip_text="RAM",
+        ) or _ModWebBadgeSpec(text="Unavailable", tone="grey", icon="memory", tooltip_text="RAM")
+        return (system_uptime, bot_uptime, cpu_points, ram_points)
+
     def _render_live_home_node_stats_renderer(
         self,
         *,
         ui: ModWebUi,
         initial_summaries: tuple[ModWebHomeNodeSummary, ...],
+        system_page_enabled: bool = False,
     ) -> Callable[[tuple[ModWebHomeNodeSummary, ...]], None]:
         @ui.refreshable
         def _render_stats(node_summaries: tuple[ModWebHomeNodeSummary, ...]) -> None:
             with ui.row().classes("mod-home-node-grid w-full gap-3"):
                 for stat in self._build_home_node_stat_specs(node_summaries):
-                    with ui.card().classes(f"mod-home-node-card mod-home-node-card-{stat.card_tone}"):
+                    card_classes = f"mod-home-node-card mod-home-node-card-{stat.card_tone}"
+                    if system_page_enabled:
+                        card_classes = f"{card_classes} mod-home-node-card-actionable"
+                    card: Card = ui.card().classes(card_classes)
+                    if system_page_enabled:
+                        target_url: str = mod_web_node_system_path(stat.node_name)
+                        card.props("role=link tabindex=0")
+                        card.on("click", lambda _=None, url=target_url: ui.navigate.to(url))
+                        card.on(
+                            "keydown.enter",
+                            lambda _=None, url=target_url: ui.navigate.to(url),
+                            js_handler="(event) => { event.preventDefault(); emit(); }",
+                        )
+                        card.on(
+                            "keydown.space",
+                            lambda _=None, url=target_url: ui.navigate.to(url),
+                            js_handler="(event) => { event.preventDefault(); emit(); }",
+                        )
+                    with card:
                         with ui.column().classes("w-full gap-3 p-3"):
                             with ui.row().classes("w-full items-start justify-between gap-3 flex-wrap"):
                                 node_text_style: str | None = self._node_text_style(node_name=stat.node_name)
@@ -756,11 +1125,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
         ui: ModWebUi,
         initial_summaries: tuple[ModWebHomeNodeSummary, ...],
         refresh_async_summaries: Callable[[], Awaitable[tuple[ModWebHomeNodeSummary, ...]]] | None = None,
+        system_page_enabled: bool = False,
     ) -> Callable[[tuple[ModWebHomeNodeSummary, ...]], None]:
         apply_summaries: Callable[[tuple[ModWebHomeNodeSummary, ...]], None] = (
             self._render_live_home_node_stats_renderer(
                 ui=ui,
                 initial_summaries=initial_summaries,
+                system_page_enabled=system_page_enabled,
             )
         )
         if refresh_async_summaries is not None:
@@ -855,114 +1226,689 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     show_api_actions=show_api_actions,
                                 )
 
-    def _render_node_apps_page(
+    def _render_node_system_dashboard(
         self,
         *,
         ui: ModWebUi,
         node: ModWebNodeLink,
-        app_links: tuple[ModWebAppLink, ...],
         user: ModWebUser,
-        show_api_actions: bool,
-        initial_title_stats: tuple[ModWebTitleStat, ...],
-        refresh_async_title_stats: Callable[[], Awaitable[tuple[ModWebTitleStat, ...]]] | None = None,
+        initial_system_summary: NodeSystemSummary,
+        initial_system_history: NodeSystemHistory,
+        initial_app_entries: tuple[NodeAppEntry, ...],
+        initial_restart_schedules: NodeRestartScheduleState | None,
         subscribe_node_state_updates: Callable[
             [Callable[[NodeStateStreamEvent], None]],
             Callable[[], None],
-        ]
-        | None = None,
+        ],
     ) -> None:
         self._apply_theme(ui=ui)
-        current_app_links: tuple[ModWebAppLink, ...] = app_links
+        current_app_entries = initial_app_entries
+        current_system_summary = initial_system_summary
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_user_header(ui=ui, user=user)
             with ui.card().classes(self._hero_card_classes()):
-                with ui.column().classes(self._hero_shell_classes()):
-                    with ui.row().classes(self._hero_header_classes()):
-                        with ui.column().classes(self._hero_header_main_classes()):
-                            node_text_style: str | None = self._node_text_style(node_name=node.node_name)
-                            node_title: Label = ui.label(node.label).classes(self._hero_title_classes())
-                            if node_text_style is not None:
-                                node_title.style(node_text_style)
-                            node_subtitle: Label = ui.label(node.node_name).classes(self._hero_support_classes())
-                            if node_text_style is not None:
-                                node_subtitle.style(node_text_style)
-                        with ui.column().classes(self._hero_badges_classes()):
+                operational_badge_specs = self._node_system_operational_badges(initial_system_summary)
+                operational_badge_bindings: list[tuple[Element, Label]] = []
+                with ui.element("div").classes("mod-app-node-badge-wrap mod-system-edge-badge-wrap"):
+                    with ui.row().classes("mod-app-node-badge-row mod-system-edge-badge-row"):
+                        for badge in operational_badge_specs:
+                            if badge.icon is None:
+                                raise RuntimeError("System operational badges require icons.")
+                            operational_badge_bindings.append(
+                                ModWebUiHelpersMixin._badge_icon_parts(
+                                    ui=ui,
+                                    text=badge.text,
+                                    tone=badge.tone,
+                                    icon=badge.icon,
+                                    extra_classes="mod-app-corner-badge mod-system-corner-badge",
+                                    tooltip_text=badge.tooltip_text,
+                                )
+                            )
+                with ui.column().classes(f"{self._hero_shell_classes()} mod-system-hero-shell"):
+                    with ui.element("div").classes("mod-system-hero-header"):
+                        with ui.row().classes(
+                            "mod-system-hero-identity items-center gap-3 flex-nowrap"
+                        ):
+                            ui.html(
+                                self._node_bot_avatar_markup(
+                                    node_name=node.node_name,
+                                    display_name=node.label,
+                                    extra_class="mod-system-hero-avatar",
+                                )
+                            ).classes("shrink-0")
+                            with ui.column().classes("gap-1 min-w-0"):
+                                node_text_style: str | None = self._node_text_style(node_name=node.node_name)
+                                node_title: Label = ui.label(node.label).classes(self._hero_title_classes())
+                                if node_text_style is not None:
+                                    node_title.style(node_text_style)
+                                ui.label(f"{node.node_name} system monitoring").classes(self._hero_support_classes())
+                        with ui.column().classes("mod-system-scope-slot"):
 
                             @ui.refreshable
-                            def _render_node_badges(current_app_links: tuple[ModWebAppLink, ...]) -> None:
-                                for badge_row in self._section_badge_rows(
-                                    self._node_capability_badges(app_links=current_app_links)
-                                ):
-                                    with ui.row().classes(self._hero_badge_row_classes()):
-                                        for badge in badge_row:
-                                            self._badge_spec(ui=ui, badge=badge)
+                            def _render_system_scope_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
+                                with ui.row().classes("mod-system-scope-badges"):
+                                    for badge in badges:
+                                        self._badge_spec(ui=ui, badge=badge)
 
-                            _render_node_badges(current_app_links)
-                    with ui.row().classes(self._hero_action_row_classes()):
-                        self._action_link(
+                            current_scope_badges = self._node_system_scope_badges(current_app_entries)
+                            _render_system_scope_badges(current_scope_badges)
+
+                    apply_system_stats: Callable[[tuple[ModWebTitleStat, ...]], None] = (
+                        self._render_live_title_stats(
                             ui=ui,
-                            label="Home",
-                            url=self._app_list_view_url(self.index_path(), show_api_actions=show_api_actions),
-                            compact=True,
+                            initial_stats=self._build_node_system_stats(initial_system_summary),
                         )
-                    title_stats_refresh = None if subscribe_node_state_updates is not None else refresh_async_title_stats
-                    apply_title_stats: Callable[[tuple[ModWebTitleStat, ...]], None] = self._render_live_title_stats(
-                        ui=ui,
-                        initial_stats=initial_title_stats,
-                        refresh_async_stats=title_stats_refresh,
                     )
 
-            @ui.refreshable
-            def _render_node_cards(current_app_links: tuple[ModWebAppLink, ...]) -> None:
-                if not current_app_links:
-                    with ui.card().classes("mod-card mod-card-empty w-full"):
-                        ui.label("No apps are currently available on this node.").classes("p-8 text-lg mod-subtitle")
+            current_history = self._append_node_system_history(
+                initial_system_history,
+                initial_system_summary,
+            )
+            with ui.card().classes("mod-card w-full"):
+                with ui.column().classes("w-full gap-3 p-4"):
+                    with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+                        with ui.column().classes("gap-0"):
+                            ui.label("Utilisation history").classes("text-lg font-black mod-title-small")
+                            ui.label("One-hour rolling window · streamed live").classes("mod-subtitle text-xs")
+                        self._badge(
+                            ui=ui,
+                            text=f"{initial_system_history.sample_interval_seconds}s samples",
+                            tone="grey",
+                        )
+                    chart: Html = ui.html(self._node_system_history_svg(current_history))
+                    chart.classes("mod-system-chart-shell w-full")
+
+            if self._user_has_level(user, Power_Level.root):
+                self._render_node_system_actions(
+                    ui=ui,
+                    node=node,
+                    user=user,
+                    initial_restart_schedules=initial_restart_schedules,
+                )
+
+            page_closed = False
+            loop: AbstractEventLoop = asyncio.get_running_loop()
+
+            def _apply_update(event: NodeStateStreamEvent) -> None:
+                nonlocal current_app_entries, current_history, current_scope_badges
+                nonlocal current_system_summary, operational_badge_specs
+                if page_closed:
+                    return
+                if event.app_entries is not None:
+                    current_app_entries = event.app_entries
+                    next_scope_badges = self._node_system_scope_badges(current_app_entries)
+                    if next_scope_badges != current_scope_badges:
+                        current_scope_badges = next_scope_badges
+                        _render_system_scope_badges.refresh(current_scope_badges)
+                if event.system_summary is None:
+                    return
+                current_system_summary = event.system_summary
+                next_operational_badges = self._node_system_operational_badges(current_system_summary)
+                for index, (previous_badge, next_badge) in enumerate(
+                    zip(operational_badge_specs, next_operational_badges, strict=True)
+                ):
+                    badge_element, value_label = operational_badge_bindings[index]
+                    if previous_badge.text != next_badge.text:
+                        value_label.set_text(next_badge.text)
+                    if previous_badge.tone != next_badge.tone:
+                        badge_element.classes(
+                            replace=self._badge_class_name(
+                                tone=next_badge.tone,
+                                extra_classes=(
+                                    "mod-badge-icon-label mod-app-corner-badge mod-system-corner-badge"
+                                ),
+                            )
+                        )
+                operational_badge_specs = next_operational_badges
+                apply_system_stats(self._build_node_system_stats(current_system_summary))
+                next_history = self._append_node_system_history(current_history, current_system_summary)
+                if next_history != current_history:
+                    current_history = next_history
+                    chart.set_content(self._node_system_history_svg(current_history))
+
+            def _handle_update(event: NodeStateStreamEvent) -> None:
+                loop.call_soon_threadsafe(lambda: _apply_update(event))
+
+            unsubscribe: Callable[[], None] = subscribe_node_state_updates(_handle_update)
+
+            def _cleanup_live_updates() -> None:
+                nonlocal page_closed
+                page_closed = True
+                unsubscribe()
+
+            self._register_client_cleanup(ui=ui, cleanup=_cleanup_live_updates)
+
+    def _render_node_system_actions(
+        self,
+        *,
+        ui: ModWebUi,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        initial_restart_schedules: NodeRestartScheduleState | None,
+    ) -> None:
+        action_buttons: list[Button] = []
+        from nicegui.context import context as nicegui_context
+
+        action_client = nicegui_context.client
+        actions_closed = False
+
+        def _close_actions() -> None:
+            nonlocal actions_closed
+            actions_closed = True
+
+        self._register_client_cleanup(ui=ui, cleanup=_close_actions)
+
+        def _notify_error(message: str, *, multi_line: bool = False) -> None:
+            if actions_closed:
+                return
+            with action_client:
+                ui.notify(message, type="negative", multi_line=multi_line)
+
+        def _notify_success(message: str) -> None:
+            if actions_closed:
+                return
+            with action_client:
+                ui.notify(message, type="positive")
+
+        def _notify_ongoing(message: str) -> None:
+            if actions_closed:
+                return
+            with action_client:
+                ui.notify(message, type="ongoing", close_button=True, timeout=15_000)
+
+        def _create_confirm_handler(
+            *,
+            spec: _ModWebSystemActionSpec,
+            dialog: Dialog,
+            auto_restart_running_apps_checkbox: Checkbox,
+        ) -> Callable[[], Awaitable[None]]:
+            async def _confirm() -> None:
+                for action_button in action_buttons:
+                    action_button.disable()
+                try:
+                    result = await self._remote_node_system_action_async(
+                        node,
+                        spec.action,
+                        _value_as_bool(auto_restart_running_apps_checkbox),
+                        user,
+                    )
+                except Exception as xcp:
+                    if actions_closed:
+                        return
+                    for action_button in action_buttons:
+                        action_button.enable()
+                    _notify_error(f"Unable to schedule {spec.title.lower()}: {xcp}", multi_line=True)
+                    return
+                if actions_closed:
+                    return
+                dialog.close()
+                _notify_ongoing(result.message)
+
+            return _confirm
+
+        with ui.card().classes("mod-card mod-system-danger-card w-full"):
+            with ui.column().classes("w-full gap-4 p-4"):
+                ui.label("Root actions").classes("text-lg font-black mod-title-small")
+                with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                    auto_restart_running_apps_checkbox = ui.checkbox(
+                        "Auto-restart running apps",
+                        value=True,
+                    ).props("dense color=accent").classes(
+                        "mod-app-details-toggle mod-system-auto-restart-toggle"
+                    )
+                    for spec in _SYSTEM_ACTION_SPECS:
+                        if spec.required_target is not None and (
+                            initial_restart_schedules is None
+                            or all(
+                                entry.target is not spec.required_target
+                                for entry in initial_restart_schedules.schedules
+                            )
+                        ):
+                            continue
+                        dialog = ui.dialog()
+                        with dialog:
+                            with ui.card().classes("mod-card mod-dialog-card"):
+                                with ui.column().classes("w-full gap-4 p-5"):
+                                    ui.label(f"{spec.title}?").classes("text-xl font-black mod-title-small")
+                                    ui.label(node.label).classes("mod-subtitle text-sm")
+                                    with ui.row().classes("w-full justify-end gap-2"):
+                                        ui.button("Cancel", on_click=dialog.close).classes("mod-list-button secondary")
+                                        confirm_button = ui.button(spec.button_label).classes("mod-list-button danger")
+                                        action_buttons.append(confirm_button)
+                                        confirm_button.on(
+                                            "click",
+                                            _create_confirm_handler(
+                                                spec=spec,
+                                                dialog=dialog,
+                                                auto_restart_running_apps_checkbox=(
+                                                    auto_restart_running_apps_checkbox
+                                                ),
+                                            ),
+                                        )
+                        open_button = ui.button(spec.button_label, on_click=dialog.open).classes(
+                            "mod-list-button danger"
+                        )
+                        action_buttons.append(open_button)
+
+                ui.label("Restart schedules").classes("text-base font-black mod-title-small")
+                if initial_restart_schedules is None:
+                    ui.label("Unavailable").classes("mod-subtitle text-sm")
                     return
 
-                with ui.column().classes("w-full gap-3"):
-                    for app in current_app_links:
-                        card_target: str = self._app_list_view_url(app.url, show_api_actions=show_api_actions)
-                        card: Card = (
-                            ui.card().classes(self._app_card_link_classes(app)).style(self._app_card_link_style(app))
-                        )
-                        card.on("click", lambda _=None, target_url=card_target: ui.navigate.to(target_url))
-                        with card:
-                            self._render_app_card_content(ui=ui, app=app, show_api_actions=show_api_actions)
+                def _schedule_status(entry: NodeRestartScheduleEntry) -> str:
+                    if not entry.enabled:
+                        return "Off"
+                    interval = MaintenanceService.format_interval_minutes(entry.interval_minutes)
+                    return f"Every {interval}"
 
-            _render_node_cards(current_app_links)
-            if subscribe_node_state_updates is not None:
-                page_closed = False
-                loop: AbstractEventLoop = asyncio.get_running_loop()
-
-                def _apply_update(event: NodeStateStreamEvent) -> None:
-                    nonlocal current_app_links
-                    if page_closed:
+                async def _set_client_restart_time(label: Label, timestamp: int | None) -> None:
+                    if actions_closed:
                         return
-                    if event.app_entries is not None:
-                        updated_app_links: tuple[ModWebAppLink, ...] = tuple[ModWebAppLink, ...](
-                            self._app_link_from_entry(entry=entry, user=user, node_name=node.node_name)
-                            for entry in event.app_entries
+                    if timestamp is None:
+                        label.set_text("—")
+                        return
+                    script = (
+                        f"const date = new Date({timestamp * 1000});"
+                        "const dateTime = new Intl.DateTimeFormat(undefined, {"
+                        "weekday: 'short', day: '2-digit', month: 'short', year: 'numeric', "
+                        "hour: '2-digit', minute: '2-digit', hourCycle: 'h23'"
+                        "}).format(date);"
+                        "const timezonePart = new Intl.DateTimeFormat(undefined, {timeZoneName: 'short'})"
+                        ".formatToParts(date).find(part => part.type === 'timeZoneName');"
+                        "return `${dateTime} [${timezonePart?.value ?? 'local'}]`;"
+                    )
+                    try:
+                        formatted = await cast(Awaitable[object], ui.run_javascript(script))
+                    except Exception:
+                        if actions_closed:
+                            return
+                        label.set_text("unavailable")
+                        return
+                    if actions_closed:
+                        return
+                    label.set_text(str(formatted))
+
+                def _set_schedule_display(
+                    entry: NodeRestartScheduleEntry,
+                    *,
+                    status_label: Label,
+                    timezone_labels: dict[str, Label],
+                    client_label: Label,
+                ) -> None:
+                    status_label.set_text(_schedule_status(entry))
+                    for timezone_label, timezone_name in _RESTART_DISPLAY_TIMEZONES:
+                        value = (
+                            "—"
+                            if entry.next_restart_timestamp is None
+                            else _format_restart_timestamp(entry.next_restart_timestamp, timezone_name)
                         )
-                        current_app_links = self._mark_runtime_changes(
-                            previous_apps=current_app_links,
-                            updated_apps=updated_app_links,
+                        timezone_labels[timezone_name].set_text(f"{timezone_label} · {value}")
+                    ui.timer(
+                        0.01,
+                        lambda: _set_client_restart_time(client_label, entry.next_restart_timestamp),
+                        once=True,
+                    )
+
+                schedules_by_target: dict[RestartTarget, NodeRestartScheduleEntry] = {
+                    entry.target: entry for entry in initial_restart_schedules.schedules
+                }
+
+                def _set_schedule_buttons_busy(
+                    *,
+                    schedule_target: RestartTarget,
+                    save: Button,
+                    skip: Button,
+                    disable: Button,
+                    busy: bool,
+                ) -> None:
+                    if busy:
+                        save.disable()
+                        skip.disable()
+                        disable.disable()
+                        return
+                    save.enable()
+                    disable.enable()
+                    if schedules_by_target[schedule_target].enabled:
+                        skip.enable()
+                    else:
+                        skip.disable()
+
+                for target, initial_entry in schedules_by_target.items():
+                    initial_days, initial_hours, initial_minutes = _restart_interval_parts(
+                        initial_entry.interval_minutes
+                    )
+                    initial_anchor_timestamp = initial_entry.anchor_timestamp or initial_entry.next_restart_timestamp
+                    if initial_anchor_timestamp is None:
+                        initial_anchor_timestamp = int(datetime.now().timestamp()) + initial_entry.interval_minutes * 60
+                    initial_anchor_at = datetime.fromtimestamp(initial_anchor_timestamp, ZoneInfo("UTC"))
+                    initial_anchor_weekday = _RESTART_WEEKDAYS[initial_anchor_at.weekday()].value
+                    initial_anchor_time = initial_anchor_at.strftime("%H:%M")
+                    with ui.column().classes("mod-system-schedule-row w-full gap-3"):
+                        with ui.row().classes("w-full items-start justify-between gap-4"):
+                            with ui.column().classes("gap-1"):
+                                ui.label(target.value.title()).classes("font-black mod-title-small")
+                                status_label = ui.label(_schedule_status(initial_entry)).classes("mod-subtitle text-xs")
+                            with ui.row().classes("gap-2"):
+                                save_button = ui.button("Save").classes("mod-list-button")
+                                skip_button = ui.button("Skip").classes("mod-list-button secondary")
+                                disable_button = ui.button("Disable").classes("mod-list-button secondary")
+                                if not initial_entry.enabled:
+                                    skip_button.disable()
+
+                        with ui.row().classes("mod-system-schedule-controls w-full gap-2"):
+                            days_input = ui.input("Days", value=str(initial_days)).props(
+                                f"{_RESTART_SCHEDULE_FIELD_PROPS} type=number min=0 max=7 step=1"
+                            ).classes("w-full mod-system-schedule-field")
+                            hours_input = ui.input("Hours", value=str(initial_hours)).props(
+                                f"{_RESTART_SCHEDULE_FIELD_PROPS} type=number min=0 max=23 step=1"
+                            ).classes("w-full mod-system-schedule-field")
+                            minutes_input = ui.input("Minutes", value=str(initial_minutes)).props(
+                                f"{_RESTART_SCHEDULE_FIELD_PROPS} type=number min=0 max=59 step=1"
+                            ).classes("w-full mod-system-schedule-field")
+                            weekday_select = ui.select(
+                                _RESTART_WEEKDAY_OPTIONS,
+                                value=initial_anchor_weekday,
+                                label="Anchor day",
+                            ).props(
+                                f"{_RESTART_SCHEDULE_FIELD_PROPS} "
+                                "options-dark popup-content-class=mod-setting-menu"
+                            ).classes("w-full mod-system-schedule-field mod-system-schedule-weekday")
+                            anchor_time_input = ui.input("Anchor time", value=initial_anchor_time).props(
+                                f"{_RESTART_SCHEDULE_FIELD_PROPS} "
+                                "mask=##:## maxlength=5 inputmode=numeric placeholder=HH:MM"
+                            ).classes("w-full mod-system-schedule-field mod-system-schedule-time")
+                            timezone_select = ui.select(
+                                _RESTART_TIMEZONE_OPTIONS,
+                                value="UTC",
+                                label="Anchor timezone",
+                            ).props(
+                                f"{_RESTART_SCHEDULE_FIELD_PROPS} "
+                                "options-dark popup-content-class=mod-setting-menu"
+                            ).classes("w-full mod-system-schedule-field mod-system-schedule-timezone")
+
+                        with ui.row().classes("w-full items-baseline gap-1 flex-wrap"):
+                            ui.label("Next restart:").classes("text-xs font-black mod-title-small")
+                            client_time_label = ui.label("loading…").classes("mod-subtitle text-xs")
+                        timezone_labels: dict[str, Label] = {}
+                        with ui.grid(columns=2).classes("w-full gap-x-6 gap-y-1"):
+                            for timezone_label, timezone_name in _RESTART_DISPLAY_TIMEZONES:
+                                value = (
+                                    "—"
+                                    if initial_entry.next_restart_timestamp is None
+                                    else _format_restart_timestamp(
+                                        initial_entry.next_restart_timestamp,
+                                        timezone_name,
+                                    )
+                                )
+                                timezone_labels[timezone_name] = ui.label(
+                                    f"{timezone_label} · {value}"
+                                ).classes("mod-subtitle text-xs")
+
+                        _set_schedule_display(
+                            initial_entry,
+                            status_label=status_label,
+                            timezone_labels=timezone_labels,
+                            client_label=client_time_label,
                         )
-                        _render_node_badges.refresh(current_app_links)
-                        _render_node_cards.refresh(current_app_links)
-                    if event.system_summary is not None:
-                        apply_title_stats(self._build_system_title_stats(event.system_summary))
 
-                def _handle_update(event: NodeStateStreamEvent) -> None:
-                    loop.call_soon_threadsafe(lambda: _apply_update(event))
+                        async def _save_schedule(
+                            *,
+                            schedule_target: RestartTarget = target,
+                            schedule_days_input: Input = days_input,
+                            schedule_hours_input: Input = hours_input,
+                            schedule_minutes_input: Input = minutes_input,
+                            schedule_weekday_select: Select = weekday_select,
+                            schedule_anchor_time_input: Input = anchor_time_input,
+                            schedule_timezone_select: Select = timezone_select,
+                            schedule_status_label: Label = status_label,
+                            schedule_timezone_labels: dict[str, Label] = timezone_labels,
+                            schedule_client_label: Label = client_time_label,
+                            schedule_save_button: Button = save_button,
+                            schedule_skip_button: Button = skip_button,
+                            schedule_disable_button: Button = disable_button,
+                        ) -> None:
+                            try:
+                                interval_days = int(_value_as_text(schedule_days_input))
+                                interval_hours = int(_value_as_text(schedule_hours_input))
+                                interval_remainder_minutes = int(_value_as_text(schedule_minutes_input))
+                            except ValueError:
+                                _notify_error("Use whole values for days, hours, and minutes.")
+                                return
+                            try:
+                                interval_minutes = _restart_interval_from_parts(
+                                    days=interval_days,
+                                    hours=interval_hours,
+                                    minutes=interval_remainder_minutes,
+                                )
+                            except ValueError as xcp:
+                                _notify_error(str(xcp))
+                                return
+                            _set_schedule_buttons_busy(
+                                schedule_target=schedule_target,
+                                save=schedule_save_button,
+                                skip=schedule_skip_button,
+                                disable=schedule_disable_button,
+                                busy=True,
+                            )
 
-                unsubscribe: Callable[[], None] = subscribe_node_state_updates(_handle_update)
+                            timezone_name = _value_as_text(schedule_timezone_select)
+                            if timezone_name == _CLIENT_TIMEZONE_VALUE:
+                                try:
+                                    raw_timezone = await cast(
+                                        Awaitable[object],
+                                        ui.run_javascript("return Intl.DateTimeFormat().resolvedOptions().timeZone;"),
+                                    )
+                                except Exception as xcp:
+                                    _set_schedule_buttons_busy(
+                                        schedule_target=schedule_target,
+                                        save=schedule_save_button,
+                                        skip=schedule_skip_button,
+                                        disable=schedule_disable_button,
+                                        busy=False,
+                                    )
+                                    _notify_error(f"Unable to detect the client timezone: {xcp}")
+                                    return
+                                if actions_closed:
+                                    return
+                                if not isinstance(raw_timezone, str) or not raw_timezone:
+                                    _set_schedule_buttons_busy(
+                                        schedule_target=schedule_target,
+                                        save=schedule_save_button,
+                                        skip=schedule_skip_button,
+                                        disable=schedule_disable_button,
+                                        busy=False,
+                                    )
+                                    _notify_error("The browser did not provide a timezone.")
+                                    return
+                                timezone_name = raw_timezone
+                            try:
+                                anchor_weekday = _RestartWeekday(_value_as_text(schedule_weekday_select))
+                            except ValueError:
+                                _set_schedule_buttons_busy(
+                                    schedule_target=schedule_target,
+                                    save=schedule_save_button,
+                                    skip=schedule_skip_button,
+                                    disable=schedule_disable_button,
+                                    busy=False,
+                                )
+                                _notify_error("Choose an anchor day.")
+                                return
+                            try:
+                                anchor_timestamp = _restart_anchor_timestamp(
+                                    anchor_weekday,
+                                    _value_as_text(schedule_anchor_time_input),
+                                    timezone_name,
+                                )
+                            except ValueError as xcp:
+                                _set_schedule_buttons_busy(
+                                    schedule_target=schedule_target,
+                                    save=schedule_save_button,
+                                    skip=schedule_skip_button,
+                                    disable=schedule_disable_button,
+                                    busy=False,
+                                )
+                                _notify_error(str(xcp))
+                                return
+                            try:
+                                state = await self._remote_update_restart_schedule_async(
+                                    node,
+                                    schedule_target,
+                                    interval_minutes,
+                                    anchor_timestamp,
+                                    user,
+                                )
+                            except Exception as xcp:
+                                if actions_closed:
+                                    return
+                                _set_schedule_buttons_busy(
+                                    schedule_target=schedule_target,
+                                    save=schedule_save_button,
+                                    skip=schedule_skip_button,
+                                    disable=schedule_disable_button,
+                                    busy=False,
+                                )
+                                _notify_error(f"Unable to save schedule: {xcp}", multi_line=True)
+                                return
+                            if actions_closed:
+                                return
+                            entry = next(item for item in state.schedules if item.target is schedule_target)
+                            schedules_by_target[schedule_target] = entry
+                            next_days, next_hours, next_minutes = _restart_interval_parts(entry.interval_minutes)
+                            schedule_days_input.set_value(str(next_days))
+                            schedule_hours_input.set_value(str(next_hours))
+                            schedule_minutes_input.set_value(str(next_minutes))
+                            _set_schedule_buttons_busy(
+                                schedule_target=schedule_target,
+                                save=schedule_save_button,
+                                skip=schedule_skip_button,
+                                disable=schedule_disable_button,
+                                busy=False,
+                            )
+                            _set_schedule_display(
+                                entry,
+                                status_label=schedule_status_label,
+                                timezone_labels=schedule_timezone_labels,
+                                client_label=schedule_client_label,
+                            )
+                            _notify_success(
+                                "Schedule saved; near-term restart skipped."
+                                if entry.skipped_through_timestamp is not None
+                                else "Schedule saved."
+                            )
 
-                def _cleanup_live_updates() -> None:
-                    nonlocal page_closed
-                    page_closed = True
-                    unsubscribe()
+                        async def _disable_schedule(
+                            *,
+                            schedule_target: RestartTarget = target,
+                            schedule_status_label: Label = status_label,
+                            schedule_timezone_labels: dict[str, Label] = timezone_labels,
+                            schedule_client_label: Label = client_time_label,
+                            schedule_save_button: Button = save_button,
+                            schedule_skip_button: Button = skip_button,
+                            schedule_disable_button: Button = disable_button,
+                        ) -> None:
+                            _set_schedule_buttons_busy(
+                                schedule_target=schedule_target,
+                                save=schedule_save_button,
+                                skip=schedule_skip_button,
+                                disable=schedule_disable_button,
+                                busy=True,
+                            )
+                            try:
+                                state = await self._remote_update_restart_schedule_async(
+                                    node,
+                                    schedule_target,
+                                    None,
+                                    None,
+                                    user,
+                                )
+                            except Exception as xcp:
+                                if actions_closed:
+                                    return
+                                _set_schedule_buttons_busy(
+                                    schedule_target=schedule_target,
+                                    save=schedule_save_button,
+                                    skip=schedule_skip_button,
+                                    disable=schedule_disable_button,
+                                    busy=False,
+                                )
+                                _notify_error(f"Unable to disable schedule: {xcp}", multi_line=True)
+                                return
+                            if actions_closed:
+                                return
+                            entry = next(item for item in state.schedules if item.target is schedule_target)
+                            schedules_by_target[schedule_target] = entry
+                            _set_schedule_buttons_busy(
+                                schedule_target=schedule_target,
+                                save=schedule_save_button,
+                                skip=schedule_skip_button,
+                                disable=schedule_disable_button,
+                                busy=False,
+                            )
+                            _set_schedule_display(
+                                entry,
+                                status_label=schedule_status_label,
+                                timezone_labels=schedule_timezone_labels,
+                                client_label=schedule_client_label,
+                            )
+                            _notify_success("Schedule disabled.")
 
-                self._register_client_cleanup(ui=ui, cleanup=_cleanup_live_updates)
+                        async def _skip_schedule(
+                            *,
+                            schedule_target: RestartTarget = target,
+                            schedule_status_label: Label = status_label,
+                            schedule_timezone_labels: dict[str, Label] = timezone_labels,
+                            schedule_client_label: Label = client_time_label,
+                            schedule_save_button: Button = save_button,
+                            schedule_skip_button: Button = skip_button,
+                            schedule_disable_button: Button = disable_button,
+                        ) -> None:
+                            _set_schedule_buttons_busy(
+                                schedule_target=schedule_target,
+                                save=schedule_save_button,
+                                skip=schedule_skip_button,
+                                disable=schedule_disable_button,
+                                busy=True,
+                            )
+                            try:
+                                state = await self._remote_skip_restart_schedule_async(
+                                    node,
+                                    schedule_target,
+                                    user,
+                                )
+                            except Exception as xcp:
+                                if actions_closed:
+                                    return
+                                _set_schedule_buttons_busy(
+                                    schedule_target=schedule_target,
+                                    save=schedule_save_button,
+                                    skip=schedule_skip_button,
+                                    disable=schedule_disable_button,
+                                    busy=False,
+                                )
+                                _notify_error(f"Unable to skip restart: {xcp}", multi_line=True)
+                                return
+                            if actions_closed:
+                                return
+                            entry = next(item for item in state.schedules if item.target is schedule_target)
+                            schedules_by_target[schedule_target] = entry
+                            _set_schedule_display(
+                                entry,
+                                status_label=schedule_status_label,
+                                timezone_labels=schedule_timezone_labels,
+                                client_label=schedule_client_label,
+                            )
+                            _set_schedule_buttons_busy(
+                                schedule_target=schedule_target,
+                                save=schedule_save_button,
+                                skip=schedule_skip_button,
+                                disable=schedule_disable_button,
+                                busy=False,
+                            )
+                            _notify_success("Next restart skipped.")
+
+                        save_button.on("click", _save_schedule)
+                        skip_button.on("click", _skip_schedule)
+                        disable_button.on("click", _disable_schedule)
 
     @staticmethod
     def _node_display_subtitle(*, label: str, node_name: str) -> str | None:
@@ -1017,13 +1963,20 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 return avatar_uri
         return self._bot_avatar_uri_fallback()
 
-    def _home_section_avatar_markup(self, *, node_name: str, display_name: str) -> str:
+    def _node_bot_avatar_markup(self, *, node_name: str, display_name: str, extra_class: str) -> str:
         avatar_alt = escape(f"{display_name} bot avatar", quote=True)
         avatar_uri = self._node_bot_avatar_uri(node_name=node_name)
         return (
             "<img"
-            f' class="mod-user-avatar mod-home-section-avatar" src="{escape(avatar_uri, quote=True)}"'
+            f' class="mod-user-avatar {escape(extra_class, quote=True)}" src="{escape(avatar_uri, quote=True)}"'
             f' alt="{avatar_alt}" loading="lazy" referrerpolicy="no-referrer">'
+        )
+
+    def _home_section_avatar_markup(self, *, node_name: str, display_name: str) -> str:
+        return self._node_bot_avatar_markup(
+            node_name=node_name,
+            display_name=display_name,
+            extra_class="mod-home-section-avatar",
         )
 
     @staticmethod
@@ -1076,7 +2029,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
     ) -> tuple[_ModWebBadgeSpec, ...]:
         if node_summary is None or node_summary.system_summary is None:
             return ()
-        system_summary = node_summary.system_summary
+        return cls._system_resource_point_badges(node_summary.system_summary)
+
+    @classmethod
+    def _system_resource_point_badges(
+        cls,
+        system_summary: NodeSystemSummary,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
         cpu_badge = cls._node_resource_point_badge(
             available_points=system_summary.cpu_points_available,
             capacity_points=system_summary.cpu_points_capacity,

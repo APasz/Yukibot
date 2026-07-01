@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -294,8 +295,12 @@ class DashboardOAuthTests(unittest.TestCase):
     def test_maintenance_schedule_lines_show_available_targets(self) -> None:
         maintenance = MaintenanceService()
         maintenance._restart_schedules = {  # type: ignore[attr-defined]
-            RestartTarget.BOT: config.PersistedRestartSchedule(enabled=True, hour=4, minute=30),
-            RestartTarget.SYSTEM: config.PersistedRestartSchedule(enabled=False, hour=0, minute=0),
+            RestartTarget.BOT: config.PersistedRestartSchedule(
+                enabled=True,
+                interval_minutes=270,
+                anchor_timestamp=int(datetime.fromisoformat("2026-05-27T04:30:00+10:00").timestamp()),
+            ),
+            RestartTarget.SYSTEM: config.PersistedRestartSchedule(enabled=False),
         }
 
         with patch(
@@ -304,7 +309,7 @@ class DashboardOAuthTests(unittest.TestCase):
         ):
             lines = DashboardEditorService._maintenance_schedule_lines(maintenance)
 
-        self.assertEqual(lines, ["bot: 04:30", "system: off"])
+        self.assertEqual(lines, ["bot: 4h 30m", "system: off"])
 
     def test_maintenance_warning_lines_show_configured_warning(self) -> None:
         maintenance = MaintenanceService()
@@ -319,7 +324,7 @@ class DashboardOAuthTests(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                "configurable: 25m",
+                "configured: 25m",
                 "final: 1m",
                 "applies to: bot, system",
                 "delivery: running apps with inbound relay",
@@ -329,13 +334,17 @@ class DashboardOAuthTests(unittest.TestCase):
     def test_maintenance_modal_values_leave_disabled_fields_blank(self) -> None:
         maintenance = MaintenanceService()
         maintenance._restart_schedules = {  # type: ignore[attr-defined]
-            RestartTarget.BOT: config.PersistedRestartSchedule(enabled=True, hour=4, minute=30),
-            RestartTarget.SYSTEM: config.PersistedRestartSchedule(enabled=False, hour=0, minute=0),
+            RestartTarget.BOT: config.PersistedRestartSchedule(
+                enabled=True,
+                interval_minutes=270,
+                anchor_timestamp=int(datetime.fromisoformat("2026-05-27T04:30:00+10:00").timestamp()),
+            ),
+            RestartTarget.SYSTEM: config.PersistedRestartSchedule(enabled=False),
         }
 
         values = DashboardEditorService._maintenance_modal_values(maintenance)
 
-        self.assertEqual(values["bot"], "04:30")
+        self.assertEqual(values["bot"], "270")
         self.assertEqual(values["system"], "")
 
     def test_privileges_render_adds_visitor_button_without_guild_context(self) -> None:

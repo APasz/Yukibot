@@ -12,7 +12,9 @@ from fastapi import FastAPI
 import config
 from _manager import App_Manager
 from _security import Access_Control
-from node_api import NodeApiService, RelayTTSQueue
+from node_api import NodeApiService, NodeSystemActionHandler, RelayTTSQueue
+from maintenance import MaintenanceService
+from restart_targets import RestartTarget
 from web_dash.nicegui_protocols import WebChatRelayPublisher
 
 log = logging.getLogger(__name__)
@@ -38,6 +40,16 @@ class NodeApiHttpService:
 
     def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self._node_api.set_chat_relay_service(chat_relay)
+
+    def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
+        self._node_api.set_system_action_handler(handler)
+
+    def set_maintenance_service(
+        self,
+        maintenance_service: MaintenanceService,
+        available_targets: tuple[RestartTarget, ...],
+    ) -> None:
+        self._node_api.set_maintenance_service(maintenance_service, available_targets)
 
     async def start(self, manager: App_Manager, *, acl: Access_Control | None = None) -> None:
         if not self.enabled:
@@ -75,9 +87,13 @@ class NodeApiHttpService:
 
             @asynccontextmanager
             async def _lifespan(_: FastAPI) -> AsyncGenerator[None]:
+                self._node_api.start_background_tasks()
                 self._startup_signal.set()
                 log.info("Node API startup event received")
-                yield
+                try:
+                    yield
+                finally:
+                    self._node_api.begin_shutdown()
 
             app = FastAPI(lifespan=_lifespan)
             self._node_api.register_routes(app)

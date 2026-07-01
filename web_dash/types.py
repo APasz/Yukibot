@@ -692,12 +692,19 @@ class ModWebTitleStat:
     value: str
     tone: BadgeTone = "grey"
     lines: tuple["ModWebTitleStatLine", ...] = ()
+    show_label: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ModWebTitleStatLine:
     label: str | None
     value: str
+    is_section: bool = False
+    tone: BadgeTone | None = None
+
+    def __post_init__(self) -> None:
+        if self.is_section and self.label is None:
+            raise ValueError("Stat section lines require a label.")
 
 
 @dataclass(frozen=True, slots=True)

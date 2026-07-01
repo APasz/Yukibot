@@ -53,7 +53,8 @@ Sister bots also push a typed bot-metadata snapshot to Yuki through the same aut
 - `NODE_API_PUBLIC_BASE_URL` controls the published public base used for node API links and registry metadata when a dedicated node API server is enabled. If unset, it defaults to the mod web public base.
 - `MOD_WEB_BIND_HOST` controls the interface NiceGUI binds to and defaults to `0.0.0.0`.
 - `NODE_NAME` identifies the local host in node API tokens and defaults to the active bot profile name.
-- `NODE_API_TOKEN_SECRET` signs direct node API links. If unset, Yukibot falls back to `DATA_AUTHORITY_TOKEN`; if both are unset, node API auth is disabled.
+- `NODE_API_TOKEN_SECRET` signs direct node API links. If unset, Yukibot falls back to `DATA_AUTHORITY_TOKEN`; if both are unset, node API requests fail closed.
+- Unauthenticated node API access is allowed only in `INDEV` or when `ALLOW_UNAUTH_NODE_API=true` is explicitly set.
 - `MOD_WEB_DISCORD_CLIENT_ID` and `MOD_WEB_DISCORD_CLIENT_SECRET` enable Discord login for the mod web UI.
 - The Discord OAuth redirect defaults to `{MOD_WEB_PUBLIC_BASE_URL}/auth/discord/callback`; override it with `MOD_WEB_AUTH_REDIRECT_URL` only when Discord is configured with a different public callback.
 - `MOD_WEB_SESSION_CACHE_DIR` defaults to `.cache/mod_web_sessions`; Portal persists browser sessions and pending OAuth state there so Portal restarts do not force users to sign in again.

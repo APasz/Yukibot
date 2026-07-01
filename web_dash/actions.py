@@ -31,6 +31,10 @@ from .runtime_imports import (
     NodeModEntry,
     NodeModMutationAction,
     NodeModMutationResult,
+    NodeSystemAction,
+    NodeSystemActionResult,
+    NodeRestartScheduleState,
+    RestartTarget,
     Power_Level,
     assert_never,
     asyncio,
@@ -218,6 +222,80 @@ class ModWebActionsMixin(ModWebServiceSupport):
             user=user,
         )
         return config.NodeCapacityProfile.model_validate(payload)
+
+    async def _remote_node_system_action_async(
+        self,
+        node: ModWebNodeLink,
+        action: NodeSystemAction,
+        auto_restart_running_apps: bool,
+        user: ModWebUser,
+    ) -> NodeSystemActionResult:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/system/actions",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "action": action.value,
+                "auto_restart_running_apps": auto_restart_running_apps,
+            },
+        )
+        return NodeSystemActionResult.from_mapping(payload)
+
+    async def _remote_restart_schedules_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> NodeRestartScheduleState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/system/restart-schedules",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+        )
+        return NodeRestartScheduleState.from_mapping(payload)
+
+    async def _remote_update_restart_schedule_async(
+        self,
+        node: ModWebNodeLink,
+        target: RestartTarget,
+        interval_minutes: int | None,
+        anchor_timestamp: int | None,
+        user: ModWebUser,
+    ) -> NodeRestartScheduleState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/system/restart-schedules",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "target": target.value,
+                "interval_minutes": interval_minutes,
+                "anchor_timestamp": anchor_timestamp,
+            },
+        )
+        return NodeRestartScheduleState.from_mapping(payload)
+
+    async def _remote_skip_restart_schedule_async(
+        self,
+        node: ModWebNodeLink,
+        target: RestartTarget,
+        user: ModWebUser,
+    ) -> NodeRestartScheduleState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path=f"/system/restart-schedules/{quote(target.value, safe='')}/skip",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+            method="POST",
+        )
+        return NodeRestartScheduleState.from_mapping(payload)
 
     async def _remote_update_node_capacity_async(
         self,

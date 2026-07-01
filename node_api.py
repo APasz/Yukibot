@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -102,8 +103,10 @@ from map_annotations import (
     MapWorldSummary,
 )
 from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
+from maintenance import MAX_RESTART_INTERVAL_MINUTES, MIN_RESTART_INTERVAL_MINUTES, MaintenanceService
 from mod_web_auth import ModWebAuthService, ModWebUser
 from node_auth import NodeAccessGrant, NodeApiScope, NodeTokenError, issue_node_token, verify_node_token
+from restart_targets import RestartTarget
 
 if TYPE_CHECKING:
     from _manager import App_Manager
@@ -122,6 +125,11 @@ _FULL_APP_RUNTIME_CACHE_TTL_SECONDS = 2.0
 _MOD_INVENTORY_CACHE_TTL_SECONDS = 5.0
 _LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS = 0.75
 _LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 2.0
+_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS = 10.0
+_NODE_SYSTEM_HISTORY_RETENTION_SECONDS = 60 * 60
+_NODE_SYSTEM_HISTORY_MAX_SAMPLES = (
+    _NODE_SYSTEM_HISTORY_RETENTION_SECONDS // int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS)
+)
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
 _SQUAREMAP_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -1807,6 +1815,38 @@ class _TimedModInventory:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeSystemDiskSummary:
+    mountpoint: str
+    label: str
+    percent: int
+    free_bytes: int
+    total_bytes: int
+
+    def __post_init__(self) -> None:
+        if not self.mountpoint.strip() or not self.label.strip():
+            raise ValueError("System disk mountpoint and label must not be blank.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemDiskSummary:
+        return cls(
+            mountpoint=_required_string(payload, "mountpoint"),
+            label=_required_string(payload, "label"),
+            percent=_required_int(payload, "percent"),
+            free_bytes=_required_int(payload, "free_bytes"),
+            total_bytes=_required_int(payload, "total_bytes"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "mountpoint": self.mountpoint,
+            "label": self.label,
+            "percent": self.percent,
+            "free_bytes": self.free_bytes,
+            "total_bytes": self.total_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeSystemSummary:
     cpu_percent: int | None
     ram_percent: int | None
@@ -1815,6 +1855,8 @@ class NodeSystemSummary:
     storage_percent: int | None
     storage_free_bytes: int | None
     storage_total_bytes: int | None
+    cpu_per_core_percent: tuple[int, ...] = ()
+    disks: tuple[NodeSystemDiskSummary, ...] = ()
     bot_uptime_seconds: int | None = None
     uptime_seconds: int | None = None
     cpu_points_available: int | None = None
@@ -1825,9 +1867,26 @@ class NodeSystemSummary:
     running_app_ids: tuple[str, ...] = ()
     running_app_scopes: tuple[str, ...] = ()
     start_blocked_app_ids: tuple[str, ...] = ()
+    captured_at_epoch_seconds: int | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemSummary:
+        raw_cpu_per_core = payload.get("cpu_per_core_percent", ())
+        if not isinstance(raw_cpu_per_core, Sequence) or isinstance(raw_cpu_per_core, (str, bytes)):
+            raise ValueError("cpu_per_core_percent is invalid.")
+        cpu_per_core_percent: list[int] = []
+        for raw_percent in raw_cpu_per_core:
+            if isinstance(raw_percent, bool) or not isinstance(raw_percent, int):
+                raise ValueError("cpu_per_core_percent is invalid.")
+            cpu_per_core_percent.append(raw_percent)
+        raw_disks = payload.get("disks", ())
+        if not isinstance(raw_disks, Sequence) or isinstance(raw_disks, (str, bytes)):
+            raise ValueError("disks is invalid.")
+        disks: list[NodeSystemDiskSummary] = []
+        for raw_disk in raw_disks:
+            if not isinstance(raw_disk, Mapping):
+                raise ValueError("disks is invalid.")
+            disks.append(NodeSystemDiskSummary.from_mapping(raw_disk))
         raw_running_names = payload.get("running_names", ())
         if not isinstance(raw_running_names, Sequence) or isinstance(raw_running_names, (str, bytes)):
             raise ValueError("running_names is invalid.")
@@ -1868,6 +1927,8 @@ class NodeSystemSummary:
             storage_percent=_optional_int(payload, "storage_percent"),
             storage_free_bytes=_optional_int(payload, "storage_free_bytes"),
             storage_total_bytes=_optional_int(payload, "storage_total_bytes"),
+            cpu_per_core_percent=tuple(cpu_per_core_percent),
+            disks=tuple(disks),
             bot_uptime_seconds=_optional_int(payload, "bot_uptime_seconds"),
             uptime_seconds=_optional_int(payload, "uptime_seconds"),
             cpu_points_available=_optional_int(payload, "cpu_points_available"),
@@ -1878,6 +1939,7 @@ class NodeSystemSummary:
             running_app_ids=tuple(running_app_ids),
             running_app_scopes=tuple(running_app_scopes),
             start_blocked_app_ids=tuple(start_blocked_app_ids),
+            captured_at_epoch_seconds=_optional_int(payload, "captured_at_epoch_seconds"),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1889,6 +1951,8 @@ class NodeSystemSummary:
             "storage_percent": self.storage_percent,
             "storage_free_bytes": self.storage_free_bytes,
             "storage_total_bytes": self.storage_total_bytes,
+            "cpu_per_core_percent": list(self.cpu_per_core_percent),
+            "disks": [disk.to_mapping() for disk in self.disks],
             "bot_uptime_seconds": self.bot_uptime_seconds,
             "uptime_seconds": self.uptime_seconds,
             "cpu_points_available": self.cpu_points_available,
@@ -1899,7 +1963,223 @@ class NodeSystemSummary:
             "running_app_ids": list(self.running_app_ids),
             "running_app_scopes": list(self.running_app_scopes),
             "start_blocked_app_ids": list(self.start_blocked_app_ids),
+            "captured_at_epoch_seconds": self.captured_at_epoch_seconds,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSystemSample:
+    captured_at_epoch_seconds: int
+    cpu_percent: int | None
+    ram_percent: int | None
+    storage_percent: int | None
+
+    @classmethod
+    def from_summary(cls, summary: NodeSystemSummary) -> NodeSystemSample:
+        captured_at = summary.captured_at_epoch_seconds
+        if captured_at is None:
+            raise ValueError("System summary capture time is required for history samples.")
+        return cls(
+            captured_at_epoch_seconds=captured_at,
+            cpu_percent=summary.cpu_percent,
+            ram_percent=summary.ram_percent,
+            storage_percent=summary.storage_percent,
+        )
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemSample:
+        captured_at = _required_int(payload, "captured_at_epoch_seconds")
+        if captured_at < 0:
+            raise ValueError("System sample capture time must not be negative.")
+        return cls(
+            captured_at_epoch_seconds=captured_at,
+            cpu_percent=_optional_int(payload, "cpu_percent"),
+            ram_percent=_optional_int(payload, "ram_percent"),
+            storage_percent=_optional_int(payload, "storage_percent"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "captured_at_epoch_seconds": self.captured_at_epoch_seconds,
+            "cpu_percent": self.cpu_percent,
+            "ram_percent": self.ram_percent,
+            "storage_percent": self.storage_percent,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSystemHistory:
+    retention_seconds: int
+    sample_interval_seconds: int
+    samples: tuple[NodeSystemSample, ...]
+
+    def __post_init__(self) -> None:
+        if self.retention_seconds <= 0 or self.sample_interval_seconds <= 0:
+            raise ValueError("System history timing values must be positive.")
+        timestamps = tuple(sample.captured_at_epoch_seconds for sample in self.samples)
+        if timestamps != tuple(sorted(timestamps)):
+            raise ValueError("System history samples must be chronological.")
+
+    @classmethod
+    def empty(cls) -> NodeSystemHistory:
+        return cls(
+            retention_seconds=_NODE_SYSTEM_HISTORY_RETENTION_SECONDS,
+            sample_interval_seconds=int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS),
+            samples=(),
+        )
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemHistory:
+        raw_samples = payload.get("samples")
+        if not isinstance(raw_samples, Sequence) or isinstance(raw_samples, (str, bytes)):
+            raise ValueError("System history samples are invalid.")
+        samples: list[NodeSystemSample] = []
+        for raw_sample in raw_samples:
+            if not isinstance(raw_sample, Mapping):
+                raise ValueError("System history sample is invalid.")
+            samples.append(NodeSystemSample.from_mapping(raw_sample))
+        return cls(
+            retention_seconds=_required_int(payload, "retention_seconds"),
+            sample_interval_seconds=_required_int(payload, "sample_interval_seconds"),
+            samples=tuple(samples),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "retention_seconds": self.retention_seconds,
+            "sample_interval_seconds": self.sample_interval_seconds,
+            "samples": [sample.to_mapping() for sample in self.samples],
+        }
+
+
+class NodeSystemAction(StrEnum):
+    RESTART_PROCESS = "restart_process"
+    REBOOT_HOST = "reboot_host"
+    RESTART_PORTAL = "restart_portal"
+
+
+type NodeSystemActionHandler = Callable[[NodeSystemAction, bool], None]
+
+
+_NODE_SYSTEM_ACTION_LABELS: dict[NodeSystemAction, str] = {
+    NodeSystemAction.RESTART_PROCESS: "process restart",
+    NodeSystemAction.REBOOT_HOST: "host reboot",
+    NodeSystemAction.RESTART_PORTAL: "Portal restart",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSystemActionResult:
+    node: str
+    action: NodeSystemAction
+    message: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemActionResult:
+        raw_action = _required_string(payload, "action")
+        try:
+            action = NodeSystemAction(raw_action)
+        except ValueError as xcp:
+            raise ValueError("Node system action result action is invalid.") from xcp
+        return cls(
+            node=_required_string(payload, "node"),
+            action=action,
+            message=_required_string(payload, "message"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "action": self.action.value,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeRestartScheduleEntry:
+    target: RestartTarget
+    enabled: bool
+    interval_minutes: int
+    anchor_timestamp: int | None
+    next_restart_timestamp: int | None
+    skipped_through_timestamp: int | None
+
+    def __post_init__(self) -> None:
+        if not MIN_RESTART_INTERVAL_MINUTES <= self.interval_minutes <= MAX_RESTART_INTERVAL_MINUTES:
+            raise ValueError("Node restart schedule interval is invalid.")
+        if self.enabled and (self.anchor_timestamp is None or self.next_restart_timestamp is None):
+            raise ValueError("Enabled node restart schedules require anchor and next-restart timestamps.")
+        if not self.enabled and self.next_restart_timestamp is not None:
+            raise ValueError("Disabled node restart schedules cannot have a next-restart timestamp.")
+        for field_name, value in (
+            ("anchor_timestamp", self.anchor_timestamp),
+            ("next_restart_timestamp", self.next_restart_timestamp),
+            ("skipped_through_timestamp", self.skipped_through_timestamp),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"Node restart schedule {field_name} must be positive Unix seconds.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeRestartScheduleEntry:
+        raw_target = _required_string(payload, "target")
+        try:
+            target = RestartTarget(raw_target)
+        except ValueError as xcp:
+            raise ValueError("Node restart schedule target is invalid.") from xcp
+        raw_anchor_timestamp = payload.get("anchor_timestamp")
+        raw_next_restart_timestamp = payload.get("next_restart_timestamp")
+        raw_skipped_through_timestamp = payload.get("skipped_through_timestamp")
+        if isinstance(raw_anchor_timestamp, bool) or (
+            raw_anchor_timestamp is not None and not isinstance(raw_anchor_timestamp, int)
+        ):
+            raise ValueError("Node restart schedule anchor timestamp is invalid.")
+        if isinstance(raw_next_restart_timestamp, bool) or (
+            raw_next_restart_timestamp is not None and not isinstance(raw_next_restart_timestamp, int)
+        ):
+            raise ValueError("Node restart schedule next restart timestamp is invalid.")
+        if isinstance(raw_skipped_through_timestamp, bool) or (
+            raw_skipped_through_timestamp is not None and not isinstance(raw_skipped_through_timestamp, int)
+        ):
+            raise ValueError("Node restart schedule skipped-through timestamp is invalid.")
+        return cls(
+            target=target,
+            enabled=_required_bool(payload, "enabled"),
+            interval_minutes=_required_int(payload, "interval_minutes"),
+            anchor_timestamp=raw_anchor_timestamp,
+            next_restart_timestamp=raw_next_restart_timestamp,
+            skipped_through_timestamp=raw_skipped_through_timestamp,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "target": self.target.value,
+            "enabled": self.enabled,
+            "interval_minutes": self.interval_minutes,
+            "anchor_timestamp": self.anchor_timestamp,
+            "next_restart_timestamp": self.next_restart_timestamp,
+            "skipped_through_timestamp": self.skipped_through_timestamp,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeRestartScheduleState:
+    node: str
+    schedules: tuple[NodeRestartScheduleEntry, ...]
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeRestartScheduleState:
+        raw_schedules = payload.get("schedules")
+        if not isinstance(raw_schedules, Sequence) or isinstance(raw_schedules, (str, bytes)):
+            raise ValueError("Node restart schedules are invalid.")
+        schedules: list[NodeRestartScheduleEntry] = []
+        for raw_schedule in raw_schedules:
+            if not isinstance(raw_schedule, Mapping):
+                raise ValueError("Node restart schedule is invalid.")
+            schedules.append(NodeRestartScheduleEntry.from_mapping(raw_schedule))
+        return cls(node=_required_string(payload, "node"), schedules=tuple(schedules))
+
+    def to_mapping(self) -> dict[str, object]:
+        return {"node": self.node, "schedules": [schedule.to_mapping() for schedule in self.schedules]}
 
 
 @dataclass(frozen=True, slots=True)
@@ -3289,12 +3569,20 @@ class NodeApiService:
         self._acl: Access_Control | None = None
         self._web_auth: ModWebAuthService | None = None
         self._process_restart_handler: Callable[[], None] | None = None
+        self._system_action_handler: NodeSystemActionHandler | None = None
+        self._maintenance_service: MaintenanceService | None = None
+        self._maintenance_restart_targets: tuple[RestartTarget, ...] = ()
+        self._pending_system_action: NodeSystemAction | None = None
+        self._system_action_lock = threading.RLock()
         self._app_footprint_cache: dict[str, NodeAppFootprintSnapshot] = {}
         self._app_transition_cache: dict[str, NodeAppTransitionSnapshot] = {}
         self._app_entries_cache: _TimedNodeAppEntries | None = None
         self._app_entries_cache_lock = asyncio.Lock()
         self._system_summary_cache: _TimedNodeSystemSummary | None = None
         self._system_summary_cache_lock = threading.RLock()
+        self._system_history: deque[NodeSystemSample] = deque(maxlen=_NODE_SYSTEM_HISTORY_MAX_SAMPLES)
+        self._system_history_lock = threading.RLock()
+        self._system_history_task: asyncio.Task[None] | None = None
         self._live_runtime_cache: dict[str, _TimedAppRuntimeSummary] = {}
         self._live_runtime_cache_locks: dict[str, asyncio.Lock] = {}
         self._full_runtime_cache: dict[str, _TimedAppRuntimeSummary] = {}
@@ -3344,6 +3632,17 @@ class NodeApiService:
     def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
         self._process_restart_handler = handler
 
+    def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
+        self._system_action_handler = handler
+
+    def set_maintenance_service(
+        self,
+        maintenance_service: MaintenanceService,
+        available_targets: tuple[RestartTarget, ...],
+    ) -> None:
+        self._maintenance_service = maintenance_service
+        self._maintenance_restart_targets = available_targets
+
     def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self._chat_relay = chat_relay
 
@@ -3352,6 +3651,8 @@ class NodeApiService:
 
     def begin_shutdown(self) -> None:
         self._shutting_down = True
+        history_task = self._system_history_task
+        self._system_history_task = None
         app_mutation_tasks = tuple(self._app_mutation_tasks.values())
         self._app_mutation_tasks.clear()
         with self._local_runtime_watch_lock:
@@ -3362,10 +3663,29 @@ class NodeApiService:
             self._local_node_state_watcher = _NodeLocalNodeStateWatchState()
         for task in app_mutation_tasks:
             task.cancel()
+        if history_task is not None:
+            history_task.cancel()
         for task in tasks:
             task.cancel()
         if node_task is not None:
             node_task.cancel()
+
+    def start_background_tasks(self) -> None:
+        self._shutting_down = False
+        task = self._system_history_task
+        if task is None or task.done():
+            self._system_history_task = asyncio.get_running_loop().create_task(self._sample_system_history())
+
+    async def _sample_system_history(self) -> None:
+        try:
+            while not self._shutting_down:
+                try:
+                    self.build_system_summary(force_refresh=True)
+                except Exception:
+                    log.exception("Node API system history sample failed: node=%s", self.node_name)
+                await asyncio.sleep(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
 
     def register_routes(self, nicegui_app: Any) -> None:
         if self._routes_registered:
@@ -3421,6 +3741,118 @@ class NodeApiService:
             traffic_log.info("Node API system summary request: node=%s", self.node_name)
             self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
             return self.build_system_summary().to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/history")
+        async def _system_history(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API system history request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
+            return self.build_system_history().to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/system/actions")
+        async def _system_action(
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API system action request: node=%s", self.node_name)
+            grant = self._require_access(
+                request,
+                access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+            )
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+                verified_grant=grant,
+            )
+            raw_action = payload.get("action")
+            if not isinstance(raw_action, str):
+                raise _http_exception(400, "Node system action is invalid.")
+            try:
+                action = NodeSystemAction(raw_action)
+            except ValueError as xcp:
+                raise _http_exception(400, "Unknown node system action.") from xcp
+            auto_restart_running_apps = payload.get("auto_restart_running_apps", True)
+            if not isinstance(auto_restart_running_apps, bool):
+                raise _http_exception(400, "Node system action auto-restart option must be boolean.")
+            result = await self.schedule_system_action(
+                action=action,
+                auto_restart_running_apps=auto_restart_running_apps,
+                actor_user_id=actor_user_id,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/restart-schedules")
+        async def _restart_schedules(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API restart schedule request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            return self.read_restart_schedules().to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/system/restart-schedules")
+        async def _update_restart_schedule(
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API restart schedule update request: node=%s", self.node_name)
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+                verified_grant=grant,
+            )
+            raw_target = payload.get("target")
+            if not isinstance(raw_target, str):
+                raise _http_exception(400, "Restart schedule target is invalid.")
+            try:
+                target = RestartTarget(raw_target)
+            except ValueError as xcp:
+                raise _http_exception(400, "Unknown restart schedule target.") from xcp
+            raw_interval = payload.get("interval_minutes")
+            if isinstance(raw_interval, bool) or (raw_interval is not None and not isinstance(raw_interval, int)):
+                raise _http_exception(400, "Restart schedule interval is invalid.")
+            raw_anchor_timestamp = payload.get("anchor_timestamp")
+            if isinstance(raw_anchor_timestamp, bool) or (
+                raw_anchor_timestamp is not None and not isinstance(raw_anchor_timestamp, int)
+            ):
+                raise _http_exception(400, "Restart schedule anchor timestamp is invalid.")
+            result = await self.update_restart_schedule(
+                target=target,
+                interval_minutes=raw_interval,
+                anchor_timestamp=raw_anchor_timestamp,
+                actor_user_id=actor_user_id,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/system/restart-schedules/{{target_name}}/skip")
+        async def _skip_restart_schedule(
+            target_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API restart schedule skip request: node=%s target=%s",
+                self.node_name,
+                target_name,
+            )
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+                verified_grant=grant,
+            )
+            try:
+                target = RestartTarget(target_name)
+            except ValueError as xcp:
+                raise _http_exception(400, "Unknown restart schedule target.") from xcp
+            return (await self.skip_restart_schedule(target=target, actor_user_id=actor_user_id)).to_mapping()
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/node-capacity")
         async def _node_capacity(request: Request, access_token: str | None = None) -> dict[str, object]:
@@ -5077,20 +5509,44 @@ class NodeApiService:
             ):
                 return cached.summary
             summary = self._build_system_summary_uncached()
+            self._record_system_sample(summary)
             self._system_summary_cache = _TimedNodeSystemSummary(
                 captured_at_seconds=time.monotonic(),
                 summary=summary,
             )
             return summary
 
+    def _record_system_sample(self, summary: NodeSystemSummary) -> None:
+        sample = NodeSystemSample.from_summary(summary)
+        with self._system_history_lock:
+            if self._system_history:
+                previous = self._system_history[-1]
+                elapsed = sample.captured_at_epoch_seconds - previous.captured_at_epoch_seconds
+                if elapsed < 0:
+                    self._system_history.clear()
+                elif elapsed < _NODE_SYSTEM_HISTORY_INTERVAL_SECONDS:
+                    return
+            self._system_history.append(sample)
+
+    def build_system_history(self) -> NodeSystemHistory:
+        with self._system_history_lock:
+            samples = tuple(self._system_history)
+        return NodeSystemHistory(
+            retention_seconds=_NODE_SYSTEM_HISTORY_RETENTION_SECONDS,
+            sample_interval_seconds=int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS),
+            samples=samples,
+        )
+
     def _build_system_summary_uncached(self) -> NodeSystemSummary:
         cpu_percent: int | None = None
+        cpu_per_core_percent: tuple[int, ...] = ()
         ram_percent: int | None = None
         ram_used_bytes: int | None = None
         ram_total_bytes: int | None = None
         storage_percent: int | None = None
         storage_free_bytes: int | None = None
         storage_total_bytes: int | None = None
+        disks: tuple[NodeSystemDiskSummary, ...] = ()
         bot_uptime_seconds: int | None = None
         uptime_seconds: int | None = None
         cpu_points_available: int | None = None
@@ -5109,6 +5565,7 @@ class NodeApiService:
             log.warning("Node API system stats failed: node=%s error=%s", self.node_name, xcp)
         else:
             cpu_percent = snapshot.cpu_percent
+            cpu_per_core_percent = snapshot.cpu_per_core_percent
             ram_percent = snapshot.ram_percent
             ram_used_bytes = snapshot.ram_used_bytes
             ram_total_bytes = snapshot.ram_total_bytes
@@ -5117,6 +5574,16 @@ class NodeApiService:
                 storage_percent = primary_disk.percent
                 storage_free_bytes = primary_disk.free_bytes
                 storage_total_bytes = primary_disk.total_bytes
+            disks = tuple(
+                NodeSystemDiskSummary(
+                    mountpoint=disk.mountpoint_text,
+                    label=disk.display_name,
+                    percent=disk.percent,
+                    free_bytes=disk.free_bytes,
+                    total_bytes=disk.total_bytes,
+                )
+                for disk in snapshot.disks
+            )
         try:
             bot_uptime_seconds = max(0, int(time.time() - psutil.Process().create_time()))
         except Exception as xcp:
@@ -5162,6 +5629,8 @@ class NodeApiService:
             storage_percent=storage_percent,
             storage_free_bytes=storage_free_bytes,
             storage_total_bytes=storage_total_bytes,
+            cpu_per_core_percent=cpu_per_core_percent,
+            disks=disks,
             bot_uptime_seconds=bot_uptime_seconds,
             uptime_seconds=uptime_seconds,
             cpu_points_available=cpu_points_available,
@@ -5172,6 +5641,7 @@ class NodeApiService:
             running_app_ids=running_app_ids,
             running_app_scopes=running_app_scopes,
             start_blocked_app_ids=start_blocked_app_ids,
+            captured_at_epoch_seconds=int(time.time()),
         )
 
     @staticmethod
@@ -6846,6 +7316,141 @@ class NodeApiService:
         manager = self._require_manager()
         return manager.discord_settings()
 
+    async def schedule_system_action(
+        self,
+        *,
+        action: NodeSystemAction,
+        auto_restart_running_apps: bool,
+        actor_user_id: int,
+    ) -> NodeSystemActionResult:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        if (
+            action is NodeSystemAction.RESTART_PORTAL
+            and config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.YUKI
+        ):
+            raise _http_exception(400, "Portal restart is only available on the Yuki node.")
+        handler = self._system_action_handler
+        if handler is None:
+            raise _http_exception(503, "Node system actions are unavailable on this node.")
+        with self._system_action_lock:
+            if self._pending_system_action is not None:
+                raise _http_exception(
+                    409,
+                    f"Node system action {self._pending_system_action.value!r} is already pending.",
+                )
+            self._pending_system_action = action
+
+        audit_log(
+            "node.system_action.scheduled",
+            actor_user_id=actor_user_id,
+            node=self.node_name,
+            action=action.value,
+        )
+
+        def _dispatch() -> None:
+            try:
+                handler(action, auto_restart_running_apps)
+            except Exception:
+                with self._system_action_lock:
+                    self._pending_system_action = None
+                log.exception("Node system action dispatch failed: node=%s action=%s", self.node_name, action.value)
+                return
+            if action is NodeSystemAction.RESTART_PORTAL:
+                with self._system_action_lock:
+                    self._pending_system_action = None
+
+        asyncio.get_running_loop().call_later(_NODE_RESTART_DELAY_SECONDS, _dispatch)
+        action_label = _NODE_SYSTEM_ACTION_LABELS[action]
+        return NodeSystemActionResult(
+            node=self.node_name,
+            action=action,
+            message=f"Scheduled {action_label} for {self.node_name}.",
+        )
+
+    def read_restart_schedules(self) -> NodeRestartScheduleState:
+        maintenance = self._maintenance_service
+        if maintenance is None:
+            raise _http_exception(503, "Restart scheduling is unavailable on this node.")
+        maintenance.reload()
+        return NodeRestartScheduleState(
+            node=self.node_name,
+            schedules=tuple(
+                NodeRestartScheduleEntry(
+                    target=target,
+                    enabled=(schedule := maintenance.schedule_for(target)).enabled,
+                    interval_minutes=schedule.interval_minutes,
+                    anchor_timestamp=schedule.anchor_timestamp,
+                    next_restart_timestamp=(
+                        int(next_restart.timestamp())
+                        if (next_restart := maintenance.next_restart_at(target)) is not None
+                        else None
+                    ),
+                    skipped_through_timestamp=schedule.skipped_through_timestamp,
+                )
+                for target in self._maintenance_restart_targets
+            ),
+        )
+
+    async def update_restart_schedule(
+        self,
+        *,
+        target: RestartTarget,
+        interval_minutes: int | None,
+        anchor_timestamp: int | None,
+        actor_user_id: int,
+    ) -> NodeRestartScheduleState:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        maintenance = self._maintenance_service
+        if maintenance is None:
+            raise _http_exception(503, "Restart scheduling is unavailable on this node.")
+        if target not in self._maintenance_restart_targets:
+            raise _http_exception(400, f"Restart target {target.value!r} is unavailable on this node.")
+        if interval_minutes is not None and anchor_timestamp is None:
+            raise _http_exception(400, "Enabled restart schedules require an anchor timestamp.")
+        try:
+            updated_schedules = maintenance.update_restart_intervals(
+                {target: interval_minutes},
+                anchor_timestamp=anchor_timestamp,
+            )
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        updated_schedule = updated_schedules[target]
+        audit_log(
+            "node.restart_schedule.updated",
+            actor_user_id=actor_user_id,
+            node=self.node_name,
+            target=target.value,
+            interval_minutes=interval_minutes,
+            anchor_timestamp=anchor_timestamp,
+            automatically_skipped_through_timestamp=updated_schedule.skipped_through_timestamp,
+        )
+        return self.read_restart_schedules()
+
+    async def skip_restart_schedule(
+        self,
+        *,
+        target: RestartTarget,
+        actor_user_id: int,
+    ) -> NodeRestartScheduleState:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        maintenance = self._maintenance_service
+        if maintenance is None:
+            raise _http_exception(503, "Restart scheduling is unavailable on this node.")
+        if target not in self._maintenance_restart_targets:
+            raise _http_exception(400, f"Restart target {target.value!r} is unavailable on this node.")
+        try:
+            schedule = maintenance.skip_next_restart(target)
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        audit_log(
+            "node.restart_schedule.skipped",
+            actor_user_id=actor_user_id,
+            node=self.node_name,
+            target=target.value,
+            skipped_through_timestamp=schedule.skipped_through_timestamp,
+        )
+        return self.read_restart_schedules()
+
     async def mutate_node_capacity(
         self,
         *,
@@ -8169,11 +8774,11 @@ class NodeApiService:
         if self._require_web_session_access(request=request, app_name=app_name, scopes=scopes):
             return None
 
-        if secret is None:
+        if secret is None and (config.INDEV or config.ALLOW_UNAUTH_NODE_API):
             log.debug("Node API auth disabled: node=%s app=%s scopes=%s", self.node_name, app_name, scopes)
             return None
 
-        reason: NodeTokenError = token_error or NodeTokenError("Node token is missing.")
+        reason: NodeTokenError = token_error or NodeTokenError("Node API authentication is not configured.")
         log.warning(
             "Node API access rejected: node=%s app=%s scopes=%s reason=%s",
             self.node_name,

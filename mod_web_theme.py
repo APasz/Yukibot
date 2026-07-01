@@ -2987,6 +2987,69 @@ class ModWebTheme:
                     height: 1.6rem;
                     min-width: 1.6rem;
                 }}
+                .mod-system-hero-avatar {{
+                    width: 4rem;
+                    height: 4rem;
+                    min-width: 4rem;
+                }}
+                .mod-system-edge-badge-wrap {{
+                    position: absolute !important;
+                    inset: -1px auto auto -1px !important;
+                    width: calc(100% + 2px) !important;
+                    max-width: none !important;
+                    margin: 0 !important;
+                }}
+                .mod-system-edge-badge-row {{
+                    width: 100%;
+                    flex-wrap: wrap;
+                    gap: 0.5rem;
+                }}
+                .mod-system-hero-shell {{
+                    padding-top: 2.8rem !important;
+                }}
+                .mod-system-hero-header {{
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+                    align-items: start;
+                    gap: 1rem 1.5rem;
+                    width: 100%;
+                }}
+                .mod-system-hero-identity {{
+                    display: flex !important;
+                    min-width: 0;
+                    flex-wrap: nowrap !important;
+                }}
+                .mod-system-scope-slot {{
+                    min-width: 0;
+                    max-width: 38rem;
+                    align-items: flex-end;
+                    justify-self: end;
+                }}
+                .mod-system-scope-badges {{
+                    display: flex;
+                    width: 100%;
+                    flex-wrap: wrap;
+                    justify-content: flex-end;
+                    gap: 0.5rem;
+                }}
+                @container mod-app-hero (max-width: 52rem) {{
+                    .mod-system-hero-header {{
+                        grid-template-columns: minmax(0, 1fr);
+                    }}
+                    .mod-system-scope-slot {{
+                        max-width: 100%;
+                        align-items: flex-start;
+                        justify-self: start;
+                    }}
+                    .mod-system-scope-badges {{
+                        justify-content: flex-start;
+                    }}
+                }}
+                @container mod-app-hero (max-width: 34rem) {{
+                    .mod-system-hero-shell {{
+                        padding-top: 4.8rem !important;
+                    }}
+                }}
                 @media (min-width: 1280px) {{
                     .mod-home-section-grid {{
                         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3017,6 +3080,17 @@ class ModWebTheme:
                 }}
                 .mod-home-node-card-grey {{
                     border-color: #3f3f46 !important;
+                }}
+                .mod-home-node-card-actionable {{
+                    cursor: pointer !important;
+                    transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+                }}
+                .mod-home-node-card-actionable:hover,
+                .mod-home-node-card-actionable:focus-visible {{
+                    background: rgba(20, 18, 30, 0.94) !important;
+                    border-color: #a78bfa !important;
+                    outline: none !important;
+                    transform: translateY(-1px);
                 }}
                 .mod-home-node-title {{
                     color: var(--mod-text) !important;
@@ -3115,6 +3189,9 @@ class ModWebTheme:
                 .mod-stat-card.red {{ border-color: rgba(220, 38, 38, 0.78) !important; }}
                 .mod-stat-card.warn {{ border-color: rgba(127, 29, 29, 0.82) !important; }}
                 .mod-stat-card.grey {{ border-color: #3f3f46 !important; }}
+                .mod-system-hero-shell .mod-stat-card {{
+                    border-color: #2f2f37 !important;
+                }}
                 .mod-stat-label {{
                     color: var(--mod-dim) !important;
                     font-size: 0.62rem !important;
@@ -3149,6 +3226,168 @@ class ModWebTheme:
                     font-size: 0.84rem !important;
                     font-weight: 900 !important;
                     line-height: 1.2 !important;
+                }}
+                .mod-stat-tone-black,
+                .mod-stat-line:has(.mod-stat-tone-black) .mod-stat-line-label,
+                .mod-stat-section:has(.mod-stat-tone-black) .mod-stat-section-label {{
+                    color: #d4d4d8 !important;
+                }}
+                .mod-stat-tone-grey,
+                .mod-stat-line:has(.mod-stat-tone-grey) .mod-stat-line-label,
+                .mod-stat-section:has(.mod-stat-tone-grey) .mod-stat-section-label {{
+                    color: #a1a1aa !important;
+                }}
+                .mod-stat-tone-purple,
+                .mod-stat-line:has(.mod-stat-tone-purple) .mod-stat-line-label,
+                .mod-stat-section:has(.mod-stat-tone-purple) .mod-stat-section-label {{
+                    color: #c4b5fd !important;
+                }}
+                .mod-stat-tone-warn,
+                .mod-stat-line:has(.mod-stat-tone-warn) .mod-stat-line-label,
+                .mod-stat-section:has(.mod-stat-tone-warn) .mod-stat-section-label {{
+                    color: #fca5a5 !important;
+                }}
+                .mod-stat-tone-red,
+                .mod-stat-line:has(.mod-stat-tone-red) .mod-stat-line-label,
+                .mod-stat-section:has(.mod-stat-tone-red) .mod-stat-section-label {{
+                    color: #fecaca !important;
+                }}
+                .mod-stat-section {{
+                    padding-top: 0.42rem;
+                    border-top: 1px solid rgba(113, 113, 122, 0.55);
+                }}
+                .mod-stat-section:first-child {{
+                    padding-top: 0;
+                    border-top: 0;
+                }}
+                .mod-stat-section-label {{
+                    color: var(--mod-dim) !important;
+                    font-size: 0.62rem !important;
+                    font-weight: 900 !important;
+                    letter-spacing: 0.08em;
+                    text-transform: uppercase;
+                }}
+                .mod-stat-section-value {{
+                    color: var(--mod-text) !important;
+                    font-size: 0.88rem !important;
+                    font-weight: 900 !important;
+                    line-height: 1.2 !important;
+                }}
+                .mod-system-chart-shell {{
+                    min-height: 12rem;
+                    overflow: hidden;
+                    border: 1px solid rgba(63, 63, 70, 0.62);
+                    background: rgba(5, 5, 8, 0.72);
+                }}
+                .mod-system-chart {{
+                    display: block;
+                    width: 100%;
+                    height: auto;
+                    min-height: 12rem;
+                }}
+                .mod-system-chart-grid line {{
+                    stroke: rgba(113, 113, 122, 0.2);
+                    stroke-width: 1;
+                }}
+                .mod-system-chart-grid text,
+                .mod-system-chart-axis-labels text,
+                .mod-system-chart-legend text {{
+                    fill: var(--mod-muted);
+                    font-size: 11px;
+                    font-weight: 750;
+                }}
+                .mod-system-chart-line {{
+                    fill: none;
+                    stroke-width: 2.5;
+                    stroke-linecap: round;
+                    stroke-linejoin: round;
+                    vector-effect: non-scaling-stroke;
+                }}
+                .mod-system-chart-empty {{
+                    display: flex;
+                    min-height: 12rem;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 2rem;
+                    color: var(--mod-muted);
+                    font-size: 0.82rem;
+                    font-weight: 750;
+                    text-align: center;
+                }}
+                .mod-system-danger-card {{
+                    border-color: rgba(220, 38, 38, 0.64) !important;
+                }}
+                .mod-system-schedule-row {{
+                    padding: 1rem;
+                    border: 1px solid rgba(127, 29, 29, 0.46);
+                    background:
+                        linear-gradient(135deg, rgba(127, 29, 29, 0.09), transparent 54%),
+                        rgba(10, 10, 14, 0.52);
+                }}
+                .mod-system-schedule-row + .mod-system-schedule-row {{
+                    margin-top: 0.25rem;
+                }}
+                .mod-system-schedule-controls {{
+                    display: grid !important;
+                    grid-template-columns: repeat(6, minmax(0, 1fr));
+                    align-items: end;
+                }}
+                .mod-system-schedule-timezone {{
+                    min-width: 0;
+                }}
+                .mod-system-schedule-field {{
+                    height: 2.75rem;
+                    min-height: 2.75rem;
+                }}
+                .mod-system-schedule-field .q-field__control {{
+                    height: 2.75rem !important;
+                    min-height: 2.75rem !important;
+                    border: 1px solid rgba(82, 82, 91, 0.72) !important;
+                    border-radius: 0 !important;
+                    background: rgba(12, 12, 17, 0.94) !important;
+                    color-scheme: dark;
+                }}
+                .mod-system-schedule-field .q-field__control::before {{
+                    border: 0 !important;
+                }}
+                .mod-system-schedule-field .q-field__control::after {{
+                    border-bottom: 2px solid var(--mod-accent) !important;
+                }}
+                .mod-system-schedule-field .q-field__label {{
+                    color: var(--mod-muted) !important;
+                    font-size: 0.72rem !important;
+                    font-weight: 850 !important;
+                    letter-spacing: 0.04em;
+                }}
+                .mod-system-schedule-field .q-field__native,
+                .mod-system-schedule-field .q-field__input,
+                .mod-system-schedule-field .q-field__marginal,
+                .mod-system-schedule-field .q-icon {{
+                    color: var(--mod-text) !important;
+                    opacity: 1 !important;
+                }}
+                .mod-system-schedule-field .q-field__marginal {{
+                    height: 2.75rem !important;
+                }}
+                .mod-system-schedule-field .q-field__native,
+                .mod-system-schedule-field .q-field__input {{
+                    font-size: 0.82rem !important;
+                    font-weight: 800 !important;
+                    color-scheme: dark;
+                }}
+                .mod-system-schedule-time input {{
+                    color: var(--mod-text) !important;
+                    background: transparent !important;
+                    color-scheme: dark;
+                }}
+                @media (max-width: 56rem) {{
+                    .mod-system-schedule-controls {{
+                        grid-template-columns: repeat(3, minmax(0, 1fr));
+                    }}
+                }}
+                .mod-system-action-row {{
+                    padding-top: 0.9rem;
+                    border-top: 1px solid rgba(127, 29, 29, 0.52);
                 }}
                 .mod-dialog-card {{
                     width: min(30rem, calc(100vw - 2rem)) !important;
@@ -4083,6 +4322,13 @@ class ModWebTheme:
                     box-shadow: none !important;
                 }}
                 .mod-action:hover {{ filter: brightness(1.14); transform: translateY(-1px); }}
+                .mod-user-header-tray-shell:not(:has(.mod-user-header-tray)) {{
+                    display: none !important;
+                    min-height: 0 !important;
+                }}
+                @media (min-width: 961px) and (max-width: 1023px) {{
+                    .mod-user-header-row {{ flex-wrap: nowrap !important; }}
+                }}
                 @media (max-width: 960px) {{
                     .mod-user-header-tray-shell {{ min-height: 0 !important; }}
                     .mod-hero-header {{ flex-wrap: wrap !important; }}

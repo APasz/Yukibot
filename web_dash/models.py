@@ -30,7 +30,7 @@ from .constants import (
 )
 from .home import ModWebHomeMixin
 from .json_helpers import _json_object, _json_request_object
-from .links import mod_web_node_path
+from .links import mod_web_node_path, mod_web_node_system_path
 from .nicegui_protocols import AsyncRefresh, ModWebUi, RefreshableValue
 from .runtime_imports import (
     App,
@@ -43,8 +43,10 @@ from .runtime_imports import (
     BadgeTone,
     BotMetadataModWeb,
     BotMetadataSnapshot,
+    Card,
     Callable,
     Iterable,
+    Label,
     Literal,
     Mapping,
     ModWebUser,
@@ -71,6 +73,7 @@ from .runtime_imports import (
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
+    NodeSystemHistory,
     NodeSystemSummary,
     Path,
     Power_Level,
@@ -113,7 +116,7 @@ from .types import (
     ModWebTitleStat,
     ModWebTitleStatLine,
 )
-from .utils import _http_exception, _is_executor_shutdown_error
+from .utils import _format_uptime_seconds, _http_exception, _is_executor_shutdown_error
 
 if TYPE_CHECKING:
     from nicegui.elements.upload_files import FileUpload
@@ -245,7 +248,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 ModWebNodeLink(
                     node_name=node_name,
                     label=label,
-                    url=mod_web_node_path(node_name),
+                    url=mod_web_node_system_path(node_name),
                     api_base_url=node_api_base_url,
                     api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
                     is_current=False,
@@ -332,7 +335,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         return ModWebNodeLink(
             node_name=node_name,
             label=self._current_node_label(),
-            url=mod_web_node_path(node_name),
+            url=mod_web_node_system_path(node_name),
             api_base_url=api_base_url,
             api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
             is_current=True,
@@ -1004,7 +1007,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             links[key] = ModWebNodeLink(
                 node_name=node_name,
                 label=snapshot.profile.label or node_name,
-                url=f"/mod-web/nodes/{quote(node_name, safe='')}",
+                url=mod_web_node_system_path(node_name),
                 api_base_url=mod_web.node_api_base_url.rstrip("/"),
                 api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
                 is_current=False,
@@ -1488,6 +1491,16 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeSystemSummary.from_mapping(payload)
 
+    async def _remote_node_system_history_async(self, node: ModWebNodeLink, user: ModWebUser) -> NodeSystemHistory:
+        payload: dict[str, object] = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/system/history",
+            scopes=(NodeApiScope.APPS_READ,),
+            user=user,
+        )
+        return NodeSystemHistory.from_mapping(payload)
+
     async def _remote_node_system_summary_or_none_async(
         self,
         node: ModWebNodeLink,
@@ -1932,8 +1945,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         if path.startswith("/auth/"):
             if is_portal_profile:
                 return None
-            node_path = mod_web_node_path(target_node_name)
-            return f"/auth/login?{urlencode({'next_path': node_path})}"
+            return f"/auth/login?{urlencode({'next_path': '/'})}"
         if path.startswith(self._NODE_SCOPED_PATH_PREFIX):
             if is_portal_profile:
                 return None
@@ -1947,7 +1959,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         if path in {"", "/", "/mod-web"}:
             if is_portal_profile:
                 return None
-            return node_path
+            return "/"
 
         chat_app_name: str | None = self._chat_app_name_from_remote_ui_path(path)
         if chat_app_name is not None:
@@ -2179,20 +2191,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _format_uptime_seconds(total_seconds: int) -> str:
-        remaining = max(0, int(total_seconds))
-        days, remaining = divmod(remaining, 24 * 60 * 60)
-        hours, remaining = divmod(remaining, 60 * 60)
-        minutes, _seconds = divmod(remaining, 60)
-        if days == 0 and hours == 0 and minutes == 0:
-            return "<1m"
-        parts: list[str] = []
-        if days > 0:
-            parts.append(f"{days}d")
-        if hours > 0 or parts:
-            parts.append(f"{hours}h")
-        if minutes > 0 or parts:
-            parts.append(f"{minutes}m")
-        return " ".join(parts)
+        return _format_uptime_seconds(total_seconds)
 
     @staticmethod
     def _dominant_tone(tones: tuple[BadgeTone, ...]) -> BadgeTone:
@@ -2217,6 +2216,58 @@ class ModWebModelsMixin(ModWebServiceSupport):
             ModWebTitleStat(label="CPU", value=cpu_value, tone=cpu_tone),
             ModWebTitleStat(label="RAM", value=ram_value, tone=ram_tone),
             ModWebTitleStat(label="Storage", value=storage_value, tone=storage_tone),
+        )
+
+    @classmethod
+    def _build_node_system_stats(cls, system_summary: NodeSystemSummary) -> tuple[ModWebTitleStat, ...]:
+        cpu_value, cpu_tone = cls._system_cpu_entry(system_summary)
+        ram_value, ram_tone = cls._system_ram_entry(system_summary)
+        storage_value, storage_tone = cls._system_storage_entry(system_summary)
+        cpu_lines: tuple[ModWebTitleStatLine, ...] = (
+            (
+                ModWebTitleStatLine(label="Total", value=cpu_value, tone=cpu_tone),
+                *(
+                    ModWebTitleStatLine(
+                        label=f"Core {index}",
+                        value=f"{percent}%",
+                        tone=cls._percent_tone(percent),
+                    )
+                    for index, percent in enumerate(system_summary.cpu_per_core_percent, start=1)
+                ),
+            )
+            if system_summary.cpu_per_core_percent
+            else ()
+        )
+        disk_lines: tuple[ModWebTitleStatLine, ...] = tuple(
+            ModWebTitleStatLine(
+                label=disk.label,
+                value=cls._storage_value(
+                    percent=disk.percent,
+                    free_bytes=disk.free_bytes,
+                    total_bytes=disk.total_bytes,
+                ),
+                tone=cls._percent_tone(disk.percent),
+            )
+            for disk in system_summary.disks
+        )
+        storage_section_value = (
+            f"{len(disk_lines)} configured {'disk' if len(disk_lines) == 1 else 'disks'}"
+            if disk_lines
+            else storage_value
+        )
+        return (
+            ModWebTitleStat(label="CPU", value=cpu_value, tone="black", lines=cpu_lines),
+            ModWebTitleStat(
+                label="RAM & Storage",
+                value="Unavailable",
+                tone="black",
+                lines=(
+                    ModWebTitleStatLine(label="RAM", value=ram_value, is_section=True, tone=ram_tone),
+                    ModWebTitleStatLine(label="Storage", value=storage_section_value, is_section=True),
+                    *disk_lines,
+                ),
+                show_label=False,
+            ),
         )
 
     async def _home_node_summaries(
@@ -2397,29 +2448,107 @@ class ModWebModelsMixin(ModWebServiceSupport):
         ui: ModWebUi,
         initial_stats: tuple[ModWebTitleStat, ...],
     ) -> Callable[[tuple[ModWebTitleStat, ...]], None]:
+        rendered_cards: list[Card] = []
+        rendered_value_labels: list[Label | None] = []
+        rendered_line_value_labels: list[tuple[Label, ...]] = []
+        current_stats = initial_stats
+
         @ui.refreshable
         def _render_stats(stats: tuple[ModWebTitleStat, ...]) -> None:
+            rendered_cards.clear()
+            rendered_value_labels.clear()
+            rendered_line_value_labels.clear()
             with ui.row().classes("mod-stat-grid w-full gap-2 flex-wrap"):
                 for stat in stats:
-                    with ui.card().classes(f"mod-stat-card {stat.tone} min-w-36 grow"):
+                    card = ui.card().classes(f"mod-stat-card {stat.tone} min-w-36 grow")
+                    rendered_cards.append(card)
+                    with card:
                         with ui.column().classes("gap-1 p-2"):
-                            ui.label(stat.label).classes("mod-stat-label")
+                            if stat.show_label:
+                                ui.label(stat.label).classes("mod-stat-label")
                             if stat.lines:
+                                line_value_labels: list[Label] = []
                                 with ui.column().classes("gap-1"):
                                     for line in stat.lines:
-                                        if line.label is None:
-                                            ui.label(line.value).classes("mod-stat-line-value break-all")
+                                        if line.is_section:
+                                            if line.label is None:
+                                                raise RuntimeError("Stat section line unexpectedly has no label.")
+                                            with ui.column().classes("mod-stat-section w-full gap-1"):
+                                                ui.label(line.label).classes("mod-stat-section-label")
+                                                value_label = ui.label(line.value).classes(
+                                                    f"mod-stat-section-value break-all"
+                                                    f"{' mod-stat-tone-' + line.tone if line.tone is not None else ''}"
+                                                )
+                                        elif line.label is None:
+                                            value_label = ui.label(line.value).classes(
+                                                f"mod-stat-line-value break-all"
+                                                f"{' mod-stat-tone-' + line.tone if line.tone is not None else ''}"
+                                            )
                                         else:
                                             with ui.row().classes(
                                                 "mod-stat-line w-full items-start justify-between gap-3"
                                             ):
                                                 ui.label(line.label).classes("mod-stat-line-label")
-                                                ui.label(line.value).classes("mod-stat-line-value break-all text-right")
+                                                value_label = ui.label(line.value).classes(
+                                                    f"mod-stat-line-value break-all text-right"
+                                                    f"{' mod-stat-tone-' + line.tone if line.tone is not None else ''}"
+                                                )
+                                        line_value_labels.append(value_label)
+                                rendered_value_labels.append(None)
+                                rendered_line_value_labels.append(tuple(line_value_labels))
                             else:
-                                ui.label(stat.value).classes("mod-stat-value break-all")
+                                rendered_value_labels.append(
+                                    ui.label(stat.value).classes("mod-stat-value break-all")
+                                )
+                                rendered_line_value_labels.append(())
+
+        def _structure(
+            stats: tuple[ModWebTitleStat, ...],
+        ) -> tuple[tuple[str, bool, tuple[tuple[str | None, bool], ...]], ...]:
+            return tuple(
+                (
+                    stat.label,
+                    stat.show_label,
+                    tuple((line.label, line.is_section) for line in stat.lines),
+                )
+                for stat in stats
+            )
+
+        def _apply_stats(stats: tuple[ModWebTitleStat, ...]) -> None:
+            nonlocal current_stats
+            if stats == current_stats:
+                return
+            if _structure(stats) != _structure(current_stats):
+                current_stats = stats
+                _render_stats.refresh(stats)
+                return
+            for index, (previous_stat, next_stat) in enumerate(zip(current_stats, stats, strict=True)):
+                if previous_stat.tone != next_stat.tone:
+                    rendered_cards[index].classes(replace=f"mod-stat-card {next_stat.tone} min-w-36 grow")
+                value_label = rendered_value_labels[index]
+                if value_label is not None and previous_stat.value != next_stat.value:
+                    value_label.set_text(next_stat.value)
+                for line_index, (previous_line, next_line) in enumerate(
+                    zip(previous_stat.lines, next_stat.lines, strict=True)
+                ):
+                    if previous_line.tone != next_line.tone:
+                        base_classes = (
+                            "mod-stat-section-value break-all"
+                            if next_line.is_section
+                            else "mod-stat-line-value break-all"
+                            if next_line.label is None
+                            else "mod-stat-line-value break-all text-right"
+                        )
+                        tone_class = "" if next_line.tone is None else f" mod-stat-tone-{next_line.tone}"
+                        rendered_line_value_labels[index][line_index].classes(
+                            replace=f"{base_classes}{tone_class}"
+                        )
+                    if previous_line.value != next_line.value:
+                        rendered_line_value_labels[index][line_index].set_text(next_line.value)
+            current_stats = stats
 
         _render_stats(initial_stats)
-        return _render_stats.refresh
+        return _apply_stats
 
     def _render_live_title_stats(
         self,

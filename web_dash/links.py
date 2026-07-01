@@ -17,6 +17,10 @@ def mod_web_node_path(node_name: str) -> str:
     return f"/mod-web/nodes/{quote(resolved_node_name, safe='')}"
 
 
+def mod_web_node_system_path(node_name: str) -> str:
+    return f"{mod_web_node_path(node_name)}/system"
+
+
 def mod_web_node_app_path(node_name: str, app_name: str) -> str:
     resolved_app_name = _required_path_segment(app_name, field_name="Mod web app name")
     return f"{mod_web_node_path(node_name)}/mods/{quote(resolved_app_name, safe='')}"
@@ -41,4 +45,5 @@ __all__: tuple[str, ...] = (
     "mod_web_node_app_path",
     "mod_web_node_chat_path",
     "mod_web_node_path",
+    "mod_web_node_system_path",
 )

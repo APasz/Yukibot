@@ -842,38 +842,10 @@ class DashboardEditorService:
             )
 
         if action.kind is DashboardActionKind.OPEN_MAINTENANCE_MODAL:
-            try:
-                await acl.perm_check(actor_user_id, acl.LvL.sudo)
-            except Exception:
-                return EditorResponse.ephemeral("Sudo access is required to edit maintenance schedules.")
-
-            await req.interaction.create_modal_response(
-                title=f"Edit Maintenance Schedules ({self._local_timezone_label()})",
-                custom_id=self._maintenance_modal.build_id(
-                    self._build_state_action(DashboardActionKind.SHOW_MAINTENANCE, state),
-                    scope_id=actor_user_id,
-                    user_id=actor_user_id,
-                ),
-                components=self._maintenance_modal.rows(self._maintenance_modal_values(maintenance)),
-            )
-            return None
+            return EditorResponse.ephemeral("Restart schedules are managed from the web dashboard.")
 
         if action.kind is DashboardActionKind.OPEN_MAINTENANCE_WARNING_MODAL:
-            try:
-                await acl.perm_check(actor_user_id, acl.LvL.sudo)
-            except Exception:
-                return EditorResponse.ephemeral("Sudo access is required to edit maintenance warnings.")
-
-            await req.interaction.create_modal_response(
-                title="Edit Maintenance Warning",
-                custom_id=self._maintenance_warning_modal.build_id(
-                    self._build_state_action(DashboardActionKind.SHOW_MAINTENANCE, state),
-                    scope_id=actor_user_id,
-                    user_id=actor_user_id,
-                ),
-                components=self._maintenance_warning_modal.rows(self._maintenance_warning_modal_values(maintenance)),
-            )
-            return None
+            return EditorResponse.ephemeral("Maintenance settings are read-only here.")
 
         if action.kind is DashboardActionKind.OPEN_LABEL_MODAL:
             try:
@@ -1278,6 +1250,9 @@ class DashboardEditorService:
         req: ModalRequest,
         deps: Mapping[str, object],
     ) -> EditorResponse | None:
+        return EditorResponse.ephemeral("Restart schedules are managed from the web dashboard.")
+
+        # Reject stale modal interactions from messages created by older builds.
         acl = self._require_acl(deps)
         bot = self._require_bot(deps)
         maintenance = self._require_maintenance(deps)
@@ -1346,6 +1321,9 @@ class DashboardEditorService:
         req: ModalRequest,
         deps: Mapping[str, object],
     ) -> EditorResponse | None:
+        return EditorResponse.ephemeral("Maintenance settings are read-only here.")
+
+        # Reject stale modal interactions from messages created by older builds.
         acl = self._require_acl(deps)
         bot = self._require_bot(deps)
         maintenance = self._require_maintenance(deps)
@@ -1748,7 +1726,7 @@ class DashboardEditorService:
         embed.description = "\n".join(
             [
                 f"Lvl: {acl.level_of(actor_user_id).name.title()} | Timezone: {self._local_timezone_label()}",
-                f"{_EMBED_SUBTEXT}Daily restart schedules and relay warnings for this bot instance.",
+                f"{_EMBED_SUBTEXT}Recurring restart schedules for this bot instance (read-only).",
             ]
         )
         embed.add_field(
@@ -1765,22 +1743,11 @@ class DashboardEditorService:
             name="Notes",
             value=_display_value(
                 [
-                    f"Schedules use `HH:MM` in `{self._local_timezone_label()}` or `off` to disable a target.",
+                    "Schedules are managed from the node system page in the web dashboard.",
                     "If multiple targets match the same minute, broader restarts supersede narrower ones.",
                 ]
             ),
             inline=True,
-        )
-        layout.add_buttons(
-            EditorButton(
-                self._build_state_action(DashboardActionKind.OPEN_MAINTENANCE_MODAL, state),
-                "Edit Schedules",
-                style=hikari.ButtonStyle.PRIMARY,
-            ),
-            EditorButton(
-                self._build_state_action(DashboardActionKind.OPEN_MAINTENANCE_WARNING_MODAL, state),
-                "Edit Warning",
-            ),
         )
         layout.page_footer(
             self._action_codec.build(DashboardActionKind.CLOSE, page=state.page),
@@ -1986,7 +1953,7 @@ class DashboardEditorService:
         ]
         applies_to = ", ".join(available_targets) if available_targets else "none"
         return [
-            f"configurable: {maintenance.format_warning_minutes_display(maintenance.restart_warning_lead_minutes)}",
+            f"configured: {maintenance.format_warning_minutes_display(maintenance.restart_warning_lead_minutes)}",
             "final: 1m",
             f"applies to: {applies_to}",
             "delivery: running apps with inbound relay",

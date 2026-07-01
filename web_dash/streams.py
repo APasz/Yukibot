@@ -449,8 +449,9 @@ class ModWebStreamsMixin(ModWebServiceSupport):
                         user=user,
                         on_update=on_update,
                     )
-                log.warning(
-                    "Remote node state stream failed: node=%s error=%s",
+                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
+                log_method(
+                    "Remote node state stream disconnected; retrying: node=%s error=%s",
                     node.node_name,
                     xcp,
                 )

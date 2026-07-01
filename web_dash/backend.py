@@ -13,6 +13,7 @@ from .runtime_imports import (
     ManagedApp,
     ModWebAuthService,
     NodeApiService,
+    NodeSystemActionHandler,
     Power_Level,
     RelayTTSQueue,
 )
@@ -112,11 +113,17 @@ class ModWebDashboardBackend:
     def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
         self._node_api.set_process_restart_handler(handler)
 
+    def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
+        self._node_api.set_system_action_handler(handler)
+
     def replace_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self.set_chat_relay_service(chat_relay)
 
     def register_node_api_routes(self, nicegui_app: ModWebFastApiApp) -> None:
         self._node_api.register_routes(nicegui_app)
+
+    def start_background_tasks(self) -> None:
+        self._node_api.start_background_tasks()
 
     def begin_shutdown(self) -> None:
         self._node_api.begin_shutdown()

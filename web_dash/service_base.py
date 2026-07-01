@@ -51,10 +51,15 @@ from .runtime_imports import (
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
+    NodeSystemHistory,
+    NodeSystemAction,
+    NodeSystemActionResult,
+    NodeRestartScheduleState,
     NodeSystemSummary,
     NodeStateStreamEvent,
     Path,
     Power_Level,
+    RestartTarget,
     RedirectResponse,
     StarletteResponse,
     Tooltip,
@@ -266,6 +271,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_build_system_title_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_build_node_system_stats"]) -> Callable[..., tuple[ModWebTitleStat, ...]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_chat_player_count_badge"]) -> Callable[..., _ModWebBadgeSpec | None]: ...
@@ -587,6 +595,33 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(
+        self, name: Literal["_remote_node_system_history_async"]
+    ) -> Callable[..., Awaitable[NodeSystemHistory]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_node_system_action_async"]
+    ) -> Callable[[ModWebNodeLink, NodeSystemAction, bool, ModWebUser], Awaitable[NodeSystemActionResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_restart_schedules_async"]
+    ) -> Callable[[ModWebNodeLink, ModWebUser], Awaitable[NodeRestartScheduleState]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_update_restart_schedule_async"]
+    ) -> Callable[
+        [ModWebNodeLink, RestartTarget, int | None, int | None, ModWebUser], Awaitable[NodeRestartScheduleState]
+    ]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_skip_restart_schedule_async"]
+    ) -> Callable[[ModWebNodeLink, RestartTarget, ModWebUser], Awaitable[NodeRestartScheduleState]]: ...
+
+    @overload
+    def __getattr__(
         self, name: Literal["_remote_node_system_summary_or_none_async"]
     ) -> Callable[..., Awaitable[NodeSystemSummary | None]]: ...
 
@@ -728,13 +763,13 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_render_mods_page"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_render_node_apps_page"]) -> Callable[..., None]: ...
-
-    @overload
     def __getattr__(self, name: Literal["_render_node_mods_page"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_render_node_page"]) -> Callable[..., Awaitable[None]]: ...
+    def __getattr__(self, name: Literal["_render_node_system_dashboard"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_node_system_page"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_render_node_unavailable_card"]) -> Callable[..., None]: ...
@@ -753,6 +788,11 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_render_remote_node_unavailable_page"]) -> Callable[..., None]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_node_error_is_transient"]
+    ) -> Callable[[BaseException], bool]: ...
 
     @overload
     def __getattr__(self, name: Literal["_render_auth_setup_page"]) -> Callable[..., None]: ...

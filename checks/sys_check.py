@@ -9,7 +9,7 @@ import pytest
 
 import config
 from _activity import Provider_DISK
-from _sys import Stats_System
+from _sys import Stats_System, reboot_host
 
 
 def _disk_partition(mountpoint: str, device: str) -> SimpleNamespace:
@@ -233,3 +233,24 @@ async def test_provider_disk_reports_label_for_multi_disk_activity_selection() -
     provider = Provider_DISK(stats)  # type: ignore[arg-type]
 
     assert await provider.get() == "Data @ 92"
+
+
+def test_reboot_host_uses_non_interactive_systemctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], bool]] = []
+
+    def run(command: list[str], *, check: bool) -> SimpleNamespace:
+        calls.append((command, check))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("_sys.subprocess.run", run)
+
+    reboot_host()
+
+    assert calls == [(["sudo", "systemctl", "reboot", "-i"], False)]
+
+
+def test_reboot_host_fails_loudly_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("_sys.subprocess.run", lambda command, check: SimpleNamespace(returncode=1))
+
+    with pytest.raises(RuntimeError, match="exit code 1"):
+        reboot_host()

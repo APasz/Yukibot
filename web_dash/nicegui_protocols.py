@@ -10,6 +10,7 @@ from .runtime_imports import (
     CodeMirror,
     Column,
     Coroutine,
+    Html,
     Input,
     Label,
     Literal,
@@ -129,7 +130,7 @@ class ModWebUi(Protocol):
 
     def label(self, text: str = "", *args: object, **kwargs: object) -> "Label": ...
 
-    def html(self, content: str = "", *args: object, **kwargs: object) -> "Element": ...
+    def html(self, content: str = "", *args: object, **kwargs: object) -> Html: ...
 
     def element(self, tag: str = "div", *args: object, **kwargs: object) -> "Element": ...
 
@@ -219,6 +220,13 @@ def _value_as_text(container: object) -> str:
     return "" if value is None else str(value)
 
 
+def _value_as_bool(container: object) -> bool:
+    value = _value_as_object(container)
+    if not isinstance(value, bool):
+        raise TypeError(f"{type(container).__name__!r} does not contain a boolean value.")
+    return value
+
+
 __all__: tuple[str, ...] = (
     "AsyncRefresh",
     "ModWebEventArgumentsContainer",
@@ -238,6 +246,7 @@ __all__: tuple[str, ...] = (
     "WebChatRelayPublisher",
     "_cast_mod_web_route_ui",
     "_event_args_as_text",
+    "_value_as_bool",
     "_value_as_object",
     "_value_as_text",
 )

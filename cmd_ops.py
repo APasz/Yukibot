@@ -41,7 +41,7 @@ def available_restart_targets(
 def available_maintenance_restart_targets(
     profile: config.BotProfileConfig = config.ACTIVE_BOT_PROFILE,
 ) -> tuple[RestartTarget, ...]:
-    return tuple(target for target in available_restart_targets(profile) if target is not RestartTarget.PORTAL)
+    return available_restart_targets(profile)
 
 
 def restart_target_choices(profile: config.BotProfileConfig = config.ACTIVE_BOT_PROFILE) -> list[lightbulb.Choice[str]]:
@@ -85,10 +85,9 @@ async def restart_host_or_bot(
         raise ValueError(f"{restart_type.value.title()} restart requires its target-specific handler")
 
     await acl.perm_check(ctx.user.id, restart_required_level(restart_type))
-    auto_start_apps = (
-        manager.set_running_restart_auto_start_apps()
-        if auto_restart_running_app
-        else manager.set_restart_auto_start_apps(())
+    auto_start_apps = _sys.configure_restart_auto_start_apps(
+        manager,
+        enabled=auto_restart_running_app,
     )
     await ctx.defer()
     log.critical(

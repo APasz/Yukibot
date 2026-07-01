@@ -26,10 +26,10 @@ def test_portal_restart_target_is_only_available_to_yuki() -> None:
         assert RestartTarget.PORTAL not in cmd_ops.available_restart_targets(config.BOT_PROFILES[profile_name])
 
 
-def test_portal_restart_target_is_not_available_to_maintenance() -> None:
+def test_portal_restart_target_is_available_to_yuki_maintenance() -> None:
     targets = cmd_ops.available_maintenance_restart_targets(config.BOT_PROFILES[config.BotProfileName.YUKI])
 
-    assert RestartTarget.PORTAL not in targets
+    assert RestartTarget.PORTAL in targets
 
 
 @pytest.mark.anyio

@@ -35,6 +35,7 @@ from .runtime_imports import (
     NodeAppStateStreamEvent,
     NodeConsoleStdoutSnapshot,
     NodeStateStreamEvent,
+    NodeSystemActionHandler,
     RelayTTSQueue,
     aiohttp,
     asyncio,
@@ -115,6 +116,9 @@ class ModWebService(
 
     def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
         self._backend.set_process_restart_handler(handler)
+
+    def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
+        self._backend.set_system_action_handler(handler)
 
     @staticmethod
     def _web_display_name(user: ModWebUser) -> str:

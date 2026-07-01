@@ -38,6 +38,7 @@ from .nicegui_protocols import (
 from .runtime_imports import (
     MOD_WEB_ACTION_BASE_CLASSES,
     Awaitable,
+    aiohttp,
     Button,
     Callable,
     ChatAttachment,
@@ -139,20 +140,28 @@ class ModWebStatusMixin(ModWebServiceSupport):
         ui: ModWebUi,
         node_name: str,
         exception: Exception,
+        retry_url: str | None = None,
     ) -> None:
         self._apply_theme(ui=ui)
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_status_page_panel(
                 ui=ui,
                 config=_ModWebStatusPageConfig(
-                    title="Node unavailable",
-                    support_text=self._friendly_remote_node_error_text(exception),
-                    badge_text="Unavailable",
-                    badge_tone="red",
-                    accent_color_hex="#dc2626",
+                    title="Node reconnecting" if retry_url is not None else "Node unavailable",
+                    support_text=(
+                        "The node is restarting or temporarily offline. This page will reconnect automatically."
+                        if retry_url is not None
+                        else self._friendly_remote_node_error_text(exception)
+                    ),
+                    badge_text="Reconnecting" if retry_url is not None else "Unavailable",
+                    badge_tone="warn" if retry_url is not None else "red",
+                    accent_color_hex="#f59e0b" if retry_url is not None else "#dc2626",
                     icon_markup=self._remote_node_unavailable_icon_markup(),
                     context_label=node_name,
-                    actions=(_ModWebLinkSpec(label="Home", url=self.index_path()),),
+                    actions=(
+                        *((_ModWebLinkSpec(label="Retry", url=retry_url),) if retry_url is not None else ()),
+                        _ModWebLinkSpec(label="Home", url=self.index_path()),
+                    ),
                 ),
             )
 
@@ -310,9 +319,9 @@ class ModWebStatusMixin(ModWebServiceSupport):
     @classmethod
     def _friendly_remote_node_error_text(cls, exception: BaseException) -> str:
         for cause in cls._exception_chain(exception):
-            if isinstance(cause, requests.Timeout):
+            if isinstance(cause, (requests.Timeout, asyncio.TimeoutError)):
                 return "This node is taking too long to respond. It may be offline or still waking up."
-            if isinstance(cause, requests.ConnectionError):
+            if isinstance(cause, (requests.ConnectionError, aiohttp.ClientConnectionError, ConnectionError)):
                 return "This node is unreachable right now. It may be offline or still waking up."
 
         detail: str = str(exception).strip()
@@ -321,6 +330,22 @@ class ModWebStatusMixin(ModWebServiceSupport):
         if detail == "Remote node returned invalid JSON." or detail.startswith("Remote node response must be"):
             return "This node answered, but it sent back something Yuki could not understand."
         return "Yuki could not talk to this node right now. Refresh to try again in a moment."
+
+    @classmethod
+    def _remote_node_error_is_transient(cls, exception: BaseException) -> bool:
+        return any(
+            isinstance(
+                cause,
+                (
+                    requests.Timeout,
+                    requests.ConnectionError,
+                    aiohttp.ClientConnectionError,
+                    asyncio.TimeoutError,
+                    ConnectionError,
+                ),
+            )
+            for cause in cls._exception_chain(exception)
+        )
 
     @staticmethod
     def _remote_node_unavailable_icon_markup() -> str:
@@ -879,7 +904,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
     def _render_user_header(self, *, ui: ModWebUi, user: ModWebUser) -> None:
         display_name: str = self._web_display_name(user)
         avatar_uri: str = self._user_avatar_uri(user)
-        with ui.row().classes("w-full min-w-0 items-start gap-4 flex-wrap lg:flex-nowrap"):
+        with ui.row().classes("w-full min-w-0 items-start gap-4 flex-wrap lg:flex-nowrap mod-user-header-row"):
             with ui.element("div").classes("shrink-0 mod-user-header-surface").style(self._user_header_surface_style()):
                 with ui.column().classes("w-full h-full justify-between gap-2"):
                     with ui.row().classes("items-center gap-2 no-wrap min-w-0"):

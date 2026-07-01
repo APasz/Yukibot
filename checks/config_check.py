@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, call, patch
@@ -12,6 +13,17 @@ from hikari import applications
 import config
 from apps._config import AppVersion
 from restart_targets import RestartTarget
+
+
+class ConfigEnvFlagTests(unittest.TestCase):
+    def test_parse_env_flag_requires_explicit_true_value(self) -> None:
+        self.assertTrue(config._parse_env_flag("True", var_name="INDEV"))
+        self.assertFalse(config._parse_env_flag("False", var_name="INDEV"))
+        self.assertFalse(config._parse_env_flag(None, var_name="INDEV"))
+
+    def test_parse_env_flag_rejects_ambiguous_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "INDEV must be a boolean flag"):
+            config._parse_env_flag("development", var_name="INDEV")
 
 
 class ConfigLoggingTests(unittest.TestCase):
@@ -541,8 +553,24 @@ class BotConfigurationTests(unittest.TestCase):
 
         schedule = loaded.maintenance.schedule_for(RestartTarget.BOT)
         self.assertTrue(schedule.enabled)
-        self.assertEqual(schedule.hour, 4)
-        self.assertEqual(schedule.minute, 30)
+        self.assertEqual(schedule.interval_minutes, 24 * 60)
+        self.assertIsNotNone(schedule.anchor_timestamp)
+        assert schedule.anchor_timestamp is not None
+        anchor_at = datetime.fromtimestamp(schedule.anchor_timestamp).astimezone()
+        self.assertEqual((anchor_at.hour, anchor_at.minute), (4, 30))
+
+    def test_restart_schedule_migrates_aware_datetimes_to_unix_seconds(self) -> None:
+        schedule = config.PersistedRestartSchedule.model_validate(
+            {
+                "enabled": True,
+                "interval_minutes": 90,
+                "anchor_at": "2026-07-01T10:00:00+10:00",
+            }
+        )
+
+        expected_first_restart = datetime.fromisoformat("2026-07-01T11:30:00+10:00")
+        self.assertEqual(schedule.anchor_timestamp, int(expected_first_restart.timestamp()))
+        self.assertNotIn("anchor_at", schedule.model_dump(mode="json"))
 
     def test_load_bot_configuration_backfills_missing_node_capacity(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -576,8 +604,10 @@ class BotConfigurationTests(unittest.TestCase):
                         restart_schedules={
                             RestartTarget.SYSTEM: config.PersistedRestartSchedule(
                                 enabled=True,
-                                hour=2,
-                                minute=15,
+                                interval_minutes=135,
+                                anchor_timestamp=int(
+                                    datetime.fromisoformat("2026-05-27T04:30:00+10:00").timestamp()
+                                ),
                             )
                         }
                     )
@@ -589,8 +619,8 @@ class BotConfigurationTests(unittest.TestCase):
         self.assertIn('"maintenance"', payload)
         self.assertIn('"restart_schedules"', payload)
         self.assertIn('"system"', payload)
-        self.assertIn('"hour": 2', payload)
-        self.assertIn('"minute": 15', payload)
+        self.assertIn('"interval_minutes": 135', payload)
+        self.assertIn('"anchor_timestamp"', payload)
 
     def test_save_bot_configuration_persists_steamcmd_path(self) -> None:
         with TemporaryDirectory() as tmp:

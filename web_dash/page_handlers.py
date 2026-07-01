@@ -5,6 +5,7 @@ from .constants import (
     log,
 )
 from .nicegui_protocols import ModWebUi
+from .links import mod_web_node_system_path
 from .runtime_imports import (
     Awaitable,
     Callable,
@@ -17,9 +18,11 @@ from .runtime_imports import (
     NodeConsoleActionList,
     NodeModList,
     NodeModSummary,
+    NodeRestartScheduleState,
     NodeSaveList,
     NodeSettingList,
     NodeStateStreamEvent,
+    NodeSystemHistory,
     NodeSystemSummary,
     Power_Level,
     Request,
@@ -42,11 +45,11 @@ from .types import (
     ModWebNodeStatus,
     ModWebPageLoadWarning,
     ModWebSevenDaysSandboxOptionsSummary,
-    ModWebTitleStat,
 )
 
 
 PageSection = TypeVar("PageSection")
+_NODE_RECONNECT_PROBE_INTERVAL_SECONDS = 2.0
 
 
 class ModWebPageHandlersMixin(ModWebServiceSupport):
@@ -179,6 +182,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             return fallback
 
     def _on_startup(self) -> None:
+        self._backend.start_background_tasks()
         self._startup_signal.set()
         log.info("Mod web startup event received")
 
@@ -247,7 +251,12 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
 
         return tuple(await asyncio.gather(*(_status(node) for node in nodes)))
 
-    async def _probe_node_status_async(self, node: ModWebNodeLink) -> ModWebNodeStatus:
+    async def _probe_node_status_async(
+        self,
+        node: ModWebNodeLink,
+        *,
+        log_failures: bool = True,
+    ) -> ModWebNodeStatus:
         url = node.latency_probe_url or f"{self._absolute_node_api_base_url(node.api_base_url).rstrip('/')}/ping"
         try:
             session = await self._remote_http_client()
@@ -257,7 +266,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             ) as response:
                 status_code = response.status
         except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
-            if not (self._shutting_down or config.IS_SHUTTINGDOWN):
+            if log_failures and not (self._shutting_down or config.IS_SHUTTINGDOWN):
                 log.warning("Remote mod web login status probe failed: node=%s error=%s", node.node_name, xcp)
             return ModWebNodeStatus(node=node, alive=False, detail=str(xcp))
         return ModWebNodeStatus(node=node, alive=True, detail=f"HTTP {status_code}")
@@ -292,26 +301,77 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             request=request,
         )
 
-    async def _render_node_page(self, *, ui: ModWebUi, node_name: str, request: Request) -> None:
-        user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.user)
+    async def _render_node_system_page(self, *, ui: ModWebUi, node_name: str, request: Request) -> None:
+        user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.sudo)
         if user is None:
             return
+
+        async def _load_system_history(node: ModWebNodeLink) -> NodeSystemHistory:
+            try:
+                return await self._remote_node_system_history_async(node, user)
+            except Exception as xcp:
+                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
+                log_method("Remote mod web node system history unavailable: node=%s error=%s", node.node_name, xcp)
+                return NodeSystemHistory.empty()
+
+        async def _load_restart_schedules(node: ModWebNodeLink) -> NodeRestartScheduleState | None:
+            if not self._user_has_level(user, Power_Level.root):
+                return None
+            try:
+                return await self._remote_restart_schedules_async(node, user)
+            except Exception as xcp:
+                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
+                log_method("Remote restart schedules unavailable: node=%s error=%s", node.node_name, xcp)
+                return None
+
+        node: ModWebNodeLink | None = None
         try:
             node = self._remote_node_link(node_name)
-            app_links = await self._remote_app_links(node, user)
+            system_summary, system_history, app_entries, restart_schedules = await asyncio.gather(
+                self._remote_node_system_summary_async(node, user),
+                _load_system_history(node),
+                self._remote_apps_async(node, user),
+                _load_restart_schedules(node),
+            )
         except Exception as xcp:
-            log.exception("Remote mod web node page render failed: node=%s", node_name)
-            self._render_remote_node_unavailable_page(ui=ui, node_name=node_name, exception=xcp)
-            return
-        system_summary = await self._remote_node_system_summary_or_none_async(
-            node,
-            user,
-            error_context="Remote mod web node system summary failed",
-        )
+            if not self._remote_node_error_is_transient(xcp):
+                log.exception("Remote mod web node system page render failed: node=%s", node_name)
+                self._render_remote_node_unavailable_page(ui=ui, node_name=node_name, exception=xcp)
+                return
+            log.info("Remote mod web node temporarily unavailable: node=%s error=%s", node_name, xcp)
+            retry_url = mod_web_node_system_path(node_name)
+            self._render_remote_node_unavailable_page(
+                ui=ui,
+                node_name=node_name,
+                exception=xcp,
+                retry_url=retry_url,
+            )
+            if node is None:
+                return
+            retry_node = node
+            reconnect_in_progress = False
 
-        async def _refresh_title_stats() -> tuple[ModWebTitleStat, ...]:
-            latest = await self._remote_node_system_summary_async(node, user)
-            return self._build_system_title_stats(latest)
+            async def _reconnect_when_available() -> None:
+                nonlocal reconnect_in_progress
+                if reconnect_in_progress:
+                    return
+                reconnect_in_progress = True
+                try:
+                    status = await self._probe_node_status_async(retry_node, log_failures=False)
+                    if status.alive:
+                        ui.navigate.to(retry_url)
+                finally:
+                    reconnect_in_progress = False
+
+            reconnect_timer = ui.timer(
+                _NODE_RECONNECT_PROBE_INTERVAL_SECONDS,
+                _reconnect_when_available,
+            )
+            self._register_timer_cleanup(ui=ui, timer=reconnect_timer)
+            return
+
+        if node is None:
+            raise RuntimeError("Resolved system node unexpectedly missing after successful page load.")
 
         def subscribe_node_state_updates(
             on_update: Callable[[NodeStateStreamEvent], None],
@@ -322,14 +382,14 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 on_update=on_update,
             )
 
-        self._render_node_apps_page(
+        self._render_node_system_dashboard(
             ui=ui,
             node=node,
-            app_links=app_links,
             user=user,
-            show_api_actions=self._app_list_api_actions_enabled(request),
-            initial_title_stats=self._build_system_title_stats(system_summary),
-            refresh_async_title_stats=_refresh_title_stats,
+            initial_system_summary=system_summary,
+            initial_system_history=system_history,
+            initial_app_entries=app_entries,
+            initial_restart_schedules=restart_schedules,
             subscribe_node_state_updates=subscribe_node_state_updates,
         )
 

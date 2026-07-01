@@ -85,6 +85,39 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-home-section-grid", css)
         self.assertIn(".mod-home-section", css)
         self.assertIn(".mod-home-section-avatar", css)
+        self.assertIn(".mod-stat-section", css)
+        self.assertIn(".mod-stat-section-label", css)
+        self.assertIn(".mod-stat-tone-purple", css)
+        self.assertIn(".mod-stat-tone-red", css)
+        self.assertIn(".mod-stat-line:has(.mod-stat-tone-purple) .mod-stat-line-label", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-hero-shell \.mod-stat-card \{.*?border-color: #2f2f37 !important;",
+        )
+        self.assertIn(".mod-system-schedule-field .q-field__native", css)
+        self.assertIn(".mod-system-schedule-controls", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-schedule-controls \{.*?grid-template-columns: repeat\(6, minmax\(0, 1fr\)\);",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-schedule-field \.q-field__control \{.*?height: 2\.75rem !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-schedule-time input \{.*?color-scheme: dark;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-edge-badge-wrap \{.*?position: absolute !important;.*?inset: -1px auto auto -1px !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-hero-header \{.*?display: grid;.*?grid-template-columns:",
+        )
+        self.assertIn("@container mod-app-hero (max-width: 52rem)", css)
+        self.assertIn("@container mod-app-hero (max-width: 34rem)", css)
         self.assertIn("@media (min-width: 1280px)", css)
         self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr));", css)
         self.assertIn(".mod-app-card-starting::before", css)
@@ -272,7 +305,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-chat-head-meta", css)
         self.assertIn(".mod-chat-badge-row", css)
         self.assertIn("flex-wrap: nowrap !important", css)
+        self.assertIn("@media (min-width: 961px) and (max-width: 1023px)", css)
+        self.assertIn(".mod-user-header-row { flex-wrap: nowrap !important; }", css)
         self.assertIn(".mod-user-header-tray-shell { min-height: 0 !important; }", css)
+        self.assertIn(".mod-user-header-tray-shell:not(:has(.mod-user-header-tray))", css)
         self.assertIn("--mod-setting-secret-cycle-duration", css)
         self.assertIn("--mod-setting-secret-flicker-duration", css)
         self.assertIn("@keyframes mod-setting-secret-cycle-main", css)

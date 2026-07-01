@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-import re
+import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -19,8 +19,10 @@ from restart_targets import RestartTarget, coalesce_restart_targets
 
 log = logging.getLogger(__name__)
 _SCHEDULE_DISABLED_VALUES = frozenset({"", "off", "disabled", "none"})
-_SCHEDULE_TIME_RE = re.compile(r"^(?P<hour>\d{1,2}):(?P<minute>\d{2})$")
 _SYSTEM_WARNING_TARGETS = frozenset({RestartTarget.BOT, RestartTarget.SYSTEM})
+MIN_RESTART_INTERVAL_MINUTES = 60
+MAX_RESTART_INTERVAL_MINUTES = 7 * 24 * 60
+MIN_RESTART_SAVE_LEAD_MINUTES = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +38,7 @@ class MaintenanceService:
 
     def __init__(self) -> None:
         self._bot_configuration_path = self._BOT_CONFIGURATION_PATH
+        self._lock = threading.RLock()
         self._restart_schedules: dict[RestartTarget, config.PersistedRestartSchedule] = {}
         self._restart_warning = config.PersistedRestartWarning()
         self._warning_slots_sent: set[tuple[RestartTarget, str, int]] = set()
@@ -43,66 +46,96 @@ class MaintenanceService:
 
     @property
     def restart_schedules(self) -> Mapping[RestartTarget, config.PersistedRestartSchedule]:
-        return self._restart_schedules
+        with self._lock:
+            return dict(self._restart_schedules)
 
     @property
     def restart_warning(self) -> config.PersistedRestartWarning:
-        return self._restart_warning
+        with self._lock:
+            return self._restart_warning
 
     @property
     def restart_warning_lead_minutes(self) -> int:
-        return self._restart_warning.lead_minutes
+        with self._lock:
+            return self._restart_warning.lead_minutes
 
     def schedule_for(self, target: RestartTarget) -> config.PersistedRestartSchedule:
-        return self._restart_schedules.get(target, config.PersistedRestartSchedule())
+        with self._lock:
+            return self._restart_schedules.get(target, config.PersistedRestartSchedule())
 
     def reload(self) -> bool:
-        try:
-            bot_config = config.load_bot_configuration(self._bot_configuration_path)
-        except (OSError, ValueError) as xcp:
-            log.warning(
-                "Maintenance config read failed path=%s: %s: %s",
-                self._bot_configuration_path,
-                type(xcp).__name__,
-                xcp,
-            )
-            return False
+        with self._lock:
+            try:
+                bot_config = config.load_bot_configuration(self._bot_configuration_path)
+            except (OSError, ValueError) as xcp:
+                log.warning(
+                    "Maintenance config read failed path=%s: %s: %s",
+                    self._bot_configuration_path,
+                    type(xcp).__name__,
+                    xcp,
+                )
+                return False
 
-        self._restart_schedules = {target: bot_config.maintenance.schedule_for(target) for target in RestartTarget}
-        self._restart_warning = bot_config.maintenance.restart_warning
-        return True
+            self._restart_schedules = {target: bot_config.maintenance.schedule_for(target) for target in RestartTarget}
+            self._restart_warning = bot_config.maintenance.restart_warning
+            return True
 
-    def update_restart_schedules(
+    def update_restart_intervals(
         self,
-        schedules: Mapping[RestartTarget, tuple[int, int] | None],
+        schedules: Mapping[RestartTarget, int | None],
+        *,
+        anchor_timestamp: int | None = None,
+        saved_at_timestamp: int | None = None,
     ) -> dict[RestartTarget, config.PersistedRestartSchedule]:
-        bot_config = self._load_bot_configuration()
-        next_schedules = dict(bot_config.maintenance.restart_schedules)
-        for target, schedule_time in schedules.items():
-            current = next_schedules.get(target, config.PersistedRestartSchedule())
-            if schedule_time is None:
-                next_schedules[target] = current.model_copy(update={"enabled": False})
-                continue
-            hour, minute = schedule_time
-            next_schedules[target] = current.model_copy(
-                update={
-                    "enabled": True,
-                    "hour": hour,
-                    "minute": minute,
-                }
-            )
-        bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
-        config.save_bot_configuration(self._bot_configuration_path, bot_config)
-        self.reload()
-        return dict(self._restart_schedules)
+        with self._lock:
+            if any(interval_minutes is not None for interval_minutes in schedules.values()) and anchor_timestamp is None:
+                raise ValueError("Enabled restart schedules require an anchor timestamp.")
+            anchor = anchor_timestamp
+            if anchor is not None:
+                anchor -= anchor % 60
+            saved_at = saved_at_timestamp if saved_at_timestamp is not None else int(datetime.now().timestamp())
+            if saved_at <= 0:
+                raise ValueError("Schedule save time must be positive Unix seconds.")
+            save_cutoff = saved_at + MIN_RESTART_SAVE_LEAD_MINUTES * 60
+            bot_config = self._load_bot_configuration()
+            next_schedules = dict(bot_config.maintenance.restart_schedules)
+            for target, interval_minutes in schedules.items():
+                current = next_schedules.get(target, config.PersistedRestartSchedule())
+                if interval_minutes is None:
+                    next_schedules[target] = current.model_copy(update={"enabled": False})
+                    continue
+                next_schedule = config.PersistedRestartSchedule(
+                    enabled=True,
+                    interval_minutes=interval_minutes,
+                    anchor_timestamp=anchor,
+                    last_triggered_timestamp=None,
+                    skipped_through_timestamp=None,
+                )
+                next_restart = self._next_restart_for_schedule(next_schedule)
+                if next_restart is None:
+                    raise RuntimeError("Enabled restart schedule unexpectedly has no next restart.")
+                next_restart_timestamp = int(next_restart.timestamp())
+                if next_restart_timestamp <= save_cutoff:
+                    interval_seconds = interval_minutes * 60
+                    skipped_intervals = (save_cutoff - next_restart_timestamp) // interval_seconds + 1
+                    skipped_through_timestamp = next_restart_timestamp + (skipped_intervals - 1) * interval_seconds
+                    next_schedule = next_schedule.model_copy(
+                        update={"skipped_through_timestamp": skipped_through_timestamp}
+                    )
+                next_schedules[target] = next_schedule
+            bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
+            config.save_bot_configuration(self._bot_configuration_path, bot_config)
+            self.reload()
+            return dict(self._restart_schedules)
 
     def update_restart_warning_minutes(self, lead_minutes: int) -> int:
-        warning = config.PersistedRestartWarning(lead_minutes=lead_minutes)
-        bot_config = self._load_bot_configuration()
-        bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_warning": warning})
-        config.save_bot_configuration(self._bot_configuration_path, bot_config)
-        self.reload()
-        return self.restart_warning_lead_minutes
+        with self._lock:
+            warning = config.PersistedRestartWarning(lead_minutes=lead_minutes)
+            bot_config = self._load_bot_configuration()
+            bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_warning": warning})
+            config.save_bot_configuration(self._bot_configuration_path, bot_config)
+            self.reload()
+            return self.restart_warning_lead_minutes
 
     def due_restart_targets(
         self,
@@ -111,7 +144,7 @@ class MaintenanceService:
         available_targets: Sequence[RestartTarget],
     ) -> tuple[RestartTarget, ...]:
         local_now = (now or datetime.now().astimezone()).astimezone()
-        return self._scheduled_targets_for_slot(local_now, available_targets=available_targets)
+        return self._targets_due_by(local_now, available_targets=available_targets)
 
     def due_restart_target(
         self,
@@ -131,15 +164,38 @@ class MaintenanceService:
         if not target_list:
             return
 
-        at = (triggered_at or datetime.now().astimezone()).astimezone()
-        bot_config = self._load_bot_configuration()
-        next_schedules = dict(bot_config.maintenance.restart_schedules)
-        for target in target_list:
-            current = next_schedules.get(target, config.PersistedRestartSchedule())
-            next_schedules[target] = current.model_copy(update={"last_triggered_at": at})
-        bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
-        config.save_bot_configuration(self._bot_configuration_path, bot_config)
-        self.reload()
+        with self._lock:
+            at = int((triggered_at or datetime.now().astimezone()).timestamp())
+            bot_config = self._load_bot_configuration()
+            next_schedules = dict(bot_config.maintenance.restart_schedules)
+            for target in target_list:
+                current = next_schedules.get(target, config.PersistedRestartSchedule())
+                next_schedules[target] = current.model_copy(
+                    update={
+                        "last_triggered_timestamp": at,
+                        "skipped_through_timestamp": None,
+                    }
+                )
+            bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
+            config.save_bot_configuration(self._bot_configuration_path, bot_config)
+            self.reload()
+
+    def skip_next_restart(self, target: RestartTarget) -> config.PersistedRestartSchedule:
+        with self._lock:
+            bot_config = self._load_bot_configuration()
+            current = bot_config.maintenance.schedule_for(target)
+            next_restart = self._next_restart_for_schedule(current)
+            if next_restart is None:
+                raise ValueError(f"Restart schedule {target.value!r} is not enabled.")
+            skipped_through_timestamp = int(next_restart.timestamp())
+            next_schedules = dict(bot_config.maintenance.restart_schedules)
+            next_schedules[target] = current.model_copy(
+                update={"skipped_through_timestamp": skipped_through_timestamp}
+            )
+            bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
+            config.save_bot_configuration(self._bot_configuration_path, bot_config)
+            self.reload()
+            return self.schedule_for(target)
 
     def due_restart_warnings(
         self,
@@ -175,31 +231,65 @@ class MaintenanceService:
         return tuple(warnings)
 
     @staticmethod
-    def parse_schedule_text(value: str) -> tuple[int, int] | None:
+    def parse_schedule_text(value: str) -> int | None:
         text = value.strip().lower()
         if text in _SCHEDULE_DISABLED_VALUES:
             return None
-
-        match = _SCHEDULE_TIME_RE.fullmatch(text)
-        if match is None:
-            raise ValueError("Use HH:MM in 24-hour time or 'off'.")
-
-        hour = int(match.group("hour"))
-        minute = int(match.group("minute"))
-        config.PersistedRestartSchedule(enabled=True, hour=hour, minute=minute)
-        return hour, minute
+        try:
+            interval_minutes = int(text)
+        except ValueError as xcp:
+            raise ValueError("Use whole minutes from 60 to 10080, or 'off'.") from xcp
+        if not MIN_RESTART_INTERVAL_MINUTES <= interval_minutes <= MAX_RESTART_INTERVAL_MINUTES:
+            raise ValueError("maintenance restart interval must be between 60 and 10080 minutes.")
+        return interval_minutes
 
     @staticmethod
     def format_schedule_text(schedule: config.PersistedRestartSchedule) -> str:
         if not schedule.enabled:
             return "off"
-        return f"{schedule.hour:02d}:{schedule.minute:02d}"
+        return MaintenanceService.format_interval_minutes(schedule.interval_minutes)
 
     @staticmethod
     def format_schedule_input(schedule: config.PersistedRestartSchedule) -> str:
         if not schedule.enabled:
             return ""
-        return f"{schedule.hour:02d}:{schedule.minute:02d}"
+        return str(schedule.interval_minutes)
+
+    @staticmethod
+    def format_interval_minutes(interval_minutes: int) -> str:
+        days, remaining = divmod(interval_minutes, 24 * 60)
+        hours, minutes = divmod(remaining, 60)
+        parts: list[str] = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        return " ".join(parts) or "0m"
+
+    def next_restart_at(
+        self,
+        target: RestartTarget,
+        *,
+        now: datetime | None = None,
+    ) -> datetime | None:
+        return self._next_restart_for_schedule(self.schedule_for(target))
+
+    @staticmethod
+    def _next_restart_for_schedule(schedule: config.PersistedRestartSchedule) -> datetime | None:
+        if not schedule.enabled or schedule.anchor_timestamp is None:
+            return None
+        if schedule.last_triggered_timestamp is None:
+            next_timestamp = schedule.anchor_timestamp
+        else:
+            next_timestamp = schedule.last_triggered_timestamp + schedule.interval_minutes * 60
+        if (
+            schedule.skipped_through_timestamp is not None
+            and schedule.skipped_through_timestamp >= next_timestamp
+        ):
+            next_timestamp = schedule.skipped_through_timestamp + schedule.interval_minutes * 60
+        return datetime.fromtimestamp(next_timestamp).astimezone()
 
     @staticmethod
     def parse_warning_minutes_text(value: str) -> int:
@@ -283,13 +373,13 @@ class MaintenanceService:
         *,
         now_local: datetime,
     ) -> bool:
-        if schedule.last_triggered_at is None:
+        if schedule.last_triggered_timestamp is None:
             return False
-        last_local = schedule.last_triggered_at.astimezone(now_local.tzinfo)
+        last_local = datetime.fromtimestamp(schedule.last_triggered_timestamp, tz=now_local.tzinfo)
         return (
             last_local.date() == now_local.date()
-            and last_local.hour == schedule.hour
-            and last_local.minute == schedule.minute
+            and last_local.hour == now_local.hour
+            and last_local.minute == now_local.minute
         )
 
     def _load_bot_configuration(self) -> config.BotConfiguration:
@@ -305,12 +395,26 @@ class MaintenanceService:
     ) -> tuple[RestartTarget, ...]:
         due_targets: list[RestartTarget] = []
         for target in available_targets:
+            next_restart = self.next_restart_at(target, now=slot_local)
+            if next_restart is not None and next_restart.replace(second=0, microsecond=0) == slot_local.replace(
+                second=0, microsecond=0
+            ):
+                due_targets.append(target)
+        return tuple(due_targets)
+
+    def _targets_due_by(
+        self,
+        now_local: datetime,
+        *,
+        available_targets: Sequence[RestartTarget],
+    ) -> tuple[RestartTarget, ...]:
+        due_targets: list[RestartTarget] = []
+        for target in available_targets:
             schedule = self.schedule_for(target)
-            if not schedule.enabled:
+            next_restart = self.next_restart_at(target, now=now_local)
+            if next_restart is None or next_restart > now_local:
                 continue
-            if schedule.hour != slot_local.hour or schedule.minute != slot_local.minute:
-                continue
-            if self._was_triggered_for_slot(schedule, now_local=slot_local):
+            if self._was_triggered_for_slot(schedule, now_local=now_local):
                 continue
             due_targets.append(target)
         return tuple(due_targets)

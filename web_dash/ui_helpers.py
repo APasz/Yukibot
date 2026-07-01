@@ -111,18 +111,38 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         extra_classes: str = "",
         tooltip_text: str | None = None,
     ) -> "Element":
+        badge, _value_label = ModWebUiHelpersMixin._badge_icon_parts(
+            ui=ui,
+            text=text,
+            tone=tone,
+            icon=icon,
+            extra_classes=extra_classes,
+            tooltip_text=tooltip_text,
+        )
+        return badge
+
+    @staticmethod
+    def _badge_icon_parts(
+        *,
+        ui: ModWebUi,
+        text: str,
+        tone: BadgeTone,
+        icon: str,
+        extra_classes: str = "",
+        tooltip_text: str | None = None,
+    ) -> tuple["Element", Label]:
         badge = ui.element("span").classes(
             ModWebUiHelpersMixin._badge_class_name(tone=tone, extra_classes=f"mod-badge-icon-label {extra_classes}".strip())
         )
         with badge:
-            ui.label(text).classes("mod-badge-value")
+            value_label = ui.label(text).classes("mod-badge-value")
             ui.icon(icon).classes("mod-badge-icon")
         ModWebUiHelpersMixin._attach_badge_tooltip(
             ui=ui,
             target=badge,
             text=ModWebUiHelpersMixin._resolved_badge_tooltip_text(text=text, tooltip_text=tooltip_text),
         )
-        return badge
+        return badge, value_label
 
     @staticmethod
     def _badge_avatar_markup(*, avatar_uri: str, display_name: str) -> str:

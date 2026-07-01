@@ -933,10 +933,10 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             traffic_log.info("Rendering mod web mods page: app=%s", app_name)
             await self._render_mods_page(ui=ui, app_name=app_name, request=request)
 
-        @ui.page("/mod-web/nodes/{node_name}")
-        async def _node_page(node_name: str, request: Request) -> None:
-            traffic_log.info("Rendering mod web node page: node=%s", node_name)
-            await self._render_node_page(ui=ui, node_name=node_name, request=request)
+        @ui.page("/mod-web/nodes/{node_name}/system")
+        async def _node_system_page(node_name: str, request: Request) -> None:
+            traffic_log.info("Rendering mod web node system page: node=%s", node_name)
+            await self._render_node_system_page(ui=ui, node_name=node_name, request=request)
 
         @ui.page("/mod-web/nodes/{node_name}/mods/{app_name}")
         async def _node_mods_page(node_name: str, app_name: str, request: Request) -> None:

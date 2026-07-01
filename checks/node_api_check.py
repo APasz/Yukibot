@@ -59,6 +59,7 @@ from apps.sevendays import SevenDays, SevenDaysSandboxOption, SevenDaysSandboxOp
 from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore, SatisfactoryServerState
 from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
 from map_annotations import MapAnnotationDraft
+from maintenance import MaintenanceService
 from node_api import (
     NodeApiService,
     NodeAppActivityProviderEntry,
@@ -93,6 +94,7 @@ from node_api import (
     NodeModUploadBatchResult,
     NodeModUploadResult,
     NodeModUploadSource,
+    NodeRestartScheduleState,
     NodeRelayTTSRequest,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -101,6 +103,10 @@ from node_api import (
     NodeSettingList,
     NodeStateStreamEvent,
     NodeStateTopic,
+    NodeSystemAction,
+    NodeSystemDiskSummary,
+    NodeSystemHistory,
+    NodeSystemSample,
     NodeSystemSummary,
     NodeWebChatRequest,
     RemoteRelayTTSForwarder,
@@ -109,6 +115,7 @@ from node_api import (
     required_mod_mutation_level,
 )
 from node_auth import NodeApiScope, verify_node_token
+from restart_targets import RestartTarget
 
 
 class _DummyApp(App[Any]):
@@ -342,6 +349,73 @@ def _setting(
 
 
 class NodeApiTests(unittest.TestCase):
+    @staticmethod
+    def _request() -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/node/apps",
+                "headers": [],
+                "query_string": b"",
+                "scheme": "http",
+                "server": ("testserver", 80),
+                "client": ("testclient", 50000),
+            }
+        )
+
+    def test_node_api_fails_closed_when_authentication_is_not_configured(self) -> None:
+        server = replace(config.MOD_WEB_SERVER, token_secret=None)
+        with (
+            patch.object(config, "MOD_WEB_SERVER", server),
+            patch.object(config, "INDEV", False),
+            patch.object(config, "ALLOW_UNAUTH_NODE_API", False),
+            self.assertRaisesRegex(
+                HTTPException,
+                "Node API authentication is not configured",
+            ) as raised,
+        ):
+            NodeApiService()._require_access(
+                self._request(),
+                None,
+                app_name=None,
+                scopes=(NodeApiScope.APPS_READ,),
+            )
+
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_node_api_allows_unauthenticated_access_in_development(self) -> None:
+        server = replace(config.MOD_WEB_SERVER, token_secret=None)
+        with (
+            patch.object(config, "MOD_WEB_SERVER", server),
+            patch.object(config, "INDEV", True),
+            patch.object(config, "ALLOW_UNAUTH_NODE_API", False),
+        ):
+            grant = NodeApiService()._require_access(
+                self._request(),
+                None,
+                app_name=None,
+                scopes=(NodeApiScope.APPS_READ,),
+            )
+
+        self.assertIsNone(grant)
+
+    def test_node_api_allows_explicit_unauthenticated_access(self) -> None:
+        server = replace(config.MOD_WEB_SERVER, token_secret=None)
+        with (
+            patch.object(config, "MOD_WEB_SERVER", server),
+            patch.object(config, "INDEV", False),
+            patch.object(config, "ALLOW_UNAUTH_NODE_API", True),
+        ):
+            grant = NodeApiService()._require_access(
+                self._request(),
+                None,
+                app_name=None,
+                scopes=(NodeApiScope.APPS_READ,),
+            )
+
+        self.assertIsNone(grant)
+
     def test_app_color_hex_formats_embed_color(self) -> None:
         self.assertEqual(NodeApiService.app_color_hex(0x22C55E), "#22C55E")
         self.assertIsNone(NodeApiService.app_color_hex(None))
@@ -4445,6 +4519,8 @@ class NodeApiTests(unittest.TestCase):
 
     def test_build_system_summary_uses_primary_disk(self) -> None:
         fake_primary_disk = SimpleNamespace(
+            mountpoint_text="/",
+            display_name="System",
             percent=55,
             free_bytes=100 * 1024**3,
             total_bytes=200 * 1024**3,
@@ -4452,10 +4528,12 @@ class NodeApiTests(unittest.TestCase):
         fake_stats = Mock()
         fake_stats.system_snapshot.return_value = SimpleNamespace(
             cpu_percent=22,
+            cpu_per_core_percent=(11, 33),
             ram_percent=44,
             ram_used_bytes=8 * 1024**3,
             ram_total_bytes=16 * 1024**3,
             primary_disk=fake_primary_disk,
+            disks=(fake_primary_disk,),
         )
 
         with (
@@ -4477,20 +4555,171 @@ class NodeApiTests(unittest.TestCase):
                 storage_percent=55,
                 storage_free_bytes=100 * 1024**3,
                 storage_total_bytes=200 * 1024**3,
+                cpu_per_core_percent=(11, 33),
+                disks=(
+                    NodeSystemDiskSummary(
+                        mountpoint="/",
+                        label="System",
+                        percent=55,
+                        free_bytes=100 * 1024**3,
+                        total_bytes=200 * 1024**3,
+                    ),
+                ),
                 bot_uptime_seconds=900,
                 uptime_seconds=3_600,
                 running_names=(),
+                captured_at_epoch_seconds=10_000,
             ),
         )
+
+    def test_system_history_round_trip_preserves_typed_samples(self) -> None:
+        history = NodeSystemHistory(
+            retention_seconds=3600,
+            sample_interval_seconds=10,
+            samples=(
+                NodeSystemSample(
+                    captured_at_epoch_seconds=100,
+                    cpu_percent=20,
+                    ram_percent=30,
+                    storage_percent=40,
+                ),
+            ),
+        )
+
+        self.assertEqual(NodeSystemHistory.from_mapping(history.to_mapping()), history)
+
+    def test_schedule_system_action_requires_root_and_dispatches_once(self) -> None:
+        async def exercise() -> None:
+            service = NodeApiService()
+            acl = AsyncMock()
+            handler = Mock()
+            service.set_acl(cast(Access_Control, acl))
+            service.set_system_action_handler(handler)
+            loop = asyncio.get_running_loop()
+            with patch.object(loop, "call_later") as call_later:
+                result = await service.schedule_system_action(
+                    action=NodeSystemAction.RESTART_PROCESS,
+                    auto_restart_running_apps=False,
+                    actor_user_id=42,
+                )
+
+            acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+            self.assertEqual(result.action, NodeSystemAction.RESTART_PROCESS)
+            dispatch = call_later.call_args.args[1]
+            dispatch()
+            handler.assert_called_once_with(NodeSystemAction.RESTART_PROCESS, False)
+
+            with self.assertRaises(HTTPException) as raised:
+                await service.schedule_system_action(
+                    action=NodeSystemAction.REBOOT_HOST,
+                    auto_restart_running_apps=True,
+                    actor_user_id=42,
+                )
+            self.assertEqual(raised.exception.status_code, 409)
+
+        asyncio.run(exercise())
+
+    def test_schedule_portal_action_is_available_on_yuki(self) -> None:
+        async def exercise() -> None:
+            service = NodeApiService()
+            acl = AsyncMock()
+            handler = Mock()
+            service.set_acl(cast(Access_Control, acl))
+            service.set_system_action_handler(handler)
+            loop = asyncio.get_running_loop()
+            with patch.object(loop, "call_later") as call_later:
+                result = await service.schedule_system_action(
+                    action=NodeSystemAction.RESTART_PORTAL,
+                    auto_restart_running_apps=True,
+                    actor_user_id=42,
+                )
+
+            self.assertEqual(result.message, f"Scheduled Portal restart for {service.node_name}.")
+            call_later.call_args.args[1]()
+            handler.assert_called_once_with(NodeSystemAction.RESTART_PORTAL, True)
+            self.assertIsNone(service._pending_system_action)  # type: ignore[attr-defined]
+
+        asyncio.run(exercise())
+
+    def test_restart_schedule_state_round_trip_and_root_update(self) -> None:
+        async def exercise() -> None:
+            with TemporaryDirectory() as temp_dir:
+                config_path = Path(temp_dir) / "configuration.json"
+                with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+                    maintenance = MaintenanceService()
+                    maintenance.update_restart_intervals(
+                        {RestartTarget.BOT: 90},
+                        anchor_timestamp=int(datetime.fromisoformat("2026-07-01T10:00:00+10:00").timestamp()),
+                        saved_at_timestamp=int(datetime.fromisoformat("2026-07-01T08:00:00+10:00").timestamp()),
+                    )
+                    service = NodeApiService()
+                    acl = AsyncMock()
+                    service.set_acl(cast(Access_Control, acl))
+                    service.set_maintenance_service(
+                        maintenance,
+                        (RestartTarget.BOT, RestartTarget.SYSTEM),
+                    )
+
+                    state = service.read_restart_schedules()
+                    self.assertEqual(NodeRestartScheduleState.from_mapping(state.to_mapping()), state)
+                    self.assertEqual([entry.target for entry in state.schedules], [RestartTarget.BOT, RestartTarget.SYSTEM])
+                    self.assertTrue(state.schedules[0].enabled)
+                    self.assertEqual(state.schedules[0].interval_minutes, 90)
+
+                    updated = await service.update_restart_schedule(
+                        target=RestartTarget.SYSTEM,
+                        interval_minutes=7 * 24 * 60,
+                        anchor_timestamp=int(datetime.fromisoformat("2026-07-02T10:00:00+10:00").timestamp()),
+                        actor_user_id=42,
+                    )
+
+                    acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+                    system_schedule = next(entry for entry in updated.schedules if entry.target is RestartTarget.SYSTEM)
+                    self.assertTrue(system_schedule.enabled)
+                    self.assertEqual(system_schedule.interval_minutes, 7 * 24 * 60)
+
+        asyncio.run(exercise())
+
+    def test_skip_restart_schedule_requires_root_and_advances_next_restart(self) -> None:
+        async def exercise() -> None:
+            with TemporaryDirectory() as temp_dir:
+                config_path = Path(temp_dir) / "configuration.json"
+                with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+                    maintenance = MaintenanceService()
+                    anchor_timestamp = int(datetime.fromisoformat("2026-07-01T10:00:00+10:00").timestamp())
+                    maintenance.update_restart_intervals(
+                        {RestartTarget.BOT: 90},
+                        anchor_timestamp=anchor_timestamp,
+                        saved_at_timestamp=int(datetime.fromisoformat("2026-07-01T08:00:00+10:00").timestamp()),
+                    )
+                    service = NodeApiService()
+                    acl = AsyncMock()
+                    service.set_acl(cast(Access_Control, acl))
+                    service.set_maintenance_service(maintenance, (RestartTarget.BOT,))
+
+                    updated = await service.skip_restart_schedule(
+                        target=RestartTarget.BOT,
+                        actor_user_id=42,
+                    )
+
+                    acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+                    entry = updated.schedules[0]
+                    self.assertEqual(entry.skipped_through_timestamp, anchor_timestamp)
+                    self.assertEqual(entry.next_restart_timestamp, anchor_timestamp + 90 * 60)
+                    self.assertEqual(NodeRestartScheduleState.from_mapping(updated.to_mapping()), updated)
+
+        asyncio.run(exercise())
 
     def test_build_system_summary_lists_running_app_names(self) -> None:
         fake_stats = Mock()
         fake_stats.system_snapshot.return_value = SimpleNamespace(
             cpu_percent=12,
+            cpu_per_core_percent=(10, 14),
             ram_percent=30,
             ram_used_bytes=2 * 1024**3,
             ram_total_bytes=8 * 1024**3,
             primary_disk=None,
+            disks=(),
         )
         service = NodeApiService()
         service.set_manager(

@@ -5,6 +5,7 @@ import os
 import signal
 import traceback
 from contextlib import suppress
+from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Protocol
 import hikari
 import hikariwave
 import lightbulb
+import requests
 
 import _sys
 import config
@@ -36,7 +38,7 @@ from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, Voice
 from config import Activity_Provider, Name_Cache
 from font_assets import font_assets
 from maintenance import MaintenanceService
-from node_api import RemoteRelayTTSForwarder
+from node_api import NodeSystemAction, RemoteRelayTTSForwarder
 from node_api_http import NodeApiHttpService
 from online import Online_Tracker
 from relay_notices import (
@@ -345,7 +347,21 @@ async def _run_portal() -> None:
     def _schedule_restart() -> None:
         loop.call_soon_threadsafe(_request_restart)
 
+    def _schedule_system_action(action: NodeSystemAction, auto_restart_running_apps: bool) -> None:
+        del auto_restart_running_apps
+        if action is NodeSystemAction.RESTART_PROCESS:
+            _schedule_restart()
+            return
+
+        async def _reboot_portal_host() -> None:
+            log.critical("Rebooting portal host from web dashboard")
+            mod_web.begin_shutdown()
+            await asyncio.to_thread(_sys.reboot_host)
+
+        asyncio.run_coroutine_threadsafe(_reboot_portal_host(), loop)
+
     mod_web.set_process_restart_handler(_schedule_restart)
+    mod_web.set_system_action_handler(_schedule_system_action)
     await mod_web.start(acl=acl)
 
     refresh_task: asyncio.Task[None] | None = None
@@ -444,6 +460,56 @@ def main():
     resolutator = Resolutator(bot)
     authority_server = AuthorityServer(name_cache)
     node_api_server = NodeApiHttpService()
+    bot_runtime_loop: asyncio.AbstractEventLoop | None = None
+
+    def _schedule_node_system_action(action: NodeSystemAction, auto_restart_running_apps: bool) -> None:
+        runtime_loop = bot_runtime_loop
+        if runtime_loop is None:
+            raise RuntimeError("Bot runtime loop is not available for node system actions.")
+
+        async def _execute_node_system_action() -> None:
+            if action is NodeSystemAction.RESTART_PORTAL:
+                log.critical("Executing web dashboard Portal restart")
+                await _sys.request_portal_process_restart(subject="web:yuki-system-action")
+                return
+            auto_start_apps = _sys.configure_restart_auto_start_apps(
+                app_manager,
+                enabled=auto_restart_running_apps,
+            )
+            restart_type = "system" if action is NodeSystemAction.REBOOT_HOST else "bot"
+            log.critical(
+                "Executing web dashboard node system action: action=%s auto_restart_running_apps=%s "
+                "auto_start_apps=%s",
+                action.value,
+                auto_restart_running_apps,
+                ",".join(auto_start_apps) if auto_start_apps else "none",
+            )
+            await _sys.scheduled_restart(
+                bot=bot,
+                manager=app_manager,
+                restart_type=restart_type,
+                reason=f"Web dashboard requested {action.value}.",
+                message_channel_id=None,
+                suppress_notifications=True,
+            )
+
+        future = asyncio.run_coroutine_threadsafe(_execute_node_system_action(), runtime_loop)
+
+        def _log_system_action_failure(completed: ConcurrentFuture[None]) -> None:
+            try:
+                completed.result()
+            except SystemExit:
+                return
+            except BaseException:
+                log.exception("Web dashboard node system action failed: action=%s", action.value)
+
+        future.add_done_callback(_log_system_action_failure)
+
+    node_api_server.set_system_action_handler(_schedule_node_system_action)
+    node_api_server.set_maintenance_service(
+        maintenance,
+        available_maintenance_restart_targets(profile),
+    )
     registry = client.di.registry_for(lightbulb.di.Contexts.DEFAULT)
     acl = Access_Control()
     registry.register_value(Access_Control, acl)
@@ -536,6 +602,8 @@ def main():
 
     @bot.listen(hikari.StartingEvent)
     async def on_starting(event: hikari.StartingEvent):
+        nonlocal bot_runtime_loop
+        bot_runtime_loop = asyncio.get_running_loop()
         log.info("Starting")
         try:
             await client.start()
@@ -740,20 +808,40 @@ def main():
         if not due_targets:
             return
 
-        effective_target = maintenance.due_restart_target(now=now, available_targets=available_targets)
+        if RestartTarget.PORTAL in due_targets:
+            portal_scheduled_for = maintenance.next_restart_at(RestartTarget.PORTAL, now=now)
+            try:
+                await _sys.request_portal_process_restart(subject="maintenance:yuki")
+            except (RuntimeError, requests.RequestException):
+                log.exception(
+                    "Scheduled Portal restart request failed; it will be retried at the next maintenance check"
+                )
+            else:
+                maintenance.mark_triggered((RestartTarget.PORTAL,), triggered_at=now)
+                log.critical(
+                    "Maintenance.Restart; effective=portal due=portal interval=%sm slot=%s",
+                    maintenance.schedule_for(RestartTarget.PORTAL).interval_minutes,
+                    (portal_scheduled_for or now.replace(second=0, microsecond=0)).isoformat(),
+                )
+
+        local_due_targets = tuple(target for target in due_targets if target is not RestartTarget.PORTAL)
+        if not local_due_targets:
+            return
+
+        effective_target = maintenance.due_restart_target(now=now, available_targets=local_due_targets)
         if effective_target is None:
             return
 
-        maintenance.mark_triggered(due_targets, triggered_at=now)
+        scheduled_for = maintenance.next_restart_at(effective_target, now=now) or now.replace(second=0, microsecond=0)
+        maintenance.mark_triggered(local_due_targets, triggered_at=now)
         schedule = maintenance.schedule_for(effective_target)
-        due_names = ", ".join(target.value for target in due_targets)
-        scheduled_for = now.replace(hour=schedule.hour, minute=schedule.minute, second=0, microsecond=0)
+        due_names = ", ".join(target.value for target in local_due_targets)
         log.critical(
-            "Maintenance.Restart; effective=%s due=%s slot=%02d:%02d",
+            "Maintenance.Restart; effective=%s due=%s interval=%sm slot=%s",
             effective_target.value,
             due_names,
-            schedule.hour,
-            schedule.minute,
+            schedule.interval_minutes,
+            scheduled_for.isoformat(),
         )
 
         if effective_target is RestartTarget.VOICE:
@@ -763,7 +851,7 @@ def main():
             await reset_voice_runtime_services(voice_tts, music)
             completion_notice = maintenance.build_restart_completed_notice(
                 effective_target=effective_target,
-                matched_targets=due_targets,
+                matched_targets=local_due_targets,
                 scheduled_for=scheduled_for,
             )
             await _post_started_channel_notice(bot, completion_notice, error_context="MAINTENANCE COMPLETE MESSAGE")
@@ -771,7 +859,7 @@ def main():
 
         restart_notice = maintenance.build_restart_executing_notice(
             effective_target=effective_target,
-            matched_targets=due_targets,
+            matched_targets=local_due_targets,
             scheduled_for=scheduled_for,
         )
         await _sys.scheduled_restart(

@@ -97,6 +97,7 @@ from node_api import (
     NodeModMutationResult,
     NodeModSummary,
     NodeModUploadBatchResult,
+    NodeRestartScheduleState,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveRootEntry,
@@ -104,6 +105,10 @@ from node_api import (
     NodeSettingEntry,
     NodeSettingList,
     NodeStateStreamEvent,
+    NodeSystemDiskSummary,
+    NodeSystemHistory,
+    NodeSystemAction,
+    NodeSystemSample,
     NodeSystemSummary,
 )
 from node_auth import NodeApiScope, verify_node_token
@@ -131,7 +136,14 @@ from web_dash.app_page import (
 from web_dash.assets import AssetContentEncoding, CacheableTextAsset, extract_html_tag_contents
 from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS
-from web_dash.links import current_node_app_url
+from web_dash.home import (
+    _RestartWeekday,
+    _format_restart_timestamp,
+    _restart_anchor_timestamp,
+    _restart_interval_from_parts,
+    _restart_interval_parts,
+)
+from web_dash.links import current_node_app_url, mod_web_node_system_path
 from web_dash.models import _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
 from web_dash.nicegui_protocols import ModWebUi
 from web_dash.service import ModWebService
@@ -1501,6 +1513,50 @@ class ModWebTests(unittest.TestCase):
             method="DELETE",
         )
 
+    def test_remote_node_system_action_sends_auto_restart_option(self) -> None:
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        payload = {
+            "node": "erin",
+            "action": NodeSystemAction.REBOOT_HOST.value,
+            "message": "Scheduled host reboot for erin.",
+        }
+
+        with patch.object(
+            ModWebService,
+            "_remote_json_async",
+            new=AsyncMock(return_value=payload),
+        ) as remote_json:
+            result = asyncio.run(
+                ModWebService()._remote_node_system_action_async(
+                    node,
+                    NodeSystemAction.REBOOT_HOST,
+                    False,
+                    user,
+                )
+            )
+
+        self.assertEqual(result.action, NodeSystemAction.REBOOT_HOST)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name=None,
+            path="/system/actions",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "action": NodeSystemAction.REBOOT_HOST.value,
+                "auto_restart_running_apps": False,
+            },
+        )
+
     def test_login_node_status_badge_marks_current_node_alive(self) -> None:
         status = ModWebNodeStatus(
             node=ModWebNodeLink(
@@ -1575,6 +1631,23 @@ class ModWebTests(unittest.TestCase):
                 storage_percent=55,
                 storage_free_bytes=100 * 1024**3,
                 storage_total_bytes=200 * 1024**3,
+                cpu_per_core_percent=(20, 42),
+                disks=(
+                    NodeSystemDiskSummary(
+                        mountpoint="/",
+                        label="System",
+                        percent=55,
+                        free_bytes=100 * 1024**3,
+                        total_bytes=200 * 1024**3,
+                    ),
+                    NodeSystemDiskSummary(
+                        mountpoint="/mnt/data",
+                        label="Data",
+                        percent=65,
+                        free_bytes=350 * 1024**3,
+                        total_bytes=1000 * 1024**3,
+                    ),
+                ),
             )
         )
 
@@ -1589,6 +1662,383 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(title_stats[0].value, "31%")
         self.assertIn("8.0GiB / 16.0GiB", title_stats[1].value)
         self.assertIn("100.0GiB / 200.0GiB", title_stats[2].value)
+
+    def test_node_system_path_quotes_node_name(self) -> None:
+        self.assertEqual(mod_web_node_system_path("node alpha"), "/mod-web/nodes/node%20alpha/system")
+
+    def test_node_system_scope_badges_deduplicate_installed_app_scopes(self) -> None:
+        entries = (
+            NodeAppEntry(
+                name="factorio_lab",
+                friendly="Factorio Lab",
+                node="erin",
+                running=True,
+                enabled=True,
+                supports_mods=True,
+                supports_configs=True,
+            ),
+            NodeAppEntry(
+                name="minecraft_alpha",
+                friendly="Minecraft Alpha",
+                node="erin",
+                running=False,
+                enabled=False,
+                supports_mods=True,
+                supports_configs=True,
+            ),
+            NodeAppEntry(
+                name="minecraft_beta",
+                friendly="Minecraft Beta",
+                node="erin",
+                running=True,
+                enabled=True,
+                supports_mods=True,
+                supports_configs=True,
+            ),
+            NodeAppEntry(
+                name="custom_worker",
+                friendly="Custom Worker",
+                node="erin",
+                running=False,
+                enabled=True,
+                supports_mods=False,
+                supports_configs=False,
+                scope="custom_scope",
+            ),
+        )
+
+        badges = ModWebService._node_system_scope_badges(entries)
+
+        self.assertEqual(
+            [(badge.text, badge.tone) for badge in badges],
+            [("Minecraft", "purple"), ("Factorio", "purple"), ("Custom Scope", "grey")],
+        )
+
+    def test_node_system_uptime_badges_show_system_and_bot_uptimes(self) -> None:
+        badges = ModWebService._node_system_uptime_badges(
+            NodeSystemSummary(
+                cpu_percent=None,
+                ram_percent=None,
+                ram_used_bytes=None,
+                ram_total_bytes=None,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                bot_uptime_seconds=3661,
+                uptime_seconds=90061,
+            )
+        )
+
+        self.assertEqual(
+            badges,
+            (
+                _ModWebBadgeSpec(text="1d 1h 1m", tone="black", icon="dns", tooltip_text="System uptime"),
+                _ModWebBadgeSpec(text="1h 1m", tone="black", icon="smart_toy", tooltip_text="Yukibot uptime"),
+            ),
+        )
+
+    def test_node_system_operational_badges_match_app_hero_edge_order(self) -> None:
+        badges = ModWebService._node_system_operational_badges(
+            NodeSystemSummary(
+                cpu_percent=None,
+                ram_percent=None,
+                ram_used_bytes=None,
+                ram_total_bytes=None,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                bot_uptime_seconds=3661,
+                uptime_seconds=90061,
+                cpu_points_available=6,
+                cpu_points_capacity=12,
+                ram_points_available=2,
+                ram_points_capacity=8,
+            )
+        )
+
+        self.assertEqual(
+            [(badge.text, badge.icon, badge.tooltip_text) for badge in badges],
+            [
+                ("1d 1h 1m", "dns", "System uptime"),
+                ("1h 1m", "smart_toy", "Yukibot uptime"),
+                ("6/12", "speed", "CPU"),
+                ("2/8", "memory", "RAM"),
+            ],
+        )
+
+    def test_build_node_system_stats_formats_live_summary(self) -> None:
+        stats = ModWebService._build_node_system_stats(
+            NodeSystemSummary(
+                cpu_percent=31,
+                ram_percent=44,
+                ram_used_bytes=8 * 1024**3,
+                ram_total_bytes=16 * 1024**3,
+                storage_percent=55,
+                storage_free_bytes=100 * 1024**3,
+                storage_total_bytes=200 * 1024**3,
+                cpu_per_core_percent=(20, 42),
+                disks=(
+                    NodeSystemDiskSummary(
+                        mountpoint="/",
+                        label="System",
+                        percent=55,
+                        free_bytes=100 * 1024**3,
+                        total_bytes=200 * 1024**3,
+                    ),
+                    NodeSystemDiskSummary(
+                        mountpoint="/mnt/data",
+                        label="Data",
+                        percent=65,
+                        free_bytes=350 * 1024**3,
+                        total_bytes=1000 * 1024**3,
+                    ),
+                ),
+                bot_uptime_seconds=3661,
+                uptime_seconds=90061,
+                cpu_points_available=3,
+                cpu_points_capacity=8,
+                ram_points_available=5,
+                ram_points_capacity=12,
+                running_names=("Factorio Lab", "Minecraft Alpha"),
+            )
+        )
+
+        self.assertEqual(
+            [stat.label for stat in stats],
+            ["CPU", "RAM & Storage"],
+        )
+        self.assertEqual([stat.tone for stat in stats], ["black", "black"])
+        self.assertTrue(stats[0].show_label)
+        self.assertFalse(stats[1].show_label)
+        self.assertEqual(
+            [(line.label, line.value) for line in stats[0].lines],
+            [("Total", "31%"), ("Core 1", "20%"), ("Core 2", "42%")],
+        )
+        self.assertEqual([line.tone for line in stats[0].lines], ["grey", "grey", "purple"])
+        self.assertEqual(
+            [(line.label, line.is_section) for line in stats[1].lines],
+            [("RAM", True), ("Storage", True), ("System", False), ("Data", False)],
+        )
+        self.assertEqual(stats[1].lines[0].value, "44% · 8.0GiB / 16.0GiB")
+        self.assertEqual(stats[1].lines[1].value, "2 configured disks")
+        self.assertEqual(
+            [line.tone for line in stats[1].lines],
+            ["purple", None, "purple", "purple"],
+        )
+
+    def test_node_bot_avatar_markup_supports_system_hero_class(self) -> None:
+        service = ModWebService()
+        with patch.object(service, "_node_bot_avatar_uri", return_value="https://cdn.example.com/yuki.png"):
+            markup = service._node_bot_avatar_markup(
+                node_name="yuki",
+                display_name="Yuki",
+                extra_class="mod-system-hero-avatar",
+            )
+
+        self.assertIn('class="mod-user-avatar mod-system-hero-avatar"', markup)
+        self.assertIn('alt="Yuki bot avatar"', markup)
+
+    def test_restart_interval_controls_round_trip_minute_precision(self) -> None:
+        self.assertEqual(_restart_interval_parts(3_077), (2, 3, 17))
+        self.assertEqual(_restart_interval_from_parts(days=2, hours=3, minutes=17), 3_077)
+        with self.assertRaisesRegex(ValueError, "between 1 hour and 1 week"):
+            _restart_interval_from_parts(days=0, hours=0, minutes=59)
+
+    def test_restart_anchor_and_display_use_named_timezones(self) -> None:
+        timestamp = _restart_anchor_timestamp(
+            _RestartWeekday.WEDNESDAY,
+            "12:30",
+            "UTC",
+            now_timestamp=1_782_820_800,
+        )
+
+        self.assertEqual(timestamp, 1_782_909_000)
+        self.assertEqual(
+            _format_restart_timestamp(timestamp, "Australia/Melbourne"),
+            "Wed, 01 Jul 2026 · 22:30 AEST",
+        )
+
+    def test_restart_anchor_rejects_nonexistent_dst_time(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            _restart_anchor_timestamp(
+                _RestartWeekday.SUNDAY,
+                "02:30",
+                "Australia/Melbourne",
+                now_timestamp=1_790_776_800,
+            )
+
+    def test_restart_anchor_uses_next_week_when_day_time_has_passed(self) -> None:
+        timestamp = _restart_anchor_timestamp(
+            _RestartWeekday.WEDNESDAY,
+            "11:30",
+            "UTC",
+            now_timestamp=1_782_909_000,
+        )
+
+        self.assertEqual(timestamp, 1_783_510_200)
+
+    def test_node_system_history_appends_by_sample_interval_and_renders_svg(self) -> None:
+        history = NodeSystemHistory(
+            retention_seconds=3600,
+            sample_interval_seconds=10,
+            samples=(
+                NodeSystemSample(
+                    captured_at_epoch_seconds=100,
+                    cpu_percent=20,
+                    ram_percent=30,
+                    storage_percent=40,
+                ),
+            ),
+        )
+        updated = ModWebService._append_node_system_history(
+            history,
+            NodeSystemSummary(
+                cpu_percent=25,
+                ram_percent=35,
+                ram_used_bytes=None,
+                ram_total_bytes=None,
+                storage_percent=45,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+                captured_at_epoch_seconds=110,
+            ),
+        )
+
+        self.assertEqual(len(updated.samples), 2)
+        markup = ModWebService._node_system_history_svg(updated)
+        self.assertIn('aria-label="CPU, RAM, and storage usage over the last hour"', markup)
+        self.assertIn("#a78bfa", markup)
+        self.assertIn("#38bdf8", markup)
+
+    def test_render_node_system_page_requires_sudo_and_builds_live_page(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            summary = NodeSystemSummary(
+                cpu_percent=20,
+                ram_percent=30,
+                ram_used_bytes=3,
+                ram_total_bytes=10,
+                storage_percent=40,
+                storage_free_bytes=6,
+                storage_total_bytes=10,
+            )
+            authorised_user = AsyncMock(return_value=user)
+            render_dashboard = Mock()
+            history = NodeSystemHistory.empty()
+            restart_schedules = NodeRestartScheduleState(node="erin", schedules=())
+            ui = cast(ModWebUi, cast(object, SimpleNamespace()))
+            request = cast(Any, SimpleNamespace())
+            with (
+                patch.object(service, "_authorised_page_user", new=authorised_user),
+                patch.object(service, "_remote_node_link", return_value=node),
+                patch.object(service, "_remote_node_system_summary_async", new=AsyncMock(return_value=summary)),
+                patch.object(service, "_remote_node_system_history_async", new=AsyncMock(return_value=history)),
+                patch.object(service, "_remote_apps_async", new=AsyncMock(return_value=())),
+                patch.object(service, "_user_has_level", return_value=True),
+                patch.object(
+                    service,
+                    "_remote_restart_schedules_async",
+                    new=AsyncMock(return_value=restart_schedules),
+                ),
+                patch.object(service, "_render_node_system_dashboard", new=render_dashboard),
+            ):
+                await service._render_node_system_page(
+                    ui=ui,
+                    node_name="erin",
+                    request=request,
+                )
+
+            authorised_user.assert_awaited_once_with(
+                ui=ui,
+                request=request,
+                required_level=Power_Level.sudo,
+            )
+            self.assertEqual(render_dashboard.call_args.kwargs["node"], node)
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_system_summary"], summary)
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_system_history"], history)
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_app_entries"], ())
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_restart_schedules"], restart_schedules)
+
+        asyncio.run(exercise())
+
+    def test_render_node_system_page_reconnects_after_transient_node_restart(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="erin",
+                label="Erin",
+                url="/mod-web/nodes/erin",
+                api_base_url="https://erin.example/api/node",
+                api_url="/api/node-proxy/erin/apps",
+                is_current=False,
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            connection_error = RuntimeError("Remote node request failed")
+            connection_error.__cause__ = aiohttp.ClientConnectionError("node restarting")
+            timer = object()
+            navigate_to = Mock()
+            timer_factory = Mock(return_value=timer)
+            ui = cast(
+                ModWebUi,
+                cast(object, SimpleNamespace(timer=timer_factory, navigate=SimpleNamespace(to=navigate_to))),
+            )
+            request = cast(Any, SimpleNamespace())
+            render_unavailable = Mock()
+            register_timer_cleanup = Mock()
+            with (
+                patch.object(service, "_authorised_page_user", new=AsyncMock(return_value=user)),
+                patch.object(service, "_remote_node_link", return_value=node),
+                patch.object(
+                    service,
+                    "_remote_node_system_summary_async",
+                    new=AsyncMock(side_effect=connection_error),
+                ),
+                patch.object(service, "_remote_node_system_history_async", new=AsyncMock(side_effect=connection_error)),
+                patch.object(service, "_remote_apps_async", new=AsyncMock(side_effect=connection_error)),
+                patch.object(service, "_user_has_level", return_value=False),
+                patch.object(service, "_render_remote_node_unavailable_page", new=render_unavailable),
+                patch.object(
+                    service,
+                    "_probe_node_status_async",
+                    new=AsyncMock(return_value=ModWebNodeStatus(node=node, alive=True, detail="HTTP 204")),
+                ) as probe,
+                patch.object(service, "_register_timer_cleanup", new=register_timer_cleanup),
+            ):
+                await service._render_node_system_page(ui=ui, node_name="erin", request=request)
+                reconnect = timer_factory.call_args.args[1]
+                await reconnect()
+
+            render_unavailable.assert_called_once_with(
+                ui=ui,
+                node_name="erin",
+                exception=connection_error,
+                retry_url="/mod-web/nodes/erin/system",
+            )
+            probe.assert_awaited_once_with(node, log_failures=False)
+            navigate_to.assert_called_once_with("/mod-web/nodes/erin/system")
+            register_timer_cleanup.assert_called_once_with(ui=ui, timer=timer)
+
+        asyncio.run(exercise())
+
+    def test_remote_node_connection_errors_are_transient(self) -> None:
+        wrapped = RuntimeError("Remote node request failed")
+        wrapped.__cause__ = aiohttp.ClientConnectionError("node restarting")
+
+        self.assertTrue(ModWebService._remote_node_error_is_transient(wrapped))
+        self.assertEqual(
+            ModWebService._friendly_remote_node_error_text(wrapped),
+            "This node is unreachable right now. It may be offline or still waking up.",
+        )
+        self.assertFalse(ModWebService._remote_node_error_is_transient(ValueError("invalid payload")))
 
     def test_format_uptime_seconds_compacts_duration(self) -> None:
         self.assertEqual(ModWebService._format_uptime_seconds(59), "<1m")
@@ -2197,10 +2647,10 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual([link.node_name for link in links], ["yuki", "erin"])
         self.assertEqual(links[0].label, "Yuki")
         self.assertTrue(links[0].is_current)
-        self.assertEqual(links[0].url, "/mod-web/nodes/yuki")
+        self.assertEqual(links[0].url, "/mod-web/nodes/yuki/system")
         self.assertEqual(links[0].latency_probe_url, "http://yuki.example:3180/api/node/ping")
         self.assertEqual(links[0].presence_stream_url, "http://yuki.example:3180/api/node/presence/stream")
-        self.assertEqual(links[1].url, "/mod-web/nodes/erin")
+        self.assertEqual(links[1].url, "/mod-web/nodes/erin/system")
         self.assertEqual(links[1].api_base_url, "http://erin.example:3180/api/node")
         self.assertEqual(links[1].api_url, "/api/node-proxy/erin/apps")
         self.assertEqual(links[1].latency_probe_url, "http://erin.example:3180/api/node/ping")
@@ -3298,103 +3748,6 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("icon:memory", [element.kind for element in ui.elements])
         self.assertEqual(len(ui.html_fragments), 1)
         self.assertIn('class="mod-user-avatar mod-home-section-avatar"', ui.html_fragments[0])
-
-    def test_render_node_apps_page_disables_title_stat_polling_when_live_node_updates_are_subscribed(self) -> None:
-        class FakeContainer:
-            def classes(self, value: str) -> "FakeContainer":
-                del value
-                return self
-
-            def style(self, value: str) -> "FakeContainer":
-                del value
-                return self
-
-            def __enter__(self) -> "FakeContainer":
-                return self
-
-            def __exit__(
-                self,
-                exc_type: type[BaseException] | None,
-                exc: BaseException | None,
-                traceback: object | None,
-            ) -> bool:
-                del exc_type, exc, traceback
-                return False
-
-        class FakeLabel:
-            def classes(self, value: str) -> "FakeLabel":
-                del value
-                return self
-
-            def style(self, value: str) -> "FakeLabel":
-                del value
-                return self
-
-        class FakeRefreshable:
-            def __init__(self, func: Callable[..., None]) -> None:
-                self._func = func
-
-            def __call__(self, *args: object, **kwargs: object) -> None:
-                self._func(*args, **kwargs)
-
-            def refresh(self, *args: object, **kwargs: object) -> None:
-                self._func(*args, **kwargs)
-
-        class FakeUi:
-            def refreshable(self, func: Callable[..., None]) -> FakeRefreshable:
-                return FakeRefreshable(func)
-
-            def column(self) -> FakeContainer:
-                return FakeContainer()
-
-            def card(self) -> FakeContainer:
-                return FakeContainer()
-
-            def row(self) -> FakeContainer:
-                return FakeContainer()
-
-            def label(self, text: str) -> FakeLabel:
-                del text
-                return FakeLabel()
-
-        service = ModWebService()
-        node = ModWebNodeLink(
-            node_name="yuki",
-            label="Yuki",
-            url="/mod-web/nodes/yuki",
-            api_base_url="/api/node",
-            api_url="/api/node/apps",
-            is_current=True,
-        )
-        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
-        ui = FakeUi()
-        subscribe_updates = Mock(return_value=lambda: None)
-
-        with (
-            patch.object(ModWebService, "_apply_theme"),
-            patch.object(ModWebService, "_render_user_header"),
-            patch.object(ModWebService, "_node_text_style", return_value=None),
-            patch.object(ModWebService, "_section_badge_rows", return_value=()),
-            patch.object(ModWebService, "_node_capability_badges", return_value=()),
-            patch.object(ModWebService, "_badge_spec"),
-            patch.object(ModWebService, "_action_link"),
-            patch.object(ModWebService, "_render_live_title_stats", return_value=lambda *_args: None) as render_stats,
-            patch.object(ModWebService, "_register_client_cleanup"),
-            patch("web_dash.home.asyncio.get_running_loop", return_value=cast(Any, object())),
-        ):
-            service._render_node_apps_page(
-                ui=cast(ModWebUi, cast(object, ui)),
-                node=node,
-                app_links=(),
-                user=user,
-                show_api_actions=False,
-                initial_title_stats=(),
-                refresh_async_title_stats=AsyncMock(return_value=()),
-                subscribe_node_state_updates=subscribe_updates,
-            )
-
-        self.assertIsNone(render_stats.call_args.kwargs["refresh_async_stats"])
-        subscribe_updates.assert_called_once()
 
     def test_node_resource_point_badges_show_available_capacity(self) -> None:
         node = ModWebNodeLink(
@@ -8602,7 +8955,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertIn("No saves match that search.", [label.text for label in ui.labels])
 
-    def test_remote_node_ui_redirects_to_yuki_portal_node_page(self) -> None:
+    def test_remote_node_ui_redirects_to_portal_home_page(self) -> None:
         yuki_snapshot = config.BotMetadataSnapshot(
             profile=config.BotMetadataProfile(
                 id="1350601198637551659",
@@ -8633,7 +8986,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertIsNotNone(response)
         assert response is not None
-        self.assertEqual(response.headers["location"], "https://wakusei.apasz.com/mod-web/nodes/erin")
+        self.assertEqual(response.headers["location"], "https://wakusei.apasz.com/")
 
     def test_current_node_app_url_targets_node_specific_route(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="erin", public_base_url="https://portal.example")

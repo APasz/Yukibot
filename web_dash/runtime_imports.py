@@ -94,6 +94,7 @@ from chat_hub import (
 from config import AuthorityEndpoint, BotMetadataModWeb, BotMetadataSnapshot
 from mod_web_auth import ModWebAuthError, ModWebAuthService, ModWebSessionPersistence, ModWebUser
 from mod_web_theme import MOD_WEB_ACTION_BASE_CLASSES, BadgeTone, apply_mod_web_theme, mod_web_badge_class
+from maintenance import MAX_RESTART_INTERVAL_MINUTES, MIN_RESTART_INTERVAL_MINUTES, MaintenanceService
 from node_api import (
     NodeApiService,
     NodeAppActivityProviderEntry,
@@ -143,6 +144,14 @@ from node_api import (
     NodeSettingMutationResult,
     NodeSettingsActionResult,
     NodeStateStreamEvent,
+    NodeSystemHistory,
+    NodeSystemAction,
+    NodeSystemActionHandler,
+    NodeSystemActionResult,
+    NodeRestartScheduleEntry,
+    NodeRestartScheduleState,
+    NodeSystemDiskSummary,
+    NodeSystemSample,
     NodeStateTopic,
     NodeSystemSummary,
     RelayTTSQueue,
@@ -151,6 +160,7 @@ from node_api import (
     required_mod_mutation_level,
 )
 from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
+from restart_targets import RestartTarget
 
 __all__: tuple[str, ...] = (
     "AbstractEventLoop",
@@ -213,6 +223,9 @@ __all__: tuple[str, ...] = (
     "ModWebAuthService",
     "ModWebSessionPersistence",
     "ModWebUser",
+    "MAX_RESTART_INTERVAL_MINUTES",
+    "MaintenanceService",
+    "MIN_RESTART_INTERVAL_MINUTES",
     "MutableMapping",
     "NodeAccessGrant",
     "NodeApiScope",
@@ -264,6 +277,14 @@ __all__: tuple[str, ...] = (
     "NodeSettingMutationResult",
     "NodeSettingsActionResult",
     "NodeStateStreamEvent",
+    "NodeSystemHistory",
+    "NodeSystemAction",
+    "NodeSystemActionHandler",
+    "NodeSystemActionResult",
+    "NodeRestartScheduleEntry",
+    "NodeRestartScheduleState",
+    "NodeSystemDiskSummary",
+    "NodeSystemSample",
     "NodeStateTopic",
     "NodeSystemSummary",
     "OwnUser",
@@ -276,6 +297,7 @@ __all__: tuple[str, ...] = (
     "RedirectResponse",
     "RelayTTSQueue",
     "Request",
+    "RestartTarget",
     "Response",
     "ScrollArea",
     "Select",

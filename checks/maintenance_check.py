@@ -12,6 +12,10 @@ from relay_notices import MaintenanceStage, RelayNoticeSeverity, render_system_n
 from restart_targets import RestartTarget
 
 
+def _timestamp(value: str) -> int:
+    return int(datetime.fromisoformat(value).timestamp())
+
+
 class MaintenanceServiceTests(unittest.TestCase):
     def test_due_restart_targets_skip_already_triggered_slot(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -23,9 +27,9 @@ class MaintenanceServiceTests(unittest.TestCase):
                         restart_schedules={
                             RestartTarget.BOT: config.PersistedRestartSchedule(
                                 enabled=True,
-                                hour=4,
-                                minute=30,
-                                last_triggered_at=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
+                                interval_minutes=60,
+                                anchor_timestamp=_timestamp("2026-05-27T03:30:00+10:00"),
+                                last_triggered_timestamp=_timestamp("2026-05-27T04:30:00+10:00"),
                             )
                         }
                     )
@@ -49,8 +53,16 @@ class MaintenanceServiceTests(unittest.TestCase):
                 config.BotConfiguration(
                     maintenance=config.PersistedMaintenanceSettings(
                         restart_schedules={
-                            RestartTarget.BOT: config.PersistedRestartSchedule(enabled=True, hour=4, minute=30),
-                            RestartTarget.VOICE: config.PersistedRestartSchedule(enabled=True, hour=4, minute=30),
+                            RestartTarget.BOT: config.PersistedRestartSchedule(
+                                enabled=True,
+                                interval_minutes=60,
+                                anchor_timestamp=_timestamp("2026-05-27T04:30:00+10:00"),
+                            ),
+                            RestartTarget.VOICE: config.PersistedRestartSchedule(
+                                enabled=True,
+                                interval_minutes=60,
+                                anchor_timestamp=_timestamp("2026-05-27T04:30:00+10:00"),
+                            ),
                         }
                     )
                 ),
@@ -65,23 +77,26 @@ class MaintenanceServiceTests(unittest.TestCase):
 
         self.assertIs(due, RestartTarget.BOT)
 
-    def test_update_restart_schedules_persists_disabled_and_enabled_targets(self) -> None:
+    def test_update_restart_intervals_persists_disabled_and_enabled_targets(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "configuration.json"
             with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
                 service = MaintenanceService()
-                service.update_restart_schedules(
+                service.update_restart_intervals(
                     {
-                        RestartTarget.BOT: (3, 15),
+                        RestartTarget.BOT: 195,
                         RestartTarget.SYSTEM: None,
-                    }
+                    },
+                    anchor_timestamp=_timestamp("2026-05-27T03:15:00+10:00"),
+                    saved_at_timestamp=_timestamp("2026-05-27T01:00:00+10:00"),
                 )
                 loaded = config.load_bot_configuration(config_path)
 
         bot_schedule = loaded.maintenance.schedule_for(RestartTarget.BOT)
         system_schedule = loaded.maintenance.schedule_for(RestartTarget.SYSTEM)
         self.assertTrue(bot_schedule.enabled)
-        self.assertEqual((bot_schedule.hour, bot_schedule.minute), (3, 15))
+        self.assertEqual(bot_schedule.interval_minutes, 195)
+        self.assertEqual(bot_schedule.anchor_timestamp, _timestamp("2026-05-27T03:15:00+10:00"))
         self.assertFalse(system_schedule.enabled)
 
     def test_update_restart_warning_minutes_persists_configuration(self) -> None:
@@ -94,11 +109,135 @@ class MaintenanceServiceTests(unittest.TestCase):
 
         self.assertEqual(loaded.maintenance.restart_warning.lead_minutes, 45)
 
-    def test_parse_schedule_text_accepts_off_and_hh_mm(self) -> None:
+    def test_saving_schedule_skips_restarts_within_one_hour(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.json"
+            with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+                service = MaintenanceService()
+                service.update_restart_intervals(
+                    {RestartTarget.BOT: 90},
+                    anchor_timestamp=_timestamp("2026-05-27T10:30:00+10:00"),
+                    saved_at_timestamp=_timestamp("2026-05-27T10:00:00+10:00"),
+                )
+
+                schedule = service.schedule_for(RestartTarget.BOT)
+                self.assertEqual(
+                    schedule.skipped_through_timestamp,
+                    _timestamp("2026-05-27T10:30:00+10:00"),
+                )
+                self.assertEqual(
+                    service.next_restart_at(RestartTarget.BOT),
+                    datetime.fromisoformat("2026-05-27T12:00:00+10:00"),
+                )
+
+    def test_saving_schedule_keeps_restart_beyond_one_hour(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.json"
+            with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+                service = MaintenanceService()
+                service.update_restart_intervals(
+                    {RestartTarget.BOT: 90},
+                    anchor_timestamp=_timestamp("2026-05-27T11:01:00+10:00"),
+                    saved_at_timestamp=_timestamp("2026-05-27T10:00:00+10:00"),
+                )
+
+                schedule = service.schedule_for(RestartTarget.BOT)
+                self.assertIsNone(schedule.skipped_through_timestamp)
+                self.assertEqual(
+                    service.next_restart_at(RestartTarget.BOT),
+                    datetime.fromisoformat("2026-05-27T11:01:00+10:00"),
+                )
+
+    def test_recurring_interval_becomes_due_with_minute_precision(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.json"
+            with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+                service = MaintenanceService()
+                service.update_restart_intervals(
+                    {RestartTarget.BOT: 75},
+                    anchor_timestamp=_timestamp("2026-05-27T04:30:00+10:00"),
+                    saved_at_timestamp=_timestamp("2026-05-27T03:00:00+10:00"),
+                )
+
+                self.assertEqual(
+                    service.due_restart_targets(
+                        now=datetime.fromisoformat("2026-05-27T04:29:00+10:00"),
+                        available_targets=(RestartTarget.BOT,),
+                    ),
+                    (),
+                )
+                self.assertEqual(
+                    service.due_restart_targets(
+                        now=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
+                        available_targets=(RestartTarget.BOT,),
+                    ),
+                    (RestartTarget.BOT,),
+                )
+                service.mark_triggered(
+                    (RestartTarget.BOT,),
+                    triggered_at=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
+                )
+                self.assertEqual(
+                    service.next_restart_at(
+                        RestartTarget.BOT,
+                        now=datetime.fromisoformat("2026-05-27T04:30:00+10:00"),
+                    ),
+                    datetime.fromisoformat("2026-05-27T05:45:00+10:00"),
+                )
+
+    def test_skip_next_restart_persists_and_supports_repeated_skips(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.json"
+            with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+                service = MaintenanceService()
+                service.update_restart_intervals(
+                    {RestartTarget.BOT: 75},
+                    anchor_timestamp=_timestamp("2026-05-27T04:30:00+10:00"),
+                    saved_at_timestamp=_timestamp("2026-05-27T03:00:00+10:00"),
+                )
+
+                first_skip = service.skip_next_restart(RestartTarget.BOT)
+                self.assertEqual(
+                    first_skip.skipped_through_timestamp,
+                    _timestamp("2026-05-27T04:30:00+10:00"),
+                )
+                self.assertEqual(
+                    service.next_restart_at(RestartTarget.BOT),
+                    datetime.fromisoformat("2026-05-27T05:45:00+10:00"),
+                )
+
+                second_skip = service.skip_next_restart(RestartTarget.BOT)
+                self.assertEqual(
+                    second_skip.skipped_through_timestamp,
+                    _timestamp("2026-05-27T05:45:00+10:00"),
+                )
+                reloaded = MaintenanceService()
+                self.assertEqual(
+                    reloaded.next_restart_at(RestartTarget.BOT),
+                    datetime.fromisoformat("2026-05-27T07:00:00+10:00"),
+                )
+
+                reloaded.mark_triggered(
+                    (RestartTarget.BOT,),
+                    triggered_at=datetime.fromisoformat("2026-05-27T07:00:00+10:00"),
+                )
+                self.assertIsNone(reloaded.schedule_for(RestartTarget.BOT).skipped_through_timestamp)
+
+    def test_skip_next_restart_rejects_disabled_schedule(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.json"
+            with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+                service = MaintenanceService()
+                with self.assertRaisesRegex(ValueError, "is not enabled"):
+                    service.skip_next_restart(RestartTarget.SYSTEM)
+
+    def test_parse_schedule_text_accepts_off_and_minute_interval(self) -> None:
         self.assertIsNone(MaintenanceService.parse_schedule_text("off"))
-        self.assertEqual(MaintenanceService.parse_schedule_text("04:30"), (4, 30))
-        with self.assertRaisesRegex(ValueError, "HH:MM"):
+        self.assertEqual(MaintenanceService.parse_schedule_text("90"), 90)
+        with self.assertRaisesRegex(ValueError, "whole minutes"):
             MaintenanceService.parse_schedule_text("4.30")
+        with self.assertRaisesRegex(ValueError, "between 60 and 10080"):
+            MaintenanceService.parse_schedule_text("59")
 
     def test_parse_warning_minutes_text_accepts_zero_and_valid_range(self) -> None:
         self.assertEqual(MaintenanceService.parse_warning_minutes_text("0"), 0)
@@ -161,8 +300,16 @@ class MaintenanceServiceTests(unittest.TestCase):
                 config.BotConfiguration(
                     maintenance=config.PersistedMaintenanceSettings(
                         restart_schedules={
-                            RestartTarget.SYSTEM: config.PersistedRestartSchedule(enabled=True, hour=4, minute=30),
-                            RestartTarget.VOICE: config.PersistedRestartSchedule(enabled=True, hour=4, minute=30),
+                            RestartTarget.SYSTEM: config.PersistedRestartSchedule(
+                                enabled=True,
+                                interval_minutes=60,
+                                anchor_timestamp=_timestamp("2026-05-27T04:30:00+10:00"),
+                            ),
+                            RestartTarget.VOICE: config.PersistedRestartSchedule(
+                                enabled=True,
+                                interval_minutes=60,
+                                anchor_timestamp=_timestamp("2026-05-27T04:30:00+10:00"),
+                            ),
                         },
                         restart_warning=config.PersistedRestartWarning(lead_minutes=15),
                     )
@@ -200,7 +347,11 @@ class MaintenanceServiceTests(unittest.TestCase):
                 config.BotConfiguration(
                     maintenance=config.PersistedMaintenanceSettings(
                         restart_schedules={
-                            RestartTarget.VOICE: config.PersistedRestartSchedule(enabled=True, hour=4, minute=30),
+                            RestartTarget.VOICE: config.PersistedRestartSchedule(
+                                enabled=True,
+                                interval_minutes=60,
+                                anchor_timestamp=_timestamp("2026-05-27T04:30:00+10:00"),
+                            ),
                         }
                     )
                 ),

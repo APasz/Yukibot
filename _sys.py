@@ -198,10 +198,12 @@ class StatsDiskSnapshot:
 @dataclass(frozen=True, slots=True)
 class StatsSystemSnapshot:
     cpu_percent: int
+    cpu_per_core_percent: tuple[int, ...]
     ram_percent: int
     ram_used_bytes: int
     ram_total_bytes: int
     primary_disk: StatsDiskSnapshot | None
+    disks: tuple[StatsDiskSnapshot, ...]
 
 
 class Stats_System(metaclass=Singleton):
@@ -420,12 +422,15 @@ class Stats_System(metaclass=Singleton):
             if refresh:
                 self._update_unlocked()
             primary_disk = self.primary_disk
+            disks = tuple(self._disk_snapshot(disk) for disk in self.disks)
             return StatsSystemSnapshot(
                 cpu_percent=self.cpu.r_total,
+                cpu_per_core_percent=tuple(self.cpu.r_per_core),
                 ram_percent=self.ram.percent,
                 ram_used_bytes=int(self.ram.used),
                 ram_total_bytes=int(self.ram.raw.total),
                 primary_disk=None if primary_disk is None else self._disk_snapshot(primary_disk),
+                disks=disks,
             )
 
     def disk_snapshot_for_path(
@@ -646,31 +651,9 @@ async def restart_portal(
     *,
     silent: bool = False,
 ) -> None:
-    token_secret = config.MOD_WEB_SERVER.token_secret
-    if token_secret is None:
-        log.error("Portal restart failed because the node API token secret is not configured")
-        await ctx.respond("Unable to restart Portal.", flags=hikari.MessageFlag.EPHEMERAL)
-        return
-
-    portal_node_name = config.BotProfileName.PORTAL.value
-    token = issue_node_token(
-        secret=token_secret,
-        grant=NodeAccessGrant(
-            subject=f"web:{ctx.user.id}",
-            node=portal_node_name,
-            app=None,
-            scopes=frozenset({NodeApiScope.NODE_MANAGE}),
-            expires_at=int(time.time()) + _PORTAL_RESTART_TOKEN_TTL_SECONDS,
-        ),
-    )
-    portal_node_api_url = config.resolve_node_api_base_url(config.MOD_WEB_SERVER.public_base_url)
     try:
-        await asyncio.to_thread(
-            _request_portal_restart,
-            f"{portal_node_api_url.rstrip('/')}/restart",
-            token,
-        )
-    except requests.RequestException as xcp:
+        await request_portal_process_restart(subject=f"web:{ctx.user.id}")
+    except (RuntimeError, requests.RequestException) as xcp:
         log.error("Portal restart failed: %s", xcp)
         await ctx.respond("Unable to restart Portal.", flags=hikari.MessageFlag.EPHEMERAL)
         return
@@ -679,6 +662,30 @@ async def restart_portal(
         hikari.MessageFlag.EPHEMERAL if silent else hikari.UNDEFINED
     )
     await ctx.respond("Portal restarting.", flags=flags)
+
+
+async def request_portal_process_restart(*, subject: str) -> None:
+    token_secret = config.MOD_WEB_SERVER.token_secret
+    if token_secret is None:
+        raise RuntimeError("Portal restart requires a configured node API token secret.")
+
+    portal_node_name = config.BotProfileName.PORTAL.value
+    token = issue_node_token(
+        secret=token_secret,
+        grant=NodeAccessGrant(
+            subject=subject,
+            node=portal_node_name,
+            app=None,
+            scopes=frozenset({NodeApiScope.NODE_MANAGE}),
+            expires_at=int(time.time()) + _PORTAL_RESTART_TOKEN_TTL_SECONDS,
+        ),
+    )
+    portal_node_api_url = config.resolve_node_api_base_url(config.MOD_WEB_SERVER.public_base_url)
+    await asyncio.to_thread(
+        _request_portal_restart,
+        f"{portal_node_api_url.rstrip('/')}/restart",
+        token,
+    )
 
 
 def _request_portal_restart(url: str, token: str) -> None:
@@ -755,6 +762,17 @@ async def scheduled_restart(
     await _finish_restart(restart_sys=restart_sys, ctx=None)
 
 
+def configure_restart_auto_start_apps(
+    manager: App_Manager,
+    *,
+    enabled: bool,
+) -> tuple[str, ...]:
+    """Persist the apps to restore after a restart, or explicitly clear that state."""
+    if enabled:
+        return manager.set_running_restart_auto_start_apps()
+    return manager.set_restart_auto_start_apps(())
+
+
 async def _prepare_restart(
     *,
     bot: hikari.GatewayBot,
@@ -775,13 +793,19 @@ async def _finish_restart(
 ) -> None:
     try:
         if restart_sys:
-            code = subprocess.run(["sudo", "systemctl", "reboot", "-i"], check=False).returncode
-            log.info(f"Restart CMD {code=}")
+            reboot_host()
         sys.exit(1)
     except Exception:
         log.exception("Failed to reboot system" if restart_sys else "Failed to restart bot")
         if ctx is not None:
             await ctx.respond(f"unable to {'restart' if restart_sys else 'crash'}")
+
+
+def reboot_host() -> None:
+    result = subprocess.run(["sudo", "systemctl", "reboot", "-i"], check=False)
+    log.info("Host reboot command completed: code=%s", result.returncode)
+    if result.returncode != 0:
+        raise RuntimeError(f"Host reboot command failed with exit code {result.returncode}.")
 
 
 # AiviA APasz
