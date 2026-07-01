@@ -36,6 +36,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from starlette.middleware.cors import CORSMiddleware
 
 import config
 from _audit import audit_log
@@ -160,6 +161,7 @@ _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.FILES_UPLOAD: Power_Level.user,
     NodeApiScope.APP_CONTROL: Power_Level.user,
     NodeApiScope.APP_MANAGE: Power_Level.sudo,
+    NodeApiScope.NODE_OPERATE: Power_Level.sudo,
     NodeApiScope.NODE_MANAGE: Power_Level.root,
 }
 log = logging.getLogger(__name__)
@@ -1244,6 +1246,99 @@ class NodeCapacityMutationResult:
             "node": self.node,
             "message": self.message,
             "capacity": self.capacity.model_dump(mode="json"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeDiskEntry:
+    mountpoint: str
+    display_name: str
+    is_activity: bool
+    is_primary: bool
+    is_secondary: bool
+    is_bot_disk: bool
+
+    def __post_init__(self) -> None:
+        if not self.mountpoint.strip() or not self.display_name.strip():
+            raise ValueError("Node disk mountpoint and display name must not be blank.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeDiskEntry":
+        return cls(
+            mountpoint=_required_string(payload, "mountpoint"),
+            display_name=_required_string(payload, "display_name"),
+            is_activity=_required_bool(payload, "is_activity"),
+            is_primary=_required_bool(payload, "is_primary"),
+            is_secondary=_required_bool(payload, "is_secondary"),
+            is_bot_disk=_required_bool(payload, "is_bot_disk"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "mountpoint": self.mountpoint,
+            "display_name": self.display_name,
+            "is_activity": self.is_activity,
+            "is_primary": self.is_primary,
+            "is_secondary": self.is_secondary,
+            "is_bot_disk": self.is_bot_disk,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeDiskManagementState:
+    node: str
+    disks: tuple[NodeDiskEntry, ...]
+    preferences: config.PersistedDiskPreferences
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeDiskManagementState":
+        raw_disks = payload.get("disks", ())
+        if not isinstance(raw_disks, Sequence) or isinstance(raw_disks, (str, bytes)):
+            raise ValueError("Node disk management disks are invalid.")
+        disks: list[NodeDiskEntry] = []
+        for raw_disk in raw_disks:
+            if not isinstance(raw_disk, Mapping):
+                raise ValueError("Node disk management disks are invalid.")
+            disks.append(NodeDiskEntry.from_mapping(raw_disk))
+        raw_preferences = payload.get("preferences")
+        if not isinstance(raw_preferences, Mapping):
+            raise ValueError("Node disk management preferences are invalid.")
+        return cls(
+            node=_required_string(payload, "node"),
+            disks=tuple(disks),
+            preferences=config.PersistedDiskPreferences.model_validate(raw_preferences),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "disks": [disk.to_mapping() for disk in self.disks],
+            "preferences": self.preferences.model_dump(mode="json"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeDiskSettingsMutationResult:
+    node: str
+    message: str
+    settings: NodeDiskManagementState
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeDiskSettingsMutationResult":
+        raw_settings = payload.get("settings")
+        if not isinstance(raw_settings, Mapping):
+            raise ValueError("Node disk settings mutation settings are invalid.")
+        return cls(
+            node=_required_string(payload, "node"),
+            message=_required_string(payload, "message"),
+            settings=NodeDiskManagementState.from_mapping(raw_settings),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "message": self.message,
+            "settings": self.settings.to_mapping(),
         }
 
 
@@ -3691,6 +3786,13 @@ class NodeApiService:
         if self._routes_registered:
             return
 
+        nicegui_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=("*",),
+            allow_methods=("POST",),
+            allow_headers=("Authorization",),
+        )
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps")
         async def _list_apps(request: Request, access_token: str | None = None) -> dict[str, object]:
             traffic_log.info("Node API apps request: node=%s", self.node_name)
@@ -3759,13 +3861,13 @@ class NodeApiService:
                 request,
                 access_token,
                 app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
+                scopes=(NodeApiScope.NODE_OPERATE,),
             )
             actor_user_id = self._request_actor_user_id(
                 request=request,
                 access_token=access_token,
                 app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
+                scopes=(NodeApiScope.NODE_OPERATE,),
                 verified_grant=grant,
             )
             raw_action = payload.get("action")
@@ -3788,7 +3890,7 @@ class NodeApiService:
         @nicegui_app.get(f"{_NODE_API_PREFIX}/system/restart-schedules")
         async def _restart_schedules(request: Request, access_token: str | None = None) -> dict[str, object]:
             traffic_log.info("Node API restart schedule request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
             return self.read_restart_schedules().to_mapping()
 
         @nicegui_app.post(f"{_NODE_API_PREFIX}/system/restart-schedules")
@@ -3798,12 +3900,12 @@ class NodeApiService:
             access_token: str | None = None,
         ) -> dict[str, object]:
             traffic_log.info("Node API restart schedule update request: node=%s", self.node_name)
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
             actor_user_id = self._request_actor_user_id(
                 request=request,
                 access_token=access_token,
                 app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
+                scopes=(NodeApiScope.NODE_OPERATE,),
                 verified_grant=grant,
             )
             raw_target = payload.get("target")
@@ -3840,12 +3942,12 @@ class NodeApiService:
                 self.node_name,
                 target_name,
             )
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
             actor_user_id = self._request_actor_user_id(
                 request=request,
                 access_token=access_token,
                 app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
+                scopes=(NodeApiScope.NODE_OPERATE,),
                 verified_grant=grant,
             )
             try:
@@ -3879,10 +3981,41 @@ class NodeApiService:
             result = await self.mutate_node_capacity(capacity=capacity, actor_user_id=actor_user_id)
             return result.to_mapping()
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/node-disk-settings")
+        async def _node_disk_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API node disk settings request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            return self.read_node_disk_settings().to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/node-disk-settings")
+        async def _update_node_disk_settings(
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API node disk settings update request: node=%s", self.node_name)
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+                verified_grant=grant,
+            )
+            preferences = config.PersistedDiskPreferences.model_validate(payload)
+            try:
+                result = await self.mutate_node_disk_settings(
+                    preferences=preferences,
+                    actor_user_id=actor_user_id,
+                )
+            except ValueError as xcp:
+                raise _http_exception(400, str(xcp)) from xcp
+            return result.to_mapping()
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/node-font-sources")
         async def _node_font_sources(request: Request, access_token: str | None = None) -> dict[str, object]:
             traffic_log.info("Node API node font sources request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
             return self.read_node_font_sources().model_dump(mode="json")
 
         @nicegui_app.post(f"{_NODE_API_PREFIX}/node-font-sources")
@@ -3892,12 +4025,12 @@ class NodeApiService:
             access_token: str | None = None,
         ) -> dict[str, object]:
             traffic_log.info("Node API node font sources update request: node=%s", self.node_name)
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
             actor_user_id = self._request_actor_user_id(
                 request=request,
                 access_token=access_token,
                 app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
+                scopes=(NodeApiScope.NODE_OPERATE,),
                 verified_grant=grant,
             )
             settings = config.NodeFontSourceSettings.model_validate(payload)
@@ -7312,6 +7445,38 @@ class NodeApiService:
         manager = self._require_manager()
         return manager.node_font_sources()
 
+    def read_node_disk_settings(self) -> NodeDiskManagementState:
+        stats = Stats_System()
+        stats.refresh_disk_inventory()
+        activity_mountpoints = {disk.mountpoint_text for disk in stats.activity_disks}
+        primary_disk = stats.primary_disk
+        secondary_disk = stats.secondary_disk
+        bot_disk = stats.bot_disk
+        return NodeDiskManagementState(
+            node=self.node_name,
+            disks=tuple(
+                NodeDiskEntry(
+                    mountpoint=disk.mountpoint_text,
+                    display_name=disk.display_name,
+                    is_activity=disk.mountpoint_text in activity_mountpoints,
+                    is_primary=(
+                        primary_disk is not None
+                        and disk.mountpoint_text == primary_disk.mountpoint_text
+                    ),
+                    is_secondary=(
+                        secondary_disk is not None
+                        and disk.mountpoint_text == secondary_disk.mountpoint_text
+                    ),
+                    is_bot_disk=(
+                        bot_disk is not None
+                        and disk.mountpoint_text == bot_disk.mountpoint_text
+                    ),
+                )
+                for disk in stats.disks
+            ),
+            preferences=stats.disk_preferences,
+        )
+
     def read_discord_settings(self) -> config.DiscordSettings:
         manager = self._require_manager()
         return manager.discord_settings()
@@ -7323,7 +7488,7 @@ class NodeApiService:
         auto_restart_running_apps: bool,
         actor_user_id: int,
     ) -> NodeSystemActionResult:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         if (
             action is NodeSystemAction.RESTART_PORTAL
             and config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.YUKI
@@ -7399,7 +7564,7 @@ class NodeApiService:
         anchor_timestamp: int | None,
         actor_user_id: int,
     ) -> NodeRestartScheduleState:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         maintenance = self._maintenance_service
         if maintenance is None:
             raise _http_exception(503, "Restart scheduling is unavailable on this node.")
@@ -7432,7 +7597,7 @@ class NodeApiService:
         target: RestartTarget,
         actor_user_id: int,
     ) -> NodeRestartScheduleState:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         maintenance = self._maintenance_service
         if maintenance is None:
             raise _http_exception(503, "Restart scheduling is unavailable on this node.")
@@ -7467,13 +7632,37 @@ class NodeApiService:
             capacity=updated_capacity,
         )
 
+    async def mutate_node_disk_settings(
+        self,
+        *,
+        preferences: config.PersistedDiskPreferences,
+        actor_user_id: int,
+    ) -> NodeDiskSettingsMutationResult:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        updated_preferences = Stats_System().set_disk_preferences(preferences)
+        self._invalidate_state_caches()
+        audit_log(
+            "node.disk_settings.updated",
+            actor_user_id=actor_user_id,
+            node=self.node_name,
+            activity_mounts=updated_preferences.activity_mounts,
+            primary_mount=updated_preferences.primary_mount,
+            secondary_mount=updated_preferences.secondary_mount,
+            label_mountpoints=sorted(updated_preferences.labels),
+        )
+        return NodeDiskSettingsMutationResult(
+            node=self.node_name,
+            message=f"Updated node disk settings for {self.node_name}.",
+            settings=self.read_node_disk_settings(),
+        )
+
     async def mutate_node_font_sources(
         self,
         *,
         settings: config.NodeFontSourceSettings,
         actor_user_id: int,
     ) -> NodeFontSourceSettingsMutationResult:
-        await self._require_acl().perm_check(actor_user_id, Power_Level.root)
+        await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
         manager = self._require_manager()
         updated_settings = manager.set_node_font_sources(settings)
         font_assets.schedule_startup_refresh(google_font_urls=updated_settings.google_font_urls)

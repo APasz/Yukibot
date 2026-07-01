@@ -218,6 +218,7 @@ class Stats_System(metaclass=Singleton):
         self._configured_activity_mounts: tuple[str, ...] | None = None
         self._configured_labels: dict[str, str] = {}
         self._configured_primary_mount: str | None = None
+        self._configured_secondary_mount: str | None = None
         self._disks_by_mountpoint: dict[str, Stats_Disk] = {}
         self._last_disk_discovery_at: datetime | None = None
         self.reload_disk_preferences()
@@ -237,8 +238,17 @@ class Stats_System(metaclass=Singleton):
         return self._configured_primary_mount
 
     @property
+    def configured_secondary_mount(self) -> str | None:
+        return self._configured_secondary_mount
+
+    @property
     def configured_labels(self) -> Mapping[str, str]:
         return self._configured_labels
+
+    @property
+    def disk_preferences(self) -> config.PersistedDiskPreferences:
+        with self._lock:
+            return self._current_disk_preferences_unlocked()
 
     @property
     def bot_disk(self) -> Stats_Disk | None:
@@ -266,6 +276,13 @@ class Stats_System(metaclass=Singleton):
                 return bot_disk
             disks = self.disks
             return disks[0] if disks else None
+
+    @property
+    def secondary_disk(self) -> Stats_Disk | None:
+        with self._lock:
+            if self._configured_secondary_mount is None:
+                return None
+            return self._disks_by_mountpoint.get(self._configured_secondary_mount)
 
     @property
     def disk(self) -> Stats_Disk:
@@ -316,6 +333,7 @@ class Stats_System(metaclass=Singleton):
         )
         self._configured_labels = dict(preferences.labels)
         self._configured_primary_mount = preferences.primary_mount
+        self._configured_secondary_mount = preferences.secondary_mount
         return True
 
     def set_activity_mounts(self, mountpoints: list[str]) -> tuple[Stats_Disk, ...]:
@@ -339,8 +357,9 @@ class Stats_System(metaclass=Singleton):
         if unknown_mountpoints:
             raise ValueError(f"Unknown activity disk mountpoint(s): {', '.join(unknown_mountpoints)}")
 
-        self._configured_activity_mounts = tuple(normalised)
-        self._save_disk_preferences()
+        preferences = self._current_disk_preferences_unlocked()
+        preferences.activity_mounts = normalised
+        self._set_disk_preferences_unlocked(preferences)
         return self.activity_disks
 
     def set_primary_mount_override(self, mountpoint: str | None) -> Stats_Disk | None:
@@ -357,9 +376,25 @@ class Stats_System(metaclass=Singleton):
             if normalised_mountpoint not in self._disks_by_mountpoint:
                 raise ValueError(f"Unknown primary disk mountpoint: {normalised_mountpoint}")
 
-        self._configured_primary_mount = normalised_mountpoint
-        self._save_disk_preferences()
+        preferences = self._current_disk_preferences_unlocked()
+        preferences.primary_mount = normalised_mountpoint
+        self._set_disk_preferences_unlocked(preferences)
         return self.primary_disk
+
+    def set_secondary_mount(self, mountpoint: str | None) -> Stats_Disk | None:
+        with self._lock:
+            normalised_mountpoint = None
+            if mountpoint is not None:
+                normalised_mountpoint = config.normalise_absolute_path_text(
+                    mountpoint,
+                    source="secondary disk mountpoint",
+                )
+                if normalised_mountpoint not in self._disks_by_mountpoint:
+                    raise ValueError(f"Unknown secondary disk mountpoint: {normalised_mountpoint}")
+            preferences = self._current_disk_preferences_unlocked()
+            preferences.secondary_mount = normalised_mountpoint
+            self._set_disk_preferences_unlocked(preferences)
+            return self.secondary_disk
 
     def replace_disk_labels(self, labels_by_mountpoint: Mapping[str, str]) -> tuple[Stats_Disk, ...]:
         with self._lock:
@@ -385,22 +420,85 @@ class Stats_System(metaclass=Singleton):
             else:
                 next_labels.pop(mountpoint_text, None)
 
-        self._configured_labels = next_labels
+        preferences = self._current_disk_preferences_unlocked()
+        preferences.labels = next_labels
+        self._set_disk_preferences_unlocked(preferences)
+        return self.disks
+
+    def set_disk_preferences(
+        self,
+        preferences: config.PersistedDiskPreferences,
+    ) -> config.PersistedDiskPreferences:
+        with self._lock:
+            return self._set_disk_preferences_unlocked(preferences)
+
+    def _set_disk_preferences_unlocked(
+        self,
+        preferences: config.PersistedDiskPreferences,
+    ) -> config.PersistedDiskPreferences:
+        known_mountpoints = set(self._disks_by_mountpoint)
+        activity_mounts = preferences.activity_mounts
+        if activity_mounts is not None:
+            existing_activity_mounts = set(self._configured_activity_mounts or ())
+            unknown_activity_mounts = [
+                mountpoint
+                for mountpoint in activity_mounts
+                if mountpoint not in known_mountpoints and mountpoint not in existing_activity_mounts
+            ]
+            if unknown_activity_mounts:
+                raise ValueError(
+                    f"Unknown activity disk mountpoint(s): {', '.join(unknown_activity_mounts)}"
+                )
+        if (
+            preferences.primary_mount is not None
+            and preferences.primary_mount not in known_mountpoints
+            and preferences.primary_mount != self._configured_primary_mount
+        ):
+            raise ValueError(f"Unknown primary disk mountpoint: {preferences.primary_mount}")
+        if (
+            preferences.secondary_mount is not None
+            and preferences.secondary_mount not in known_mountpoints
+            and preferences.secondary_mount != self._configured_secondary_mount
+        ):
+            raise ValueError(f"Unknown secondary disk mountpoint: {preferences.secondary_mount}")
+        new_unknown_label_mounts = (
+            set(preferences.labels) - known_mountpoints - set(self._configured_labels)
+        )
+        if new_unknown_label_mounts:
+            raise ValueError(
+                "Unknown disk label mountpoint(s): "
+                + ", ".join(sorted(new_unknown_label_mounts))
+            )
+
+        self._configured_activity_mounts = (
+            tuple(activity_mounts) if activity_mounts is not None else None
+        )
+        self._configured_labels = dict(preferences.labels)
+        self._configured_primary_mount = preferences.primary_mount
+        self._configured_secondary_mount = preferences.secondary_mount
         self._save_disk_preferences()
         self.refresh_disk_inventory()
-        return self.disks
+        return self._current_disk_preferences_unlocked()
+
+    def _current_disk_preferences_unlocked(self) -> config.PersistedDiskPreferences:
+        return config.PersistedDiskPreferences(
+            activity_mounts=(
+                list(self._configured_activity_mounts)
+                if self._configured_activity_mounts is not None
+                else None
+            ),
+            labels=dict(self._configured_labels),
+            primary_mount=self._configured_primary_mount,
+            secondary_mount=self._configured_secondary_mount,
+        )
 
     def _save_disk_preferences(self) -> None:
         bot_config = config.BotConfiguration()
         if self._bot_configuration_path.exists():
             bot_config = config.load_bot_configuration(self._bot_configuration_path)
-        bot_config.disk_preferences = config.PersistedDiskPreferences(
-            activity_mounts=(
-                list(self._configured_activity_mounts) if self._configured_activity_mounts is not None else None
-            ),
-            labels=dict(sorted(self._configured_labels.items())),
-            primary_mount=self._configured_primary_mount,
-        )
+        preferences = self._current_disk_preferences_unlocked()
+        preferences.labels = dict(sorted(preferences.labels.items()))
+        bot_config.disk_preferences = preferences
         config.save_bot_configuration(self._bot_configuration_path, bot_config)
 
     def refresh_disk_inventory(self) -> None:

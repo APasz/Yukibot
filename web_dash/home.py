@@ -32,6 +32,7 @@ from .runtime_imports import (
     NodeAppEntry,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    NodeDiskManagementState,
     NodeStateStreamEvent,
     NodeRestartScheduleEntry,
     NodeRestartScheduleState,
@@ -219,47 +220,16 @@ class _ModWebNodeSettingsFieldKey(Enum):
     RAM_RESERVED = "ram_points_reserved"
 
 
+class _ModWebNodeDiskChoice(Enum):
+    DEFAULT_PRIMARY = "__default_primary_disk__"
+    NO_SECONDARY = "__no_secondary_disk__"
+
+
 @dataclass(frozen=True, slots=True)
 class _ModWebNodeSettingsNumberFieldSpec:
     key: _ModWebNodeSettingsFieldKey
     label: str
     field_label: str
-
-
-@dataclass(slots=True)
-class _ModWebNodeSettingsPanelState:
-    overlay: Element
-    title_label: Label
-    subtitle_label: Label
-    field_inputs: dict[_ModWebNodeSettingsFieldKey, Input]
-    google_font_urls_input: Input | None = None
-    simulate_button: Button | None = None
-    selected_node_name: str | None = None
-
-    def require_selected_node_name(self) -> str:
-        if self.selected_node_name is None:
-            raise RuntimeError("Node settings panel opened without a selected node.")
-        return self.selected_node_name
-
-    def show(self) -> None:
-        self.overlay.style(remove="display: none;")
-
-    def hide(self) -> None:
-        self.overlay.style(add="display: none;")
-
-    def input_for(self, key: _ModWebNodeSettingsFieldKey) -> Input:
-        return self.field_inputs[key]
-
-    def set_capacity_profile(self, capacity: config.NodeCapacityProfile) -> None:
-        self.input_for(_ModWebNodeSettingsFieldKey.CPU_TOTAL).set_value(str(capacity.cpu_points_total))
-        self.input_for(_ModWebNodeSettingsFieldKey.RAM_TOTAL).set_value(str(capacity.ram_points_total))
-        self.input_for(_ModWebNodeSettingsFieldKey.CPU_RESERVED).set_value(str(capacity.cpu_points_reserved))
-        self.input_for(_ModWebNodeSettingsFieldKey.RAM_RESERVED).set_value(str(capacity.ram_points_reserved))
-
-    def set_google_font_urls(self, settings: config.NodeFontSourceSettings) -> None:
-        if self.google_font_urls_input is None:
-            raise RuntimeError("Node settings panel Google font URL input is not available.")
-        self.google_font_urls_input.set_value("\n".join(settings.google_font_urls))
 
 
 _HOME_APPS_ICON: str = "apps"
@@ -340,7 +310,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
         show_api_actions: bool,
     ) -> None:
         self._apply_theme(ui=ui)
-        request_path: str = self._request_path(request)
         simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
         simulated_down_keys = {node_name.casefold() for node_name in simulated_down_node_names}
         summary_nodes = tuple(
@@ -381,13 +350,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         summaries_by_node: dict[str, ModWebHomeNodeSummary] = {
             summary.node.node_name: summary for summary in home_node_summaries
         }
-        dev_mode_enabled: bool = config.INDEV
-        can_manage_node_configuration: bool = self._user_has_level(user, Power_Level.root)
         can_view_node_system: bool = self._user_has_level(user, Power_Level.sudo)
-        node_settings_panel: _ModWebNodeSettingsPanelState | None = None
-        node_dialog_simulate_button: Button | None = None
-        node_capacity_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
-        node_google_font_urls_input: Input | None = None
 
         def _current_sections() -> tuple[ModWebNodeAppSection, ...]:
             return tuple[ModWebNodeAppSection, ...](sections_by_node[node_name] for node_name in node_order)
@@ -397,228 +360,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 summaries_by_node[node_name] for node_name in node_order if node_name in summaries_by_node
             )
 
-        def _parse_required_non_negative_int(*, raw_value: str, field_label: str) -> int:
-            value = raw_value.strip()
-            if not value:
-                raise ValueError(f"{field_label} must not be empty.")
-            try:
-                parsed = int(value)
-            except ValueError as xcp:
-                raise ValueError(f"{field_label} must be a whole number.") from xcp
-            if parsed < 0:
-                raise ValueError(f"{field_label} must not be negative.")
-            return parsed
-
-        def _require_node_settings_panel() -> _ModWebNodeSettingsPanelState:
-            if node_settings_panel is None:
-                raise RuntimeError("Node settings panel is not available.")
-            return node_settings_panel
-
-        def _render_node_settings_number_input(*, label: str) -> Input:
-            return (
-                ui.input(label)
-                .props("filled square dense hide-bottom-space color=accent type=number inputmode=numeric step=1 min=0")
-                .classes("mod-app-details-field mod-app-details-point-field")
-            )
-
-        def _render_node_settings_capacity_inputs() -> dict[_ModWebNodeSettingsFieldKey, Input]:
-            field_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
-            with ui.column().classes("mod-app-details-subsection"):
-                ui.label("Capacity").classes("mod-stat-label")
-                ui.label("Adjust total capacity and reserved headroom for this node.").classes("mod-subtitle text-xs")
-                for row_specs in _NODE_SETTINGS_CAPACITY_FIELD_ROWS:
-                    with ui.row().classes("w-full gap-2 flex-wrap"):
-                        for field_spec in row_specs:
-                            field_inputs[field_spec.key] = _render_node_settings_number_input(label=field_spec.label)
-            return field_inputs
-
-        def _render_node_settings_font_source_input() -> Input:
-            with ui.column().classes("mod-app-details-subsection"):
-                ui.label("Title Fonts").classes("mod-stat-label")
-                ui.label(
-                    "Add one Google Fonts specimen or CSS URL per line. These are downloaded on save and made available to app title fonts."
-                ).classes("mod-subtitle text-xs")
-                return (
-                    ui.input("Google Font URLs", value="")
-                    .props("filled square type=textarea autogrow hide-bottom-space color=accent")
-                    .classes("mod-app-details-field mod-app-details-notes")
-                )
-
-        def _node_settings_field_spec(
-            key: _ModWebNodeSettingsFieldKey,
-        ) -> _ModWebNodeSettingsNumberFieldSpec:
-            for row_specs in _NODE_SETTINGS_CAPACITY_FIELD_ROWS:
-                for field_spec in row_specs:
-                    if field_spec.key is key:
-                        return field_spec
-            raise RuntimeError(f"Missing node settings field spec for key: {key!r}")
-
-        def _set_node_settings_panel_context(node_name: str) -> None:
-            panel = _require_node_settings_panel()
-            panel.selected_node_name = node_name
-            section = sections_by_node.get(node_name)
-            if section is None:
-                raise RuntimeError(f"Cannot open node settings for unknown node: {node_name!r}")
-            node = section.node
-            panel.title_label.set_text("Node Details")
-            panel.subtitle_label.set_text(f"Update node-specific settings for {node.label}.")
-            if panel.simulate_button is not None:
-                panel.simulate_button.set_text(
-                    "Restore Availability" if node.node_name.casefold() in simulated_down_keys else "Simulate Down"
-                )
-            log.info("Node settings panel context set: node=%s", node_name)
-
-        def _hide_node_settings_panel() -> None:
-            _require_node_settings_panel().hide()
-
-        async def _refresh_node_settings_panel(node_name: str) -> None:
-            panel = _require_node_settings_panel()
-            log.info("Refreshing node settings panel: node=%s", node_name)
-            try:
-                capacity = await self._node_capacity(node_name=node_name, user=user)
-                font_sources = await self._node_font_sources(node_name=node_name, user=user)
-            except Exception as xcp:
-                log.warning("Node settings load failed: node=%s error=%s", node_name, xcp)
-                ui.notify(f"Node settings load failed: {xcp}", type="negative")
-                return
-            if panel.selected_node_name != node_name:
-                log.info(
-                    "Skipping stale node settings panel population: requested=%s selected=%s",
-                    node_name,
-                    panel.selected_node_name,
-                )
-                return
-            panel.set_capacity_profile(capacity)
-            panel.set_google_font_urls(font_sources)
-            log.info("Node settings panel populated: node=%s", node_name)
-
-        async def _open_node_configuration_panel(node_name: str) -> None:
-            panel = _require_node_settings_panel()
-            log.info("Node settings panel open scheduled: node=%s", node_name)
-            await asyncio.sleep(0)
-            _set_node_settings_panel_context(node_name)
-            panel.show()
-            log.info("Node settings panel shown: node=%s", node_name)
-            await _refresh_node_settings_panel(node_name)
-
-        def _create_open_node_configuration_handler(node_name: str) -> Callable[[object | None], None]:
-            def _handle(_: object | None = None) -> None:
-                log.info("Node settings badge clicked: node=%s", node_name)
-                if node_settings_panel is None:
-                    log.warning("Node settings overlay missing for node=%s", node_name)
-                    return
-                asyncio.create_task(_open_node_configuration_panel(node_name))
-
-            return _handle
-
-        async def _handle_toggle_simulated_down(_: object | None = None) -> None:
-            node_name = _require_node_settings_panel().require_selected_node_name()
-            target_url = self._toggle_simulated_down_node_url(
-                current_url=request_path,
-                node_name=node_name,
-                simulated_down_node_names=simulated_down_node_names,
-            )
-            log.info("Toggling simulated node availability: node=%s", node_name)
-            ui.navigate.to(target_url)
-
-        def _create_save_node_configuration_handler() -> Callable[[object | None], Awaitable[None]]:
-            async def _handle(_: object | None = None) -> None:
-                panel = _require_node_settings_panel()
-                node_name = panel.require_selected_node_name()
-                try:
-                    capacity = config.NodeCapacityProfile(
-                        cpu_points_total=_parse_required_non_negative_int(
-                            raw_value=_value_as_text(panel.input_for(_ModWebNodeSettingsFieldKey.CPU_TOTAL)),
-                            field_label=_node_settings_field_spec(_ModWebNodeSettingsFieldKey.CPU_TOTAL).field_label,
-                        ),
-                        ram_points_total=_parse_required_non_negative_int(
-                            raw_value=_value_as_text(panel.input_for(_ModWebNodeSettingsFieldKey.RAM_TOTAL)),
-                            field_label=_node_settings_field_spec(_ModWebNodeSettingsFieldKey.RAM_TOTAL).field_label,
-                        ),
-                        cpu_points_reserved=_parse_required_non_negative_int(
-                            raw_value=_value_as_text(panel.input_for(_ModWebNodeSettingsFieldKey.CPU_RESERVED)),
-                            field_label=_node_settings_field_spec(_ModWebNodeSettingsFieldKey.CPU_RESERVED).field_label,
-                        ),
-                        ram_points_reserved=_parse_required_non_negative_int(
-                            raw_value=_value_as_text(panel.input_for(_ModWebNodeSettingsFieldKey.RAM_RESERVED)),
-                            field_label=_node_settings_field_spec(_ModWebNodeSettingsFieldKey.RAM_RESERVED).field_label,
-                        ),
-                    )
-                    if panel.google_font_urls_input is None:
-                        raise RuntimeError("Node settings font URL input is unavailable.")
-                    font_sources = config.NodeFontSourceSettings(
-                        google_font_urls=config.normalise_google_font_source_urls(
-                            _value_as_text(panel.google_font_urls_input)
-                        )
-                    )
-                except (TypeError, ValueError) as xcp:
-                    ui.notify(str(xcp), type="negative")
-                    return
-                try:
-                    capacity_result = await self._update_node_capacity(node_name=node_name, user=user, capacity=capacity)
-                    font_source_result = await self._update_node_font_sources(
-                        node_name=node_name,
-                        user=user,
-                        settings=font_sources,
-                    )
-                except Exception as xcp:
-                    log.warning("Node settings update failed: node=%s error=%s", node_name, xcp)
-                    ui.notify(f"Node settings update failed: {xcp}", type="negative")
-                    return
-                ui.notify(f"{capacity_result.message} {font_source_result.message}", type="positive")
-                ui.navigate.reload()
-
-            return _handle
-
         with ui.column().classes("w-full gap-6 px-4 py-8 md:px-8"):
             with ui.column().classes("mod-page w-full gap-6"):
                 self._render_user_header(ui=ui, user=user)
-                if can_manage_node_configuration:
-                    with (
-                        ui.element("div")
-                        .classes("mod-node-settings-overlay")
-                        .style("display: none;") as node_configuration_overlay
-                    ):
-                        backdrop = ui.element("div").classes("mod-node-settings-backdrop")
-                        backdrop.on("click", lambda _: _hide_node_settings_panel())
-                        panel_shell = ui.element("div").classes("mod-node-settings-shell")
-                        panel_shell.on("click", js_handler="(event) => event.stopPropagation()")
-                        with panel_shell:
-                            with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
-                                with ui.column().classes("w-full gap-4 mod-app-details-layout"):
-                                    with ui.column().classes("gap-1"):
-                                        node_dialog_title_label = ui.label("Node Details").classes(
-                                            "text-xl font-black mod-title-small"
-                                        )
-                                        node_dialog_subtitle_label = ui.label("").classes("mod-subtitle text-sm")
-                                    with ui.column().classes("mod-app-details-section"):
-                                        node_capacity_inputs = _render_node_settings_capacity_inputs()
-                                        node_google_font_urls_input = _render_node_settings_font_source_input()
-                                    if dev_mode_enabled:
-                                        with ui.column().classes("mod-app-details-section"):
-                                            ui.label("Dev").classes("mod-stat-label")
-                                            node_dialog_simulate_button = ui.button(
-                                                "Simulate Down",
-                                                on_click=_handle_toggle_simulated_down,
-                                            ).classes("mod-list-button secondary")
-                                    with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
-                                        ui.button("Cancel", on_click=lambda _: _hide_node_settings_panel()).classes(
-                                            "mod-list-button secondary"
-                                        )
-                                        ui.button(
-                                            "Save",
-                                            on_click=_create_save_node_configuration_handler(),
-                                        ).classes("mod-list-button")
-                    node_settings_panel = _ModWebNodeSettingsPanelState(
-                        overlay=node_configuration_overlay,
-                        title_label=node_dialog_title_label,
-                        subtitle_label=node_dialog_subtitle_label,
-                        field_inputs=node_capacity_inputs,
-                        google_font_urls_input=node_google_font_urls_input,
-                        simulate_button=node_dialog_simulate_button,
-                    )
-                    for section in _current_sections():
-                        log.info("Node settings panel registered: node=%s", section.node.node_name)
                 with ui.card().classes(self._hero_card_classes()):
                     with ui.column().classes(self._hero_shell_classes()):
                         with ui.row().classes(self._hero_header_classes()):
@@ -640,26 +384,14 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                             badge, badge_text = self._render_home_node_status_badge(
                                                 ui=ui,
                                                 section=section,
-                                                on_click=(
-                                                    _create_open_node_configuration_handler(section.node.node_name)
-                                                    if can_manage_node_configuration
-                                                    else None
-                                                ),
-                                                extra_classes=(
-                                                    "mod-node-status-badge mod-node-status-badge-actionable"
-                                                    if can_manage_node_configuration
-                                                    else "mod-node-status-badge"
-                                                ),
+                                                on_click=None,
+                                                extra_classes="mod-node-status-badge",
                                             )
                                             badge_spec = self._home_node_latency_badge_spec(
                                                 badge_element=badge,
                                                 text_element=badge_text,
                                                 section=section,
-                                                extra_classes=(
-                                                    "mod-node-status-badge mod-node-status-badge-actionable"
-                                                    if can_manage_node_configuration
-                                                    else "mod-node-status-badge"
-                                                ),
+                                                extra_classes="mod-node-status-badge",
                                             )
                                             if badge_spec is not None:
                                                 home_node_latency_badges.append(badge_spec)
@@ -1236,6 +968,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
         initial_system_history: NodeSystemHistory,
         initial_app_entries: tuple[NodeAppEntry, ...],
         initial_restart_schedules: NodeRestartScheduleState | None,
+        initial_node_capacity: config.NodeCapacityProfile | None,
+        initial_node_font_sources: config.NodeFontSourceSettings | None,
+        initial_node_disk_settings: NodeDiskManagementState | None,
+        current_url: str,
+        simulated_down_node_names: tuple[str, ...],
         subscribe_node_state_updates: Callable[
             [Callable[[NodeStateStreamEvent], None]],
             Callable[[], None],
@@ -1318,13 +1055,24 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     chart: Html = ui.html(self._node_system_history_svg(current_history))
                     chart.classes("mod-system-chart-shell w-full")
 
-            if self._user_has_level(user, Power_Level.root):
-                self._render_node_system_actions(
-                    ui=ui,
-                    node=node,
-                    user=user,
-                    initial_restart_schedules=initial_restart_schedules,
-                )
+            can_manage_node_configuration = self._user_has_level(user, Power_Level.root)
+            self._render_node_system_properties(
+                ui=ui,
+                node=node,
+                user=user,
+                can_manage_node_configuration=can_manage_node_configuration,
+                initial_capacity=initial_node_capacity,
+                initial_font_sources=initial_node_font_sources,
+                initial_disk_settings=initial_node_disk_settings,
+                current_url=current_url,
+                simulated_down_node_names=simulated_down_node_names,
+            )
+            self._render_node_system_actions(
+                ui=ui,
+                node=node,
+                user=user,
+                initial_restart_schedules=initial_restart_schedules,
+            )
 
             page_closed = False
             loop: AbstractEventLoop = asyncio.get_running_loop()
@@ -1377,6 +1125,390 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 unsubscribe()
 
             self._register_client_cleanup(ui=ui, cleanup=_cleanup_live_updates)
+
+    @staticmethod
+    def _parse_required_non_negative_int(*, raw_value: str, field_label: str) -> int:
+        value = raw_value.strip()
+        if not value:
+            raise ValueError(f"{field_label} must not be empty.")
+        try:
+            parsed = int(value)
+        except ValueError as xcp:
+            raise ValueError(f"{field_label} must be a whole number.") from xcp
+        if parsed < 0:
+            raise ValueError(f"{field_label} must not be negative.")
+        return parsed
+
+    @staticmethod
+    def _node_settings_field_spec(
+        key: _ModWebNodeSettingsFieldKey,
+    ) -> _ModWebNodeSettingsNumberFieldSpec:
+        for row_specs in _NODE_SETTINGS_CAPACITY_FIELD_ROWS:
+            for field_spec in row_specs:
+                if field_spec.key is key:
+                    return field_spec
+        raise RuntimeError(f"Missing node settings field spec for key: {key!r}")
+
+    @staticmethod
+    def _build_node_disk_preferences(
+        *,
+        initial_settings: NodeDiskManagementState,
+        selected_activity_mounts: tuple[str, ...],
+        primary_choice: str,
+        secondary_choice: str,
+        label_values: dict[str, str],
+    ) -> config.PersistedDiskPreferences:
+        discovered_mounts = tuple(disk.mountpoint for disk in initial_settings.disks)
+        discovered_mount_set = set(discovered_mounts)
+        selected_activity_set = set(selected_activity_mounts)
+        if not selected_activity_set <= discovered_mount_set:
+            raise ValueError("Activity disks contain an unknown mountpoint.")
+
+        primary_mount = (
+            None
+            if primary_choice == _ModWebNodeDiskChoice.DEFAULT_PRIMARY.value
+            else primary_choice
+        )
+        allowed_primary_mounts = discovered_mount_set | {
+            initial_settings.preferences.primary_mount
+        }
+        if primary_mount is not None and primary_mount not in allowed_primary_mounts:
+            raise ValueError("Primary disk is not available.")
+        secondary_mount = (
+            None
+            if secondary_choice == _ModWebNodeDiskChoice.NO_SECONDARY.value
+            else secondary_choice
+        )
+        allowed_secondary_mounts = discovered_mount_set | {
+            initial_settings.preferences.secondary_mount
+        }
+        if secondary_mount is not None and secondary_mount not in allowed_secondary_mounts:
+            raise ValueError("Secondary disk is not available.")
+
+        initial_activity_set = {
+            disk.mountpoint for disk in initial_settings.disks if disk.is_activity
+        }
+        activity_mounts = (
+            initial_settings.preferences.activity_mounts
+            if selected_activity_set == initial_activity_set
+            else [
+                mountpoint
+                for mountpoint in discovered_mounts
+                if mountpoint in selected_activity_set
+            ]
+        )
+        labels = {
+            mountpoint: label
+            for mountpoint, label in initial_settings.preferences.labels.items()
+            if mountpoint not in discovered_mount_set
+        }
+        for mountpoint in discovered_mounts:
+            label = label_values.get(mountpoint)
+            if label is None:
+                raise RuntimeError(f"Missing disk label control for {mountpoint!r}.")
+            if stripped_label := label.strip():
+                labels[mountpoint] = stripped_label
+
+        return config.PersistedDiskPreferences(
+            activity_mounts=(list(activity_mounts) if activity_mounts is not None else None),
+            labels=labels,
+            primary_mount=primary_mount,
+            secondary_mount=secondary_mount,
+        )
+
+    def _render_node_system_properties(
+        self,
+        *,
+        ui: ModWebUi,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        can_manage_node_configuration: bool,
+        initial_capacity: config.NodeCapacityProfile | None,
+        initial_font_sources: config.NodeFontSourceSettings | None,
+        initial_disk_settings: NodeDiskManagementState | None,
+        current_url: str,
+        simulated_down_node_names: tuple[str, ...],
+    ) -> None:
+        field_inputs: dict[_ModWebNodeSettingsFieldKey, Input] = {}
+        disk_activity_checkboxes: dict[str, Checkbox] = {}
+        disk_label_inputs: dict[str, Input] = {}
+        primary_disk_select: Select | None = None
+        secondary_disk_select: Select | None = None
+
+        async def _handle_toggle_simulated_down(_: object | None = None) -> None:
+            target_url = self._toggle_simulated_down_node_url(
+                current_url=current_url,
+                node_name=node.node_name,
+                simulated_down_node_names=simulated_down_node_names,
+            )
+            ui.navigate.to(target_url)
+
+        with ui.card().classes("mod-card w-full"):
+            with ui.column().classes("w-full gap-4 p-4"):
+                with ui.column().classes("gap-0"):
+                    ui.label("Properties").classes("text-lg font-black mod-title-small")
+                    ui.label(f"Node-specific settings for {node.label}.").classes("mod-subtitle text-xs")
+
+                if initial_font_sources is None:
+                    ui.label("Properties are unavailable. Reload the page to try again.").classes(
+                        "mod-subtitle text-sm"
+                    )
+                else:
+                    capacity_values: dict[_ModWebNodeSettingsFieldKey, int] | None = (
+                        None
+                        if initial_capacity is None
+                        else {
+                            _ModWebNodeSettingsFieldKey.CPU_TOTAL: initial_capacity.cpu_points_total,
+                            _ModWebNodeSettingsFieldKey.RAM_TOTAL: initial_capacity.ram_points_total,
+                            _ModWebNodeSettingsFieldKey.CPU_RESERVED: initial_capacity.cpu_points_reserved,
+                            _ModWebNodeSettingsFieldKey.RAM_RESERVED: initial_capacity.ram_points_reserved,
+                        }
+                    )
+                    with ui.column().classes("mod-app-details-section"):
+                        capacity_section = ui.column().classes("mod-app-details-subsection")
+                        capacity_section.set_visibility(can_manage_node_configuration)
+                        with capacity_section:
+                            ui.label("Capacity").classes("mod-stat-label")
+                            ui.label("Adjust total capacity and reserved headroom for this node.").classes(
+                                "mod-subtitle text-xs"
+                            )
+                            if capacity_values is None:
+                                ui.label("Capacity settings are unavailable.").classes("mod-subtitle text-sm")
+                            else:
+                                for row_specs in _NODE_SETTINGS_CAPACITY_FIELD_ROWS:
+                                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                                        for field_spec in row_specs:
+                                            field_inputs[field_spec.key] = (
+                                                ui.input(field_spec.label, value=str(capacity_values[field_spec.key]))
+                                                .props(
+                                                    "filled square dense hide-bottom-space color=accent "
+                                                    "type=number inputmode=numeric step=1 min=0"
+                                                )
+                                                .classes("mod-app-details-field mod-app-details-point-field")
+                                            )
+
+                        with ui.column().classes("mod-app-details-subsection"):
+                            ui.label("Title Fonts").classes("mod-stat-label")
+                            ui.label(
+                                "Add Google Fonts specimen or CSS URLs for app title fonts."
+                            ).classes("mod-subtitle text-xs")
+                            font_sources_dialog = ui.dialog()
+                            with font_sources_dialog:
+                                with ui.card().classes("mod-card mod-dialog-card"):
+                                    with ui.column().classes("w-full gap-4 p-5"):
+                                        google_font_urls_input = (
+                                            ui.textarea(
+                                                label="Google Font URLs",
+                                                value="\n".join(initial_font_sources.google_font_urls),
+                                            )
+                                            .props("filled square autogrow hide-bottom-space color=accent")
+                                            .classes("mod-app-details-field mod-app-details-notes")
+                                        )
+                                        with ui.row().classes("w-full justify-end"):
+                                            ui.button("Done", on_click=font_sources_dialog.close).classes(
+                                                "mod-list-button"
+                                            )
+                            ui.button("Edit Google Fonts", on_click=font_sources_dialog.open).classes(
+                                "mod-list-button secondary"
+                            )
+
+                        disk_section = ui.column().classes("mod-app-details-subsection")
+                        disk_section.set_visibility(can_manage_node_configuration)
+                        with disk_section:
+                            ui.label("Disks").classes("mod-stat-label")
+                            ui.label(
+                                "Choose activity, primary, and secondary disks, and optionally override labels."
+                            ).classes("mod-subtitle text-xs")
+                            if initial_disk_settings is None:
+                                ui.label("Disk settings are unavailable. Reload the page to try again.").classes(
+                                    "mod-subtitle text-sm"
+                                )
+                            elif not initial_disk_settings.disks:
+                                ui.label("No manageable disks were discovered.").classes("mod-subtitle text-sm")
+                            else:
+                                disk_options = {
+                                    disk.mountpoint: f"{disk.display_name} · {disk.mountpoint}"
+                                    for disk in initial_disk_settings.disks
+                                }
+                                bot_disk = next(
+                                    (disk for disk in initial_disk_settings.disks if disk.is_bot_disk),
+                                    None,
+                                )
+                                primary_options = {
+                                    _ModWebNodeDiskChoice.DEFAULT_PRIMARY.value: (
+                                        "Bot Disk (default)"
+                                        if bot_disk is None
+                                        else f"Bot Disk (default) · {bot_disk.mountpoint}"
+                                    ),
+                                    **disk_options,
+                                }
+                                configured_primary_mount = initial_disk_settings.preferences.primary_mount
+                                if (
+                                    configured_primary_mount is not None
+                                    and configured_primary_mount not in disk_options
+                                ):
+                                    primary_options[configured_primary_mount] = (
+                                        f"Unavailable · {configured_primary_mount}"
+                                    )
+                                secondary_options = {
+                                    _ModWebNodeDiskChoice.NO_SECONDARY.value: "Not configured",
+                                    **disk_options,
+                                }
+                                configured_secondary_mount = initial_disk_settings.preferences.secondary_mount
+                                if (
+                                    configured_secondary_mount is not None
+                                    and configured_secondary_mount not in disk_options
+                                ):
+                                    secondary_options[configured_secondary_mount] = (
+                                        f"Unavailable · {configured_secondary_mount}"
+                                    )
+                                with ui.row().classes("w-full gap-2 flex-wrap"):
+                                    primary_disk_select = (
+                                        ui.select(
+                                            options=primary_options,
+                                            value=(
+                                                initial_disk_settings.preferences.primary_mount
+                                                or _ModWebNodeDiskChoice.DEFAULT_PRIMARY.value
+                                            ),
+                                            label="Primary Disk",
+                                        )
+                                        .props(
+                                            "filled square dense hide-bottom-space color=accent options-dark "
+                                            "popup-content-class=mod-setting-menu"
+                                        )
+                                        .classes("mod-app-details-field mod-system-disk-select")
+                                    )
+                                    secondary_disk_select = (
+                                        ui.select(
+                                            options=secondary_options,
+                                            value=(
+                                                initial_disk_settings.preferences.secondary_mount
+                                                or _ModWebNodeDiskChoice.NO_SECONDARY.value
+                                            ),
+                                            label="Secondary Disk",
+                                        )
+                                        .props(
+                                            "filled square dense hide-bottom-space color=accent options-dark "
+                                            "popup-content-class=mod-setting-menu"
+                                        )
+                                        .classes("mod-app-details-field mod-system-disk-select")
+                                    )
+                                with ui.column().classes("w-full gap-2"):
+                                    for disk in initial_disk_settings.disks:
+                                        with ui.element("div").classes("mod-system-disk-property-row"):
+                                            with ui.column().classes("gap-0 min-w-0 mod-system-disk-property-identity"):
+                                                ui.label(disk.display_name).classes("mod-stat-label")
+                                                ui.label(disk.mountpoint).classes(
+                                                    "mod-subtitle text-xs mod-system-disk-mountpoint"
+                                                )
+                                            disk_activity_checkboxes[disk.mountpoint] = (
+                                                ui.checkbox("Activity", value=disk.is_activity)
+                                                .props("dense color=accent")
+                                                .classes("mod-app-details-toggle")
+                                            )
+                                            disk_label_inputs[disk.mountpoint] = (
+                                                ui.input(
+                                                    "Label Override",
+                                                    value=initial_disk_settings.preferences.labels.get(
+                                                        disk.mountpoint,
+                                                        "",
+                                                    ),
+                                                )
+                                                .props("filled square dense hide-bottom-space color=accent")
+                                                .classes("mod-app-details-field mod-system-disk-label-field")
+                                            )
+
+                    async def _save_properties(_: object | None = None) -> None:
+                        try:
+                            def _capacity_value(key: _ModWebNodeSettingsFieldKey) -> int:
+                                return self._parse_required_non_negative_int(
+                                    raw_value=_value_as_text(field_inputs[key]),
+                                    field_label=self._node_settings_field_spec(key).field_label,
+                                )
+
+                            capacity: config.NodeCapacityProfile | None = None
+                            if can_manage_node_configuration and field_inputs:
+                                capacity = config.NodeCapacityProfile(
+                                    cpu_points_total=_capacity_value(_ModWebNodeSettingsFieldKey.CPU_TOTAL),
+                                    ram_points_total=_capacity_value(_ModWebNodeSettingsFieldKey.RAM_TOTAL),
+                                    cpu_points_reserved=_capacity_value(_ModWebNodeSettingsFieldKey.CPU_RESERVED),
+                                    ram_points_reserved=_capacity_value(_ModWebNodeSettingsFieldKey.RAM_RESERVED),
+                                )
+                            font_sources = config.NodeFontSourceSettings(
+                                google_font_urls=config.normalise_google_font_source_urls(
+                                    _value_as_text(google_font_urls_input)
+                                )
+                            )
+                            disk_preferences: config.PersistedDiskPreferences | None = None
+                            if (
+                                can_manage_node_configuration
+                                and initial_disk_settings is not None
+                                and initial_disk_settings.disks
+                            ):
+                                if primary_disk_select is None or secondary_disk_select is None:
+                                    raise RuntimeError("Node disk selection controls are unavailable.")
+                                disk_preferences = self._build_node_disk_preferences(
+                                    initial_settings=initial_disk_settings,
+                                    selected_activity_mounts=tuple(
+                                        disk.mountpoint
+                                        for disk in initial_disk_settings.disks
+                                        if _value_as_bool(disk_activity_checkboxes[disk.mountpoint])
+                                    ),
+                                    primary_choice=_value_as_text(primary_disk_select),
+                                    secondary_choice=_value_as_text(secondary_disk_select),
+                                    label_values={
+                                        mountpoint: _value_as_text(label_input)
+                                        for mountpoint, label_input in disk_label_inputs.items()
+                                    },
+                                )
+                        except (TypeError, ValueError) as xcp:
+                            ui.notify(str(xcp), type="negative")
+                            return
+                        save_button.disable()
+                        try:
+                            font_source_result = await self._update_node_font_sources(
+                                node_name=node.node_name,
+                                user=user,
+                                settings=font_sources,
+                            )
+                            result_messages = [font_source_result.message]
+                            if capacity is not None:
+                                capacity_result = await self._update_node_capacity(
+                                    node_name=node.node_name,
+                                    user=user,
+                                    capacity=capacity,
+                                )
+                                result_messages.append(capacity_result.message)
+                            if disk_preferences is not None:
+                                disk_result = await self._update_node_disk_settings(
+                                    node_name=node.node_name,
+                                    user=user,
+                                    preferences=disk_preferences,
+                                )
+                                result_messages.append(disk_result.message)
+                        except Exception as xcp:
+                            log.warning("Node properties update failed: node=%s error=%s", node.node_name, xcp)
+                            ui.notify(f"Node properties update failed: {xcp}", type="negative")
+                            save_button.enable()
+                            return
+                        ui.notify(" ".join(result_messages), type="positive")
+                        ui.navigate.reload()
+
+                    with ui.row().classes("w-full justify-end"):
+                        save_button = ui.button("Save", on_click=_save_properties).classes("mod-list-button")
+
+                if config.INDEV and can_manage_node_configuration:
+                    with ui.column().classes("mod-app-details-section"):
+                        ui.label("Dev").classes("mod-stat-label")
+                        simulate_button_text = (
+                            "Restore Availability"
+                            if node.node_name.casefold()
+                            in {configured_name.casefold() for configured_name in simulated_down_node_names}
+                            else "Simulate Down"
+                        )
+                        ui.button(simulate_button_text, on_click=_handle_toggle_simulated_down).classes(
+                            "mod-list-button secondary"
+                        )
 
     def _render_node_system_actions(
         self,

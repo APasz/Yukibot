@@ -76,6 +76,20 @@ class ModWebNotificationTrayItemState(Enum):
     ERROR = "error"
 
 
+@dataclass(frozen=True, slots=True)
+class ModWebDirectUploadTarget:
+    url: str
+    authorization_header: str
+
+    def __post_init__(self) -> None:
+        if not self.url.strip():
+            raise ValueError("Direct upload target URL must not be empty.")
+        if not self.authorization_header.startswith("Bearer ") or not self.authorization_header.removeprefix(
+            "Bearer "
+        ).strip():
+            raise ValueError("Direct upload authorization must use a bearer token.")
+
+
 class ModWebMinecraftRecipeOperationKind(Enum):
     ADD = "add"
     REMOVE = "remove"
@@ -1017,6 +1031,7 @@ __all__: tuple[str, ...] = (
     "ModWebBasePageModel",
     "ModWebConfigEditorLayout",
     "ModWebConfigEditorShape",
+    "ModWebDirectUploadTarget",
     "ModWebHomeNodeSummary",
     "ModWebNotificationTrayItemKind",
     "ModWebNotificationTrayItemState",

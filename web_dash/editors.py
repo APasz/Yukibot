@@ -9,6 +9,7 @@ from .constants import (
     _CONFIG_EDITOR_DOCKERFILE_LANGUAGE,
     _CONFIG_EDITOR_LANGUAGE_BY_SUFFIX,
     _CONFIG_EDITOR_THEME,
+    _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
     _HIDDEN_SETTING_CYCLE_VARIANT_COUNT,
     _HIDDEN_SETTING_GLYPHS,
     _SAME_ORIGIN_NODE_PROXY_BASE,
@@ -73,6 +74,7 @@ from .runtime_imports import (
     Select,
     Textarea,
     Timer,
+    Upload,
     asyncio,
     cached_member_role_color,
     cast,
@@ -90,6 +92,7 @@ from .types import (
     ModWebBasePageModel,
     ModWebConfigEditorLayout,
     ModWebConfigEditorShape,
+    ModWebDirectUploadTarget,
     ModWebNodeLink,
     ModWebModSortOrder,
     ModWebPageModel,
@@ -104,7 +107,7 @@ if TYPE_CHECKING:
     from nicegui.elements.dialog import Dialog
     from nicegui.elements.switch import Switch
     from nicegui.elements.upload_files import FileUpload
-    from nicegui.events import MultiUploadEventArguments, UploadEventArguments
+    from nicegui.events import MultiUploadEventArguments
 
 _SEVENDAYS_TRADER_BIOME_SETTING_KEYS: frozenset[str] = frozenset(
     {
@@ -781,29 +784,58 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         show_upload_action: bool = model.supports_save_uploads and can_write and selected_root_id is not None
         show_write_lock_note: bool = (model.supports_save_uploads or model.supports_save_rename) and not can_write
 
-        async def upload_save(event: "UploadEventArguments") -> None:
-            if not model.supports_save_uploads:
-                ui.notify(f"{model.app_friendly} does not support save uploads.", type="warning")
-                return
+        root_select: Select | None = None
+        save_upload_control: Upload | None = None
+
+        def selected_save_root_id() -> str:
             selected_root_value: str | None = (
                 selected_root_id if root_select is None else _value_as_text(root_select).strip() or None
             )
             root_id: str | None = selected_root_value or selected_root_id
             if not root_id:
-                ui.notify("Select a save root first.", type="warning")
-                return
-            try:
-                result: NodeSaveMutationResult = await self._upload_save(
-                    model=model, root_id=root_id, upload_file=event.file, user=user
-                )
-            except Exception as xcp:
-                ui.notify(f"Save upload failed: {xcp}", type="negative")
-                return
+                raise ValueError("Select a save root before uploading.")
+            if root_id not in save_root_options:
+                raise ValueError(f"Unknown save root: {root_id}")
+            return root_id
+
+        def refresh_direct_save_upload_target() -> None:
+            if save_upload_control is None:
+                raise RuntimeError("Save upload control is not available.")
+            root_id: str = selected_save_root_id()
+            target: ModWebDirectUploadTarget = self._direct_save_upload_target(model=model, user=user)
+            save_upload_control.props["url"] = target.url
+            save_upload_control.props["headers"] = [
+                {"name": "Authorization", "value": target.authorization_header},
+            ]
+            save_upload_control.props["form-fields"] = [
+                {"name": "root_id", "value": root_id},
+            ]
+
+        def direct_save_upload_started() -> None:
+            ui.notify(
+                f"Upload acknowledged. Sending the save directly to {model.app_friendly}.",
+                type="info",
+            )
+
+        def direct_save_upload_succeeded() -> None:
             upload_dialog.close()
-            ui.notify(result.message, type="positive")
+            ui.notify(f"Uploaded the save for {model.app_friendly}.", type="positive")
             ui.navigate.reload()
 
-        root_select: Select | None = None
+        def direct_save_upload_failed() -> None:
+            ui.notify(
+                f"Save upload failed before {model.app_friendly} accepted it. "
+                "The node may be unavailable, out of temporary space, or may have rejected the file.",
+                type="negative",
+                multi_line=True,
+            )
+
+        def direct_save_upload_rejected() -> None:
+            ui.notify(
+                "The selected save was rejected before upload. Check the file type and upload limits.",
+                type="warning",
+            )
+
         with ui.dialog() as upload_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
@@ -816,11 +848,24 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             .props("filled square dense hide-bottom-space color=accent")
                             .classes("mod-config-select")
                         )
-                    ui.upload(
+                    save_upload_control = ui.upload(
                         label="Choose Save Archive",
                         auto_upload=True,
-                        on_upload=upload_save,
                     ).classes("mod-list-button")
+                    if show_upload_action:
+                        save_upload_control.props["field-name"] = "upload"
+                        save_upload_control.on("start", direct_save_upload_started, args=[])
+                        save_upload_control.on("uploaded", direct_save_upload_succeeded, args=[])
+                        save_upload_control.on("failed", direct_save_upload_failed, args=[])
+                        save_upload_control.on("rejected", direct_save_upload_rejected, args=[])
+                        refresh_direct_save_upload_target()
+                        direct_save_upload_token_timer: Timer = ui.timer(
+                            _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
+                            refresh_direct_save_upload_target,
+                        )
+                        self._register_timer_cleanup(ui=ui, timer=direct_save_upload_token_timer)
+                        if root_select is not None:
+                            root_select.on("update:model-value", lambda: refresh_direct_save_upload_target())
                     ui.label("ZIP archives are uploaded directly into the selected save target.").classes(
                         "mod-subtitle text-sm"
                     )

@@ -35,6 +35,8 @@ from .runtime_imports import (
     NodeBlueprintList,
     NodeBlueprintMutationResult,
     NodeCapacityMutationResult,
+    NodeDiskManagementState,
+    NodeDiskSettingsMutationResult,
     NodeConfigContent,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
@@ -73,6 +75,7 @@ from .types import (
     ModWebAppLink,
     ModWebAppTabDefinition,
     ModWebBasePageModel,
+    ModWebDirectUploadTarget,
     ModWebHomeNodeSummary,
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
@@ -424,6 +427,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_node_capacity"]) -> Callable[..., Awaitable[config.NodeCapacityProfile]]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_node_disk_settings"]) -> Callable[..., Awaitable[NodeDiskManagementState]]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_node_font_sources"]) -> Callable[..., Awaitable[config.NodeFontSourceSettings]]: ...
 
     @overload
@@ -469,6 +475,11 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_update_node_capacity"]
     ) -> Callable[..., Awaitable[NodeCapacityMutationResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_update_node_disk_settings"]
+    ) -> Callable[..., Awaitable[NodeDiskSettingsMutationResult]]: ...
 
     @overload
     def __getattr__(
@@ -556,6 +567,12 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_download_url"]) -> Callable[..., str]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_direct_mod_upload_target"]) -> Callable[..., ModWebDirectUploadTarget]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_direct_save_upload_target"]) -> Callable[..., ModWebDirectUploadTarget]: ...
 
     @overload
     def __getattr__(

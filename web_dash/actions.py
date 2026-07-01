@@ -25,6 +25,8 @@ from .runtime_imports import (
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
     NodeCapacityMutationResult,
+    NodeDiskManagementState,
+    NodeDiskSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationResult,
@@ -223,6 +225,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return config.NodeCapacityProfile.model_validate(payload)
 
+    async def _remote_node_disk_settings_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> NodeDiskManagementState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/node-disk-settings",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+        )
+        return NodeDiskManagementState.from_mapping(payload)
+
     async def _remote_node_system_action_async(
         self,
         node: ModWebNodeLink,
@@ -234,7 +250,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             node=node,
             app_name=None,
             path="/system/actions",
-            scopes=(NodeApiScope.NODE_MANAGE,),
+            scopes=(NodeApiScope.NODE_OPERATE,),
             user=user,
             method="POST",
             json_payload={
@@ -253,7 +269,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             node=node,
             app_name=None,
             path="/system/restart-schedules",
-            scopes=(NodeApiScope.NODE_MANAGE,),
+            scopes=(NodeApiScope.NODE_OPERATE,),
             user=user,
         )
         return NodeRestartScheduleState.from_mapping(payload)
@@ -270,7 +286,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             node=node,
             app_name=None,
             path="/system/restart-schedules",
-            scopes=(NodeApiScope.NODE_MANAGE,),
+            scopes=(NodeApiScope.NODE_OPERATE,),
             user=user,
             method="POST",
             json_payload={
@@ -291,7 +307,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             node=node,
             app_name=None,
             path=f"/system/restart-schedules/{quote(target.value, safe='')}/skip",
-            scopes=(NodeApiScope.NODE_MANAGE,),
+            scopes=(NodeApiScope.NODE_OPERATE,),
             user=user,
             method="POST",
         )
@@ -314,6 +330,23 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return NodeCapacityMutationResult.from_mapping(payload)
 
+    async def _remote_update_node_disk_settings_async(
+        self,
+        node: ModWebNodeLink,
+        preferences: config.PersistedDiskPreferences,
+        user: ModWebUser,
+    ) -> NodeDiskSettingsMutationResult:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/node-disk-settings",
+            scopes=(NodeApiScope.NODE_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload=preferences.model_dump(mode="json"),
+        )
+        return NodeDiskSettingsMutationResult.from_mapping(payload)
+
     async def _remote_node_font_sources_async(
         self,
         node: ModWebNodeLink,
@@ -323,7 +356,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             node=node,
             app_name=None,
             path="/node-font-sources",
-            scopes=(NodeApiScope.NODE_MANAGE,),
+            scopes=(NodeApiScope.NODE_OPERATE,),
             user=user,
         )
         return config.NodeFontSourceSettings.model_validate(payload)
@@ -338,7 +371,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             node=node,
             app_name=None,
             path="/node-font-sources",
-            scopes=(NodeApiScope.NODE_MANAGE,),
+            scopes=(NodeApiScope.NODE_OPERATE,),
             user=user,
             method="POST",
             json_payload=settings.model_dump(mode="json"),
@@ -569,9 +602,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
         return await self._remote_node_capacity_async(node, user)
 
     async def _node_font_sources(self, *, node_name: str, user: ModWebUser) -> config.NodeFontSourceSettings:
-        self._require_user_level(user=user, required_level=Power_Level.root)
+        self._require_user_level(user=user, required_level=Power_Level.sudo)
         node = self._remote_node_link(node_name)
         return await self._remote_node_font_sources_async(node, user)
+
+    async def _node_disk_settings(self, *, node_name: str, user: ModWebUser) -> NodeDiskManagementState:
+        self._require_user_level(user=user, required_level=Power_Level.root)
+        node = self._remote_node_link(node_name)
+        return await self._remote_node_disk_settings_async(node, user)
 
     async def _update_node_capacity(
         self,
@@ -591,9 +629,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
         user: ModWebUser,
         settings: config.NodeFontSourceSettings,
     ) -> NodeFontSourceSettingsMutationResult:
-        self._require_user_level(user=user, required_level=Power_Level.root)
+        self._require_user_level(user=user, required_level=Power_Level.sudo)
         node = self._remote_node_link(node_name)
         return await self._remote_update_node_font_sources_async(node, settings, user)
+
+    async def _update_node_disk_settings(
+        self,
+        *,
+        node_name: str,
+        user: ModWebUser,
+        preferences: config.PersistedDiskPreferences,
+    ) -> NodeDiskSettingsMutationResult:
+        self._require_user_level(user=user, required_level=Power_Level.root)
+        node = self._remote_node_link(node_name)
+        return await self._remote_update_node_disk_settings_async(node, preferences, user)
 
     @staticmethod
     def _app_start_stop_action(model: ModWebBasePageModel) -> NodeAppMutationAction | None:

@@ -3317,6 +3317,37 @@ class ModWebTheme:
                 .mod-system-danger-card {{
                     border-color: rgba(220, 38, 38, 0.64) !important;
                 }}
+                .mod-system-disk-select {{
+                    flex: 1 1 18rem;
+                    min-width: min(18rem, 100%);
+                }}
+                .mod-system-disk-property-row {{
+                    display: grid;
+                    grid-template-columns: minmax(10rem, 1fr) auto minmax(12rem, 0.8fr);
+                    align-items: end;
+                    gap: 0.75rem;
+                    width: 100%;
+                    padding: 0.75rem;
+                    border: 1px solid rgba(82, 82, 91, 0.62);
+                    background: rgba(8, 8, 12, 0.72);
+                }}
+                .mod-system-disk-property-identity {{
+                    align-self: center;
+                }}
+                .mod-system-disk-mountpoint {{
+                    overflow-wrap: anywhere;
+                }}
+                .mod-system-disk-label-field {{
+                    min-width: 0;
+                }}
+                @media (max-width: 42rem) {{
+                    .mod-system-disk-property-row {{
+                        grid-template-columns: 1fr auto;
+                    }}
+                    .mod-system-disk-label-field {{
+                        grid-column: 1 / -1;
+                    }}
+                }}
                 .mod-system-schedule-row {{
                     padding: 1rem;
                     border: 1px solid rgba(127, 29, 29, 0.46);

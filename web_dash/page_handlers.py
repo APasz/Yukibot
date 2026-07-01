@@ -18,6 +18,7 @@ from .runtime_imports import (
     NodeConsoleActionList,
     NodeModList,
     NodeModSummary,
+    NodeDiskManagementState,
     NodeRestartScheduleState,
     NodeSaveList,
     NodeSettingList,
@@ -315,8 +316,6 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 return NodeSystemHistory.empty()
 
         async def _load_restart_schedules(node: ModWebNodeLink) -> NodeRestartScheduleState | None:
-            if not self._user_has_level(user, Power_Level.root):
-                return None
             try:
                 return await self._remote_restart_schedules_async(node, user)
             except Exception as xcp:
@@ -324,14 +323,52 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 log_method("Remote restart schedules unavailable: node=%s error=%s", node.node_name, xcp)
                 return None
 
+        async def _load_node_capacity(node: ModWebNodeLink) -> config.NodeCapacityProfile | None:
+            if not self._user_has_level(user, Power_Level.root):
+                return None
+            try:
+                return await self._node_capacity(node_name=node.node_name, user=user)
+            except Exception as xcp:
+                log.warning("Remote node capacity unavailable: node=%s error=%s", node.node_name, xcp)
+                return None
+
+        async def _load_node_font_sources(node: ModWebNodeLink) -> config.NodeFontSourceSettings | None:
+            if not self._user_has_level(user, Power_Level.sudo):
+                return None
+            try:
+                return await self._node_font_sources(node_name=node.node_name, user=user)
+            except Exception as xcp:
+                log.warning("Remote node font sources unavailable: node=%s error=%s", node.node_name, xcp)
+                return None
+
+        async def _load_node_disk_settings(node: ModWebNodeLink) -> NodeDiskManagementState | None:
+            if not self._user_has_level(user, Power_Level.root):
+                return None
+            try:
+                return await self._node_disk_settings(node_name=node.node_name, user=user)
+            except Exception as xcp:
+                log.warning("Remote node disk settings unavailable: node=%s error=%s", node.node_name, xcp)
+                return None
+
         node: ModWebNodeLink | None = None
         try:
             node = self._remote_node_link(node_name)
-            system_summary, system_history, app_entries, restart_schedules = await asyncio.gather(
+            (
+                system_summary,
+                system_history,
+                app_entries,
+                restart_schedules,
+                node_capacity,
+                node_font_sources,
+                node_disk_settings,
+            ) = await asyncio.gather(
                 self._remote_node_system_summary_async(node, user),
                 _load_system_history(node),
                 self._remote_apps_async(node, user),
                 _load_restart_schedules(node),
+                _load_node_capacity(node),
+                _load_node_font_sources(node),
+                _load_node_disk_settings(node),
             )
         except Exception as xcp:
             if not self._remote_node_error_is_transient(xcp):
@@ -390,6 +427,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             initial_system_history=system_history,
             initial_app_entries=app_entries,
             initial_restart_schedules=restart_schedules,
+            initial_node_capacity=node_capacity,
+            initial_node_font_sources=node_font_sources,
+            initial_node_disk_settings=node_disk_settings,
+            current_url=self._request_path(request),
+            simulated_down_node_names=self._simulated_down_node_names(request),
             subscribe_node_state_updates=subscribe_node_state_updates,
         )
 

@@ -363,6 +363,7 @@ class PersistedDiskPreferences(BaseModel):
     activity_mounts: list[str] | None = None
     labels: dict[str, str] = Field(default_factory=dict)
     primary_mount: str | None = None
+    secondary_mount: str | None = None
 
     @field_validator("activity_mounts")
     @classmethod
@@ -398,6 +399,13 @@ class PersistedDiskPreferences(BaseModel):
         if value is None:
             return None
         return normalise_absolute_path_text(value, source="disk_preferences.primary_mount")
+
+    @field_validator("secondary_mount")
+    @classmethod
+    def _validate_secondary_mount(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalise_absolute_path_text(value, source="disk_preferences.secondary_mount")
 
 
 class PersistedRestartSchedule(BaseModel):

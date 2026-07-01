@@ -32,6 +32,7 @@ from .constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _APP_SECTION_QUERY_PARAM,
+    _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
     _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
     log,
@@ -69,7 +70,6 @@ from .runtime_imports import (
     NodeModEntry,
     NodeModMutationAction,
     NodeModSummary,
-    NodeModUploadBatchResult,
     NodeSaveList,
     NodeSettingList,
     NodeSystemSummary,
@@ -94,6 +94,7 @@ from .types import (
     ModWebAppSectionKind,
     ModWebAppTabDefinition,
     ModWebBasePageModel,
+    ModWebDirectUploadTarget,
     ModWebModSortOrder,
     ModWebOverviewPageModel,
     ModWebPageLoadWarning,
@@ -116,7 +117,6 @@ if TYPE_CHECKING:
     from nicegui.elements.dialog import Dialog
     from nicegui.elements.tabs import Tab
     from nicegui.elements.tooltip import Tooltip
-    from nicegui.events import MultiUploadEventArguments
 
 
 _LEAFLET_VENDOR_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "vendor" / "leaflet"
@@ -3689,28 +3689,43 @@ class ModWebAppPageMixin(
 
         inline_upload_control: Upload | None = None
 
-        async def upload_mods(event: "MultiUploadEventArguments") -> None:
-            upload_names: tuple[str, ...] = tuple(upload_file.name for upload_file in event.files)
-            if not upload_names:
-                ui.notify("Choose at least one mod file to upload.", type="warning")
-                return
-            upload_label: str = upload_names[0] if len(upload_names) == 1 else f"{len(upload_names)} files"
-            if inline_upload_control is not None:
-                inline_upload_control.disable()
-            ui.notify(f"Uploading {upload_label} to {model.app_friendly}.", type="info")
-            try:
-                result: NodeModUploadBatchResult = await self._upload_mods(
-                    model=model,
-                    upload_files=tuple(event.files),
-                    user=user,
-                )
-            except Exception as xcp:
-                if inline_upload_control is not None:
-                    inline_upload_control.enable()
-                ui.notify(f"Mod upload failed: {xcp}", type="negative")
-                return
-            ui.notify(result.message, type="positive")
+        def open_upload_picker() -> None:
+            if inline_upload_control is None:
+                raise RuntimeError("Inline mod upload control is not available.")
+            inline_upload_control.run_method("pickFiles")
+
+        def refresh_direct_upload_target() -> None:
+            if inline_upload_control is None:
+                raise RuntimeError("Inline mod upload control is not available.")
+            target: ModWebDirectUploadTarget = self._direct_mod_upload_target(model=model, user=user)
+            inline_upload_control.props["url"] = target.url
+            inline_upload_control.props["headers"] = [
+                {"name": "Authorization", "value": target.authorization_header},
+            ]
+
+        def direct_upload_started() -> None:
+            ui.notify(
+                f"Upload acknowledged. Sending mods directly to {model.app_friendly}.",
+                type="info",
+            )
+
+        def direct_upload_succeeded() -> None:
+            ui.notify(f"Uploaded mods for {model.app_friendly}.", type="positive")
             ui.navigate.reload()
+
+        def direct_upload_failed() -> None:
+            ui.notify(
+                f"Mod upload failed before {model.app_friendly} accepted it. "
+                "The node may be unavailable, out of temporary space, or may have rejected the files.",
+                type="negative",
+                multi_line=True,
+            )
+
+        def direct_upload_rejected() -> None:
+            ui.notify(
+                "The selected mod files were rejected before upload. Check file and batch limits.",
+                type="warning",
+            )
 
         optional_client_checkboxes: dict[str, Checkbox] = {}
         client_choice_selects: dict[str, Select] = {}
@@ -3826,11 +3841,7 @@ class ModWebAppPageMixin(
                     )
                 upload_picker_action: Callable[[], None] | None = None
                 if can_upload_mod:
-
-                    def _open_upload_picker() -> None:
-                        return None
-
-                    upload_picker_action = _open_upload_picker
+                    upload_picker_action = open_upload_picker
 
                 @ui.refreshable
                 def _mod_download_rows(search_query: str) -> None:
@@ -3909,10 +3920,19 @@ class ModWebAppPageMixin(
                         label="",
                         auto_upload=True,
                         multiple=True,
-                        on_multi_upload=upload_mods,
                     ).classes("mod-mod-list-dropzone w-full")
-                    if inline_upload_control is None:
-                        raise RuntimeError("Inline mod upload control is not available.")
+                    inline_upload_control.props["batch"] = True
+                    inline_upload_control.props["field-name"] = "upload"
+                    inline_upload_control.on("start", direct_upload_started, args=[])
+                    inline_upload_control.on("uploaded", direct_upload_succeeded, args=[])
+                    inline_upload_control.on("failed", direct_upload_failed, args=[])
+                    inline_upload_control.on("rejected", direct_upload_rejected, args=[])
+                    refresh_direct_upload_target()
+                    direct_upload_token_timer: Timer = ui.timer(
+                        _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
+                        refresh_direct_upload_target,
+                    )
+                    self._register_timer_cleanup(ui=ui, timer=direct_upload_token_timer)
                     with inline_upload_control.add_slot("list"):
                         with ui.element("div").classes("mod-mod-list-drop-shell w-full"):
                             _mod_download_rows("")
@@ -4557,14 +4577,8 @@ class ModWebAppPageMixin(
                 ).classes("mod-mods-toolbar-result-count")
             with ui.row().classes("mod-tab-toolbar-actions mod-mods-toolbar-actions"):
                 if can_upload_mod:
-                    upload_button = ui.button("Upload", on_click=upload_mod).classes(
+                    ui.button("Upload", on_click=upload_mod).classes(
                         "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
-                    )
-                    upload_button.on(
-                        "click",
-                        js_handler=(
-                            "(event) => document.querySelector('.mod-mod-list-dropzone input[type=\"file\"]')?.click()"
-                        ),
                     )
                 if show_bulk_mod_actions:
                     selection_button = ui.button("", on_click=toggle_selection).classes(

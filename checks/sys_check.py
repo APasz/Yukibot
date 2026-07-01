@@ -153,6 +153,7 @@ def test_disk_preferences_are_persisted_without_dropping_other_configuration_key
     stats.replace_disk_labels({"/mnt/data": "Fast", "/mnt/backups": ""})
     stats.set_primary_mount_override("/mnt/backups")
     stats.set_primary_mount_override(None)
+    stats.set_secondary_mount("/mnt/backups")
 
     payload = json.loads(config_path.read_text(encoding="utf-8"))
 
@@ -160,6 +161,9 @@ def test_disk_preferences_are_persisted_without_dropping_other_configuration_key
     assert payload["disk_preferences"]["activity_mounts"] == ["/mnt/backups"]
     assert payload["disk_preferences"]["labels"] == {"/mnt/data": "Fast"}
     assert payload["disk_preferences"]["primary_mount"] is None
+    assert payload["disk_preferences"]["secondary_mount"] == "/mnt/backups"
+    assert stats.secondary_disk is not None
+    assert stats.secondary_disk.mountpoint_text == "/mnt/backups"
 
 
 def test_stats_system_ignores_efi_mounts_but_keeps_bot_disk(

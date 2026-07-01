@@ -101,6 +101,8 @@ from .runtime_imports import (
 )
 from .service_base import ModWebServiceSupport
 from .types import (
+    ModWebBasePageModel,
+    ModWebDirectUploadTarget,
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
     ModWebMinecraftRecipeEntry,
@@ -1282,6 +1284,53 @@ class ModWebModelsMixin(ModWebServiceSupport):
         except ValueError as xcp:
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
         return NodeModUploadBatchResult.from_mapping(_json_object(payload, context="Remote node response"))
+
+    def _direct_mod_upload_target(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+    ) -> ModWebDirectUploadTarget:
+        return self._direct_upload_target(
+            model=model,
+            user=user,
+            scope=NodeApiScope.MODS_WRITE,
+            path=f"/apps/{quote(model.app_name, safe='')}/mods/upload",
+        )
+
+    def _direct_save_upload_target(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+    ) -> ModWebDirectUploadTarget:
+        return self._direct_upload_target(
+            model=model,
+            user=user,
+            scope=NodeApiScope.SAVES_WRITE,
+            path=f"/apps/{quote(model.app_name, safe='')}/saves/upload",
+        )
+
+    def _direct_upload_target(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        scope: NodeApiScope,
+        path: str,
+    ) -> ModWebDirectUploadTarget:
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        token: str = self._remote_token(
+            node=node,
+            app_name=model.app_name,
+            scopes=(scope,),
+            user=user,
+        )
+        node_api_base_url: str = self._absolute_node_api_base_url(node.api_base_url)
+        return ModWebDirectUploadTarget(
+            url=f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}",
+            authorization_header=f"Bearer {token}",
+        )
 
     async def _remote_config_list_async(
         self,

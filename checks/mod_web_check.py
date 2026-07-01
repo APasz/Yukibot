@@ -86,6 +86,8 @@ from node_api import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleActionParameter,
+    NodeDiskEntry,
+    NodeDiskManagementState,
     NodeMinecraftItemRegistryState,
     NodeMinecraftRecipeBookState,
     NodeMinecraftRecipeMutationAction,
@@ -137,6 +139,7 @@ from web_dash.assets import AssetContentEncoding, CacheableTextAsset, extract_ht
 from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS
 from web_dash.home import (
+    _ModWebNodeDiskChoice,
     _RestartWeekday,
     _format_restart_timestamp,
     _restart_anchor_timestamp,
@@ -157,6 +160,7 @@ from web_dash.types import (
     ModWebAppTabVisibilityRule,
     ModWebBasePageModel,
     ModWebConfigEditorShape,
+    ModWebDirectUploadTarget,
     ModWebHomeNodeSummary,
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
@@ -1548,7 +1552,7 @@ class ModWebTests(unittest.TestCase):
             node=node,
             app_name=None,
             path="/system/actions",
-            scopes=(NodeApiScope.NODE_MANAGE,),
+            scopes=(NodeApiScope.NODE_OPERATE,),
             user=user,
             method="POST",
             json_payload={
@@ -1935,8 +1939,37 @@ class ModWebTests(unittest.TestCase):
             render_dashboard = Mock()
             history = NodeSystemHistory.empty()
             restart_schedules = NodeRestartScheduleState(node="erin", schedules=())
+            capacity = config.NodeCapacityProfile(
+                cpu_points_total=12,
+                ram_points_total=24,
+                cpu_points_reserved=2,
+                ram_points_reserved=4,
+            )
+            font_sources = config.NodeFontSourceSettings(
+                google_font_urls=("https://fonts.google.com/specimen/Inter",)
+            )
+            disk_settings = NodeDiskManagementState(
+                node="erin",
+                disks=(
+                    NodeDiskEntry(
+                        mountpoint="/mnt/data",
+                        display_name="Data",
+                        is_activity=True,
+                        is_primary=True,
+                        is_secondary=False,
+                        is_bot_disk=True,
+                    ),
+                ),
+                preferences=config.PersistedDiskPreferences(),
+            )
             ui = cast(ModWebUi, cast(object, SimpleNamespace()))
-            request = cast(Any, SimpleNamespace())
+            request = cast(
+                Any,
+                SimpleNamespace(
+                    query_params=SimpleNamespace(getlist=Mock(return_value=[])),
+                    url=SimpleNamespace(path="/mod-web/nodes/erin/system", query=""),
+                ),
+            )
             with (
                 patch.object(service, "_authorised_page_user", new=authorised_user),
                 patch.object(service, "_remote_node_link", return_value=node),
@@ -1949,6 +1982,9 @@ class ModWebTests(unittest.TestCase):
                     "_remote_restart_schedules_async",
                     new=AsyncMock(return_value=restart_schedules),
                 ),
+                patch.object(service, "_node_capacity", new=AsyncMock(return_value=capacity)),
+                patch.object(service, "_node_font_sources", new=AsyncMock(return_value=font_sources)),
+                patch.object(service, "_node_disk_settings", new=AsyncMock(return_value=disk_settings)),
                 patch.object(service, "_render_node_system_dashboard", new=render_dashboard),
             ):
                 await service._render_node_system_page(
@@ -1967,8 +2003,55 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(render_dashboard.call_args.kwargs["initial_system_history"], history)
             self.assertEqual(render_dashboard.call_args.kwargs["initial_app_entries"], ())
             self.assertEqual(render_dashboard.call_args.kwargs["initial_restart_schedules"], restart_schedules)
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_node_capacity"], capacity)
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_node_font_sources"], font_sources)
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_node_disk_settings"], disk_settings)
+            self.assertEqual(render_dashboard.call_args.kwargs["current_url"], "/mod-web/nodes/erin/system")
 
         asyncio.run(exercise())
+
+    def test_build_node_disk_preferences_preserves_unknown_labels_and_supports_secondary_disk(self) -> None:
+        initial_settings = NodeDiskManagementState(
+            node="erin",
+            disks=(
+                NodeDiskEntry(
+                    mountpoint="/mnt/data",
+                    display_name="Data",
+                    is_activity=True,
+                    is_primary=True,
+                    is_secondary=False,
+                    is_bot_disk=True,
+                ),
+                NodeDiskEntry(
+                    mountpoint="/mnt/backups",
+                    display_name="Backups",
+                    is_activity=True,
+                    is_primary=False,
+                    is_secondary=True,
+                    is_bot_disk=False,
+                ),
+            ),
+            preferences=config.PersistedDiskPreferences(
+                labels={"/mnt/data": "Fast", "/mnt/offline": "Offline"},
+                secondary_mount="/mnt/backups",
+            ),
+        )
+
+        preferences = ModWebService._build_node_disk_preferences(
+            initial_settings=initial_settings,
+            selected_activity_mounts=("/mnt/backups",),
+            primary_choice="/mnt/backups",
+            secondary_choice=_ModWebNodeDiskChoice.NO_SECONDARY.value,
+            label_values={"/mnt/data": "", "/mnt/backups": "Archive"},
+        )
+
+        self.assertEqual(preferences.activity_mounts, ["/mnt/backups"])
+        self.assertEqual(preferences.primary_mount, "/mnt/backups")
+        self.assertIsNone(preferences.secondary_mount)
+        self.assertEqual(
+            preferences.labels,
+            {"/mnt/offline": "Offline", "/mnt/backups": "Archive"},
+        )
 
     def test_render_node_system_page_reconnects_after_transient_node_restart(self) -> None:
         async def exercise() -> None:
@@ -2004,6 +2087,7 @@ class ModWebTests(unittest.TestCase):
                 ),
                 patch.object(service, "_remote_node_system_history_async", new=AsyncMock(side_effect=connection_error)),
                 patch.object(service, "_remote_apps_async", new=AsyncMock(side_effect=connection_error)),
+                patch.object(service, "_remote_restart_schedules_async", new=AsyncMock(side_effect=connection_error)),
                 patch.object(service, "_user_has_level", return_value=False),
                 patch.object(service, "_render_remote_node_unavailable_page", new=render_unavailable),
                 patch.object(
@@ -7930,6 +8014,69 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(query["mod_name"], ["one.jar", "two.jar"])
         self.assertEqual(grant.subject, "web:42")
 
+    def test_direct_upload_targets_point_at_node_with_scoped_tokens(self) -> None:
+        server = replace(config.MOD_WEB_SERVER, node_name="yuki", token_secret="shared-secret")
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        model = ModWebBasePageModel(
+            node_name="erin",
+            app_name="minecraft alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(app_name="minecraft alpha", app_friendly="Minecraft Alpha", node="erin", configs=()),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(config, "MOD_WEB_SERVER", server),
+            patch.object(ModWebService, "_remote_node_link", return_value=node),
+        ):
+            service = ModWebService()
+            mod_target = service._direct_mod_upload_target(model=model, user=user)
+            save_target = service._direct_save_upload_target(model=model, user=user)
+
+        mod_grant = verify_node_token(
+            secret="shared-secret",
+            token=mod_target.authorization_header.removeprefix("Bearer "),
+            node="erin",
+            app="minecraft alpha",
+            required_scopes=(NodeApiScope.MODS_WRITE,),
+        )
+        save_grant = verify_node_token(
+            secret="shared-secret",
+            token=save_target.authorization_header.removeprefix("Bearer "),
+            node="erin",
+            app="minecraft alpha",
+            required_scopes=(NodeApiScope.SAVES_WRITE,),
+        )
+
+        self.assertEqual(
+            mod_target.url,
+            "https://erin.example/api/node/apps/minecraft%20alpha/mods/upload",
+        )
+        self.assertEqual(
+            save_target.url,
+            "https://erin.example/api/node/apps/minecraft%20alpha/saves/upload",
+        )
+        self.assertEqual(mod_grant.subject, "web:42")
+        self.assertEqual(save_grant.subject, "web:42")
+
     def test_config_root_download_url_uses_configs_read_scope(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="yuki", token_secret="shared-secret")
         node = ModWebNodeLink(
@@ -8195,6 +8342,10 @@ class ModWebTests(unittest.TestCase):
                 return self
 
         class FakeUpload:
+            def __init__(self) -> None:
+                self.props: dict[str, object] = {}
+                self.handlers: dict[str, Callable[[], None]] = {}
+
             def classes(self, value: str) -> "FakeUpload":
                 del value
                 return self
@@ -8208,6 +8359,14 @@ class ModWebTests(unittest.TestCase):
 
             def enable(self) -> None:
                 return None
+
+            def on(self, event_name: str, handler: Callable[[], None], *, args: list[object]) -> "FakeUpload":
+                self.handlers[event_name] = handler
+                self.props[f"{event_name}-args"] = args
+                return self
+
+            def run_method(self, method_name: str) -> None:
+                self.props["last-method"] = method_name
 
         class FakeDialog(FakeContainer):
             def open(self) -> None:
@@ -8430,6 +8589,10 @@ class ModWebTests(unittest.TestCase):
                 return self
 
         class FakeUpload:
+            def __init__(self) -> None:
+                self.props: dict[str, object] = {}
+                self.handlers: dict[str, Callable[[], None]] = {}
+
             def classes(self, value: str) -> "FakeUpload":
                 del value
                 return self
@@ -8443,6 +8606,14 @@ class ModWebTests(unittest.TestCase):
 
             def enable(self) -> None:
                 return None
+
+            def on(self, event_name: str, handler: Callable[[], None], *, args: list[object]) -> "FakeUpload":
+                self.handlers[event_name] = handler
+                self.props[f"{event_name}-args"] = args
+                return self
+
+            def run_method(self, method_name: str) -> None:
+                self.props["last-method"] = method_name
 
         class FakeDialog(FakeContainer):
             def open(self) -> None:
@@ -8465,6 +8636,8 @@ class ModWebTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.buttons: list[FakeButton] = []
                 self.navigate = SimpleNamespace(reload=lambda: None)
+                self.upload_control = FakeUpload()
+                self.upload_kwargs: dict[str, object] = {}
 
             def refreshable(self, func: Callable[[str], None]) -> FakeRefreshable:
                 return FakeRefreshable(func)
@@ -8486,8 +8659,13 @@ class ModWebTests(unittest.TestCase):
                 return FakeDialog()
 
             def upload(self, *args: object, **kwargs: object) -> FakeUpload:
+                del args
+                self.upload_kwargs = kwargs
+                return self.upload_control
+
+            def timer(self, *args: object, **kwargs: object) -> object:
                 del args, kwargs
-                return FakeUpload()
+                return object()
 
             def button(self, *args: object, **kwargs: object) -> FakeButton:
                 del kwargs
@@ -8587,10 +8765,20 @@ class ModWebTests(unittest.TestCase):
             "_user_has_level",
             side_effect=lambda _user, level: level in {Power_Level.user, Power_Level.sudo},
         ):
-            with patch.object(
-                ModWebService,
-                "_render_mod_download_row",
-                side_effect=_capture_row,
+            with (
+                patch.object(
+                    ModWebService,
+                    "_render_mod_download_row",
+                    side_effect=_capture_row,
+                ),
+                patch.object(
+                    service,
+                    "_direct_mod_upload_target",
+                    return_value=ModWebDirectUploadTarget(
+                        url="https://node.example/api/node/apps/minecraft_alpha/mods/upload",
+                        authorization_header="Bearer direct-token",
+                    ),
+                ),
             ):
                 service._render_mods_section(ui=cast(ModWebUi, cast(object, ui)), model=model, user=user)
 
@@ -8598,6 +8786,18 @@ class ModWebTests(unittest.TestCase):
             button.text for button in ui.buttons if button.class_value is not None and "mod-toolbar-button" in button.class_value
         ]
         self.assertIn("Delete", toolbar_text)
+        self.assertNotIn("on_multi_upload", ui.upload_kwargs)
+        self.assertEqual(
+            ui.upload_control.props["url"],
+            "https://node.example/api/node/apps/minecraft_alpha/mods/upload",
+        )
+        self.assertEqual(
+            ui.upload_control.props["headers"],
+            [{"name": "Authorization", "value": "Bearer direct-token"}],
+        )
+        self.assertEqual(ui.upload_control.props["field-name"], "upload")
+        self.assertTrue(ui.upload_control.props["batch"])
+        self.assertEqual(set(ui.upload_control.handlers), {"start", "uploaded", "failed", "rejected"})
         self.assertEqual(
             can_select_by_mod,
             {
@@ -8768,7 +8968,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(str(raised.exception), "Sudo access is required for this mod action.")
 
-    def test_render_saves_editor_uses_settings_search_styling(self) -> None:
+    def test_render_saves_editor_uses_direct_upload_and_settings_search_styling(self) -> None:
         class FakeContainer:
             def __enter__(self) -> "FakeContainer":
                 return self
@@ -8794,10 +8994,11 @@ class ModWebTests(unittest.TestCase):
                 return self
 
         class FakeInput:
-            def __init__(self, *, placeholder: str | None = None) -> None:
+            def __init__(self, *, placeholder: str | None = None, value: object = None) -> None:
                 self.placeholder = placeholder
+                self.value = value
                 self.class_value: str | None = None
-                self.handlers: dict[str, Callable[[object], None]] = {}
+                self.handlers: dict[str, Callable[..., None]] = {}
 
             def props(self, value: str) -> "FakeInput":
                 del value
@@ -8807,13 +9008,22 @@ class ModWebTests(unittest.TestCase):
                 self.class_value = value
                 return self
 
-            def on(self, event_name: str, handler: Callable[[object], None]) -> "FakeInput":
+            def on(self, event_name: str, handler: Callable[..., None]) -> "FakeInput":
                 self.handlers[event_name] = handler
                 return self
 
         class FakeUpload:
+            def __init__(self) -> None:
+                self.props: dict[str, object] = {}
+                self.handlers: dict[str, Callable[[], None]] = {}
+
             def classes(self, value: str) -> "FakeUpload":
                 del value
+                return self
+
+            def on(self, event_name: str, handler: Callable[[], None], *, args: list[object]) -> "FakeUpload":
+                self.handlers[event_name] = handler
+                self.props[f"{event_name}-args"] = args
                 return self
 
         class FakeButton:
@@ -8822,11 +9032,14 @@ class ModWebTests(unittest.TestCase):
                 return self
 
         class FakeDialog(FakeContainer):
+            def __init__(self) -> None:
+                self.closed = False
+
             def open(self) -> None:
                 return None
 
             def close(self) -> None:
-                return None
+                self.closed = True
 
         class FakeRefreshable:
             def __init__(self, func: Callable[[str], None]) -> None:
@@ -8842,7 +9055,15 @@ class ModWebTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.inputs: list[FakeInput] = []
                 self.labels: list[FakeLabel] = []
-                self.navigate = SimpleNamespace(reload=lambda: None)
+                self.selects: list[FakeInput] = []
+                self.notifications: list[tuple[str, str | None]] = []
+                self.reload_called = False
+                self.navigate = SimpleNamespace(reload=self._reload)
+                self.upload_control = FakeUpload()
+                self.upload_kwargs: dict[str, object] = {}
+
+            def _reload(self) -> None:
+                self.reload_called = True
 
             def refreshable(self, func: Callable[[str], None]) -> FakeRefreshable:
                 return FakeRefreshable(func)
@@ -8864,8 +9085,13 @@ class ModWebTests(unittest.TestCase):
                 return FakeContainer()
 
             def upload(self, *args: object, **kwargs: object) -> FakeUpload:
+                del args
+                self.upload_kwargs = kwargs
+                return self.upload_control
+
+            def timer(self, *args: object, **kwargs: object) -> object:
                 del args, kwargs
-                return FakeUpload()
+                return object()
 
             def button(self, *args: object, **kwargs: object) -> FakeButton:
                 del args, kwargs
@@ -8882,9 +9108,21 @@ class ModWebTests(unittest.TestCase):
                 self.inputs.append(control)
                 return control
 
-            def notify(self, message: str, *, type: str | None = None) -> None:
-                del message, type
-                return None
+            def select(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                control = FakeInput(value=kwargs.get("value"))
+                self.selects.append(control)
+                return control
+
+            def notify(
+                self,
+                message: str,
+                *,
+                type: str | None = None,
+                multi_line: bool = False,
+            ) -> None:
+                del multi_line
+                self.notifications.append((message, type))
 
         service = ModWebService()
         model = cast(
@@ -8892,40 +9130,45 @@ class ModWebTests(unittest.TestCase):
             cast(
                 object,
                 SimpleNamespace(
-                app_friendly="Factorio",
-                supports_save_uploads=False,
-                supports_save_rename=False,
-                save_write_level=Power_Level.user,
-                saves=NodeSaveList(
-                    app_name="factorio",
                     app_friendly="Factorio",
-                    node="yuki",
-                    roots=(NodeSaveRootEntry(id="worlds", label="Worlds"),),
-                    saves=(
-                        NodeSaveEntry(
-                            id="worlds/alpha.zip",
-                            label="alpha.zip",
-                            relative_path="alpha.zip",
-                            root_id="worlds",
-                            root_label="Worlds",
-                            kind="file",
-                            size_bytes=128,
-                            size_text="128B",
-                            modified_at="2026-06-06 10:00:00",
+                    node_name="yuki",
+                    app_name="factorio",
+                    supports_save_uploads=True,
+                    supports_save_rename=False,
+                    save_write_level=Power_Level.user,
+                    saves=NodeSaveList(
+                        app_name="factorio",
+                        app_friendly="Factorio",
+                        node="yuki",
+                        roots=(
+                            NodeSaveRootEntry(id="worlds", label="Worlds"),
+                            NodeSaveRootEntry(id="archives", label="Archives"),
                         ),
-                        NodeSaveEntry(
-                            id="worlds/beta.zip",
-                            label="beta.zip",
-                            relative_path="beta.zip",
-                            root_id="worlds",
-                            root_label="Worlds",
-                            kind="file",
-                            size_bytes=256,
-                            size_text="256B",
-                            modified_at="2026-06-06 11:00:00",
+                        saves=(
+                            NodeSaveEntry(
+                                id="worlds/alpha.zip",
+                                label="alpha.zip",
+                                relative_path="alpha.zip",
+                                root_id="worlds",
+                                root_label="Worlds",
+                                kind="file",
+                                size_bytes=128,
+                                size_text="128B",
+                                modified_at="2026-06-06 10:00:00",
+                            ),
+                            NodeSaveEntry(
+                                id="worlds/beta.zip",
+                                label="beta.zip",
+                                relative_path="beta.zip",
+                                root_id="worlds",
+                                root_label="Worlds",
+                                kind="file",
+                                size_bytes=256,
+                                size_text="256B",
+                                modified_at="2026-06-06 11:00:00",
+                            ),
                         ),
                     ),
-                ),
                 ),
             ),
         )
@@ -8934,6 +9177,15 @@ class ModWebTests(unittest.TestCase):
         rendered_save_names: list[str] = []
 
         with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(
+                service,
+                "_direct_save_upload_target",
+                return_value=ModWebDirectUploadTarget(
+                    url="https://node.example/api/node/apps/factorio/saves/upload",
+                    authorization_header="Bearer save-token",
+                ),
+            ),
             patch.object(ModWebService, "_render_flat_tab_header", side_effect=lambda **kwargs: None),
             patch.object(
                 ModWebService,
@@ -8952,6 +9204,38 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(rendered_save_names, ["alpha.zip", "beta.zip", "beta.zip"])
 
             search_handler(SimpleNamespace(args="missing"))
+
+            self.assertNotIn("on_upload", ui.upload_kwargs)
+            self.assertEqual(
+                ui.upload_control.props["url"],
+                "https://node.example/api/node/apps/factorio/saves/upload",
+            )
+            self.assertEqual(
+                ui.upload_control.props["headers"],
+                [{"name": "Authorization", "value": "Bearer save-token"}],
+            )
+            self.assertEqual(
+                ui.upload_control.props["form-fields"],
+                [{"name": "root_id", "value": "worlds"}],
+            )
+            self.assertEqual(
+                set(ui.upload_control.handlers),
+                {"start", "uploaded", "failed", "rejected"},
+            )
+
+            ui.selects[0].value = "archives"
+            ui.selects[0].handlers["update:model-value"]()
+            self.assertEqual(
+                ui.upload_control.props["form-fields"],
+                [{"name": "root_id", "value": "archives"}],
+            )
+
+            ui.upload_control.handlers["start"]()
+            ui.upload_control.handlers["failed"]()
+            ui.upload_control.handlers["rejected"]()
+            self.assertEqual([tone for _message, tone in ui.notifications], ["info", "negative", "warning"])
+            self.assertIn("Upload acknowledged", ui.notifications[0][0])
+            self.assertIn("out of temporary space", ui.notifications[1][0])
 
         self.assertIn("No saves match that search.", [label.text for label in ui.labels])
 

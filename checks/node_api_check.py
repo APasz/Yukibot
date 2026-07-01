@@ -16,6 +16,8 @@ from urllib.parse import parse_qs, urlsplit
 import hikari
 import requests
 from fastapi import HTTPException, Request, WebSocketDisconnect
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from fastapi.responses import FileResponse
 
 import config
@@ -83,6 +85,9 @@ from node_api import (
     NodeConsoleStdoutStreamEventKind,
     NodeDiscordSettingsMutationResult,
     NodeDownloadRequest,
+    NodeDiskEntry,
+    NodeDiskManagementState,
+    NodeDiskSettingsMutationResult,
     NodeFontSourceSettingsMutationResult,
     NodeMinecraftRecipeMutationResult,
     NodeMinecraftRecipeMutationAction,
@@ -465,6 +470,18 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(
             service._required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.CONFIGS_READ,)),
             Power_Level.visitor,
+        )
+
+    def test_node_operation_scope_requires_sudo_while_management_requires_root(self) -> None:
+        service = NodeApiService()
+
+        self.assertEqual(
+            service._required_web_level(app_name=None, scopes=(NodeApiScope.NODE_OPERATE,)),
+            Power_Level.sudo,
+        )
+        self.assertEqual(
+            service._required_web_level(app_name=None, scopes=(NodeApiScope.NODE_MANAGE,)),
+            Power_Level.root,
         )
 
     def test_build_console_action_list_includes_parameter_metadata_and_permissions(self) -> None:
@@ -1153,6 +1170,9 @@ class NodeApiTests(unittest.TestCase):
         handlers: dict[str, object] = {}
 
         class _RouteCollector:
+            def add_middleware(self, middleware_class: type[object], **options: object) -> None:
+                del middleware_class, options
+
             def get(self, path: str):
                 def _decorator(handler: object) -> object:
                     handlers[path] = handler
@@ -1198,6 +1218,23 @@ class NodeApiTests(unittest.TestCase):
         self.assertIn("/api/node/restart", handlers)
         self.assertIn("/api/node/presence/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
+
+    def test_node_api_allows_authorized_cross_origin_uploads(self) -> None:
+        app = FastAPI()
+        NodeApiService().register_routes(app)
+
+        response = TestClient(app).options(
+            "/api/node/apps/minecraft_alpha/mods/upload",
+            headers={
+                "Origin": "https://portal.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Authorization",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], "*")
+        self.assertIn("Authorization", response.headers["access-control-allow-headers"])
 
     def test_mod_mutation_result_round_trips_mapping(self) -> None:
         result = NodeModMutationResult(
@@ -3736,7 +3773,7 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-    def test_mutate_node_font_sources_requires_root_and_refreshes_assets(self) -> None:
+    def test_mutate_node_font_sources_requires_sudo_and_refreshes_assets(self) -> None:
         manager = Mock()
         manager.set_node_font_sources = Mock(
             return_value=config.NodeFontSourceSettings(
@@ -3759,7 +3796,7 @@ class NodeApiTests(unittest.TestCase):
                 )
             )
 
-        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
         manager.set_node_font_sources.assert_called_once()
         schedule_refresh.assert_called_once_with(
             google_font_urls=("https://fonts.googleapis.com/css2?family=Black+Ops+One&display=swap",)
@@ -3774,6 +3811,65 @@ class NodeApiTests(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_mutate_node_disk_settings_requires_root_and_returns_secondary_disk_state(self) -> None:
+        preferences = config.PersistedDiskPreferences(
+            activity_mounts=["/mnt/data"],
+            labels={"/mnt/data": "Data"},
+            primary_mount="/mnt/data",
+            secondary_mount="/mnt/backups",
+        )
+        settings = NodeDiskManagementState(
+            node=config.MOD_WEB_SERVER.node_name,
+            disks=(
+                NodeDiskEntry(
+                    mountpoint="/mnt/data",
+                    display_name="Data",
+                    is_activity=True,
+                    is_primary=True,
+                    is_secondary=False,
+                    is_bot_disk=True,
+                ),
+                NodeDiskEntry(
+                    mountpoint="/mnt/backups",
+                    display_name="Backups",
+                    is_activity=False,
+                    is_primary=False,
+                    is_secondary=True,
+                    is_bot_disk=False,
+                ),
+            ),
+            preferences=preferences,
+        )
+        stats = Mock()
+        stats.set_disk_preferences = Mock(return_value=preferences)
+        service = NodeApiService()
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+
+        with (
+            patch("node_api.Stats_System", return_value=stats),
+            patch.object(service, "read_node_disk_settings", return_value=settings),
+        ):
+            result = asyncio.run(
+                service.mutate_node_disk_settings(
+                    preferences=preferences,
+                    actor_user_id=42,
+                )
+            )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+        stats.set_disk_preferences.assert_called_once_with(preferences)
+        self.assertEqual(
+            result,
+            NodeDiskSettingsMutationResult(
+                node=config.MOD_WEB_SERVER.node_name,
+                message=f"Updated node disk settings for {config.MOD_WEB_SERVER.node_name}.",
+                settings=settings,
+            ),
+        )
+        self.assertEqual(NodeDiskSettingsMutationResult.from_mapping(result.to_mapping()), result)
 
     def test_mutate_discord_settings_requires_sudo_and_refreshes_activity(self) -> None:
         manager = Mock()
@@ -4588,7 +4684,7 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(NodeSystemHistory.from_mapping(history.to_mapping()), history)
 
-    def test_schedule_system_action_requires_root_and_dispatches_once(self) -> None:
+    def test_schedule_system_action_requires_sudo_and_dispatches_once(self) -> None:
         async def exercise() -> None:
             service = NodeApiService()
             acl = AsyncMock()
@@ -4603,7 +4699,7 @@ class NodeApiTests(unittest.TestCase):
                     actor_user_id=42,
                 )
 
-            acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+            acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
             self.assertEqual(result.action, NodeSystemAction.RESTART_PROCESS)
             dispatch = call_later.call_args.args[1]
             dispatch()
@@ -4641,7 +4737,7 @@ class NodeApiTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_restart_schedule_state_round_trip_and_root_update(self) -> None:
+    def test_restart_schedule_state_round_trip_and_sudo_update(self) -> None:
         async def exercise() -> None:
             with TemporaryDirectory() as temp_dir:
                 config_path = Path(temp_dir) / "configuration.json"
@@ -4673,14 +4769,14 @@ class NodeApiTests(unittest.TestCase):
                         actor_user_id=42,
                     )
 
-                    acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+                    acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
                     system_schedule = next(entry for entry in updated.schedules if entry.target is RestartTarget.SYSTEM)
                     self.assertTrue(system_schedule.enabled)
                     self.assertEqual(system_schedule.interval_minutes, 7 * 24 * 60)
 
         asyncio.run(exercise())
 
-    def test_skip_restart_schedule_requires_root_and_advances_next_restart(self) -> None:
+    def test_skip_restart_schedule_requires_sudo_and_advances_next_restart(self) -> None:
         async def exercise() -> None:
             with TemporaryDirectory() as temp_dir:
                 config_path = Path(temp_dir) / "configuration.json"
@@ -4702,7 +4798,7 @@ class NodeApiTests(unittest.TestCase):
                         actor_user_id=42,
                     )
 
-                    acl.perm_check.assert_awaited_once_with(42, Power_Level.root)
+                    acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
                     entry = updated.schedules[0]
                     self.assertEqual(entry.skipped_through_timestamp, anchor_timestamp)
                     self.assertEqual(entry.next_restart_timestamp, anchor_timestamp + 90 * 60)
