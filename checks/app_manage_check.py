@@ -2963,7 +2963,14 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             try:
                 with patch.dict(
                     "_manager._SCOPE_INSTANCE_TEMPLATES",
-                    {"demo": AppInstanceTemplate(mods_dir="{WD}/mods", join_port=25565)},
+                    {
+                        "demo": AppInstanceTemplate(
+                            mods_dir="{WD}/mods",
+                            client_mods_dir="{WD}/mods",
+                            client_overrides_dir="{WD}/client-overrides",
+                            join_port=25565,
+                        )
+                    },
                 ):
                     scopes = manager.list_create_scopes()
             finally:
@@ -2988,6 +2995,8 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "demo": AppInstanceTemplate(
                             mods_dir="{WD}/mods",
+                            client_mods_dir="{WD}/mods",
+                            client_overrides_dir="{WD}/client-overrides",
                             server_log_file="{WD}/Server.log",
                             join_port=25565,
                         )
@@ -3009,6 +3018,8 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(payload["alpha"]["friendly_name"], "Demo Alpha")
             self.assertEqual(payload["alpha"]["directory"], "{APPS}/demo-alpha")
             self.assertEqual(payload["alpha"]["mods_dir"], "{WD}/mods")
+            self.assertEqual(payload["alpha"]["client_mods_dir"], "{WD}/mods")
+            self.assertEqual(payload["alpha"]["client_overrides_dir"], "{WD}/client-overrides")
             self.assertEqual(payload["alpha"]["server_log_file"], "{WD}/Server.log")
             self.assertEqual(payload["alpha"]["join_port"], 25565)
 

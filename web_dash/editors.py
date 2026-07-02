@@ -2880,7 +2880,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             type_order: dict[ModType, int] = {
                 ModType.REGULAR: 0,
                 ModType.CLIENT: 1,
-                ModType.SERVER_ONLY: 2,
+                ModType.SERVER: 2,
                 ModType.COREMOD: 3,
                 ModType.BUILTIN: 4,
             }

@@ -81,6 +81,12 @@ class Mod(ABC):
         return self.enabled_path.with_suffix(".disabled")
 
     @property
+    def client_path(self) -> Path:
+        if self.cfg.client_path is not None:
+            return self.cfg.client_path
+        return self.enabled_path.with_suffix(".client")
+
+    @property
     def path(self) -> Path:
         return self.enabled_path if self.cfg.enabled else self.disabled_path
 
@@ -138,7 +144,7 @@ class Mod(ABC):
 
     @property
     def is_server_only(self) -> bool:
-        return self.mod_type is ModType.SERVER_ONLY
+        return self.mod_type is ModType.SERVER
 
     @property
     def is_client(self) -> bool:

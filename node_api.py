@@ -891,6 +891,7 @@ class NodeModEntry:
     added: str
     size_bytes: int
     size_text: str
+    client_path: str | None = None
     metadata_overrides: ModMetadataOverrides = field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = field(default_factory=ClientPackConfig)
 
@@ -905,6 +906,7 @@ class NodeModEntry:
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeModEntry:
         name = _required_string(payload, "name")
         friendly = _required_string(payload, "friendly")
+        client_path = _optional_string(payload, "client_path")
         enabled = _required_bool(payload, "enabled")
         coremod = _required_bool(payload, "coremod")
         raw_mod_type = _optional_string(payload, "mod_type")
@@ -931,6 +933,7 @@ class NodeModEntry:
         return cls(
             name=name,
             friendly=friendly,
+            client_path=client_path,
             enabled=enabled,
             mod_type=mod_type,
             coremod=coremod,
@@ -958,6 +961,7 @@ class NodeModEntry:
         return {
             "name": self.name,
             "friendly": self.friendly,
+            "client_path": self.client_path,
             "enabled": self.enabled,
             "mod_type": self.mod_type.value,
             "coremod": self.coremod,
@@ -5830,7 +5834,13 @@ class NodeApiService:
     @staticmethod
     def _app_footprint_paths(app: App) -> tuple[Path, ...]:
         candidates: list[Path] = [app.directory]
-        for optional_path in (app.cfg.mods_dir, app.cfg.settings_pointer, app.cfg.server_log_file):
+        for optional_path in (
+            app.cfg.mods_dir,
+            app.cfg.client_mods_dir,
+            app.cfg.client_overrides_dir,
+            app.cfg.settings_pointer,
+            app.cfg.server_log_file,
+        ):
             if optional_path is not None:
                 candidates.append(optional_path)
         candidates.extend(root.path for root in app.config_file_roots)
@@ -9497,6 +9507,7 @@ class NodeApiService:
         return NodeModEntry(
             name=mod.name,
             friendly=mod.friendly,
+            client_path=str(mod.client_path),
             enabled=mod.cfg.enabled,
             mod_type=mod.mod_type,
             coremod=mod.is_coremod_type,

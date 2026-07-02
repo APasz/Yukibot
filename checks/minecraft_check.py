@@ -188,7 +188,7 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
         mod = Mod_MC(Mod_Config(name="squaremap-forge-mc1.20.1-1.2.0.jar", directory=Path(".")))
         mod.sync_metadata()
 
-        self.assertIs(mod.mod_type, ModType.SERVER_ONLY)
+        self.assertIs(mod.mod_type, ModType.SERVER)
         self.assertIs(mod.cfg.download_block_reason, ModDownloadBlockReason.SERVER_ONLY)
 
     def test_started_embed_includes_squaremap_link(self) -> None:

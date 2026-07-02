@@ -8227,7 +8227,7 @@ class ModWebTests(unittest.TestCase):
             friendly="Gamma",
             added="2026-06-02 12:00:00",
             size_bytes=100,
-            mod_type=ModType.SERVER_ONLY,
+            mod_type=ModType.SERVER,
         )
         mods = (alpha, beta, gamma)
 
@@ -8775,7 +8775,7 @@ class ModWebTests(unittest.TestCase):
                         name="server-only.jar",
                         friendly="Server Only Mod",
                         downloadable=False,
-                        mod_type=ModType.SERVER_ONLY,
+                        mod_type=ModType.SERVER,
                         download_block_label="Server only",
                     ),
                     self._mod_entry(
@@ -10788,17 +10788,17 @@ class ModWebTests(unittest.TestCase):
 
     def test_builtin_mod_detection_uses_block_reason(self) -> None:
         builtin_entry = SimpleNamespace(mod_type=ModType.BUILTIN)
-        normal_entry = SimpleNamespace(mod_type=ModType.SERVER_ONLY)
+        normal_entry = SimpleNamespace(mod_type=ModType.SERVER)
 
         self.assertTrue(ModWebService._is_builtin_mod(cast(Any, builtin_entry)))
         self.assertFalse(ModWebService._is_builtin_mod(cast(Any, normal_entry)))
 
     def test_mod_type_badges_use_short_labels_and_distinct_power_badge_tones(self) -> None:
         self.assertEqual(ModType.REGULAR.label, "Regular")
-        self.assertEqual(ModType.SERVER_ONLY.label, "Server")
+        self.assertEqual(ModType.SERVER.label, "Server")
         self.assertEqual(ModType.CLIENT.label, "Client")
         self.assertEqual(ModWebService._mod_type_badge_tone(ModType.REGULAR), "grey")
-        self.assertEqual(ModWebService._mod_type_badge_tone(ModType.SERVER_ONLY), "warn")
+        self.assertEqual(ModWebService._mod_type_badge_tone(ModType.SERVER), "warn")
         self.assertEqual(ModWebService._mod_type_badge_tone(ModType.CLIENT), "purple")
 
     def test_selection_toggle_label_switches_between_select_all_and_clear(self) -> None:

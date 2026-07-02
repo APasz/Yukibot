@@ -3,6 +3,8 @@
         "friendly_name": "Base",
         "directory": "{APPS}/",
         "mods_dir": "{WD}/mods",
+        "client_mods_dir": "{WD}/mods",
+        "client_overrides_dir": "{WD}/client-overrides",
         "server_log_file": "{WD}/Server.log",
         "port": 0,
         "resource_points": {

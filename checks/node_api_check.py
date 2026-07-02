@@ -105,6 +105,7 @@ from node_api import (
     NodeModMutationResult,
     NodeModPropertiesUpdateRequest,
     NodeModList,
+    NodeModEntry,
     NodeModUploadBatchResult,
     NodeModUploadResult,
     NodeModUploadSource,
@@ -3148,6 +3149,21 @@ class NodeApiTests(unittest.TestCase):
         )
         self.assertEqual(required_mod_mutation_level(NodeModMutationAction.DELETE), Power_Level.sudo)
 
+    def test_mod_entry_includes_explicit_client_path(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            mods_dir = root / "mods"
+            mods_dir.mkdir()
+            mod_path = mods_dir / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            client_mod_path = root / "client-mods" / "example.jar"
+            mod = _TestMod(Mod_Config(name=mod_path.name, directory=mods_dir, client_path=client_mod_path))
+
+            entry = NodeApiService._mod_entry(mod)
+
+        self.assertEqual(entry.client_path, str(client_mod_path))
+        self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()).client_path, str(client_mod_path))
+
     def test_mutate_mod_enable_requires_admin_for_regular_mods(self) -> None:
         with TemporaryDirectory() as temp_dir:
             mod_path = Path(temp_dir) / "example.jar"
@@ -4249,10 +4265,13 @@ class NodeApiTests(unittest.TestCase):
             root = Path(temp_dir)
             app_dir = root / "app"
             mods_dir = app_dir / "mods"
+            client_overrides_dir = app_dir / "client-overrides"
             app_dir.mkdir()
             mods_dir.mkdir()
+            client_overrides_dir.mkdir()
             (app_dir / "base.bin").write_bytes(b"base")
             (mods_dir / "example.jar").write_bytes(b"module")
+            (client_overrides_dir / "options.txt").write_bytes(b"12345")
             settings_pointer = root / "settings.ini"
             settings_pointer.write_bytes(b"cfg")
             server_log_file = root / "server.log"
@@ -4267,6 +4286,7 @@ class NodeApiTests(unittest.TestCase):
                 directory=app_dir,
                 apps_dir=root,
                 mods_dir=mods_dir,
+                client_overrides_dir=client_overrides_dir,
                 settings_pointer=settings_pointer,
                 server_log_file=server_log_file,
                 scope=app.scope,
@@ -4285,7 +4305,7 @@ class NodeApiTests(unittest.TestCase):
             with patch("node_api.Stats_System", return_value=fake_stats):
                 summary = asyncio.run(NodeApiService().build_app_runtime_summary(app))
 
-        self.assertEqual(summary.footprint_bytes, 17)
+        self.assertEqual(summary.footprint_bytes, 22)
         self.assertEqual(summary.storage_percent, 55)
 
     def test_build_live_app_runtime_summary_skips_storage_and_footprint(self) -> None:

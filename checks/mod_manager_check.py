@@ -23,7 +23,7 @@ class _FileMod(Mod):
 
 class _DetectedServerMod(_FileMod):
     def default_mod_type(self) -> ModType:
-        return ModType.SERVER_ONLY
+        return ModType.SERVER
 
     def default_download_block_reason(self) -> ModDownloadBlockReason | None:
         return ModDownloadBlockReason.SERVER_ONLY
@@ -219,7 +219,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_regular_classification_overrides_detected_server_type(self) -> None:
         manager = self._build_manager(mod_cls=_DetectedServerMod)
         detected = await manager.add(self._write_source_file())
-        self.assertEqual(detected.mod_type, ModType.SERVER_ONLY)
+        self.assertEqual(detected.mod_type, ModType.SERVER)
 
         await manager.update_properties(
             detected,

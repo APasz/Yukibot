@@ -593,12 +593,16 @@ class ModDownloadBlockReason(enum.StrEnum):
             case ModDownloadBlockReason.OTHER:
                 return "Not downloadable"
 
+class ModSide(enum.StrEnum):
+    SERVER = "server"
+    CLIENT = "client"
+    BOTH = "both"
 
 class ModType(enum.StrEnum):
     REGULAR = "regular"
     COREMOD = "coremod"
     BUILTIN = "builtin"
-    SERVER_ONLY = "server_only"
+    SERVER = "server"
     CLIENT = "client"
 
     @property
@@ -610,10 +614,20 @@ class ModType(enum.StrEnum):
                 return "Coremod"
             case ModType.BUILTIN:
                 return "Built-in"
-            case ModType.SERVER_ONLY:
+            case ModType.SERVER:
                 return "Server"
             case ModType.CLIENT:
                 return "Client"
+
+    @property
+    def side(self) -> ModSide:
+        match self:
+            case ModType.REGULAR | ModType.COREMOD:
+                return ModSide.BOTH
+            case ModType.SERVER | ModType.BUILTIN:
+                return ModSide.SERVER
+            case ModType.CLIENT:
+                return ModSide.CLIENT
 
 
 class ModMetadataOverrides(BaseModel):
@@ -820,6 +834,8 @@ class App_Config(BaseModel):
     directory: Path
     apps_dir: Path
     mods_dir: Path | None = None
+    client_mods_dir: Path | None = None
+    client_overrides_dir: Path | None = None
     settings_pointer: Path | None = None
     server_log_file: Path | None = None
     join_host: str = config.PUBLIC_ADDR
@@ -945,7 +961,15 @@ class App_Config(BaseModel):
             payload["join_port"] = payload["port"]
         return payload
 
-    @field_validator("directory", "mods_dir", "settings_pointer", "server_log_file", mode="before")
+    @field_validator(
+        "directory",
+        "mods_dir",
+        "client_mods_dir",
+        "client_overrides_dir",
+        "settings_pointer",
+        "server_log_file",
+        mode="before",
+    )
     def resolve_dir(cls, raw: str | Path | None, info) -> Path | None:
         return resolve_config_path(raw, directory=info.data.get("directory", ""))
 
@@ -1029,6 +1053,7 @@ def _format_host_port(*, host: str, port: int | None) -> str:
 class Mod_Config(BaseModel):
     name: str
     directory: Path
+    client_path: Path | None = None
     added: datetime = Field(default_factory=datetime.now)
     enabled: bool = True
     version: str | None = None
@@ -1061,6 +1086,11 @@ class Mod_Config(BaseModel):
     @property
     def coremod(self) -> bool:
         return self.mod_type is ModType.COREMOD
+
+    @field_validator("directory", "client_path", mode="before")
+    @classmethod
+    def resolve_mod_paths(cls, raw: str | Path | None, info) -> Path | None:
+        return resolve_config_path(raw, directory=info.data.get("directory", ""))
 
 
 # AiviA APasz

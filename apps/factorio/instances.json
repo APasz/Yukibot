@@ -3,6 +3,8 @@
         "friendly_name": "Factorio",
         "directory": "{APPS}/factorio",
         "mods_dir": "{WD}/mods",
+        "client_mods_dir": "{WD}/mods",
+        "client_overrides_dir": "{WD}/client-overrides",
         "server_log_file": "{WD}/factorio-current.log",
         "port": 34197,
         "resource_points": {

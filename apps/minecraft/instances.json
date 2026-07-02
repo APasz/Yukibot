@@ -3,6 +3,8 @@
         "friendly_name": "MineSurvival",
         "directory": "{APPS}/mc_survival",
         "mods_dir": "{WD}/mods",
+        "client_mods_dir": "{WD}/mods",
+        "client_overrides_dir": "{WD}/client-overrides",
         "port": 25565,
         "enabled": true,
         "resource_points": {
@@ -25,6 +27,8 @@
         "friendly_name": "MineCreative",
         "directory": "{APPS}/mc_creative",
         "mods_dir": "{WD}/mods",
+        "client_mods_dir": "{WD}/mods",
+        "client_overrides_dir": "{WD}/client-overrides",
         "port": 25565,
         "resource_points": {
             "running": {
@@ -51,6 +55,8 @@
         "friendly_name": "TestErm",
         "directory": "{APPS}/mc_erm",
         "mods_dir": "{WD}/mods",
+        "client_mods_dir": "{WD}/mods",
+        "client_overrides_dir": "{WD}/client-overrides",
         "port": 25565,
         "enabled": true,
         "resource_points": {

@@ -2282,13 +2282,13 @@ class Mod_MC(Mod):
     def sync_metadata(self) -> None:
         super().sync_metadata()
         if _is_squaremap_mod_name(self.name) and self.cfg.classification_override is None:
-            self.cfg.mod_type = ModType.SERVER_ONLY
+            self.cfg.mod_type = ModType.SERVER
             if self.cfg.download_block_reason is None:
                 self.cfg.download_block_reason = ModDownloadBlockReason.SERVER_ONLY
 
     def default_mod_type(self) -> ModType:
         if _is_squaremap_mod_name(self.name):
-            return ModType.SERVER_ONLY
+            return ModType.SERVER
         return super().default_mod_type()
 
     def detect_version(self) -> str | None:

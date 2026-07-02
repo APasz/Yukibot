@@ -71,7 +71,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return "grey"
             case ModType.CLIENT:
                 return "purple"
-            case ModType.SERVER_ONLY:
+            case ModType.SERVER:
                 return "warn"
             case ModType.COREMOD:
                 return "red"
@@ -1096,7 +1096,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 if entry.client_pack.policy is not ClientPackPolicy.REQUIRED:
                     ui.label(entry.client_pack.policy.label).classes("mod-pill")
                 show_download_block_badge: bool = not entry.downloadable and not (
-                    entry.mod_type is ModType.SERVER_ONLY
+                    entry.mod_type is ModType.SERVER
                     and entry.download_block_reason == ModDownloadBlockReason.SERVER_ONLY.value
                 )
                 if show_download_block_badge:

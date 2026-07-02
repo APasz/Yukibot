@@ -99,6 +99,8 @@ class AppDetailsUpdate:
 @dataclass(frozen=True, slots=True)
 class AppInstanceTemplate:
     mods_dir: str | None = None
+    client_mods_dir: str | None = None
+    client_overrides_dir: str | None = None
     server_log_file: str | None = None
     join_port: int | None = None
     api_host: str | None = None
@@ -109,6 +111,10 @@ class AppInstanceTemplate:
         payload: dict[str, object] = {}
         if self.mods_dir is not None:
             payload["mods_dir"] = self.mods_dir
+        if self.client_mods_dir is not None:
+            payload["client_mods_dir"] = self.client_mods_dir
+        if self.client_overrides_dir is not None:
+            payload["client_overrides_dir"] = self.client_overrides_dir
         if self.server_log_file is not None:
             payload["server_log_file"] = self.server_log_file
         if self.join_port is not None:
@@ -141,6 +147,8 @@ def _required_scope_steam_update_template(scope: str) -> SteamUpdateConfig:
 _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
     "beammp": AppInstanceTemplate(
         mods_dir="{WD}/Resources/Client",
+        client_mods_dir="{WD}/Resources/Client",
+        client_overrides_dir="{WD}/client-overrides",
         server_log_file="{WD}/Server.log",
         join_port=30814,
     ),
@@ -150,11 +158,15 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
     ),
     "factorio": AppInstanceTemplate(
         mods_dir="{WD}/mods",
+        client_mods_dir="{WD}/mods",
+        client_overrides_dir="{WD}/client-overrides",
         server_log_file="{WD}/factorio-current.log",
         join_port=34197,
     ),
     "minecraft": AppInstanceTemplate(
         mods_dir="{WD}/mods",
+        client_mods_dir="{WD}/mods",
+        client_overrides_dir="{WD}/client-overrides",
         join_port=25565,
     ),
     "satisfactory": AppInstanceTemplate(
@@ -164,6 +176,8 @@ _SCOPE_INSTANCE_TEMPLATES: dict[str, AppInstanceTemplate] = {
     ),
     "sevendays": AppInstanceTemplate(
         mods_dir="{WD}/Mods",
+        client_mods_dir="{WD}/Mods",
+        client_overrides_dir="{WD}/client-overrides",
         server_log_file="{WD}/server_stdout.log",
         join_port=26900,
         steam_update=_required_scope_steam_update_template("sevendays"),
