@@ -913,6 +913,11 @@ class Mod_7D2D(Mod):
     def path(self) -> Path:
         return self.enabled_path
 
+    @property
+    def storage_path(self) -> Path:
+        """The whole mod directory remains in place when ModInfo.xml is disabled."""
+        return self.enabled_path
+
     def default_mod_type(self) -> ModType:
         if self.name in _SEVENDAYS_BUILTIN_MOD_NAMES:
             return ModType.BUILTIN

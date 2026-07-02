@@ -9,6 +9,7 @@ from datetime import datetime
 from itertools import zip_longest
 from pathlib import Path
 from re import Pattern
+from urllib.parse import urlsplit
 
 import hikari
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -598,6 +599,31 @@ class ModSide(enum.StrEnum):
     CLIENT = "client"
     BOTH = "both"
 
+
+class ModPlacement(enum.StrEnum):
+    SERVER_ENABLED = "server_enabled"
+    SERVER_DISABLED = "server_disabled"
+    CLIENT_ONLY = "client_only"
+
+    @property
+    def enabled(self) -> bool:
+        return self is ModPlacement.SERVER_ENABLED
+
+    @property
+    def server_loadable(self) -> bool:
+        return self is not ModPlacement.CLIENT_ONLY
+
+    @property
+    def label(self) -> str:
+        match self:
+            case ModPlacement.SERVER_ENABLED:
+                return "Server enabled"
+            case ModPlacement.SERVER_DISABLED:
+                return "Server disabled"
+            case ModPlacement.CLIENT_ONLY:
+                return "Client only"
+
+
 class ModType(enum.StrEnum):
     REGULAR = "regular"
     COREMOD = "coremod"
@@ -658,6 +684,53 @@ class ModClassificationOverride(BaseModel):
     download_block_reason: ModDownloadBlockReason | None = None
 
 
+class ModrinthModMetadata(BaseModel):
+    project_id: str
+    version_id: str
+    download_url: str
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("project_id", "version_id", mode="before")
+    @classmethod
+    def validate_identifier(cls, raw: object) -> str:
+        return _normalise_required_text(raw, field_name="Modrinth identifier")
+
+    @field_validator("download_url", mode="before")
+    @classmethod
+    def validate_download_url(cls, raw: object) -> str:
+        url = _normalise_required_text(raw, field_name="Modrinth download URL")
+        parsed = urlsplit(url)
+        if parsed.scheme.casefold() != "https" or parsed.hostname is None:
+            raise ValueError("Modrinth download URL must be an absolute HTTPS URL")
+        return url
+
+
+class CurseForgeModMetadata(BaseModel):
+    project_id: int
+    file_id: int
+
+    @field_validator("project_id", "file_id", mode="before")
+    @classmethod
+    def validate_identifier(cls, raw: object) -> int:
+        if isinstance(raw, bool):
+            raise TypeError("CurseForge identifiers must be integers")
+        if isinstance(raw, int):
+            identifier = raw
+        elif isinstance(raw, str) and raw.strip().isdecimal():
+            identifier = int(raw.strip())
+        else:
+            raise ValueError("CurseForge identifiers must be integers")
+        if identifier <= 0:
+            raise ValueError("CurseForge identifiers must be positive")
+        return identifier
+
+
+class ModPlatformMetadata(BaseModel):
+    modrinth: ModrinthModMetadata | None = None
+    curseforge: CurseForgeModMetadata | None = None
+
+
 class ClientPackPolicy(enum.StrEnum):
     REQUIRED = "required"
     OPTIONAL = "optional"
@@ -678,19 +751,40 @@ class ClientPackConfig(BaseModel):
     policy: ClientPackPolicy = ClientPackPolicy.REQUIRED
     choice_group: str | None = None
     default_choice: bool = False
+    default_selected: bool = False
+    bundled_required: bool = False
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_legacy_optional_default(cls, raw: object) -> object:
+        if not isinstance(raw, dict):
+            return raw
+        payload = dict(raw)
+        policy = payload.get("policy", ClientPackPolicy.REQUIRED)
+        if policy in (ClientPackPolicy.OPTIONAL, ClientPackPolicy.OPTIONAL.value):
+            payload.setdefault("default_selected", True)
+        return payload
 
     @model_validator(mode="after")
     def validate_choice_configuration(self) -> ClientPackConfig:
         if self.policy is ClientPackPolicy.ALTERNATIVE:
             if not self.choice_group:
                 raise ValueError("alternative client-pack mods require a choice group")
+            if self.default_selected:
+                raise ValueError("alternative client-pack mods use default_choice, not default_selected")
+            if self.bundled_required:
+                raise ValueError("only required client-pack mods may allow a bundled file")
             return self
         if self.choice_group is not None:
             raise ValueError("only alternative client-pack mods may have a choice group")
         if self.default_choice:
             raise ValueError("only alternative client-pack mods may be the default choice")
+        if self.policy is not ClientPackPolicy.OPTIONAL and self.default_selected:
+            raise ValueError("only optional client-pack mods may be selected by default")
+        if self.policy is not ClientPackPolicy.REQUIRED and self.bundled_required:
+            raise ValueError("only required client-pack mods may allow a bundled file")
         return self
 
 
@@ -1056,6 +1150,7 @@ class Mod_Config(BaseModel):
     client_path: Path | None = None
     added: datetime = Field(default_factory=datetime.now)
     enabled: bool = True
+    placement: ModPlacement = ModPlacement.SERVER_ENABLED
     version: str | None = None
     origin: str = "manual"
     mod_type: ModType = ModType.REGULAR
@@ -1063,6 +1158,7 @@ class Mod_Config(BaseModel):
     classification_override: ModClassificationOverride | None = None
     metadata_overrides: ModMetadataOverrides = Field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = Field(default_factory=ClientPackConfig)
+    platforms: ModPlatformMetadata = Field(default_factory=ModPlatformMetadata)
 
     model_config = ConfigDict(arbitrary_types_allowed=True, str_strip_whitespace=True)
 
@@ -1072,16 +1168,33 @@ class Mod_Config(BaseModel):
         if not isinstance(raw, dict):
             return raw
         payload = dict(raw)
+        if "placement" not in payload:
+            payload["placement"] = (
+                ModPlacement.SERVER_DISABLED
+                if payload.get("enabled") is False
+                else ModPlacement.SERVER_ENABLED
+            )
         if "mod_type" not in payload:
             legacy_coremod = payload.get("coremod")
             block_reason = payload.get("download_block_reason")
-            if legacy_coremod is True:
+            if payload["placement"] in (ModPlacement.CLIENT_ONLY, ModPlacement.CLIENT_ONLY.value):
+                payload["mod_type"] = ModType.CLIENT
+            elif legacy_coremod is True:
                 payload["mod_type"] = ModType.COREMOD
             elif block_reason in (ModDownloadBlockReason.BUILTIN, ModDownloadBlockReason.BUILTIN.value):
                 payload["mod_type"] = ModType.BUILTIN
             else:
                 payload["mod_type"] = ModType.REGULAR
         return payload
+
+    @model_validator(mode="after")
+    def sync_legacy_enabled_field(self) -> Mod_Config:
+        self.enabled = self.placement.enabled
+        return self
+
+    def set_placement(self, placement: ModPlacement) -> None:
+        self.placement = placement
+        self.enabled = placement.enabled
 
     @property
     def coremod(self) -> bool:

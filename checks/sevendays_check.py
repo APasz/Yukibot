@@ -8,6 +8,7 @@ from typing import Any, Never, cast
 from unittest.mock import AsyncMock, patch
 
 import config
+from _mod_ops import download_entries
 from _discord import Fileish, OutboundRelayFormatter, RelayMessageReferenceKind, RelayOutboundFormatOptions
 from _security import Power_Level
 from _utils import Utilities
@@ -101,6 +102,14 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
                 Mod_Manager._instances.clear()
 
             mod = manager.get("ExampleMod")
+            entries = download_entries(
+                manager,
+                (mod.name,),
+                default_enabled_only=False,
+            )
+
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0].source_path, mod_dir)
 
         self.assertFalse(mod.cfg.enabled)
         self.assertEqual(mod.path, mod_dir)

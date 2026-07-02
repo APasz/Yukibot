@@ -30,6 +30,8 @@ from apps._config import (
     ClientPackPolicy,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPlacement,
+    ModSide,
     ModType,
 )
 from apps._updater import (
@@ -53,6 +55,7 @@ from apps.minecraft import (
     MinecraftShapedRecipe,
     MinecraftShapelessRecipe,
 )
+from apps.minecraft.pack_export import PackFormat, PackPurpose
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
     ChatAttachment,
@@ -817,7 +820,12 @@ class ModWebTests(unittest.TestCase):
         size_bytes: int = 128,
         size_text: str = "128B",
         client_pack: ClientPackConfig | None = None,
+        placement: ModPlacement | None = None,
     ) -> NodeModEntry:
+        resolved_placement = placement or (
+            ModPlacement.SERVER_ENABLED if enabled else ModPlacement.SERVER_DISABLED
+        )
+        resolved_client_pack = client_pack or ClientPackConfig()
         return NodeModEntry(
             name=name,
             friendly=friendly or name,
@@ -832,7 +840,19 @@ class ModWebTests(unittest.TestCase):
             added=added,
             size_bytes=size_bytes,
             size_text=size_text,
-            client_pack=client_pack or ClientPackConfig(),
+            placement=resolved_placement,
+            server_loadable=resolved_placement.server_loadable,
+            client_pack_eligible=mod_type.side is not ModSide.SERVER
+            and (
+                downloadable
+                or (
+                    resolved_client_pack.policy is ClientPackPolicy.REQUIRED
+                    and resolved_client_pack.bundled_required
+                )
+            ),
+            archive_name=name,
+            source_path=f"/mods/{name}",
+            client_pack=resolved_client_pack,
         )
 
     @staticmethod
@@ -8105,7 +8125,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(
             mod_target.url,
-            "https://erin.example/api/node/apps/minecraft%20alpha/mods/upload",
+            "https://erin.example/api/node/apps/minecraft%20alpha/mods/upload?placement=server_enabled",
         )
         self.assertEqual(
             save_target.url,
@@ -8113,6 +8133,30 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(mod_grant.subject, "web:42")
         self.assertEqual(save_grant.subject, "web:42")
+
+    def test_download_query_preserves_pack_parameters(self) -> None:
+        query = ModWebService._download_query(
+            enabled_only=False,
+            selected_only=True,
+            mod_names=("client.jar",),
+            client_pack=True,
+            pack_purpose=PackPurpose.CLIENT,
+            pack_format=PackFormat.MODRINTH,
+            pack_version="2.0.0",
+        )
+
+        self.assertEqual(
+            query,
+            {
+                "enabled_only": "false",
+                "selected_only": "true",
+                "client_pack": "true",
+                "pack_purpose": "client",
+                "pack_format": "mrpack",
+                "pack_version": "2.0.0",
+                "mod_name": ["client.jar"],
+            },
+        )
 
     def test_config_root_download_url_uses_configs_read_scope(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="yuki", token_secret="shared-secret")
@@ -8877,6 +8921,21 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(regular_actions, (NodeModMutationAction.DISABLE,))
         self.assertEqual(coremod_actions, ())
 
+    def test_client_only_mod_actions_exclude_server_enable_disable(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+        entry = self._mod_entry(
+            name="client.jar",
+            enabled=False,
+            mod_type=ModType.CLIENT,
+            placement=ModPlacement.CLIENT_ONLY,
+        )
+
+        with patch.object(service, "_user_has_level", return_value=True):
+            actions = service._available_mod_actions(user=user, entry=entry)
+
+        self.assertEqual(actions, (NodeModMutationAction.DELETE,))
+
     def test_mutate_mod_allows_admin_enable_for_regular_mod(self) -> None:
         service = ModWebService()
         model = ModWebPageModel(
@@ -9034,6 +9093,7 @@ class ModWebTests(unittest.TestCase):
             friendly="Alpha Override",
             mod_type=ModType.CLIENT,
             downloadable=False,
+            client_pack_eligible=False,
             download_block_reason=ModDownloadBlockReason.ARTIFACT.value,
             download_block_label=ModDownloadBlockReason.ARTIFACT.label,
             version="2.0.0",
@@ -9085,6 +9145,7 @@ class ModWebTests(unittest.TestCase):
                     mod_type=ModType.CLIENT,
                     download_block_reason=ModDownloadBlockReason.ARTIFACT,
                     metadata_overrides=overrides,
+                    platforms=entry.platforms,
                     user=user,
                 )
             )
@@ -9106,6 +9167,7 @@ class ModWebTests(unittest.TestCase):
                     "origin": "curated",
                     "added": None,
                 },
+                "platforms": {"modrinth": None, "curseforge": None},
             },
         )
 

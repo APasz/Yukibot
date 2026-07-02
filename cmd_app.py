@@ -34,8 +34,9 @@ import config
 from _discord import DC_Relay, Distils, FileDeliveryMode
 from _editor_session import startup_editor_prefix
 from _manager import App_Manager, AppInstanceCreateRequest, ac_all_apps, ac_enabled_apps, ac_running_apps
-from _mod_ops import download_paths as build_mod_download_paths
 from _mod_ops import (
+    compress_mod_archive_entries,
+    download_entries as build_mod_download_entries,
     install_attachments,
     refresh_mod_index,
     remove_mods,
@@ -3161,15 +3162,20 @@ class AppManageService:
                 raise RuntimeError("Download delivery requires a channel.")
 
             mod_names = None if selected_mod is None else (selected_mod.name,)
-            paths = list(build_mod_download_paths(app.has_mod_manager, mod_names, default_enabled_only=False))
-            if not paths:
+            entries = build_mod_download_entries(
+                app.has_mod_manager,
+                mod_names,
+                default_enabled_only=False,
+            )
+            if not entries:
                 raise FileNotFoundError(f"No mods found for {app.friendly}")
 
             base_name = selected_mod.friendly if selected_mod is not None else f"{app.friendly}_mods"
+            archive_path = await compress_mod_archive_entries(entries, base_name)
             delivery = await Distils.send_files(
                 req.interaction.app.rest,
                 channel_id,
-                paths,
+                [archive_path],
                 display_name=base_name,
             )
             if selected_mod is not None:

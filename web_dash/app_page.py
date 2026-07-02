@@ -59,6 +59,7 @@ from .runtime_imports import (
     Input,
     Label,
     LiteralString,
+    ModPlacement,
     ModWebUser,
     NodeAppActivityProviderEntry,
     NodeAppMutationAction,
@@ -73,6 +74,7 @@ from .runtime_imports import (
     NodeSaveList,
     NodeSettingList,
     NodeSystemSummary,
+    PackFormat,
     Power_Level,
     Select,
     Timer,
@@ -714,11 +716,14 @@ class ModWebAppPageMixin(
     @staticmethod
     def _app_page_hero_mod_badge(summary: NodeModSummary) -> _ModWebBadgeSpec:
         total_count: int = summary.total_count
-        enabled_count: int = summary.enabled_count
+        server_loadable_count: int = summary.server_loadable_count
+        enabled_count: int = summary.server_enabled_count
         if total_count == 1 and enabled_count == total_count:
             text = "1 Mod"
-        elif enabled_count != total_count:
-            text = f"{enabled_count}/{total_count} Mods"
+        elif summary.client_only_count > 0:
+            text = f"{server_loadable_count} server · {summary.client_only_count} client"
+        elif enabled_count != server_loadable_count:
+            text = f"{enabled_count}/{server_loadable_count} Mods"
         elif total_count == 1:
             text = "1 Mod"
         else:
@@ -3466,7 +3471,7 @@ class ModWebAppPageMixin(
         optional_entries: dict[str, NodeModEntry] = {
             entry.name: entry
             for entry in mods
-            if entry.downloadable and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+            if entry.client_pack_eligible and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
         }
         unknown_optional_names: frozenset[str] = optional_names.difference(optional_entries)
         if unknown_optional_names:
@@ -3474,7 +3479,7 @@ class ModWebAppPageMixin(
 
         choice_groups: dict[str, frozenset[str]] = {}
         for entry in mods:
-            if not entry.downloadable or entry.client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
+            if not entry.client_pack_eligible or entry.client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
                 continue
             group_name: str | None = entry.client_pack.choice_group
             if group_name is None:
@@ -3489,7 +3494,7 @@ class ModWebAppPageMixin(
         return tuple(
             entry.name
             for entry in mods
-            if entry.downloadable
+            if entry.client_pack_eligible
             and (
                 entry.client_pack.policy is ClientPackPolicy.REQUIRED
                 or (entry.client_pack.policy is ClientPackPolicy.OPTIONAL and entry.name in optional_names)
@@ -3521,12 +3526,12 @@ class ModWebAppPageMixin(
         optional_client_entries: tuple[NodeModEntry, ...] = tuple(
             entry
             for entry in model.mods.mods
-            if entry.downloadable and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+            if entry.client_pack_eligible and entry.client_pack.policy is ClientPackPolicy.OPTIONAL
         )
         client_choice_groups: dict[str, tuple[NodeModEntry, ...]] = {}
         for entry in model.mods.mods:
             client_pack = entry.client_pack
-            if not entry.downloadable or client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
+            if not entry.client_pack_eligible or client_pack.policy is not ClientPackPolicy.ALTERNATIVE:
                 continue
             if client_pack.choice_group is None:
                 raise ValueError(f"Alternative client-pack mod {entry.name!r} has no choice group.")
@@ -3689,6 +3694,7 @@ class ModWebAppPageMixin(
 
         inline_upload_control: Upload | None = None
         direct_upload_transfer_id: int | None = None
+        upload_placement = ModPlacement.SERVER_ENABLED
 
         def ensure_direct_upload_transfer() -> int | None:
             nonlocal direct_upload_transfer_id
@@ -3727,12 +3733,25 @@ class ModWebAppPageMixin(
         def open_upload_picker() -> None:
             if inline_upload_control is None:
                 raise RuntimeError("Inline mod upload control is not available.")
+            upload_placement_dialog.open()
+
+        def choose_upload_placement(placement: ModPlacement) -> None:
+            nonlocal upload_placement
+            if inline_upload_control is None:
+                raise RuntimeError("Inline mod upload control is not available.")
+            upload_placement = placement
+            upload_placement_dialog.close()
+            refresh_direct_upload_target()
             inline_upload_control.run_method("pickFiles")
 
         def refresh_direct_upload_target() -> None:
             if inline_upload_control is None:
                 raise RuntimeError("Inline mod upload control is not available.")
-            target: ModWebDirectUploadTarget = self._direct_mod_upload_target(model=model, user=user)
+            target: ModWebDirectUploadTarget = self._direct_mod_upload_target(
+                model=model,
+                user=user,
+                placement=upload_placement,
+            )
             inline_upload_control.props["url"] = target.url
             inline_upload_control.props["headers"] = [
                 {"name": "Authorization", "value": target.authorization_header},
@@ -3773,7 +3792,31 @@ class ModWebAppPageMixin(
         optional_client_checkboxes: dict[str, Checkbox] = {}
         client_choice_selects: dict[str, Select] = {}
 
+        with ui.dialog() as upload_placement_dialog:
+            with ui.card().classes("mod-card mod-dialog-card"):
+                with ui.column().classes("w-full gap-4 p-5"):
+                    ui.label("Upload mod files").classes("text-xl font-black mod-title-small")
+                    ui.label("Choose where the uploaded files belong.").classes("mod-subtitle text-sm")
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        ui.button(
+                            "Server enabled",
+                            on_click=lambda: choose_upload_placement(ModPlacement.SERVER_ENABLED),
+                        ).classes("mod-list-button")
+                        ui.button(
+                            "Client only",
+                            on_click=lambda: choose_upload_placement(ModPlacement.CLIENT_ONLY),
+                        ).classes("mod-list-button secondary")
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button("Cancel", on_click=upload_placement_dialog.close).classes(
+                            "mod-list-button secondary"
+                        )
+
         async def download_configured_client_pack() -> None:
+            pack_format = PackFormat(_value_as_text(client_pack_format_select))
+            pack_version = _value_as_text(client_pack_version_input).strip()
+            if pack_format is not PackFormat.GENERIC_ZIP and not pack_version:
+                ui.notify("Pack version is required for launcher formats.", type="warning")
+                return
             optional_names: frozenset[str] = frozenset(
                 mod_name
                 for mod_name, checkbox in optional_client_checkboxes.items()
@@ -3796,7 +3839,16 @@ class ModWebAppPageMixin(
                 ui.notify("Select at least one mod for the client pack.", type="warning")
                 return
             client_pack_dialog.close()
-            query: str = urlencode({"selected_only": "true", "mod_name": list(mod_names)}, doseq=True)
+            query: str = urlencode(
+                {
+                    "selected_only": "true",
+                    "client_pack": "true",
+                    "pack_format": pack_format.value,
+                    "pack_version": pack_version,
+                    "mod_name": list(mod_names),
+                },
+                doseq=True,
+            )
             await self._start_download(
                 ui=ui,
                 user=user,
@@ -3807,7 +3859,7 @@ class ModWebAppPageMixin(
                     app_friendly=model.app_friendly,
                     selected_count=len(mod_names),
                 ),
-                filenames=(f"{model.app_name}-client-pack.zip",),
+                filenames=(f"{model.app_name}-client-pack{pack_format.suffix}",),
             )
 
         client_pack_dialog = ui.dialog()
@@ -3820,10 +3872,28 @@ class ModWebAppPageMixin(
                             ui.label("Required mods are always included. Optional mods start selected.").classes(
                                 "mod-subtitle text-sm"
                             )
+                        client_pack_format_select = (
+                            ui.select(
+                                {
+                                    PackFormat.GENERIC_ZIP.value: "Generic ZIP",
+                                    PackFormat.MODRINTH.value: "Modrinth (.mrpack)",
+                                    PackFormat.CURSEFORGE.value: "CurseForge ZIP",
+                                },
+                                value=PackFormat.GENERIC_ZIP.value,
+                                label="Pack format",
+                            )
+                            .props("filled square dense hide-bottom-space color=accent options-dark")
+                            .classes("w-full mod-config-select")
+                        )
+                        client_pack_version_input = (
+                            ui.input("Pack version", value="1.0.0")
+                            .props("filled square dense clearable hide-bottom-space color=accent")
+                            .classes("w-full mod-config-select")
+                        )
                         required_entries: tuple[NodeModEntry, ...] = tuple(
                             entry
                             for entry in model.mods.mods
-                            if entry.downloadable and entry.client_pack.policy is ClientPackPolicy.REQUIRED
+                            if entry.client_pack_eligible and entry.client_pack.policy is ClientPackPolicy.REQUIRED
                         )
                         if required_entries:
                             with ui.column().classes("w-full gap-2"):
@@ -3840,7 +3910,7 @@ class ModWebAppPageMixin(
                                 for entry in optional_client_entries:
                                     optional_client_checkboxes[entry.name] = ui.checkbox(
                                         entry.friendly,
-                                        value=True,
+                                        value=entry.client_pack.default_selected,
                                     ).props("dense")
                         if client_choice_groups:
                             with ui.column().classes("w-full gap-3"):
@@ -4716,6 +4786,8 @@ class ModWebAppPageMixin(
             badges.append(_ModWebBadgeSpec(text=f"{summary.non_downloadable_count} blocked", tone="warn"))
         if summary.downloadable_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{summary.downloadable_count} downloadable", tone="purple"))
+        if summary.client_only_count > 0:
+            badges.append(_ModWebBadgeSpec(text=f"{summary.client_only_count} client only", tone="purple"))
         if summary.coremod_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{summary.coremod_count} {coremod_label}", tone="red"))
         return tuple[_ModWebBadgeSpec, ...](badges)

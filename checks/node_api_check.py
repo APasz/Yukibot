@@ -29,8 +29,10 @@ from apps._config import (
     AppTitleFont,
     AppVersion,
     Mod_Config,
+    ModClassificationOverride,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPlacement,
     ModType,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
@@ -65,6 +67,7 @@ from apps.minecraft import (
     MinecraftRecipeItemStack,
     MinecraftShapelessRecipe,
 )
+from apps.minecraft.pack_export import PackFormat, PackPurpose
 from apps.sevendays import SevenDays, SevenDaysSandboxOption, SevenDaysSandboxOptionsSnapshot
 from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore, SatisfactoryServerState
 from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
@@ -2075,8 +2078,14 @@ class NodeApiTests(unittest.TestCase):
             manager = Mock()
             manager.reload_mods = AsyncMock()
 
-            async def add_mod(path: Path, *, atomic: bool = True) -> Mod:
+            async def add_mod(
+                path: Path,
+                *,
+                atomic: bool = True,
+                placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+            ) -> Mod:
                 self.assertTrue(atomic)
+                self.assertIs(placement, ModPlacement.SERVER_ENABLED)
                 self.assertEqual(path.name, "CoolMod.jar")
                 self.assertTrue(path.exists())
                 return installed
@@ -2120,8 +2129,14 @@ class NodeApiTests(unittest.TestCase):
             manager.reload_mods = AsyncMock()
             added_names: list[str] = []
 
-            async def add_mod(path: Path, *, atomic: bool = True) -> Mod:
+            async def add_mod(
+                path: Path,
+                *,
+                atomic: bool = True,
+                placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+            ) -> Mod:
                 self.assertTrue(atomic)
+                self.assertIs(placement, ModPlacement.SERVER_ENABLED)
                 self.assertTrue(path.exists())
                 added_names.append(path.name)
                 return installed_mods[path.name]
@@ -2146,6 +2161,41 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(added_names, ["CoolMod.jar", "AddonPack.zip"])
         manager.reload_mods.assert_awaited_once()
         self.assertEqual(manager.add.await_count, 2)
+
+    def test_upload_mod_path_passes_client_only_placement_to_manager(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "upload.tmp"
+            source.write_bytes(b"client-mod")
+            mods_dir = root / "mods"
+            mods_dir.mkdir()
+            installed_path = mods_dir / "ClientMod.jar.client"
+            installed_path.write_bytes(b"client-mod")
+            installed = _TestMod(
+                Mod_Config(
+                    name="ClientMod.jar",
+                    directory=mods_dir,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.add = AsyncMock(return_value=installed)
+            app = _build_app(manager)
+
+            result = asyncio.run(
+                NodeApiService().upload_mod_path(
+                    app=app,
+                    source_path=source,
+                    upload_name="ClientMod.jar",
+                    actor_user_id=42,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+
+        self.assertIs(result.mod.placement, ModPlacement.CLIENT_ONLY)
+        manager.add.assert_awaited_once()
+        self.assertIs(manager.add.await_args.kwargs["placement"], ModPlacement.CLIENT_ONLY)
 
     def test_upload_mod_path_rejects_directory_filename(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3164,6 +3214,30 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.client_path, str(client_mod_path))
         self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()).client_path, str(client_mod_path))
 
+    def test_mod_entry_exposes_client_only_placement_and_artifact_paths(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            mods_dir = root / "mods"
+            mods_dir.mkdir()
+            client_path = mods_dir / "example.jar.client"
+            client_path.write_bytes(b"mod-data")
+            mod = _TestMod(
+                Mod_Config(
+                    name="example.jar",
+                    directory=mods_dir,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+
+            entry = NodeApiService._mod_entry(mod)
+
+        self.assertIs(entry.placement, ModPlacement.CLIENT_ONLY)
+        self.assertFalse(entry.server_loadable)
+        self.assertTrue(entry.client_pack_eligible)
+        self.assertEqual(entry.archive_name, "example.jar")
+        self.assertEqual(entry.source_path, str(client_path))
+        self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()), entry)
+
     def test_mutate_mod_enable_requires_admin_for_regular_mods(self) -> None:
         with TemporaryDirectory() as temp_dir:
             mod_path = Path(temp_dir) / "example.jar"
@@ -3227,6 +3301,38 @@ class NodeApiTests(unittest.TestCase):
         manager.set_enabled.assert_awaited_once_with(mod, True, override_coremod=True)
         self.assertEqual(result.action, NodeModMutationAction.ENABLE)
         self.assertEqual(result.message, "Enabled example.jar.")
+
+    def test_mutate_mod_enable_rejects_client_only_mod(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mod = _TestMod(
+                Mod_Config(
+                    name="client.jar",
+                    directory=Path(temp_dir),
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = mod
+            manager.set_enabled = AsyncMock()
+            app = _build_app(manager)
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+
+            with self.assertRaises(Exception) as raised:
+                asyncio.run(
+                    service.mutate_mod(
+                        app=app,
+                        mod_name=mod.name,
+                        action=NodeModMutationAction.ENABLE,
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 409)
+        manager.set_enabled.assert_not_awaited()
 
     def test_mutate_mod_toggle_coremod_rejects_builtin_mod(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3337,6 +3443,7 @@ class NodeApiTests(unittest.TestCase):
             mod_type=ModType.CLIENT,
             download_block_reason=ModDownloadBlockReason.ARTIFACT,
             metadata_overrides=overrides,
+            platforms=None,
         )
         self.assertEqual(result.action, NodeModMutationAction.UPDATE_PROPERTIES)
         self.assertIsNotNone(result.mod)
@@ -4188,9 +4295,19 @@ class NodeApiTests(unittest.TestCase):
         mod_manager.reload_mods.assert_awaited_once_with()
         self.assertEqual(model.summary.total_count, 1)
         self.assertEqual(model.summary.enabled_count, 1)
+        self.assertEqual(model.summary.server_enabled_count, 1)
+        self.assertEqual(model.summary.server_disabled_count, 0)
+        self.assertEqual(model.summary.server_loadable_count, 1)
+        self.assertEqual(model.summary.client_only_count, 0)
+        self.assertEqual(model.summary.client_pack_eligible_count, 1)
         self.assertEqual(model.summary.downloadable_count, 1)
         self.assertEqual(model.summary.non_downloadable_count, 0)
         self.assertEqual(model.mods[0].name, "example.jar")
+        self.assertIs(model.mods[0].placement, ModPlacement.SERVER_ENABLED)
+        self.assertTrue(model.mods[0].server_loadable)
+        self.assertTrue(model.mods[0].client_pack_eligible)
+        self.assertEqual(model.mods[0].archive_name, "example.jar")
+        self.assertEqual(model.mods[0].source_path, str(mod_path))
         self.assertTrue(model.mods[0].downloadable)
         self.assertEqual(model.mods[0].size_bytes, 8)
         self.assertIsNotNone(model.app_stats)
@@ -5125,14 +5242,17 @@ class NodeApiTests(unittest.TestCase):
             mod = _TestMod(Mod_Config(name=mod_path.name, directory=mod_path.parent))
             app = _build_app(Mock(get=Mock(return_value=mod), reload_mods=AsyncMock()))
 
-            with patch("node_api.File_Utils.compress", new=AsyncMock(return_value=archive_path)) as compress:
+            with patch("node_api.compress_mod_archive_entries", new=AsyncMock(return_value=archive_path)) as compress:
                 service = NodeApiService()
                 download = asyncio.run(service._single_mod_download_file(app=app, mod=mod))
 
         self.assertTrue(download.is_archive)
         self.assertEqual(download.filename, "Minecraft_Alpha_DirectoryMod.zip")
         self.assertEqual(download.path, archive_path)
-        compress.assert_awaited_once_with(mod_path, "Minecraft_Alpha_DirectoryMod.zip", arc_base=mod_path.parent)
+        archive_entries, archive_name = compress.await_args.args
+        self.assertEqual(tuple(entry.source_path for entry in archive_entries), (mod_path,))
+        self.assertEqual(tuple(entry.archive_path.as_posix() for entry in archive_entries), ("DirectoryMod",))
+        self.assertEqual(archive_name, "Minecraft_Alpha_DirectoryMod.zip")
 
     def test_selected_mod_download_creates_archive_from_selected_mods(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -5149,7 +5269,7 @@ class NodeApiTests(unittest.TestCase):
             mod_manager.get.side_effect = {"first.jar": first, "second.jar": second}.__getitem__
             app = _build_app(mod_manager)
 
-            with patch("node_api.File_Utils.compress", new=AsyncMock(return_value=archive_path)) as compress:
+            with patch("node_api.compress_mod_archive_entries", new=AsyncMock(return_value=archive_path)) as compress:
                 service = NodeApiService()
                 response = asyncio.run(
                     service.build_mod_download_response(
@@ -5159,11 +5279,13 @@ class NodeApiTests(unittest.TestCase):
                 )
 
         self.assertEqual(Path(response.path), archive_path)
-        compress.assert_awaited_once_with(
-            (first_path, second_path),
-            "Minecraft_Alpha_selected_mods.zip",
-            arc_base=first_path.parent,
+        archive_entries, archive_name = compress.await_args.args
+        self.assertEqual(tuple(entry.source_path for entry in archive_entries), (first_path, second_path))
+        self.assertEqual(
+            tuple(entry.archive_path.as_posix() for entry in archive_entries),
+            ("first.jar", "second.jar"),
         )
+        self.assertEqual(archive_name, "Minecraft_Alpha_selected_mods.zip")
 
     def test_single_directory_mod_archive_keeps_mod_folder_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -5243,6 +5365,225 @@ class NodeApiTests(unittest.TestCase):
                 )
                 with zipfile.ZipFile(Path(response.path)) as archive:
                     self.assertEqual(sorted(archive.namelist()), ["alpha.jar", "mod_folder_B/ModInfo.xml"])
+
+    def test_marker_backed_mods_archive_with_logical_names(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            zips_path = temp_path / "zips"
+            disabled_path = temp_path / "disabled.jar.disabled"
+            client_path = temp_path / "client.jar.client"
+            disabled_path.write_bytes(b"disabled")
+            client_path.write_bytes(b"client")
+            disabled = _TestMod(
+                Mod_Config(
+                    name="disabled.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.SERVER_DISABLED,
+                )
+            )
+            client = _TestMod(
+                Mod_Config(
+                    name="client.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.get.side_effect = {disabled.name: disabled, client.name: client}.__getitem__
+            app = _build_app(mod_manager)
+
+            with patch.object(config, "DIR_ZIPS", zips_path):
+                response = asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(mod_names=(disabled.name, client.name)),
+                    )
+                )
+                with zipfile.ZipFile(Path(response.path)) as archive:
+                    self.assertEqual(sorted(archive.namelist()), ["client.jar", "disabled.jar"])
+
+    def test_client_pack_archive_excludes_downloadable_server_only_mod(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            zips_path = temp_path / "zips"
+            regular_path = temp_path / "regular.jar"
+            client_path = temp_path / "client.jar.client"
+            server_path = temp_path / "server.jar"
+            for pointer in (regular_path, client_path, server_path):
+                pointer.write_bytes(pointer.name.encode())
+            regular = _TestMod(Mod_Config(name="regular.jar", directory=temp_path))
+            client = _TestMod(
+                Mod_Config(
+                    name="client.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+            server = _TestMod(
+                Mod_Config(
+                    name="server.jar",
+                    directory=temp_path,
+                    classification_override=ModClassificationOverride(
+                        mod_type=ModType.SERVER,
+                        download_block_reason=None,
+                    ),
+                )
+            )
+            mods = {mod.name: mod for mod in (regular, client, server)}
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.get.side_effect = mods.__getitem__
+            mod_manager.list_mods.return_value = tuple(mods.values())
+            app = _build_app(mod_manager)
+
+            with patch.object(config, "DIR_ZIPS", zips_path):
+                response = asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(mod_names=tuple(mods), client_pack=True),
+                    )
+                )
+                with zipfile.ZipFile(Path(response.path)) as archive:
+                    self.assertEqual(sorted(archive.namelist()), ["client.jar", "regular.jar"])
+
+    def test_client_pack_archive_includes_client_overrides(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            zips_path = temp_path / "zips"
+            overrides_path = temp_path / "client-overrides"
+            overrides_path.mkdir()
+            (overrides_path / "options.txt").write_text("client settings", encoding="utf-8")
+            (temp_path / "required.jar").write_bytes(b"required")
+            (temp_path / "client.jar.client").write_bytes(b"client")
+            required = _TestMod(Mod_Config(name="required.jar", directory=temp_path))
+            client = _TestMod(
+                Mod_Config(
+                    name="client.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+            mods = {mod.name: mod for mod in (required, client)}
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.get.side_effect = mods.__getitem__
+            mod_manager.list_mods.return_value = tuple(mods.values())
+            app = _build_app(mod_manager)
+            app.cfg.client_overrides_dir = overrides_path
+
+            with patch.object(config, "DIR_ZIPS", zips_path):
+                response = asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(client_pack=True),
+                    )
+                )
+                with zipfile.ZipFile(Path(response.path)) as archive:
+                    self.assertEqual(
+                        set(archive.namelist()),
+                        {"required.jar", "client.jar", "overrides/options.txt"},
+                    )
+
+    def test_client_pack_archive_supports_modrinth_format(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            zips_path = temp_path / "zips"
+            (temp_path / "client.jar.client").write_bytes(b"client")
+            client = _TestMod(
+                Mod_Config(
+                    name="client.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.CLIENT_ONLY,
+                )
+            )
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.list_mods.return_value = (client,)
+            app = _build_app(mod_manager)
+            app.cfg.version = AppVersion(
+                main="1.21.1",
+                loader="fabric",
+                framework="0.16.10",
+            )
+
+            with patch.object(config, "DIR_ZIPS", zips_path):
+                response = asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(
+                            client_pack=True,
+                            pack_format=PackFormat.MODRINTH,
+                            pack_version="1.0.0",
+                        ),
+                    )
+                )
+                self.assertTrue(str(response.path).endswith(".mrpack"))
+                with zipfile.ZipFile(Path(response.path)) as archive:
+                    self.assertEqual(
+                        set(archive.namelist()),
+                        {"modrinth.index.json", "overrides/mods/client.jar"},
+                    )
+
+    def test_server_pack_includes_enabled_non_downloadable_server_mod(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            zips_path = temp_path / "zips"
+            (temp_path / "server.jar").write_bytes(b"server")
+            server = _TestMod(
+                Mod_Config(
+                    name="server.jar",
+                    directory=temp_path,
+                    classification_override=ModClassificationOverride(
+                        mod_type=ModType.SERVER,
+                        download_block_reason=ModDownloadBlockReason.SERVER_ONLY,
+                    ),
+                )
+            )
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.list_mods.return_value = (server,)
+            app = _build_app(mod_manager)
+
+            with patch.object(config, "DIR_ZIPS", zips_path):
+                response = asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(pack_purpose=PackPurpose.SERVER),
+                    )
+                )
+                with zipfile.ZipFile(Path(response.path)) as archive:
+                    self.assertEqual(archive.namelist(), ["server.jar"])
+
+    def test_client_pack_archive_rejects_non_downloadable_required_mod(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / "blocked.jar").write_bytes(b"blocked")
+            blocked = _TestMod(
+                Mod_Config(
+                    name="blocked.jar",
+                    directory=temp_path,
+                    classification_override=ModClassificationOverride(
+                        mod_type=ModType.CLIENT,
+                        download_block_reason=ModDownloadBlockReason.ARTIFACT,
+                    ),
+                )
+            )
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.list_mods.return_value = (blocked,)
+            app = _build_app(mod_manager)
+
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(client_pack=True),
+                    )
+                )
+
+            self.assertEqual(raised.exception.status_code, 400)
+            self.assertIn("downloadable or explicitly bundled", str(raised.exception.detail))
 
     def test_empty_selected_mod_download_returns_404(self) -> None:
         mod_manager = Mock()

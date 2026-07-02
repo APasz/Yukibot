@@ -49,6 +49,7 @@ from .runtime_imports import (
     Label,
     Literal,
     Mapping,
+    ModPlacement,
     ModWebUser,
     NodeAccessGrant,
     NodeApiScope,
@@ -67,6 +68,8 @@ from .runtime_imports import (
     NodeMinecraftRecipeWorkspaceState,
     NodeModList,
     NodeModUploadBatchResult,
+    PackFormat,
+    PackPurpose,
     NodeSaveList,
     NodeSaveMutationResult,
     NodeSevenDaysSandboxOptionsState,
@@ -1290,12 +1293,16 @@ class ModWebModelsMixin(ModWebServiceSupport):
         *,
         model: ModWebBasePageModel,
         user: ModWebUser,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
     ) -> ModWebDirectUploadTarget:
         return self._direct_upload_target(
             model=model,
             user=user,
             scope=NodeApiScope.MODS_WRITE,
-            path=f"/apps/{quote(model.app_name, safe='')}/mods/upload",
+            path=(
+                f"/apps/{quote(model.app_name, safe='')}/mods/upload"
+                f"?{urlencode({'placement': placement.value})}"
+            ),
         )
 
     def _direct_save_upload_target(
@@ -1955,11 +1962,28 @@ class ModWebModelsMixin(ModWebServiceSupport):
         return user
 
     @staticmethod
-    def _download_query(*, enabled_only: bool, selected_only: bool, mod_names: tuple[str, ...]) -> dict[str, object]:
+    def _download_query(
+        *,
+        enabled_only: bool,
+        selected_only: bool,
+        mod_names: tuple[str, ...],
+        client_pack: bool = False,
+        pack_purpose: PackPurpose | None = None,
+        pack_format: PackFormat = PackFormat.GENERIC_ZIP,
+        pack_version: str | None = None,
+    ) -> dict[str, object]:
         query: dict[str, object] = {
             "enabled_only": str(enabled_only).lower(),
             "selected_only": str(selected_only).lower(),
         }
+        if client_pack:
+            query["client_pack"] = "true"
+        if pack_format is not PackFormat.GENERIC_ZIP:
+            query["pack_format"] = pack_format.value
+        if pack_purpose is not None:
+            query["pack_purpose"] = pack_purpose.value
+        if pack_version is not None:
+            query["pack_version"] = pack_version
         if mod_names:
             query["mod_name"] = list[str](mod_names)
         return query

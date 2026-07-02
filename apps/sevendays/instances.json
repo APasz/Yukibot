@@ -42,7 +42,7 @@
             ],
             "selected_branch": "latest_experimental"
         },
-        "enabled": true,
+        "enabled": false,
         "notes": null,
         "lifecycle_notice_started": true,
         "lifecycle_notice_stopped": true,

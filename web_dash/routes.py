@@ -20,6 +20,8 @@ from .runtime_imports import (
     ModWebSessionPersistence,
     ModWebUser,
     NodeApiScope,
+    PackFormat,
+    PackPurpose,
     Path,
     Power_Level,
     RedirectResponse,
@@ -727,17 +729,33 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             request: Request,
             enabled_only: bool = False,
             selected_only: bool = False,
+            client_pack: bool = False,
+            pack_purpose: PackPurpose | None = None,
+            pack_format: PackFormat = PackFormat.GENERIC_ZIP,
+            pack_version: str | None = None,
         ) -> RedirectResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
             mod_names = tuple(request.query_params.getlist("mod_name"))
-            query = self._download_query(enabled_only=enabled_only, selected_only=selected_only, mod_names=mod_names)
+            query = self._download_query(
+                enabled_only=enabled_only,
+                selected_only=selected_only,
+                mod_names=mod_names,
+                client_pack=client_pack,
+                pack_purpose=pack_purpose,
+                pack_format=pack_format,
+                pack_version=pack_version,
+            )
+            scopes = (NodeApiScope.MODS_DOWNLOAD,)
+            if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN}:
+                scopes = (NodeApiScope.MODS_DOWNLOAD, NodeApiScope.MODS_WRITE)
             return self._remote_download_redirect(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/mods/download",
                 query=query,
                 user=user,
+                scopes=scopes,
             )
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/configs")

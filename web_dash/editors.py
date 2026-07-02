@@ -39,6 +39,7 @@ from .runtime_imports import (
     Literal,
     LiteralString,
     Mapping,
+    ModPlacement,
     ModType,
     ModWebUser,
     NodeApiScope,
@@ -2700,8 +2701,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     entry.friendly,
                     entry.name,
                     entry.mod_type.value,
+                    entry.placement.value,
+                    entry.placement.label,
                     "coremod" if entry.coremod else "",
-                    "enabled" if entry.enabled else "disabled",
+                    (
+                        "client only"
+                        if entry.placement is ModPlacement.CLIENT_ONLY
+                        else "enabled" if entry.enabled else "disabled"
+                    ),
                     "downloadable" if entry.downloadable else "blocked",
                     entry.origin,
                     entry.version,

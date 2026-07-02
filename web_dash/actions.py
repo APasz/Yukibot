@@ -16,8 +16,12 @@ from .runtime_imports import (
     Callable,
     Checkbox,
     ClientPackPolicy,
+    CurseForgeModMetadata,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPlacement,
+    ModPlatformMetadata,
+    ModrinthModMetadata,
     ModType,
     ModWebUser,
     NodeApiScope,
@@ -106,10 +110,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
         user: ModWebUser,
         entry: NodeModEntry,
     ) -> tuple[NodeModMutationAction, ...]:
-        ordered_actions: tuple[NodeModMutationAction, ...] = (
-            NodeModMutationAction.DISABLE if entry.enabled else NodeModMutationAction.ENABLE,
-            NodeModMutationAction.DELETE,
-        )
+        ordered_actions: tuple[NodeModMutationAction, ...]
+        if entry.placement is ModPlacement.CLIENT_ONLY:
+            ordered_actions = (NodeModMutationAction.DELETE,)
+        else:
+            ordered_actions = (
+                NodeModMutationAction.DISABLE if entry.enabled else NodeModMutationAction.ENABLE,
+                NodeModMutationAction.DELETE,
+            )
         return tuple(
             action for action in ordered_actions if self._user_can_mutate_mod(user=user, entry=entry, action=action)
         )
@@ -422,6 +430,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         mod_type: ModType,
         download_block_reason: ModDownloadBlockReason | None,
         metadata_overrides: ModMetadataOverrides,
+        platforms: ModPlatformMetadata,
         user: ModWebUser,
     ) -> NodeModMutationResult:
         if self._is_builtin_mod(entry):
@@ -442,6 +451,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     download_block_reason.value if download_block_reason is not None else None
                 ),
                 "metadata_overrides": metadata_overrides.model_dump(mode="json"),
+                "platforms": platforms.model_dump(mode="json"),
             },
         )
         return NodeModMutationResult.from_mapping(payload)
@@ -826,7 +836,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         model: ModWebPageModel,
         user: ModWebUser,
     ) -> "Dialog":
-        status_text = "Enabled" if entry.enabled else "Disabled"
+        status_text = entry.placement.label
         downloadable_text = "Yes" if entry.downloadable else "No"
         version_text: str = entry.version or "Unknown"
         block_text: str = entry.download_block_label or entry.download_block_reason or "None"
@@ -855,12 +865,44 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         else datetime.fromisoformat(str(added_override_input.value))
                     ),
                 )
+                modrinth_values = tuple(
+                    str(value or "").strip()
+                    for value in (
+                        modrinth_project_input.value,
+                        modrinth_version_input.value,
+                        modrinth_url_input.value,
+                    )
+                )
+                curseforge_values = tuple(
+                    str(value or "").strip()
+                    for value in (curseforge_project_input.value, curseforge_file_input.value)
+                )
+                platforms = ModPlatformMetadata(
+                    modrinth=(
+                        None
+                        if not any(modrinth_values)
+                        else ModrinthModMetadata(
+                            project_id=modrinth_values[0],
+                            version_id=modrinth_values[1],
+                            download_url=modrinth_values[2],
+                        )
+                    ),
+                    curseforge=(
+                        None
+                        if not any(curseforge_values)
+                        else CurseForgeModMetadata(
+                            project_id=int(curseforge_values[0]),
+                            file_id=int(curseforge_values[1]),
+                        )
+                    ),
+                )
                 result = await self._update_mod_properties(
                     model=model,
                     entry=entry,
                     mod_type=selected_mod_type,
                     download_block_reason=selected_block_reason,
                     metadata_overrides=metadata_overrides,
+                    platforms=platforms,
                     user=user,
                 )
             except Exception as xcp:
@@ -926,6 +968,16 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         ui.label(entry.name).classes("mod-subtitle text-sm break-all")
                     with ui.grid(columns=2).classes("mod-detail-grid"):
                         self._render_mod_detail_item(ui=ui, label="Status", value=status_text)
+                        self._render_mod_detail_item(
+                            ui=ui,
+                            label="Server loadable",
+                            value="Yes" if entry.server_loadable else "No",
+                        )
+                        self._render_mod_detail_item(
+                            ui=ui,
+                            label="Client-pack eligible",
+                            value="Yes" if entry.client_pack_eligible else "No",
+                        )
                         self._render_mod_detail_item(ui=ui, label="Type", value=entry.mod_type.label)
                         self._render_mod_detail_item(ui=ui, label="Size", value=entry.size_text)
                         self._render_mod_detail_item(ui=ui, label="Downloadable", value=downloadable_text)
@@ -1034,6 +1086,46 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     )
                                 )
                             overrides_section.set_visibility(False)
+                            ui.label("Launcher metadata").classes("mod-stat-label")
+                            ui.label(
+                                "Leave every field for a platform blank to bundle the local file instead."
+                            ).classes("mod-subtitle text-xs")
+                            with ui.grid(columns=2).classes("w-full gap-2"):
+                                modrinth_project_input = ui.input(
+                                    "Modrinth project ID",
+                                    value=(
+                                        "" if entry.platforms.modrinth is None
+                                        else entry.platforms.modrinth.project_id
+                                    ),
+                                ).props("filled square dense clearable hide-bottom-space color=accent")
+                                modrinth_version_input = ui.input(
+                                    "Modrinth version ID",
+                                    value=(
+                                        "" if entry.platforms.modrinth is None
+                                        else entry.platforms.modrinth.version_id
+                                    ),
+                                ).props("filled square dense clearable hide-bottom-space color=accent")
+                                modrinth_url_input = ui.input(
+                                    "Modrinth HTTPS download URL",
+                                    value=(
+                                        "" if entry.platforms.modrinth is None
+                                        else entry.platforms.modrinth.download_url
+                                    ),
+                                ).props("filled square dense clearable hide-bottom-space color=accent")
+                                curseforge_project_input = ui.input(
+                                    "CurseForge project ID",
+                                    value=(
+                                        "" if entry.platforms.curseforge is None
+                                        else str(entry.platforms.curseforge.project_id)
+                                    ),
+                                ).props("filled square dense clearable hide-bottom-space color=accent")
+                                curseforge_file_input = ui.input(
+                                    "CurseForge file ID",
+                                    value=(
+                                        "" if entry.platforms.curseforge is None
+                                        else str(entry.platforms.curseforge.file_id)
+                                    ),
+                                ).props("filled square dense clearable hide-bottom-space color=accent")
                     if available_actions:
                         with ui.column().classes("gap-2"):
                             ui.label("Privileged Actions").classes("mod-stat-label")
@@ -1075,7 +1167,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
         row_classes = ["mod-row", "w-full"]
         if not entry.downloadable:
             row_classes.append("blocked")
-        elif not entry.enabled:
+        elif entry.placement is ModPlacement.CLIENT_ONLY:
+            row_classes.append("mod-row-client-only")
+        elif entry.placement is ModPlacement.SERVER_DISABLED:
             row_classes.append("mod-row-disabled")
         dialog = self._render_mod_info_dialog(ui=ui, entry=entry, model=model, user=user)
         row = ui.row().classes(" ".join((*row_classes, "mod-row-clickable")))
@@ -1093,6 +1187,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.label(entry.name).classes("mod-row-file")
             with ui.row().classes("mod-row-meta"):
                 ui.label(entry.size_text).classes("mod-pill size")
+                if entry.placement is ModPlacement.CLIENT_ONLY:
+                    ui.label(entry.placement.label).classes("mod-pill")
                 if entry.client_pack.policy is not ClientPackPolicy.REQUIRED:
                     ui.label(entry.client_pack.policy.label).classes("mod-pill")
                 show_download_block_badge: bool = not entry.downloadable and not (

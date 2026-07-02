@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import mimetypes
-import os
 import tempfile
 import threading
 import time
@@ -44,13 +43,19 @@ from _authority import AuthorityResource, read_json_object
 from _file import File_Utils
 from _manager import App_Manager, AppDetailsUpdate, app_scope_from_name
 from _mod_ops import (
+    ArchiveEntry,
+    ClientPackValidationError,
+    ClientPackSelection,
+    ModArchiveEntry,
     NonDownloadableModError,
     RunningAppModMutationError,
+    build_admin_pack_entries,
+    build_client_pack_entries,
+    build_server_pack_entries,
+    compress_mod_archive_entries,
+    download_entries as build_mod_download_entries,
     require_app_stopped_for_mod_mutation,
     require_downloadable,
-)
-from _mod_ops import (
-    download_paths as build_mod_download_paths,
 )
 from _security import Access_Control, Power_Level
 from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
@@ -67,8 +72,12 @@ from apps._blueprint_files import (
 from apps._config import (
     AppTitleFont,
     ClientPackConfig,
+    ClientPackPolicy,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPlacement,
+    ModPlatformMetadata,
+    ModSide,
     ModType,
     normalise_activity_provider_ids,
     normalise_app_title_font,
@@ -92,6 +101,13 @@ from apps.minecraft import (
     generated_minecraft_recipe_mutation_id,
     minecraft_recipe_mutation_id,
     minecraft_recipe_mutation_with_id,
+)
+from apps.minecraft.pack_export import (
+    MinecraftPackExportError,
+    MinecraftPackSpec,
+    PackFormat,
+    PackPurpose,
+    export_minecraft_pack,
 )
 from apps.sevendays import SevenDays
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub, ChatRoomUpdate
@@ -847,6 +863,20 @@ class NodeModSummary:
     coremod_count: int
     downloadable_count: int
     non_downloadable_count: int
+    client_only_count: int = 0
+    client_pack_eligible_count: int = 0
+
+    @property
+    def server_enabled_count(self) -> int:
+        return self.enabled_count
+
+    @property
+    def server_disabled_count(self) -> int:
+        return self.disabled_count
+
+    @property
+    def server_loadable_count(self) -> int:
+        return self.server_enabled_count + self.server_disabled_count
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeModSummary:
@@ -863,7 +893,20 @@ class NodeModSummary:
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(f"Node mod summary {key} is invalid.")
             values[key] = value
-        return cls(**values)
+        raw_client_only_count = payload.get("client_only_count", 0)
+        if isinstance(raw_client_only_count, bool) or not isinstance(raw_client_only_count, int):
+            raise ValueError("Node mod summary client_only_count is invalid.")
+        raw_client_pack_eligible_count = payload.get(
+            "client_pack_eligible_count",
+            values["downloadable_count"],
+        )
+        if isinstance(raw_client_pack_eligible_count, bool) or not isinstance(raw_client_pack_eligible_count, int):
+            raise ValueError("Node mod summary client_pack_eligible_count is invalid.")
+        return cls(
+            **values,
+            client_only_count=raw_client_only_count,
+            client_pack_eligible_count=raw_client_pack_eligible_count,
+        )
 
     def to_mapping(self) -> dict[str, int]:
         return {
@@ -873,6 +916,11 @@ class NodeModSummary:
             "coremod_count": self.coremod_count,
             "downloadable_count": self.downloadable_count,
             "non_downloadable_count": self.non_downloadable_count,
+            "server_enabled_count": self.server_enabled_count,
+            "server_disabled_count": self.server_disabled_count,
+            "server_loadable_count": self.server_loadable_count,
+            "client_only_count": self.client_only_count,
+            "client_pack_eligible_count": self.client_pack_eligible_count,
         }
 
 
@@ -891,9 +939,15 @@ class NodeModEntry:
     added: str
     size_bytes: int
     size_text: str
+    placement: ModPlacement
+    server_loadable: bool
+    client_pack_eligible: bool
+    archive_name: str
+    source_path: str
     client_path: str | None = None
     metadata_overrides: ModMetadataOverrides = field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = field(default_factory=ClientPackConfig)
+    platforms: ModPlatformMetadata = field(default_factory=ModPlatformMetadata)
 
     @property
     def added_at(self) -> datetime:
@@ -919,9 +973,17 @@ class NodeModEntry:
         raw_client_pack = payload.get("client_pack")
         if raw_client_pack is not None and not isinstance(raw_client_pack, Mapping):
             raise ValueError("Node mod client_pack is invalid.")
+        client_pack = (
+            ClientPackConfig()
+            if raw_client_pack is None
+            else ClientPackConfig.model_validate(dict(raw_client_pack))
+        )
         raw_metadata_overrides = payload.get("metadata_overrides")
         if raw_metadata_overrides is not None and not isinstance(raw_metadata_overrides, Mapping):
             raise ValueError("Node mod metadata overrides are invalid.")
+        raw_platforms = payload.get("platforms")
+        if raw_platforms is not None and not isinstance(raw_platforms, Mapping):
+            raise ValueError("Node mod platform metadata is invalid.")
         if raw_mod_type is not None:
             mod_type = ModType(raw_mod_type)
         elif download_block_reason == ModDownloadBlockReason.BUILTIN.value:
@@ -930,6 +992,32 @@ class NodeModEntry:
             mod_type = ModType.COREMOD
         else:
             mod_type = ModType.REGULAR
+        raw_placement = _optional_string(payload, "placement")
+        placement = (
+            ModPlacement.SERVER_ENABLED if enabled else ModPlacement.SERVER_DISABLED
+        ) if raw_placement is None else ModPlacement(raw_placement)
+        if raw_placement is not None and enabled is not placement.enabled:
+            raise ValueError("Node mod enabled state conflicts with placement.")
+        raw_server_loadable = payload.get("server_loadable")
+        server_loadable = (
+            placement.server_loadable
+            if raw_server_loadable is None
+            else _required_bool(payload, "server_loadable")
+        )
+        if server_loadable is not placement.server_loadable:
+            raise ValueError("Node mod server_loadable conflicts with placement.")
+        raw_client_pack_eligible = payload.get("client_pack_eligible")
+        expected_client_pack_eligible = mod_type.side is not ModSide.SERVER and (
+            downloadable
+            or (client_pack.policy is ClientPackPolicy.REQUIRED and client_pack.bundled_required)
+        )
+        client_pack_eligible = (
+            expected_client_pack_eligible
+            if raw_client_pack_eligible is None
+            else _required_bool(payload, "client_pack_eligible")
+        )
+        if client_pack_eligible is not expected_client_pack_eligible:
+            raise ValueError("Node mod client_pack_eligible conflicts with classification.")
         return cls(
             name=name,
             friendly=friendly,
@@ -945,15 +1033,21 @@ class NodeModEntry:
             added=added,
             size_bytes=size_bytes,
             size_text=size_text,
+            placement=placement,
+            server_loadable=server_loadable,
+            client_pack_eligible=client_pack_eligible,
+            archive_name=_optional_string(payload, "archive_name") or name,
+            source_path=_optional_string(payload, "source_path") or client_path or name,
             metadata_overrides=(
                 ModMetadataOverrides()
                 if raw_metadata_overrides is None
                 else ModMetadataOverrides.model_validate(dict(raw_metadata_overrides))
             ),
-            client_pack=(
-                ClientPackConfig()
-                if raw_client_pack is None
-                else ClientPackConfig.model_validate(dict(raw_client_pack))
+            client_pack=client_pack,
+            platforms=(
+                ModPlatformMetadata()
+                if raw_platforms is None
+                else ModPlatformMetadata.model_validate(dict(raw_platforms))
             ),
         )
 
@@ -973,8 +1067,14 @@ class NodeModEntry:
             "added": self.added,
             "size_bytes": self.size_bytes,
             "size_text": self.size_text,
+            "placement": self.placement.value,
+            "server_loadable": self.server_loadable,
+            "client_pack_eligible": self.client_pack_eligible,
+            "archive_name": self.archive_name,
+            "source_path": self.source_path,
             "metadata_overrides": self.metadata_overrides.model_dump(mode="json"),
             "client_pack": self.client_pack.model_dump(mode="json"),
+            "platforms": self.platforms.model_dump(mode="json"),
         }
 
 
@@ -1012,6 +1112,7 @@ class NodeModPropertiesUpdateRequest(BaseModel):
     mod_type: ModType
     download_block_reason: ModDownloadBlockReason | None
     metadata_overrides: ModMetadataOverrides
+    platforms: ModPlatformMetadata | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3476,6 +3577,18 @@ class NodeDownloadRequest:
     mod_name: str | None = None
     mod_names: tuple[str, ...] = ()
     selected_only: bool = False
+    client_pack: bool = False
+    pack_purpose: PackPurpose | None = None
+    pack_format: PackFormat = PackFormat.GENERIC_ZIP
+    pack_version: str | None = None
+
+    @property
+    def resolved_pack_purpose(self) -> PackPurpose | None:
+        if self.pack_purpose is not None:
+            return self.pack_purpose
+        if self.client_pack or self.pack_format is not PackFormat.GENERIC_ZIP:
+            return PackPurpose.CLIENT
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4533,23 +4646,40 @@ class NodeApiService:
             request: Request,
             enabled_only: bool = False,
             selected_only: bool = False,
+            client_pack: bool = False,
+            pack_purpose: PackPurpose | None = None,
+            pack_format: PackFormat = PackFormat.GENERIC_ZIP,
+            pack_version: str | None = None,
             access_token: str | None = None,
         ) -> FileResponse:
             mod_names = tuple(request.query_params.getlist("mod_name"))
             traffic_log.info(
-                "Node API mods archive request: node=%s app=%s enabled_only=%s selected_only=%s selected=%s",
+                "Node API mods archive request: node=%s app=%s enabled_only=%s selected_only=%s "
+                "client_pack=%s purpose=%s format=%s selected=%s",
                 self.node_name,
                 app_name,
                 enabled_only,
                 selected_only,
+                client_pack,
+                pack_purpose,
+                pack_format,
                 len(mod_names),
             )
-            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_DOWNLOAD,))
+            required_scopes = (NodeApiScope.MODS_DOWNLOAD,)
+            if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN}:
+                required_scopes = (NodeApiScope.MODS_DOWNLOAD, NodeApiScope.MODS_WRITE)
+            self._require_access(request, access_token, app_name=app_name, scopes=required_scopes)
             app = self._resolve_app(app_name)
             return await self.build_mod_download_response(
                 app=app,
                 request=NodeDownloadRequest(
-                    enabled_only=enabled_only, mod_names=mod_names, selected_only=selected_only
+                    enabled_only=enabled_only,
+                    mod_names=mod_names,
+                    selected_only=selected_only,
+                    client_pack=client_pack,
+                    pack_purpose=pack_purpose,
+                    pack_format=pack_format,
+                    pack_version=pack_version,
                 ),
             )
 
@@ -4574,6 +4704,7 @@ class NodeApiService:
             request: Request,
             upload: Annotated[list[UploadFile], File()],
             filename: Annotated[list[str] | None, Form()] = None,
+            placement: ModPlacement = ModPlacement.SERVER_ENABLED,
             access_token: str | None = None,
         ) -> dict[str, object]:
             traffic_log.info("Node API mod upload request: node=%s app=%s", self.node_name, app_name)
@@ -4591,6 +4722,7 @@ class NodeApiService:
                 uploads=upload,
                 upload_names=filename,
                 actor_user_id=actor_user_id,
+                placement=placement,
             )
             audit_log(
                 "mod.file_uploaded",
@@ -6092,11 +6224,19 @@ class NodeApiService:
                 captured_at_seconds=time.monotonic(),
                 summary=NodeModSummary(
                     total_count=len(mods),
-                    enabled_count=sum(1 for mod in mods if mod.cfg.enabled),
-                    disabled_count=sum(1 for mod in mods if not mod.cfg.enabled),
+                    enabled_count=sum(
+                        1 for mod in mods if mod.cfg.placement is ModPlacement.SERVER_ENABLED
+                    ),
+                    disabled_count=sum(
+                        1 for mod in mods if mod.cfg.placement is ModPlacement.SERVER_DISABLED
+                    ),
                     coremod_count=sum(1 for mod in mods if mod.counts_as_coremod),
                     downloadable_count=sum(1 for mod in mods if mod.downloadable),
                     non_downloadable_count=sum(1 for mod in mods if not mod.downloadable),
+                    client_only_count=sum(
+                        1 for mod in mods if mod.cfg.placement is ModPlacement.CLIENT_ONLY
+                    ),
+                    client_pack_eligible_count=sum(1 for mod in mods if mod.client_pack_eligible),
                 ),
                 mods=tuple(self._mod_entry(mod) for mod in mods),
             )
@@ -7778,14 +7918,35 @@ class NodeApiService:
         selected_mod_names: tuple[str, ...] | None = (
             request.mod_names if request.selected_only or request.mod_names else None
         )
-        paths: tuple[Path, ...] = tuple(
-            build_mod_download_paths(
-                app.has_mod_manager,
-                selected_mod_names,
-                default_enabled_only=request.enabled_only,
-            )
-        )
-        if not paths:
+        pack_purpose = request.resolved_pack_purpose
+        entries: tuple[ArchiveEntry, ...]
+        try:
+            if pack_purpose is PackPurpose.CLIENT:
+                entries = build_client_pack_entries(
+                    app.has_mod_manager,
+                    ClientPackSelection(
+                        selected_mod_names=frozenset(selected_mod_names or ()),
+                        supplied=request.selected_only or bool(request.mod_names),
+                    ),
+                    client_overrides_dir=app.cfg.client_overrides_dir,
+                )
+            elif pack_purpose is PackPurpose.SERVER:
+                entries = build_server_pack_entries(app.has_mod_manager)
+            elif pack_purpose is PackPurpose.ADMIN:
+                entries = build_admin_pack_entries(app.has_mod_manager)
+            else:
+                entries = build_mod_download_entries(
+                    app.has_mod_manager,
+                    selected_mod_names,
+                    default_enabled_only=request.enabled_only,
+                )
+        except NonDownloadableModError as xcp:
+            raise _http_exception(403, str(xcp)) from xcp
+        except ClientPackValidationError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except ModuleNotFoundError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        if not entries:
             detail: str = self._empty_archive_detail(request)
             log.warning(
                 "Node API archive request had no paths: app=%s enabled_only=%s selected=%s",
@@ -7795,17 +7956,45 @@ class NodeApiService:
             )
             raise _http_exception(404, detail)
 
-        archive_path: Path = await File_Utils.compress(
-            paths,
-            self._archive_name(app=app, paths=paths, request=request),
-            arc_base=self._archive_base_path(paths),
-        )
+        archive_name = self._archive_name(app=app, entries=entries, request=request)
+        if pack_purpose is not None:
+            if app.scope != "minecraft" and request.pack_format is not PackFormat.GENERIC_ZIP:
+                raise _http_exception(400, "Launcher pack formats are only available for Minecraft apps.")
+            version = app.cfg.version
+            if version is None and request.pack_format is not PackFormat.GENERIC_ZIP:
+                raise _http_exception(400, "Minecraft version metadata is required for launcher pack exports.")
+            pack_version = request.pack_version or getattr(app.cfg, "pack_version", None)
+            if pack_version is None and request.pack_format is not PackFormat.GENERIC_ZIP:
+                raise _http_exception(400, "Minecraft pack_version is required for launcher pack exports.")
+            if version is None:
+                archive_path = await compress_mod_archive_entries(entries, archive_name)
+            else:
+                try:
+                    archive_path = await export_minecraft_pack(
+                        entries,
+                        MinecraftPackSpec(
+                            purpose=pack_purpose,
+                            format=request.pack_format,
+                            name=app.friendly,
+                            version_id=pack_version or version.main,
+                            minecraft_version=version.main,
+                            loader=version.loader,
+                            loader_version=version.framework,
+                            author=getattr(app.cfg, "pack_author", "Yukibot"),
+                            summary=app.cfg.notes,
+                        ),
+                        archive_name,
+                    )
+                except MinecraftPackExportError as xcp:
+                    raise _http_exception(400, str(xcp)) from xcp
+        else:
+            archive_path = await compress_mod_archive_entries(entries, archive_name)
         traffic_log.info(
-            "Node API sending mod archive: app=%s enabled_only=%s selected=%s paths=%s archive=%s",
+            "Node API sending mod archive: app=%s enabled_only=%s selected=%s entries=%s archive=%s",
             app.name,
             request.enabled_only,
             len(selected_mod_names) if selected_mod_names is not None else 0,
-            len(paths),
+            len(entries),
             archive_path,
         )
         return FileResponse(path=archive_path, filename=archive_path.name)
@@ -8046,12 +8235,14 @@ class NodeApiService:
         upload: UploadFile,
         upload_name: str | None,
         actor_user_id: int,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
     ) -> NodeModUploadResult:
         result = await self.upload_mod_files(
             app=app,
             uploads=[upload],
             upload_names=None if upload_name is None else [upload_name],
             actor_user_id=actor_user_id,
+            placement=placement,
         )
         return self._single_mod_upload_result(result)
 
@@ -8062,6 +8253,7 @@ class NodeApiService:
         uploads: Sequence[UploadFile],
         upload_names: Sequence[str] | None,
         actor_user_id: int,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
     ) -> NodeModUploadBatchResult:
         upload_sources = self._resolve_mod_upload_requests(uploads=uploads, upload_names=upload_names)
         temp_paths: list[Path] = []
@@ -8080,6 +8272,7 @@ class NodeApiService:
                 app=app,
                 upload_sources=resolved_sources,
                 actor_user_id=actor_user_id,
+                placement=placement,
             )
         finally:
             for temp_path in temp_paths:
@@ -8092,11 +8285,13 @@ class NodeApiService:
         source_path: Path,
         upload_name: str,
         actor_user_id: int,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
     ) -> NodeModUploadResult:
         result = await self.upload_mod_paths(
             app=app,
             upload_sources=[NodeModUploadSource(source_path=source_path, upload_name=upload_name)],
             actor_user_id=actor_user_id,
+            placement=placement,
         )
         return self._single_mod_upload_result(result)
 
@@ -8106,6 +8301,7 @@ class NodeApiService:
         app: App,
         upload_sources: Sequence[NodeModUploadSource],
         actor_user_id: int,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
     ) -> NodeModUploadBatchResult:
         if app.mods is None:
             raise _http_exception(409, f"{app.friendly} does not support mods.")
@@ -8119,7 +8315,9 @@ class NodeApiService:
                 for upload_source in resolved_upload_sources:
                     staged_path: Path = Path(temp_dir) / upload_source.upload_name
                     await asyncio.to_thread(File_Utils.copy, upload_source.source_path, staged_path, True)
-                    uploaded_mods.append(await manager.add(staged_path, atomic=True))
+                    uploaded_mods.append(
+                        await manager.add(staged_path, atomic=True, placement=placement)
+                    )
         except RunningAppModMutationError as xcp:
             raise _http_exception(409, str(xcp)) from xcp
         except FileNotFoundError as xcp:
@@ -8633,6 +8831,8 @@ class NodeApiService:
             result_mod_entry: NodeModEntry | None
 
             if action is NodeModMutationAction.ENABLE:
+                if not mod.server_loadable:
+                    raise _http_exception(409, f"Client-only mod cannot be enabled on the server: {mod.name}")
                 require_app_stopped_for_mod_mutation(app)
                 updated_mod: Mod = await manager.set_enabled(
                     mod,
@@ -8642,6 +8842,8 @@ class NodeApiService:
                 result_message = f"Enabled {updated_mod.friendly}."
                 result_mod_entry = self._mod_entry(updated_mod)
             elif action is NodeModMutationAction.DISABLE:
+                if not mod.server_loadable:
+                    raise _http_exception(409, f"Client-only mod cannot be disabled on the server: {mod.name}")
                 require_app_stopped_for_mod_mutation(app)
                 updated_mod = await manager.set_enabled(
                     mod,
@@ -8724,6 +8926,7 @@ class NodeApiService:
                 mod_type=update.mod_type,
                 download_block_reason=update.download_block_reason,
                 metadata_overrides=update.metadata_overrides,
+                platforms=update.platforms,
             )
         except ValueError as xcp:
             raise _http_exception(409, str(xcp)) from xcp
@@ -8812,7 +9015,10 @@ class NodeApiService:
             return NodeDownloadFile(path=mod.path, filename=mod.name, is_archive=False)
         if mod.path.is_dir():
             archive_name: str = self._single_mod_archive_name(app=app, mod=mod)
-            archive_path: Path = await File_Utils.compress(mod.path, archive_name, arc_base=mod.path.parent)
+            archive_path: Path = await compress_mod_archive_entries(
+                (ModArchiveEntry.from_mod(mod),),
+                archive_name,
+            )
             traffic_log.info(
                 "Node API zipped directory mod: app=%s mod=%s source=%s archive=%s",
                 app.name,
@@ -8824,14 +9030,6 @@ class NodeApiService:
 
         log.warning("Node API single mod path is unsupported: app=%s mod=%s path=%s", app.name, mod.name, mod.path)
         raise _http_exception(404, f"Mod path is neither a file nor a directory: {mod.name}")
-
-    @staticmethod
-    def _archive_base_path(paths: tuple[Path, ...]) -> Path:
-        if not paths:
-            raise ValueError("Archive base path requires at least one path.")
-        if len(paths) == 1:
-            return paths[0].parent
-        return Path(os.path.commonpath([str(path) for path in paths]))
 
     def apps_url(self, *, subject: str = "web", base_url: str | None = None) -> str:
         token: str | None = self.issue_access_token(
@@ -9509,6 +9707,11 @@ class NodeApiService:
             friendly=mod.friendly,
             client_path=str(mod.client_path),
             enabled=mod.cfg.enabled,
+            placement=mod.cfg.placement,
+            server_loadable=mod.server_loadable,
+            client_pack_eligible=mod.client_pack_eligible,
+            archive_name=mod.logical_archive_name,
+            source_path=str(mod.storage_path),
             mod_type=mod.mod_type,
             coremod=mod.is_coremod_type,
             downloadable=mod.downloadable,
@@ -9523,6 +9726,7 @@ class NodeApiService:
             size_text=Utilities.humanise_bytes(size_bytes),
             metadata_overrides=mod.cfg.metadata_overrides,
             client_pack=mod.cfg.client_pack,
+            platforms=mod.cfg.platforms,
         )
 
     @staticmethod
@@ -9627,19 +9831,29 @@ class NodeApiService:
         )
 
     @staticmethod
-    def _archive_name(*, app: App, paths: tuple[Path, ...], request: NodeDownloadRequest) -> str:
-        if request.selected_only or request.mod_names:
-            suffix = "selected_mods" if len(paths) != 1 else "selected_mod"
+    def _archive_name(*, app: App, entries: tuple[ArchiveEntry, ...], request: NodeDownloadRequest) -> str:
+        if request.resolved_pack_purpose is not None:
+            suffix = f"{request.resolved_pack_purpose.value}_pack"
+        elif request.selected_only or request.mod_names:
+            suffix = "selected_mods" if len(entries) != 1 else "selected_mod"
         elif request.enabled_only:
-            suffix = "enabled_mods" if len(paths) != 1 else "enabled_mod"
+            suffix = "enabled_mods" if len(entries) != 1 else "enabled_mod"
         else:
             suffix = "mods"
         app_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in app.friendly.strip())
         base_name = app_name.strip("_") or app.name
-        return f"{base_name}_{suffix}.zip"
+        if request.resolved_pack_purpose is not None and request.pack_format is not PackFormat.GENERIC_ZIP:
+            suffix = f"{suffix}_{request.pack_format.value}"
+        return f"{base_name}_{suffix}{request.pack_format.suffix}"
 
     @staticmethod
     def _empty_archive_detail(request: NodeDownloadRequest) -> str:
+        if request.resolved_pack_purpose is PackPurpose.CLIENT:
+            return "No client-pack-eligible mods found."
+        if request.resolved_pack_purpose is PackPurpose.SERVER:
+            return "No enabled server-pack mods found."
+        if request.resolved_pack_purpose is PackPurpose.ADMIN:
+            return "No admin-pack mods found."
         if request.selected_only or request.mod_names:
             return "No selected downloadable mods found."
         if request.enabled_only:
