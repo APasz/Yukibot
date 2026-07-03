@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import zipfile
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 import hikari
 
@@ -41,6 +43,10 @@ class ArchiveDataEntry:
 
 
 type WritableArchiveEntry = ArchiveEntry | ArchiveDataEntry
+
+
+class _HashDigest(Protocol):
+    def update(self, content: bytes, /) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +87,37 @@ class NonDownloadableModError(RuntimeError):
 
 class ClientPackValidationError(ValueError):
     """The persisted client-pack policy or submitted selection is invalid."""
+
+
+def client_pack_content_hash(entries: Collection[ArchiveEntry], *, format_name: str) -> str:
+    digest = hashlib.sha256()
+    _update_content_hash(digest, format_name.encode("utf-8"))
+    for entry in sorted(entries, key=lambda item: item.archive_path.as_posix().casefold()):
+        source = entry.source_path
+        if source.is_dir():
+            files = tuple(
+                sorted(
+                    (path for path in source.rglob("*") if path.is_file()),
+                    key=lambda path: path.as_posix(),
+                )
+            )
+        elif source.is_file():
+            files = (source,)
+        else:
+            raise ClientPackValidationError(f"Client-pack entry is missing: {source}")
+        for path in files:
+            relative = path.relative_to(source) if source.is_dir() else Path(path.name)
+            archive_path = entry.archive_path.joinpath(*relative.parts).as_posix()
+            _update_content_hash(digest, archive_path.encode("utf-8"))
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    _update_content_hash(digest, chunk)
+    return digest.hexdigest()
+
+
+def _update_content_hash(digest: _HashDigest, content: bytes) -> None:
+    digest.update(len(content).to_bytes(8, "big"))
+    digest.update(content)
 
 
 class RunningAppModMutationError(RuntimeError):

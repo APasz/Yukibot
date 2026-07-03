@@ -18,6 +18,7 @@ dependencies = [
     "hikari-ui",
     "hikari-wave>=0.7.0a1",
     "hikari[speedups]~=2.5.0",
+    "httpx",
     "modmux",
     "nicegui",
     "pathvalidate",

@@ -2678,13 +2678,7 @@ class Minecraft_Settings(App_Settings):
 
 class Minecraft_Config(App_Config):
     relay_advancements: bool = True
-    pack_version: str | None = None
     pack_author: str = "Yukibot"
-
-    @field_validator("pack_version", mode="before")
-    @classmethod
-    def validate_pack_version(cls, raw: object) -> str | None:
-        return _normalise_optional_text(raw)
 
     @field_validator("pack_author", mode="before")
     @classmethod

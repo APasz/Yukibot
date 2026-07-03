@@ -28,11 +28,15 @@ from apps._config import (
     App_Config,
     AppTitleFont,
     AppVersion,
+    ClientPackConfig,
+    ClientPackPolicy,
+    LauncherProviderUrls,
     Mod_Config,
     ModClassificationOverride,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPlacement,
+    ModPlatformMetadata,
     ModType,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
@@ -3423,6 +3427,10 @@ class NodeApiTests(unittest.TestCase):
                 version="3.0.0",
                 origin="curated",
             )
+            client_pack = ClientPackConfig(
+                policy=ClientPackPolicy.OPTIONAL,
+                default_selected=False,
+            )
             updated = _TestMod(
                 Mod_Config(
                     name=mod_path.name,
@@ -3450,6 +3458,8 @@ class NodeApiTests(unittest.TestCase):
                         mod_type=ModType.CLIENT,
                         download_block_reason=ModDownloadBlockReason.ARTIFACT,
                         metadata_overrides=overrides,
+                        client_pack=client_pack,
+                        launcher_urls=LauncherProviderUrls(),
                     ),
                     actor_user_id=42,
                 )
@@ -3461,7 +3471,8 @@ class NodeApiTests(unittest.TestCase):
             mod_type=ModType.CLIENT,
             download_block_reason=ModDownloadBlockReason.ARTIFACT,
             metadata_overrides=overrides,
-            platforms=None,
+            client_pack=client_pack,
+            platforms=ModPlatformMetadata(),
         )
         self.assertEqual(result.action, NodeModMutationAction.UPDATE_PROPERTIES)
         self.assertIsNotNone(result.mod)
@@ -5459,7 +5470,7 @@ class NodeApiTests(unittest.TestCase):
                 response = asyncio.run(
                     NodeApiService().build_mod_download_response(
                         app=app,
-                        request=NodeDownloadRequest(client_pack=True),
+                        request=NodeDownloadRequest(client_pack=True, publish_client_pack=True),
                     )
                 )
                 with zipfile.ZipFile(Path(response.path)) as archive:
@@ -5509,7 +5520,7 @@ class NodeApiTests(unittest.TestCase):
                 response = asyncio.run(
                     NodeApiService().build_mod_download_response(
                         app=app,
-                        request=NodeDownloadRequest(client_pack=True),
+                        request=NodeDownloadRequest(client_pack=True, publish_client_pack=True),
                     )
                 )
                 with zipfile.ZipFile(Path(response.path)) as archive:
@@ -5547,7 +5558,7 @@ class NodeApiTests(unittest.TestCase):
                         request=NodeDownloadRequest(
                             client_pack=True,
                             pack_format=PackFormat.MODRINTH,
-                            pack_version="1.0.0",
+                            publish_client_pack=True,
                         ),
                     )
                 )
@@ -5557,6 +5568,56 @@ class NodeApiTests(unittest.TestCase):
                         set(archive.namelist()),
                         {"modrinth.index.json", "overrides/mods/client.jar"},
                     )
+                    index = json.loads(archive.read("modrinth.index.json"))
+                    self.assertEqual(index["versionId"], "1")
+
+    def test_client_pack_download_blocks_after_published_content_changes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            zips_path = temp_path / "zips"
+            mod_path = temp_path / "client.jar.client"
+            mod_path.write_bytes(b"published")
+            client = _TestMod(
+                Mod_Config(name="client.jar", directory=temp_path, placement=ModPlacement.CLIENT_ONLY)
+            )
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.list_mods.return_value = (client,)
+            app = _build_app(mod_manager)
+            service = NodeApiService()
+
+            with patch.object(config, "DIR_ZIPS", zips_path):
+                asyncio.run(
+                    service.build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(client_pack=True, publish_client_pack=True),
+                    )
+                )
+                mod_path.write_bytes(b"changed")
+                with self.assertRaisesRegex(HTTPException, "publish or regenerate") as raised:
+                    asyncio.run(
+                        service.build_mod_download_response(
+                            app=app,
+                            request=NodeDownloadRequest(client_pack=True),
+                        )
+                    )
+
+            self.assertEqual(raised.exception.status_code, 409)
+
+    def test_factorio_rejects_client_pack_generation(self) -> None:
+        mod_manager = Mock()
+        mod_manager.reload_mods = AsyncMock()
+        app = _build_app(mod_manager)
+        app.scope = "factorio"
+        app.cfg.scope = "factorio"
+
+        with self.assertRaisesRegex(HTTPException, "does not support client pack"):
+            asyncio.run(
+                NodeApiService().build_mod_download_response(
+                    app=app,
+                    request=NodeDownloadRequest(client_pack=True),
+                )
+            )
 
     def test_server_pack_includes_enabled_non_downloadable_server_mod(self) -> None:
         with TemporaryDirectory() as temp_dir:

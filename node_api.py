@@ -34,7 +34,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.middleware.cors import CORSMiddleware
 
 import config
@@ -52,6 +52,7 @@ from _mod_ops import (
     build_admin_pack_entries,
     build_client_pack_entries,
     build_server_pack_entries,
+    client_pack_content_hash,
     compress_mod_archive_entries,
     download_entries as build_mod_download_entries,
     require_app_stopped_for_mod_mutation,
@@ -73,6 +74,7 @@ from apps._config import (
     AppTitleFont,
     ClientPackConfig,
     ClientPackPolicy,
+    LauncherProviderUrls,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPlacement,
@@ -83,6 +85,7 @@ from apps._config import (
     normalise_app_title_font,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
+from apps._launcher_metadata import resolve_launcher_metadata
 from apps._console import (
     ConsoleAction,
     ConsoleActionParameter,
@@ -1112,7 +1115,8 @@ class NodeModPropertiesUpdateRequest(BaseModel):
     mod_type: ModType
     download_block_reason: ModDownloadBlockReason | None
     metadata_overrides: ModMetadataOverrides
-    platforms: ModPlatformMetadata | None = None
+    client_pack: ClientPackConfig | None = None
+    launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3580,7 +3584,7 @@ class NodeDownloadRequest:
     client_pack: bool = False
     pack_purpose: PackPurpose | None = None
     pack_format: PackFormat = PackFormat.GENERIC_ZIP
-    pack_version: str | None = None
+    publish_client_pack: bool = False
 
     @property
     def resolved_pack_purpose(self) -> PackPurpose | None:
@@ -4649,7 +4653,7 @@ class NodeApiService:
             client_pack: bool = False,
             pack_purpose: PackPurpose | None = None,
             pack_format: PackFormat = PackFormat.GENERIC_ZIP,
-            pack_version: str | None = None,
+            publish_client_pack: bool = False,
             access_token: str | None = None,
         ) -> FileResponse:
             mod_names = tuple(request.query_params.getlist("mod_name"))
@@ -4666,7 +4670,7 @@ class NodeApiService:
                 len(mod_names),
             )
             required_scopes = (NodeApiScope.MODS_DOWNLOAD,)
-            if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN}:
+            if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN} or publish_client_pack:
                 required_scopes = (NodeApiScope.MODS_DOWNLOAD, NodeApiScope.MODS_WRITE)
             self._require_access(request, access_token, app_name=app_name, scopes=required_scopes)
             app = self._resolve_app(app_name)
@@ -4679,7 +4683,7 @@ class NodeApiService:
                     client_pack=client_pack,
                     pack_purpose=pack_purpose,
                     pack_format=pack_format,
-                    pack_version=pack_version,
+                    publish_client_pack=publish_client_pack,
                 ),
             )
 
@@ -7898,6 +7902,16 @@ class NodeApiService:
     async def build_mod_download_response(self, *, app: App, request: NodeDownloadRequest) -> FileResponse:
         await app.has_mod_manager.reload_mods()
 
+        capabilities = app.mod_capabilities
+        pack_purpose = request.resolved_pack_purpose
+        if pack_purpose is PackPurpose.CLIENT:
+            if not capabilities.supports_client_pack:
+                raise _http_exception(400, f"{app.friendly} does not support client pack generation.")
+            if request.pack_format is not PackFormat.GENERIC_ZIP and not capabilities.supports_launcher_formats:
+                raise _http_exception(400, f"{app.friendly} does not support launcher pack formats.")
+        elif pack_purpose is None and not capabilities.supports_raw_download:
+            raise _http_exception(400, f"{app.friendly} does not support raw mod downloads.")
+
         if request.mod_name is not None:
             mod: Mod = app.has_mod_manager.get(request.mod_name)
             try:
@@ -7918,7 +7932,6 @@ class NodeApiService:
         selected_mod_names: tuple[str, ...] | None = (
             request.mod_names if request.selected_only or request.mod_names else None
         )
-        pack_purpose = request.resolved_pack_purpose
         entries: tuple[ArchiveEntry, ...]
         try:
             if pack_purpose is PackPurpose.CLIENT:
@@ -7928,7 +7941,9 @@ class NodeApiService:
                         selected_mod_names=frozenset(selected_mod_names or ()),
                         supplied=request.selected_only or bool(request.mod_names),
                     ),
-                    client_overrides_dir=app.cfg.client_overrides_dir,
+                    client_overrides_dir=(
+                        app.cfg.client_overrides_dir if capabilities.include_client_overrides else None
+                    ),
                 )
             elif pack_purpose is PackPurpose.SERVER:
                 entries = build_server_pack_entries(app.has_mod_manager)
@@ -7956,16 +7971,37 @@ class NodeApiService:
             )
             raise _http_exception(404, detail)
 
+        generated_pack_version: str | None = None
+        if pack_purpose is PackPurpose.CLIENT:
+            version = app.cfg.version
+            hash_context = json.dumps(
+                {
+                    "format": request.pack_format.value,
+                    "app_version": None if version is None else version.model_dump(mode="json", exclude_none=True),
+                    "name": app.friendly,
+                    "summary": app.cfg.notes,
+                },
+                sort_keys=True,
+            )
+            current_hash = await asyncio.to_thread(
+                client_pack_content_hash,
+                entries,
+                format_name=hash_context,
+            )
+            if app.cfg.client_pack_current_hash != current_hash:
+                app.record_client_pack_content_hash(current_hash)
+            if request.publish_client_pack:
+                generated_pack_version = str(app.publish_client_pack(current_hash))
+            elif app.cfg.client_pack_published_hash != current_hash:
+                raise _http_exception(409, "Client pack content has changed; publish or regenerate it before download.")
+            else:
+                generated_pack_version = str(app.cfg.client_pack_published_version)
+
         archive_name = self._archive_name(app=app, entries=entries, request=request)
         if pack_purpose is not None:
-            if app.scope != "minecraft" and request.pack_format is not PackFormat.GENERIC_ZIP:
-                raise _http_exception(400, "Launcher pack formats are only available for Minecraft apps.")
             version = app.cfg.version
             if version is None and request.pack_format is not PackFormat.GENERIC_ZIP:
                 raise _http_exception(400, "Minecraft version metadata is required for launcher pack exports.")
-            pack_version = request.pack_version or getattr(app.cfg, "pack_version", None)
-            if pack_version is None and request.pack_format is not PackFormat.GENERIC_ZIP:
-                raise _http_exception(400, "Minecraft pack_version is required for launcher pack exports.")
             if version is None:
                 archive_path = await compress_mod_archive_entries(entries, archive_name)
             else:
@@ -7976,7 +8012,7 @@ class NodeApiService:
                             purpose=pack_purpose,
                             format=request.pack_format,
                             name=app.friendly,
-                            version_id=pack_version or version.main,
+                            version_id=generated_pack_version or version.main,
                             minecraft_version=version.main,
                             loader=version.loader,
                             loader_version=version.framework,
@@ -8032,6 +8068,7 @@ class NodeApiService:
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
         traffic_log.info("Node API wrote config file: node=%s app=%s config=%s", self.node_name, app.name, config_id)
+        app.invalidate_client_pack_content()
         return self._config_content(app=app, content=updated)
 
     async def build_config_root_download_response(
@@ -8337,6 +8374,7 @@ class NodeApiService:
             actor_user_id,
         )
         mod_entries: tuple[NodeModEntry, ...] = tuple(self._mod_entry(uploaded_mod) for uploaded_mod in uploaded_mods)
+        app.invalidate_client_pack_content()
         self._invalidate_mod_inventory(app.name)
         return NodeModUploadBatchResult(
             app_name=app.name,
@@ -8892,6 +8930,7 @@ class NodeApiService:
             action.value,
             actor_user_id,
         )
+        app.invalidate_client_pack_content()
         self._invalidate_mod_inventory(app.name)
         return NodeModMutationResult(
             app_name=app.name,
@@ -8921,12 +8960,18 @@ class NodeApiService:
         if mod.is_builtin:
             raise _http_exception(409, "Built-in mod properties cannot be changed.")
         try:
+            platforms = await resolve_launcher_metadata(
+                scope=app.scope,
+                urls=update.launcher_urls,
+                local_filename=mod.storage_path.name,
+            )
             updated_mod = await manager.update_properties(
                 mod,
                 mod_type=update.mod_type,
                 download_block_reason=update.download_block_reason,
                 metadata_overrides=update.metadata_overrides,
-                platforms=update.platforms,
+                client_pack=update.client_pack or mod.cfg.client_pack,
+                platforms=platforms,
             )
         except ValueError as xcp:
             raise _http_exception(409, str(xcp)) from xcp
@@ -8938,6 +8983,7 @@ class NodeApiService:
             mod.name,
             actor_user_id,
         )
+        app.invalidate_client_pack_content()
         self._invalidate_mod_inventory(app.name)
         return NodeModMutationResult(
             app_name=app.name,

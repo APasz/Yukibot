@@ -3431,6 +3431,106 @@ class ModWebTheme:
                     width: min(30rem, calc(100vw - 2rem)) !important;
                     max-width: none !important;
                 }}
+                .mod-client-pack-dialog-card {{
+                    width: min(36rem, calc(100vw - 2rem)) !important;
+                    max-height: min(48rem, calc(100vh - 2rem));
+                    overflow: hidden;
+                }}
+                .mod-client-pack-dialog-card > .nicegui-content,
+                .mod-client-pack-dialog-card .nicegui-content {{
+                    width: 100%;
+                    padding: 0 !important;
+                }}
+                .mod-client-pack-body {{
+                    gap: 0;
+                    padding: 1.2rem 1.25rem 1rem;
+                    max-height: min(48rem, calc(100vh - 2rem));
+                    overflow-y: auto;
+                }}
+                .mod-client-pack-header {{
+                    gap: 0.18rem;
+                    padding-bottom: 0.95rem;
+                }}
+                .mod-client-pack-section {{
+                    gap: 0.42rem;
+                    padding: 0.85rem 0;
+                    border-top: 1px solid rgba(82, 82, 91, 0.52);
+                }}
+                .mod-client-pack-section-hint {{
+                    margin-top: -0.2rem;
+                    font-size: 0.78rem;
+                    line-height: 1.35;
+                }}
+                .mod-client-pack-option-list,
+                .mod-client-pack-choice-list {{
+                    gap: 0.38rem;
+                }}
+                .mod-client-pack-option,
+                .mod-client-pack-checkbox,
+                .mod-client-pack-choice {{
+                    min-height: 2.65rem;
+                    margin: 0 !important;
+                    border: 1px solid #2b2b33;
+                    border-radius: 0 !important;
+                    background: linear-gradient(135deg, rgba(11, 11, 16, 0.96), rgba(18, 15, 23, 0.96));
+                    color: var(--mod-text) !important;
+                    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+                }}
+                .mod-client-pack-option {{
+                    justify-content: space-between;
+                    gap: 0.75rem;
+                    padding: 0.5rem 0.65rem;
+                }}
+                .mod-client-pack-option-label {{
+                    min-width: 0;
+                    color: var(--mod-text) !important;
+                    font-size: 0.88rem;
+                    font-weight: 800;
+                    overflow-wrap: anywhere;
+                }}
+                .mod-client-pack-checkbox {{
+                    padding: 0.38rem 0.55rem;
+                }}
+                .mod-client-pack-checkbox .q-checkbox__label {{
+                    color: var(--mod-text) !important;
+                    font-size: 0.88rem;
+                    font-weight: 800;
+                    line-height: 1.3;
+                }}
+                .mod-client-pack-checkbox .q-checkbox__inner {{
+                    color: rgba(228, 228, 231, 0.78) !important;
+                }}
+                .mod-client-pack-checkbox .q-checkbox__inner--truthy {{
+                    color: var(--mod-purple) !important;
+                }}
+                .mod-client-pack-checkbox .q-checkbox__bg {{
+                    border-radius: 0 !important;
+                }}
+                .mod-client-pack-choice {{
+                    gap: 0;
+                    padding: 0.45rem 0.55rem;
+                }}
+                .mod-client-pack-select {{
+                    flex: 1 1 auto;
+                    min-width: 0;
+                }}
+                .mod-client-pack-select .q-field__native,
+                .mod-client-pack-select .q-field__input,
+                .mod-client-pack-select .q-field__label,
+                .mod-client-pack-select .q-field__marginal,
+                .mod-client-pack-select .q-icon {{
+                    color: var(--mod-text) !important;
+                }}
+                .mod-client-pack-actions {{
+                    justify-content: flex-end;
+                    gap: 0.5rem;
+                    flex-wrap: wrap;
+                    padding-top: 0.95rem;
+                    border-top: 1px solid rgba(82, 82, 91, 0.52);
+                }}
+                .mod-client-pack-actions .mod-list-button {{
+                    flex: 0 1 auto;
+                }}
                 .mod-node-settings-overlay {{
                     position: fixed;
                     inset: 0;

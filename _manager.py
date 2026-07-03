@@ -520,6 +520,7 @@ class App_Manager(metaclass=config.Singleton):
         try:
             await app.start()
             app.lifecycle_started_at = datetime.now(timezone.utc)
+            app.verify_published_client_pack()
             self._notify_app_lifecycle(app, started=True)
         except Exception:
             runtime_fault = getattr(app, "runtime_fault", None)

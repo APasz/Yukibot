@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING
 
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
+    ModDistributionMode,
     app_title_font_default_label,
     app_title_font_options,
+    mod_capabilities_for_scope,
     normalise_app_title_font,
     resolve_app_title_font,
 )
@@ -3511,7 +3513,7 @@ class ModWebAppPageMixin(
     @staticmethod
     def _client_pack_format_options(app_scope: str | None) -> dict[str, str]:
         options: dict[str, str] = {PackFormat.GENERIC_ZIP.value: "Generic ZIP"}
-        if app_scope == "minecraft":
+        if mod_capabilities_for_scope(app_scope).supports_launcher_formats:
             options.update(
                 {
                     PackFormat.MODRINTH.value: "Modrinth (.mrpack)",
@@ -3527,6 +3529,7 @@ class ModWebAppPageMixin(
         model: ModWebPageModel,
         user: ModWebUser,
     ) -> None:
+        capabilities = mod_capabilities_for_scope(model.app_scope)
         checkboxes: dict[str, Checkbox] = {}
         mod_options = self._mod_options(model.mods.mods)
         show_search: bool = len(mod_options) > 1
@@ -3539,7 +3542,9 @@ class ModWebAppPageMixin(
         selected_mod_names: set[str] = {
             entry.name
             for entry in model.mods.mods
-            if entry.downloadable and entry.mod_type not in {ModType.BUILTIN, ModType.SERVER}
+            if entry.downloadable
+            and entry.mod_type not in {ModType.BUILTIN, ModType.SERVER}
+            and (capabilities.mode is not ModDistributionMode.RAW_ENABLED or entry.enabled)
         }
         optional_client_entries: tuple[NodeModEntry, ...] = tuple(
             entry
@@ -3557,7 +3562,7 @@ class ModWebAppPageMixin(
                 *client_choice_groups.get(client_pack.choice_group, ()),
                 entry,
             )
-        has_client_pack_entries: bool = any(entry.client_pack_eligible for entry in model.mods.mods)
+        supports_client_pack: bool = capabilities.supports_client_pack
         client_choice_defaults: dict[str, str] = {}
         for group_name, choices in client_choice_groups.items():
             defaults: tuple[NodeModEntry, ...] = tuple(entry for entry in choices if entry.client_pack.default_choice)
@@ -3678,7 +3683,11 @@ class ModWebAppPageMixin(
                 ui=ui,
                 user=user,
                 model=model,
-                url=model.download_all_url,
+                url=(
+                    model.download_enabled_url
+                    if capabilities.mode is ModDistributionMode.RAW_ENABLED
+                    else model.download_all_url
+                ),
                 message=self._download_feedback_message(
                     kind=ModDownloadKind.ALL,
                     app_friendly=model.app_friendly,
@@ -3806,8 +3815,7 @@ class ModWebAppPageMixin(
 
         optional_client_checkboxes: dict[str, Checkbox] = {}
         client_choice_selects: dict[str, Select] = {}
-        client_pack_version_input: Input | None = None
-
+        client_pack_format_select: Select | None = None
         with ui.dialog() as upload_placement_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
@@ -3818,23 +3826,22 @@ class ModWebAppPageMixin(
                             "Server enabled",
                             on_click=lambda: choose_upload_placement(ModPlacement.SERVER_ENABLED),
                         ).classes("mod-list-button")
-                        ui.button(
-                            "Client only",
-                            on_click=lambda: choose_upload_placement(ModPlacement.CLIENT_ONLY),
-                        ).classes("mod-list-button secondary")
+                        if capabilities.supports_client_only:
+                            ui.button(
+                                "Client only",
+                                on_click=lambda: choose_upload_placement(ModPlacement.CLIENT_ONLY),
+                            ).classes("mod-list-button secondary")
                     with ui.row().classes("w-full justify-end"):
                         ui.button("Cancel", on_click=upload_placement_dialog.close).classes(
                             "mod-list-button secondary"
                         )
 
-        async def download_configured_client_pack() -> None:
-            pack_format = PackFormat(_value_as_text(client_pack_format_select))
-            pack_version = (
-                "" if client_pack_version_input is None else _value_as_text(client_pack_version_input).strip()
+        async def download_configured_client_pack(*, publish: bool = False) -> None:
+            pack_format = (
+                PackFormat.GENERIC_ZIP
+                if client_pack_format_select is None
+                else PackFormat(_value_as_text(client_pack_format_select))
             )
-            if pack_format is not PackFormat.GENERIC_ZIP and not pack_version:
-                ui.notify("Pack version is required for launcher formats.", type="warning")
-                return
             optional_names: frozenset[str] = frozenset(
                 mod_name
                 for mod_name, checkbox in optional_client_checkboxes.items()
@@ -3864,7 +3871,7 @@ class ModWebAppPageMixin(
                     mod_names=mod_names,
                     pack_purpose=PackPurpose.CLIENT,
                     pack_format=pack_format,
-                    pack_version=(pack_version or None) if pack_format is not PackFormat.GENERIC_ZIP else None,
+                    publish_client_pack=publish,
                 ),
                 doseq=True,
             )
@@ -3881,65 +3888,87 @@ class ModWebAppPageMixin(
             )
 
         client_pack_dialog = ui.dialog()
-        if has_client_pack_entries:
+        if supports_client_pack:
             with client_pack_dialog:
-                with ui.card().classes("mod-card mod-dialog-card"):
-                    with ui.column().classes("w-full gap-4 p-5"):
-                        with ui.column().classes("gap-0"):
+                with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
+                    with ui.column().classes("mod-client-pack-body w-full"):
+                        with ui.column().classes("mod-client-pack-header w-full"):
                             ui.label("Configure Client Pack").classes("text-xl font-black mod-title-small")
                             ui.label(
-                                "Required mods are always included. Optional mods use their configured defaults."
+                                "Required mods are always included. Choose which optional mods to add."
                             ).classes("mod-subtitle text-sm")
-                        client_pack_format_select = (
-                            ui.select(
-                                self._client_pack_format_options(model.app_scope),
-                                value=PackFormat.GENERIC_ZIP.value,
-                                label="Pack format",
-                            )
-                            .props("filled square dense hide-bottom-space color=accent options-dark")
-                            .classes("w-full mod-config-select")
-                        )
-                        if model.app_scope == "minecraft":
-                            client_pack_version_input = (
-                                ui.input("Pack version (launcher formats)", value="1.0.0")
-                                .props("filled square dense clearable hide-bottom-space color=accent")
-                                .classes("w-full mod-config-select")
-                            )
+                        if capabilities.supports_launcher_formats:
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("Pack format").classes("mod-stat-label")
+                                client_pack_format_select = ui.select(
+                                    self._client_pack_format_options(model.app_scope),
+                                    value=PackFormat.GENERIC_ZIP.value,
+                                ).props("filled square dense hide-bottom-space color=accent options-dark").classes(
+                                    "mod-config-select mod-client-pack-select w-full"
+                                )
                         required_entries: tuple[NodeModEntry, ...] = tuple(
                             entry
                             for entry in model.mods.mods
                             if entry.client_pack_eligible and entry.client_pack.policy is ClientPackPolicy.REQUIRED
                         )
                         if required_entries:
-                            with ui.column().classes("w-full gap-2"):
+                            with ui.column().classes("mod-client-pack-section w-full"):
                                 ui.label("Required").classes("mod-stat-label")
-                                for entry in required_entries:
-                                    ui.label(entry.friendly).classes("mod-pill")
+                                ui.label("These mods are always included.").classes(
+                                    "mod-client-pack-section-hint mod-subtitle"
+                                )
+                                with ui.column().classes("mod-client-pack-option-list w-full"):
+                                    for entry in required_entries:
+                                        with ui.row().classes("mod-client-pack-option w-full items-center"):
+                                            ui.label(entry.friendly).classes("mod-client-pack-option-label")
+                                            ui.label("Required").classes("mod-pill enabled")
                         if optional_client_entries:
-                            with ui.column().classes("w-full gap-2"):
-                                ui.label("Optional").classes("mod-stat-label")
-                                for entry in optional_client_entries:
-                                    optional_client_checkboxes[entry.name] = ui.checkbox(
-                                        entry.friendly,
-                                        value=entry.client_pack.default_selected,
-                                    ).props("dense")
-                        if client_choice_groups:
-                            with ui.column().classes("w-full gap-3"):
-                                ui.label("Choose One").classes("mod-stat-label")
-                                for group_name, choices in client_choice_groups.items():
-                                    group_label: str = group_name.replace("_", " ").replace("-", " ").strip().title()
-                                    client_choice_selects[group_name] = (
-                                        ui.select(
-                                            {entry.name: entry.friendly for entry in choices},
-                                            value=client_choice_defaults[group_name],
-                                            label=group_label,
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("Optional mods").classes("mod-stat-label")
+                                ui.label("Checked mods will be included in the pack.").classes(
+                                    "mod-client-pack-section-hint mod-subtitle"
+                                )
+                                with ui.column().classes("mod-client-pack-option-list w-full"):
+                                    for entry in optional_client_entries:
+                                        optional_client_checkboxes[entry.name] = (
+                                            ui.checkbox(
+                                                entry.friendly,
+                                                value=entry.client_pack.default_selected,
+                                            )
+                                            .props("dense color=accent keep-color")
+                                            .classes("mod-client-pack-checkbox w-full")
                                         )
-                                        .props("filled square dense hide-bottom-space color=accent options-dark")
-                                        .classes("w-full mod-config-select")
-                                    )
-                        with ui.row().classes("w-full justify-end gap-2"):
+                        if client_choice_groups:
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("Choose one").classes("mod-stat-label")
+                                ui.label("Select one mutually exclusive option from each group.").classes(
+                                    "mod-client-pack-section-hint mod-subtitle"
+                                )
+                                with ui.column().classes("mod-client-pack-choice-list w-full"):
+                                    for group_name, choices in client_choice_groups.items():
+                                        group_label: str = (
+                                            group_name.replace("_", " ").replace("-", " ").strip().title()
+                                        )
+                                        with ui.column().classes("mod-client-pack-choice w-full"):
+                                            client_choice_selects[group_name] = (
+                                                ui.select(
+                                                    {entry.name: entry.friendly for entry in choices},
+                                                    value=client_choice_defaults[group_name],
+                                                    label=group_label,
+                                                )
+                                                .props(
+                                                    "filled square dense hide-bottom-space color=accent options-dark"
+                                                )
+                                                .classes("mod-config-select mod-client-pack-select w-full")
+                                            )
+                        with ui.row().classes("mod-client-pack-actions w-full"):
                             ui.button("Cancel", on_click=client_pack_dialog.close).classes("mod-list-button secondary")
                             ui.button("Download", on_click=download_configured_client_pack).classes("mod-list-button")
+                            if self._user_has_level(user, Power_Level.user):
+                                ui.button(
+                                    "Publish & Download",
+                                    on_click=lambda: download_configured_client_pack(publish=True),
+                                ).classes("mod-list-button")
 
         with ui.dialog() as delete_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -3998,7 +4027,11 @@ class ModWebAppPageMixin(
                             checkbox: Checkbox | None = self._render_mod_download_row(
                                 ui=ui,
                                 entry=entry,
-                                download_url=model.mod_download_urls.get(entry.name),
+                                download_url=(
+                                    model.mod_download_urls.get(entry.name)
+                                    if capabilities.supports_raw_download
+                                    else None
+                                ),
                                 on_change=_create_mod_selection_handler(entry.name),
                                 can_select=entry.name in selectable_name_set,
                                 app_friendly=model.app_friendly,
@@ -4024,8 +4057,8 @@ class ModWebAppPageMixin(
                     model=model,
                     user=user,
                     toggle_selection=toggle_selection,
-                    download_selected=download_selected,
-                    open_client_pack=client_pack_dialog.open if has_client_pack_entries else None,
+                    download_selected=download_selected if capabilities.supports_raw_download else None,
+                    open_client_pack=client_pack_dialog.open if supports_client_pack else None,
                     delete_selected=delete_dialog.open,
                     upload_mod=upload_picker_action,
                     show_search=show_search,
@@ -4642,7 +4675,7 @@ class ModWebAppPageMixin(
         model: ModWebPageModel,
         user: ModWebUser,
         toggle_selection: Callable[[], None],
-        download_selected: Callable[[], Awaitable[None]],
+        download_selected: Callable[[], Awaitable[None]] | None,
         delete_selected: Callable[[], None],
         open_client_pack: Callable[[], None] | None = None,
         upload_mod: Callable[[], object] | None = None,
@@ -4715,9 +4748,10 @@ class ModWebAppPageMixin(
                         ui.button("Client Pack", on_click=open_client_pack).classes(
                             "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                         )
-                    download_button = ui.button("", on_click=download_selected).classes(
-                        "mod-list-button mod-toolbar-button mod-toolbar-button-fill mod-toolbar-primary"
-                    )
+                    if download_selected is not None:
+                        download_button = ui.button("", on_click=download_selected).classes(
+                            "mod-list-button mod-toolbar-button mod-toolbar-button-fill mod-toolbar-primary"
+                        )
                     if can_delete_mods:
                         delete_button = ui.button("", on_click=delete_selected).classes(
                             "mod-list-button danger mod-toolbar-button mod-toolbar-button-fill"

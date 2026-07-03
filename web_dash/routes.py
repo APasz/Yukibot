@@ -738,11 +738,13 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             client_pack: bool = False,
             pack_purpose: PackPurpose | None = None,
             pack_format: PackFormat = PackFormat.GENERIC_ZIP,
-            pack_version: str | None = None,
+            publish_client_pack: bool = False,
         ) -> RedirectResponse:
             user = self._require_http_user(
                 request=request,
-                required_level=self._mod_download_required_level(pack_purpose),
+                required_level=(
+                    Power_Level.user if publish_client_pack else self._mod_download_required_level(pack_purpose)
+                ),
             )
             node = self._remote_node_link(node_name)
             mod_names = tuple(request.query_params.getlist("mod_name"))
@@ -753,10 +755,10 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 client_pack=client_pack,
                 pack_purpose=pack_purpose,
                 pack_format=pack_format,
-                pack_version=pack_version,
+                publish_client_pack=publish_client_pack,
             )
             scopes = (NodeApiScope.MODS_DOWNLOAD,)
-            if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN}:
+            if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN} or publish_client_pack:
                 scopes = (NodeApiScope.MODS_DOWNLOAD, NodeApiScope.MODS_WRITE)
             return self._remote_download_redirect(
                 node=node,

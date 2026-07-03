@@ -28,6 +28,7 @@ from apps._config import (
     AppTitleFont,
     ClientPackConfig,
     ClientPackPolicy,
+    LauncherProviderUrls,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPlacement,
@@ -8142,7 +8143,6 @@ class ModWebTests(unittest.TestCase):
             client_pack=True,
             pack_purpose=PackPurpose.CLIENT,
             pack_format=PackFormat.MODRINTH,
-            pack_version="2.0.0",
         )
 
         self.assertEqual(
@@ -8153,7 +8153,6 @@ class ModWebTests(unittest.TestCase):
                 "client_pack": "true",
                 "pack_purpose": "client",
                 "pack_format": "mrpack",
-                "pack_version": "2.0.0",
                 "mod_name": ["client.jar"],
             },
         )
@@ -8561,6 +8560,7 @@ class ModWebTests(unittest.TestCase):
             app_name="minecraft_alpha",
             app_friendly="Minecraft Alpha",
             app_color_hex="#22C55E",
+            app_scope="minecraft",
             supports_configs=False,
             config_read_level=Power_Level.user,
             config_write_level=Power_Level.sudo,
@@ -9126,6 +9126,10 @@ class ModWebTests(unittest.TestCase):
             version="2.0.0",
             origin="curated",
         )
+        client_pack = ClientPackConfig(
+            policy=ClientPackPolicy.OPTIONAL,
+            default_selected=False,
+        )
         updated_entry = replace(
             entry,
             friendly="Alpha Override",
@@ -9137,6 +9141,7 @@ class ModWebTests(unittest.TestCase):
             version="2.0.0",
             origin="curated",
             metadata_overrides=overrides,
+            client_pack=client_pack,
         )
         expected_result = NodeModMutationResult(
             app_name="minecraft_alpha",
@@ -9183,12 +9188,16 @@ class ModWebTests(unittest.TestCase):
                     mod_type=ModType.CLIENT,
                     download_block_reason=ModDownloadBlockReason.ARTIFACT,
                     metadata_overrides=overrides,
-                    platforms=entry.platforms,
+                    client_pack=client_pack,
+                    launcher_urls=LauncherProviderUrls(
+                        modrinth="https://modrinth.com/mod/alpha/version/alpha-2.0.0",
+                    ),
                     user=user,
                 )
             )
 
         self.assertEqual(result, expected_result)
+        self.assertIs(result.mod.client_pack.policy, ClientPackPolicy.OPTIONAL)
         remote_json.assert_awaited_once_with(
             node=node,
             app_name="minecraft_alpha",
@@ -9205,7 +9214,17 @@ class ModWebTests(unittest.TestCase):
                     "origin": "curated",
                     "added": None,
                 },
-                "platforms": {"modrinth": None, "curseforge": None},
+                "client_pack": {
+                    "policy": "optional",
+                    "choice_group": None,
+                    "default_choice": False,
+                    "default_selected": False,
+                    "bundled_required": False,
+                },
+                "launcher_urls": {
+                    "modrinth": "https://modrinth.com/mod/alpha/version/alpha-2.0.0",
+                    "curseforge": None,
+                },
             },
         )
 

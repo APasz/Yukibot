@@ -382,11 +382,16 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         mod = await manager.add(self._write_source_file())
         mod.cfg.platforms = ModPlatformMetadata(
             modrinth=ModrinthModMetadata(
+                page_url="https://modrinth.com/mod/example/version/version-id",
                 project_id="project-slug",
                 version_id="version-id",
                 download_url="https://cdn.modrinth.com/data/project/version/example.zip",
             ),
-            curseforge=CurseForgeModMetadata(project_id=123, file_id=456),
+            curseforge=CurseForgeModMetadata(
+                page_url="https://www.curseforge.com/minecraft/mc-mods/example/files/456",
+                project_id=123,
+                file_id=456,
+            ),
         )
 
         await manager.save_mods()
@@ -425,6 +430,26 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reloaded.cfg.metadata_overrides.friendly_name, "Example Client Mod")
         self.assertEqual(reloaded.version, "2.4.0")
         self.assertEqual(reloaded.origin, "curated")
+
+    async def test_update_properties_persists_optional_client_pack_policy(self) -> None:
+        manager = self._build_manager()
+        await manager.add(self._write_source_file())
+
+        await manager.update_properties(
+            "example.zip",
+            mod_type=ModType.CLIENT,
+            download_block_reason=None,
+            metadata_overrides=ModMetadataOverrides(),
+            client_pack=ClientPackConfig(
+                policy=ClientPackPolicy.OPTIONAL,
+                default_selected=False,
+            ),
+        )
+        await manager.reload_mods()
+
+        client_pack = manager.get("example.zip").cfg.client_pack
+        self.assertIs(client_pack.policy, ClientPackPolicy.OPTIONAL)
+        self.assertFalse(client_pack.default_selected)
 
     async def test_explicit_regular_classification_overrides_detected_server_type(self) -> None:
         manager = self._build_manager(mod_cls=_DetectedServerMod)

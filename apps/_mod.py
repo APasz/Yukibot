@@ -15,6 +15,7 @@ import config
 from _file import File_Utils
 from apps._config import (
     App_Config,
+    ClientPackConfig,
     ClientPackPolicy,
     Mod_Config,
     ModClassificationOverride,
@@ -721,6 +722,7 @@ class Mod_Manager:
         mod_type: ModType,
         download_block_reason: ModDownloadBlockReason | None,
         metadata_overrides: ModMetadataOverrides,
+        client_pack: ClientPackConfig | None = None,
         platforms: ModPlatformMetadata | None = None,
     ) -> Mod:
         mod = self.get(mod_name)
@@ -730,6 +732,7 @@ class Mod_Manager:
             raise ValueError("The built-in download block reason is reserved for detected built-in mods")
         previous_classification_override = mod.cfg.classification_override
         previous_metadata_overrides = mod.cfg.metadata_overrides
+        previous_client_pack = mod.cfg.client_pack
         previous_platforms = mod.cfg.platforms
         previous_friendly = mod.friendly
         try:
@@ -738,6 +741,8 @@ class Mod_Manager:
                 download_block_reason=download_block_reason,
             )
             mod.cfg.metadata_overrides = metadata_overrides
+            if client_pack is not None:
+                mod.cfg.client_pack = client_pack
             if platforms is not None:
                 mod.cfg.platforms = platforms
             mod.sync_metadata()
@@ -746,6 +751,7 @@ class Mod_Manager:
         except Exception:
             mod.cfg.classification_override = previous_classification_override
             mod.cfg.metadata_overrides = previous_metadata_overrides
+            mod.cfg.client_pack = previous_client_pack
             mod.cfg.platforms = previous_platforms
             mod.friendly = previous_friendly
             self._rebuild_lookup()

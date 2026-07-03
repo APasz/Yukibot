@@ -12,6 +12,7 @@ from re import Pattern
 from urllib.parse import urlsplit
 
 import hikari
+from modmux.models import Provider
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import config
@@ -19,6 +20,73 @@ from _resolator import Resolutator
 from _security import Access_Control, Power_Level
 
 log = logging.getLogger(__name__)
+
+
+class ModDistributionMode(enum.StrEnum):
+    NONE = "none"
+    RAW_ENABLED = "raw_enabled"
+    SIDE_AWARE_GENERIC_CLIENT_PACK = "side_aware_generic_client_pack"
+    MINECRAFT_LAUNCHER_PACK = "minecraft_launcher_pack"
+    SERVER_PUSH = "server_push"
+    EXTERNAL_MANIFEST = "external_manifest"
+
+
+@dataclass(frozen=True, slots=True)
+class AppModCapabilities:
+    mode: ModDistributionMode
+    supports_raw_download: bool = False
+    supports_client_only: bool = False
+    supports_client_pack: bool = False
+    supports_launcher_formats: bool = False
+    include_client_overrides: bool = False
+    launcher_metadata_providers: tuple[Provider, ...] = ()
+
+
+_DEFAULT_MOD_CAPABILITIES = AppModCapabilities(mode=ModDistributionMode.NONE)
+_MOD_CAPABILITIES_BY_SCOPE: dict[str, AppModCapabilities] = {
+    "minecraft": AppModCapabilities(
+        mode=ModDistributionMode.MINECRAFT_LAUNCHER_PACK,
+        supports_raw_download=True,
+        supports_client_only=True,
+        supports_client_pack=True,
+        supports_launcher_formats=True,
+        include_client_overrides=True,
+        launcher_metadata_providers=(Provider.MODRINTH, Provider.CURSEFORGE),
+    ),
+    "sevendays": AppModCapabilities(
+        mode=ModDistributionMode.SIDE_AWARE_GENERIC_CLIENT_PACK,
+        supports_raw_download=True,
+        supports_client_only=True,
+        supports_client_pack=True,
+        include_client_overrides=True,
+    ),
+    "factorio": AppModCapabilities(
+        mode=ModDistributionMode.RAW_ENABLED,
+        supports_raw_download=True,
+    ),
+    "beammp": AppModCapabilities(
+        mode=ModDistributionMode.SERVER_PUSH,
+        supports_raw_download=True,
+    ),
+    "ets": _DEFAULT_MOD_CAPABILITIES,
+    "satisfactory": _DEFAULT_MOD_CAPABILITIES,
+}
+
+
+def mod_capabilities_for_scope(scope: str | None) -> AppModCapabilities:
+    if scope is None:
+        return _DEFAULT_MOD_CAPABILITIES
+    return _MOD_CAPABILITIES_BY_SCOPE.get(scope.strip().casefold(), _DEFAULT_MOD_CAPABILITIES)
+
+
+def launcher_provider_label(provider: Provider) -> str:
+    match provider:
+        case Provider.MODRINTH:
+            return "Modrinth"
+        case Provider.CURSEFORGE:
+            return "CurseForge"
+        case _:
+            return provider.value.title()
 
 
 def resolve_config_path(raw: str | Path | None, *, directory: Path | str | None) -> Path | None:
@@ -698,6 +766,7 @@ class ModClassificationOverride(BaseModel):
 
 
 class ModrinthModMetadata(BaseModel):
+    page_url: str
     project_id: str
     version_id: str
     download_url: str
@@ -709,17 +778,18 @@ class ModrinthModMetadata(BaseModel):
     def validate_identifier(cls, raw: object) -> str:
         return _normalise_required_text(raw, field_name="Modrinth identifier")
 
-    @field_validator("download_url", mode="before")
+    @field_validator("page_url", "download_url", mode="before")
     @classmethod
     def validate_download_url(cls, raw: object) -> str:
-        url = _normalise_required_text(raw, field_name="Modrinth download URL")
+        url = _normalise_required_text(raw, field_name="Modrinth URL")
         parsed = urlsplit(url)
         if parsed.scheme.casefold() != "https" or parsed.hostname is None:
-            raise ValueError("Modrinth download URL must be an absolute HTTPS URL")
+            raise ValueError("Modrinth URLs must be absolute HTTPS URLs")
         return url
 
 
 class CurseForgeModMetadata(BaseModel):
+    page_url: str
     project_id: int
     file_id: int
 
@@ -738,10 +808,49 @@ class CurseForgeModMetadata(BaseModel):
             raise ValueError("CurseForge identifiers must be positive")
         return identifier
 
+    @field_validator("page_url", mode="before")
+    @classmethod
+    def validate_page_url(cls, raw: object) -> str:
+        url = _normalise_required_text(raw, field_name="CurseForge URL")
+        parsed = urlsplit(url)
+        if parsed.scheme.casefold() != "https" or parsed.hostname is None:
+            raise ValueError("CurseForge URL must be an absolute HTTPS URL")
+        return url
+
+
+class LauncherProviderUrls(BaseModel):
+    modrinth: str | None = None
+    curseforge: str | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("modrinth", "curseforge", mode="before")
+    @classmethod
+    def validate_optional_url(cls, raw: object) -> str | None:
+        return normalise_optional_text(raw)
+
+    def for_provider(self, provider: Provider) -> str | None:
+        match provider:
+            case Provider.MODRINTH:
+                return self.modrinth
+            case Provider.CURSEFORGE:
+                return self.curseforge
+            case _:
+                raise ValueError(f"Launcher metadata URLs do not support {provider.value}.")
+
 
 class ModPlatformMetadata(BaseModel):
     modrinth: ModrinthModMetadata | None = None
     curseforge: CurseForgeModMetadata | None = None
+
+    def page_url_for(self, provider: Provider) -> str | None:
+        match provider:
+            case Provider.MODRINTH:
+                return None if self.modrinth is None else self.modrinth.page_url
+            case Provider.CURSEFORGE:
+                return None if self.curseforge is None else self.curseforge.page_url
+            case _:
+                raise ValueError(f"Launcher metadata does not support {provider.value}.")
 
 
 class ClientPackPolicy(enum.StrEnum):
@@ -943,6 +1052,11 @@ class App_Config(BaseModel):
     mods_dir: Path | None = None
     client_mods_dir: Path | None = None
     client_overrides_dir: Path | None = None
+    client_pack_current_hash: str | None = None
+    client_pack_published_hash: str | None = None
+    client_pack_published_version: int = 0
+    client_pack_verified_hash: str | None = None
+    client_pack_content_dirty: bool = False
     settings_pointer: Path | None = None
     server_log_file: Path | None = None
     join_host: str = config.PUBLIC_ADDR
@@ -977,6 +1091,23 @@ class App_Config(BaseModel):
     @classmethod
     def validate_friendly_name(cls, raw: object) -> str | None:
         return normalise_optional_friendly_name(raw)
+
+    @field_validator("client_pack_current_hash", "client_pack_published_hash", "client_pack_verified_hash")
+    @classmethod
+    def validate_client_pack_hash(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalised = value.strip().casefold()
+        if re.fullmatch(r"[0-9a-f]{64}", normalised) is None:
+            raise ValueError("client pack hashes must be SHA-256 hex digests")
+        return normalised
+
+    @field_validator("client_pack_published_version")
+    @classmethod
+    def validate_client_pack_published_version(cls, value: int) -> int:
+        if isinstance(value, bool) or value < 0:
+            raise ValueError("client pack published version must be a non-negative integer")
+        return value
 
     @field_validator("notes", mode="before")
     @classmethod

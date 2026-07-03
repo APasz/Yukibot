@@ -1970,7 +1970,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         client_pack: bool = False,
         pack_purpose: PackPurpose | None = None,
         pack_format: PackFormat = PackFormat.GENERIC_ZIP,
-        pack_version: str | None = None,
+        publish_client_pack: bool = False,
     ) -> dict[str, object]:
         query: dict[str, object] = {
             "enabled_only": str(enabled_only).lower(),
@@ -1982,8 +1982,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             query["pack_format"] = pack_format.value
         if pack_purpose is not None:
             query["pack_purpose"] = pack_purpose.value
-        if pack_version is not None:
-            query["pack_version"] = pack_version
+        if publish_client_pack:
+            query["publish_client_pack"] = "true"
         if mod_names:
             query["mod_name"] = list[str](mod_names)
         return query

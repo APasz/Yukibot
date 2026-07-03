@@ -9,9 +9,10 @@ from unittest.mock import Mock, call, patch
 
 import hikari
 from hikari import applications
+from modmux.models import Provider
 
 import config
-from apps._config import AppVersion
+from apps._config import ModDistributionMode, AppVersion, mod_capabilities_for_scope
 from restart_targets import RestartTarget
 
 
@@ -24,6 +25,39 @@ class ConfigEnvFlagTests(unittest.TestCase):
     def test_parse_env_flag_rejects_ambiguous_value(self) -> None:
         with self.assertRaisesRegex(ValueError, "INDEV must be a boolean flag"):
             config._parse_env_flag("development", var_name="INDEV")
+
+
+class AppModCapabilitiesTests(unittest.TestCase):
+    def test_minecraft_supports_launcher_client_packs(self) -> None:
+        capabilities = mod_capabilities_for_scope("minecraft")
+
+        self.assertEqual(capabilities.mode, ModDistributionMode.MINECRAFT_LAUNCHER_PACK)
+        self.assertTrue(capabilities.supports_client_pack)
+        self.assertTrue(capabilities.supports_launcher_formats)
+        self.assertTrue(capabilities.include_client_overrides)
+        self.assertEqual(
+            capabilities.launcher_metadata_providers,
+            (Provider.MODRINTH, Provider.CURSEFORGE),
+        )
+
+    def test_sevendays_supports_generic_client_packs_only(self) -> None:
+        capabilities = mod_capabilities_for_scope("sevendays")
+
+        self.assertTrue(capabilities.supports_client_pack)
+        self.assertFalse(capabilities.supports_launcher_formats)
+
+    def test_non_client_pack_scopes_have_explicit_modes(self) -> None:
+        expected_modes = {
+            "factorio": ModDistributionMode.RAW_ENABLED,
+            "beammp": ModDistributionMode.SERVER_PUSH,
+            "ets": ModDistributionMode.NONE,
+            "satisfactory": ModDistributionMode.NONE,
+        }
+
+        for scope, expected_mode in expected_modes.items():
+            with self.subTest(scope=scope):
+                self.assertEqual(mod_capabilities_for_scope(scope).mode, expected_mode)
+                self.assertFalse(mod_capabilities_for_scope(scope).supports_client_pack)
 
 
 class ConfigLoggingTests(unittest.TestCase):

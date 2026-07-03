@@ -24,7 +24,15 @@ import _errors
 import config
 from _security import Power_Level
 from apps._blueprint_files import AppBlueprintEntry
-from apps._config import App_Config, AppVersion, Mod_Config, RelayChannelSource, normalise_app_version
+from apps._config import (
+    App_Config,
+    AppModCapabilities,
+    AppVersion,
+    Mod_Config,
+    RelayChannelSource,
+    mod_capabilities_for_scope,
+    normalise_app_version,
+)
 from apps._config_files import (
     AppConfigFile,
     AppConfigFileContent,
@@ -322,6 +330,10 @@ class App(Generic[ConfigT], ABC):
         log.debug(f"{self.name}.__post_init__")
 
     @property
+    def mod_capabilities(self) -> AppModCapabilities:
+        return mod_capabilities_for_scope(self.scope)
+
+    @property
     def chat_relay_support(self) -> ChatRelaySupport:
         has_inbound: bool = self.am_receiver is not None
         has_outbound: bool = self.chat_relay_outbound
@@ -389,6 +401,15 @@ class App(Generic[ConfigT], ABC):
             overrides["disabled_activity_provider_ids"] = list(self.cfg.disabled_activity_provider_ids)
         if self.cfg.version is not None:
             overrides["version"] = self.cfg.version.model_dump(mode="json", exclude_none=True)
+        if self.cfg.client_pack_current_hash is not None:
+            overrides["client_pack_current_hash"] = self.cfg.client_pack_current_hash
+        if self.cfg.client_pack_published_hash is not None:
+            overrides["client_pack_published_hash"] = self.cfg.client_pack_published_hash
+            overrides["client_pack_published_version"] = self.cfg.client_pack_published_version
+        if self.cfg.client_pack_verified_hash is not None:
+            overrides["client_pack_verified_hash"] = self.cfg.client_pack_verified_hash
+        if self.cfg.client_pack_published_hash is not None:
+            overrides["client_pack_content_dirty"] = self.cfg.client_pack_content_dirty
         if self.cfg.steam_update is not None:
             overrides["steam_update"] = self.cfg.steam_update.model_dump(mode="json", exclude_none=True)
         if self.config_file_read_level_override is not None:
@@ -434,6 +455,38 @@ class App(Generic[ConfigT], ABC):
         if self._instance_config_change_handler is None:
             return
         self._instance_config_change_handler(self)
+
+    def publish_client_pack(self, content_hash: str) -> int:
+        self.cfg.client_pack_current_hash = content_hash
+        if self.cfg.client_pack_published_hash != content_hash:
+            self.cfg.client_pack_published_version += 1
+        self.cfg.client_pack_published_hash = content_hash
+        self.cfg.client_pack_content_dirty = False
+        self.persist_instance_config_overrides()
+        return self.cfg.client_pack_published_version
+
+    def record_client_pack_content_hash(self, content_hash: str) -> None:
+        self.cfg.client_pack_current_hash = content_hash
+        self.cfg.client_pack_content_dirty = self.cfg.client_pack_published_hash != content_hash
+        self.persist_instance_config_overrides()
+
+    def invalidate_client_pack_content(self) -> None:
+        if self.cfg.client_pack_published_hash is None or self.cfg.client_pack_content_dirty:
+            return
+        self.cfg.client_pack_content_dirty = True
+        self.persist_instance_config_overrides()
+
+    def verify_published_client_pack(self) -> None:
+        published_hash = self.cfg.client_pack_published_hash
+        if (
+            published_hash is None
+            or self.cfg.client_pack_content_dirty
+            or self.cfg.client_pack_current_hash != published_hash
+            or self.cfg.client_pack_verified_hash == published_hash
+        ):
+            return
+        self.cfg.client_pack_verified_hash = published_hash
+        self.persist_instance_config_overrides()
 
     def set_activity_providers(self, providers: Sequence[AppActivityProvider[Any]]) -> None:
         self.providers = list(providers)

@@ -2281,6 +2281,17 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Join: `play.example.com:25565`")
         self.assertIsNotNone(app.lifecycle_started_at)
 
+    async def test_successful_launch_verifies_current_published_client_pack(self) -> None:
+        manager = object.__new__(App_Manager)
+        app = _build_dummy_app()
+        content_hash = "a" * 64
+        app.cfg.client_pack_current_hash = content_hash
+        app.cfg.client_pack_published_hash = content_hash
+
+        await manager.launch(app)
+
+        self.assertEqual(app.cfg.client_pack_verified_hash, content_hash)
+
     def test_start_blocker_blocks_same_scope_app(self) -> None:
         manager = object.__new__(App_Manager)
         running_app = _build_dummy_app()

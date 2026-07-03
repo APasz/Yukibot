@@ -76,11 +76,16 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
             "shared.jar",
             platforms=ModPlatformMetadata(
                 modrinth=ModrinthModMetadata(
+                    page_url="https://modrinth.com/mod/shared/version/shared-version",
                     project_id="shared-project",
                     version_id="shared-version",
                     download_url="https://cdn.modrinth.com/data/shared/shared.jar",
                 ),
-                curseforge=CurseForgeModMetadata(project_id=101, file_id=1001),
+                curseforge=CurseForgeModMetadata(
+                    page_url="https://www.curseforge.com/minecraft/mc-mods/shared/files/1001",
+                    project_id=101,
+                    file_id=1001,
+                ),
             ),
         )
         client = self._mod(
@@ -90,11 +95,16 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
             client_pack=ClientPackConfig(policy=ClientPackPolicy.OPTIONAL),
             platforms=ModPlatformMetadata(
                 modrinth=ModrinthModMetadata(
+                    page_url="https://modrinth.com/mod/client/version/client-version",
                     project_id="client-project",
                     version_id="client-version",
                     download_url="https://cdn.modrinth.com/data/client/client.jar",
                 ),
-                curseforge=CurseForgeModMetadata(project_id=202, file_id=2002),
+                curseforge=CurseForgeModMetadata(
+                    page_url="https://www.curseforge.com/minecraft/mc-mods/client/files/2002",
+                    project_id=202,
+                    file_id=2002,
+                ),
             ),
         )
         bundled = self._mod("bundled.jar")
