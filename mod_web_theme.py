@@ -3488,6 +3488,58 @@ class ModWebTheme:
                     font-weight: 800;
                     overflow-wrap: anywhere;
                 }}
+                .mod-client-pack-config-search {{
+                    margin-bottom: 0.75rem;
+                }}
+                .mod-client-pack-config-search .q-field__native,
+                .mod-client-pack-config-search .q-field__input,
+                .mod-client-pack-config-search .q-field__label,
+                .mod-client-pack-config-search .q-field__marginal,
+                .mod-client-pack-config-search .q-icon {{
+                    color: var(--mod-text) !important;
+                }}
+                .mod-client-pack-config-search .q-field__native::placeholder,
+                .mod-client-pack-config-search .q-field__input::placeholder {{
+                    color: var(--mod-muted) !important;
+                    opacity: 1;
+                }}
+                .mod-client-pack-config-option {{
+                    display: grid !important;
+                    grid-template-columns: minmax(0, 1fr) 9.5rem 9.5rem;
+                    align-items: center;
+                }}
+                .mod-client-pack-config-control {{
+                    width: 100%;
+                    min-width: 0;
+                    flex: none;
+                }}
+                .mod-client-pack-config-group {{
+                    grid-column: 2;
+                }}
+                .mod-client-pack-config-policy {{
+                    grid-column: 3;
+                }}
+                .mod-client-pack-config-invalid .q-field__control {{
+                    border-color: rgba(248, 113, 113, 0.96) !important;
+                    box-shadow:
+                        0 0 0 1px rgba(248, 113, 113, 0.52),
+                        0 0 0.8rem rgba(239, 68, 68, 0.24) !important;
+                }}
+                .mod-client-pack-config-invalid .q-field__native,
+                .mod-client-pack-config-invalid .q-field__input,
+                .mod-client-pack-config-invalid .q-field__label,
+                .mod-client-pack-config-invalid .q-icon {{
+                    color: #fca5a5 !important;
+                }}
+                @media (max-width: 640px) {{
+                    .mod-client-pack-config-option {{
+                        grid-template-columns: minmax(0, 1fr);
+                    }}
+                    .mod-client-pack-config-group,
+                    .mod-client-pack-config-policy {{
+                        grid-column: 1;
+                    }}
+                }}
                 .mod-client-pack-checkbox {{
                     padding: 0.38rem 0.55rem;
                 }}

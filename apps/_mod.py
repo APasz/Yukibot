@@ -758,6 +758,29 @@ class Mod_Manager:
             raise
         return mod
 
+    async def update_client_pack_configs(
+        self,
+        updates: Mapping[str, ClientPackConfig],
+    ) -> tuple[Mod, ...]:
+        resolved_updates: tuple[tuple[Mod, ClientPackConfig], ...] = tuple(
+            (self.get(mod_name), client_pack) for mod_name, client_pack in updates.items()
+        )
+        if any(mod.is_builtin for mod, _client_pack in resolved_updates):
+            raise ValueError("Built-in client-pack configuration cannot be changed")
+
+        previous_configs: tuple[tuple[Mod, ClientPackConfig], ...] = tuple(
+            (mod, mod.cfg.client_pack) for mod, _client_pack in resolved_updates
+        )
+        try:
+            for mod, client_pack in resolved_updates:
+                mod.cfg.client_pack = client_pack
+            await self.save_mods()
+        except Exception:
+            for mod, client_pack in previous_configs:
+                mod.cfg.client_pack = client_pack
+            raise
+        return tuple(mod for mod, _client_pack in resolved_updates)
+
     def get(self, name: str | Mod) -> Mod:
         if isinstance(name, Mod):
             return name

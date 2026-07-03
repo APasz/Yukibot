@@ -56,6 +56,7 @@ from .runtime_imports import (
     Callable,
     Card,
     Checkbox,
+    ClientPackConfig,
     ClientPackPolicy,
     Html,
     Input,
@@ -70,6 +71,7 @@ from .runtime_imports import (
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
+    NodeApiScope,
     NodeConsoleActionList,
     NodeModEntry,
     NodeModMutationAction,
@@ -89,6 +91,7 @@ from .runtime_imports import (
     escape,
     json,
     parse_qsl,
+    quote,
     replace,
     required_app_mutation_level,
     urlencode,
@@ -3836,12 +3839,43 @@ class ModWebAppPageMixin(
                             "mod-list-button secondary"
                         )
 
-        async def download_configured_client_pack(*, publish: bool = False) -> None:
-            pack_format = (
+        def selected_client_pack_format() -> PackFormat:
+            return (
                 PackFormat.GENERIC_ZIP
                 if client_pack_format_select is None
                 else PackFormat(_value_as_text(client_pack_format_select))
             )
+
+        async def start_client_pack_download(
+            *,
+            mod_names: tuple[str, ...],
+        ) -> None:
+            pack_format = selected_client_pack_format()
+            client_pack_dialog.close()
+            query: str = urlencode(
+                self._download_query(
+                    enabled_only=False,
+                    selected_only=True,
+                    mod_names=mod_names,
+                    pack_purpose=PackPurpose.CLIENT,
+                    pack_format=pack_format,
+                    publish_client_pack=False,
+                ),
+                doseq=True,
+            )
+            await self._start_download(
+                ui=ui,
+                user=user,
+                model=model,
+                url=f"{self._download_base_url(model)}?{query}",
+                message=self._download_feedback_message(
+                    kind=ModDownloadKind.CLIENT_PACK,
+                    app_friendly=model.app_friendly,
+                ),
+                filenames=(f"{model.app_name}-client-pack{pack_format.suffix}",),
+            )
+
+        async def download_configured_client_pack() -> None:
             optional_names: frozenset[str] = frozenset(
                 mod_name
                 for mod_name, checkbox in optional_client_checkboxes.items()
@@ -3863,29 +3897,260 @@ class ModWebAppPageMixin(
             if not mod_names:
                 ui.notify("Select at least one mod for the client pack.", type="warning")
                 return
-            client_pack_dialog.close()
-            query: str = urlencode(
-                self._download_query(
-                    enabled_only=False,
-                    selected_only=True,
-                    mod_names=mod_names,
-                    pack_purpose=PackPurpose.CLIENT,
-                    pack_format=pack_format,
-                    publish_client_pack=publish,
-                ),
-                doseq=True,
+            await start_client_pack_download(mod_names=mod_names)
+
+        configurable_client_entries: tuple[NodeModEntry, ...] = tuple(
+            entry
+            for entry in model.mods.mods
+            if entry.client_pack_eligible and not self._is_builtin_mod(entry)
+        )
+        config_policy_selects: dict[str, Select] = {}
+        config_group_inputs: dict[str, Input] = {}
+        config_group_names: dict[str, str] = {
+            entry.name: entry.client_pack.choice_group or "" for entry in configurable_client_entries
+        }
+        config_default_selects: dict[str, Select] = {}
+        config_rows: dict[str, Element] = {}
+        config_default_names: dict[str, str] = {
+            entry.client_pack.choice_group: entry.name
+            for entry in configurable_client_entries
+            if entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
+            and entry.client_pack.choice_group is not None
+            and entry.client_pack.default_choice
+        }
+
+        def configured_choice_groups() -> dict[str, tuple[NodeModEntry, ...]]:
+            groups: dict[str, tuple[NodeModEntry, ...]] = {}
+            for entry in configurable_client_entries:
+                policy_select = config_policy_selects[entry.name]
+                if ClientPackPolicy(_value_as_text(policy_select)) is not ClientPackPolicy.ALTERNATIVE:
+                    continue
+                group_name = config_group_names[entry.name]
+                if not group_name or any(character.isspace() for character in group_name):
+                    continue
+                groups[group_name] = (*groups.get(group_name, ()), entry)
+            return groups
+
+        def filter_client_pack_config_rows(event: ModWebEventArgumentsContainer) -> None:
+            query_tokens: tuple[str, ...] = tuple(
+                token for token in _event_args_as_text(event).casefold().split() if token
             )
-            await self._start_download(
-                ui=ui,
-                user=user,
-                model=model,
-                url=f"{self._download_base_url(model)}?{query}",
-                message=self._download_feedback_message(
-                    kind=ModDownloadKind.CLIENT_PACK,
-                    app_friendly=model.app_friendly,
-                ),
-                filenames=(f"{model.app_name}-client-pack{pack_format.suffix}",),
-            )
+            for entry in configurable_client_entries:
+                search_text = f"{entry.friendly} {entry.name}".casefold()
+                config_rows[entry.name].set_visibility(
+                    all(token in search_text for token in query_tokens)
+                )
+
+        async def save_client_pack_configuration() -> None:
+            choice_groups = configured_choice_groups()
+            try:
+                for group_name, entries in choice_groups.items():
+                    if len(entries) < 2:
+                        raise ValueError(f"Choice group {group_name!r} requires at least two mods.")
+                    selected_default = _value_as_text(config_default_selects[group_name])
+                    config_default_names[group_name] = selected_default
+
+                updates: list[tuple[NodeModEntry, ClientPackConfig]] = []
+                for entry in configurable_client_entries:
+                    policy = ClientPackPolicy(_value_as_text(config_policy_selects[entry.name]))
+                    if policy is ClientPackPolicy.REQUIRED:
+                        client_pack = ClientPackConfig(
+                            policy=policy,
+                            bundled_required=(
+                                entry.client_pack.bundled_required
+                                if entry.client_pack.policy is ClientPackPolicy.REQUIRED
+                                else False
+                            ),
+                        )
+                    elif policy is ClientPackPolicy.OPTIONAL:
+                        client_pack = ClientPackConfig(
+                            policy=policy,
+                            default_selected=(
+                                entry.client_pack.default_selected
+                                if entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+                                else True
+                            ),
+                        )
+                    else:
+                        group_name = config_group_names[entry.name]
+                        if not group_name:
+                            raise ValueError(f"{entry.friendly} requires an alternative group ID.")
+                        client_pack = ClientPackConfig(
+                            policy=policy,
+                            choice_group=group_name,
+                            default_choice=config_default_names.get(group_name) == entry.name,
+                        )
+                    updates.append((entry, client_pack))
+
+                await self._remote_json_async(
+                    node=self._remote_node_link(model.node_name),
+                    app_name=model.app_name,
+                    path=f"/apps/{quote(model.app_name, safe='')}/mods/client-pack-config",
+                    scopes=(NodeApiScope.MODS_WRITE,),
+                    user=user,
+                    method="PUT",
+                    json_payload={
+                        "mods": [
+                            {
+                                "mod_name": entry.name,
+                                "client_pack": client_pack.model_dump(mode="json"),
+                            }
+                            for entry, client_pack in updates
+                        ],
+                    },
+                )
+                await self._remote_json_async(
+                    node=self._remote_node_link(model.node_name),
+                    app_name=model.app_name,
+                    path=f"/apps/{quote(model.app_name, safe='')}/mods/client-pack-config/publish",
+                    scopes=(NodeApiScope.MODS_WRITE,),
+                    user=user,
+                    method="POST",
+                )
+            except Exception as xcp:
+                log.warning("Client-pack configuration update failed for %s: %s", model.app_name, xcp)
+                ui.notify(f"Client-pack configuration failed: {xcp}", type="negative", multi_line=True)
+                return
+
+            client_pack_config_dialog.close()
+            ui.notify("Saved client-pack configuration.", type="positive")
+            ui.navigate.reload()
+
+        client_pack_config_dialog = ui.dialog()
+        if supports_client_pack and self._user_has_level(user, Power_Level.admin):
+            with client_pack_config_dialog:
+                with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
+                    with ui.column().classes("mod-client-pack-body w-full"):
+                        with ui.column().classes("mod-client-pack-header w-full"):
+                            ui.label("Configure Client Pack Policies").classes(
+                                "text-xl font-black mod-title-small"
+                            )
+                            ui.label(
+                                "Set each eligible mod's pack policy and publish the default pack."
+                            ).classes("mod-subtitle text-sm")
+                        (
+                            ui.input(placeholder="Search pack mods")
+                            .props(
+                                "filled square dense clearable hide-bottom-space color=accent "
+                                f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
+                            )
+                            .classes("mod-config-search mod-client-pack-config-search w-full")
+                            .on("update:model-value", filter_client_pack_config_rows)
+                        )
+                        with ui.column().classes("mod-client-pack-option-list w-full"):
+                            for entry in configurable_client_entries:
+                                with ui.row().classes(
+                                    "mod-client-pack-option mod-client-pack-config-option w-full items-center gap-2"
+                                ) as config_row:
+                                    config_rows[entry.name] = config_row
+                                    ui.label(entry.friendly).classes("mod-client-pack-option-label")
+                                    config_group_inputs[entry.name] = (
+                                        ui.input(
+                                            "Group ID",
+                                            value=config_group_names[entry.name],
+                                            placeholder="e.g. minimap",
+                                        )
+                                        .props("filled square dense hide-bottom-space color=accent debounce=150")
+                                        .classes(
+                                            "mod-config-input mod-client-pack-select "
+                                            "mod-client-pack-config-control mod-client-pack-config-group"
+                                        )
+                                    )
+                                    config_policy_selects[entry.name] = (
+                                        ui.select(
+                                            {policy.value: policy.label for policy in ClientPackPolicy},
+                                            value=entry.client_pack.policy.value,
+                                        )
+                                        .props("filled square dense hide-bottom-space color=accent options-dark")
+                                        .classes(
+                                            "mod-config-select mod-client-pack-select "
+                                            "mod-client-pack-config-control mod-client-pack-config-policy"
+                                        )
+                                    )
+
+                        @ui.refreshable
+                        def render_config_default_choices() -> None:
+                            config_default_selects.clear()
+                            groups = configured_choice_groups()
+                            if not groups:
+                                return
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("Default alternatives").classes("mod-stat-label")
+                                ui.label("Choose the default mod for each alternative group.").classes(
+                                    "mod-client-pack-section-hint mod-subtitle"
+                                )
+                                for group_name, entries in groups.items():
+                                    member_names = {entry.name for entry in entries}
+                                    default_name = config_default_names.get(group_name)
+                                    if default_name not in member_names:
+                                        default_name = entries[0].name
+                                        config_default_names[group_name] = default_name
+                                    config_default_selects[group_name] = (
+                                        ui.select(
+                                            {entry.name: entry.friendly for entry in entries},
+                                            value=default_name,
+                                            label=group_name,
+                                        )
+                                        .props("filled square dense hide-bottom-space color=accent options-dark")
+                                        .classes("mod-config-select mod-client-pack-select w-full")
+                                    )
+
+                        def refresh_config_row(entry: NodeModEntry) -> None:
+                            is_alternative = (
+                                ClientPackPolicy(_value_as_text(config_policy_selects[entry.name]))
+                                is ClientPackPolicy.ALTERNATIVE
+                            )
+                            config_group_inputs[entry.name].set_visibility(is_alternative)
+                            render_config_default_choices.refresh()
+
+                        def create_config_policy_handler(
+                            entry: NodeModEntry,
+                        ) -> Callable[[ModWebEventArgumentsContainer], None]:
+                            def handle_policy_change(_event: ModWebEventArgumentsContainer) -> None:
+                                refresh_config_row(entry)
+
+                            return handle_policy_change
+
+                        def create_config_group_handler(
+                            entry: NodeModEntry,
+                        ) -> Callable[[ModWebEventArgumentsContainer], None]:
+                            def handle_group_change(event: ModWebEventArgumentsContainer) -> None:
+                                raw_group_name = _event_args_as_text(event)
+                                config_group_names[entry.name] = raw_group_name
+                                invalid = any(character.isspace() for character in raw_group_name)
+                                if invalid:
+                                    config_group_inputs[entry.name].classes(
+                                        add="mod-client-pack-config-invalid"
+                                    )
+                                else:
+                                    config_group_inputs[entry.name].classes(
+                                        remove="mod-client-pack-config-invalid"
+                                    )
+                                render_config_default_choices.refresh()
+
+                            return handle_group_change
+
+                        for entry in configurable_client_entries:
+                            config_policy_selects[entry.name].on(
+                                "update:model-value",
+                                create_config_policy_handler(entry),
+                            )
+                            config_group_inputs[entry.name].on(
+                                "update:model-value",
+                                create_config_group_handler(entry),
+                            )
+                            config_group_inputs[entry.name].set_visibility(
+                                entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
+                            )
+                        render_config_default_choices()
+                        with ui.row().classes("mod-client-pack-actions w-full"):
+                            ui.button("Cancel", on_click=client_pack_config_dialog.close).classes(
+                                "mod-list-button secondary"
+                            )
+                            ui.button(
+                                "Save",
+                                on_click=save_client_pack_configuration,
+                            ).classes("mod-list-button")
 
         client_pack_dialog = ui.dialog()
         if supports_client_pack:
@@ -3893,7 +4158,7 @@ class ModWebAppPageMixin(
                 with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
                     with ui.column().classes("mod-client-pack-body w-full"):
                         with ui.column().classes("mod-client-pack-header w-full"):
-                            ui.label("Configure Client Pack").classes("text-xl font-black mod-title-small")
+                            ui.label("Download Client Pack").classes("text-xl font-black mod-title-small")
                             ui.label(
                                 "Required mods are always included. Choose which optional mods to add."
                             ).classes("mod-subtitle text-sm")
@@ -3911,17 +4176,6 @@ class ModWebAppPageMixin(
                             for entry in model.mods.mods
                             if entry.client_pack_eligible and entry.client_pack.policy is ClientPackPolicy.REQUIRED
                         )
-                        if required_entries:
-                            with ui.column().classes("mod-client-pack-section w-full"):
-                                ui.label("Required").classes("mod-stat-label")
-                                ui.label("These mods are always included.").classes(
-                                    "mod-client-pack-section-hint mod-subtitle"
-                                )
-                                with ui.column().classes("mod-client-pack-option-list w-full"):
-                                    for entry in required_entries:
-                                        with ui.row().classes("mod-client-pack-option w-full items-center"):
-                                            ui.label(entry.friendly).classes("mod-client-pack-option-label")
-                                            ui.label("Required").classes("mod-pill enabled")
                         if optional_client_entries:
                             with ui.column().classes("mod-client-pack-section w-full"):
                                 ui.label("Optional mods").classes("mod-stat-label")
@@ -3961,14 +4215,20 @@ class ModWebAppPageMixin(
                                                 )
                                                 .classes("mod-config-select mod-client-pack-select w-full")
                                             )
+                        if required_entries:
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("Required").classes("mod-stat-label")
+                                ui.label("These mods are always included.").classes(
+                                    "mod-client-pack-section-hint mod-subtitle"
+                                )
+                                with ui.column().classes("mod-client-pack-option-list w-full"):
+                                    for entry in required_entries:
+                                        with ui.row().classes("mod-client-pack-option w-full items-center"):
+                                            ui.label(entry.friendly).classes("mod-client-pack-option-label")
+                                            ui.label("Required").classes("mod-pill enabled")
                         with ui.row().classes("mod-client-pack-actions w-full"):
                             ui.button("Cancel", on_click=client_pack_dialog.close).classes("mod-list-button secondary")
                             ui.button("Download", on_click=download_configured_client_pack).classes("mod-list-button")
-                            if self._user_has_level(user, Power_Level.user):
-                                ui.button(
-                                    "Publish & Download",
-                                    on_click=lambda: download_configured_client_pack(publish=True),
-                                ).classes("mod-list-button")
 
         with ui.dialog() as delete_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -4047,9 +4307,9 @@ class ModWebAppPageMixin(
                     current_search_query = _event_args_as_text(event)
                     _mod_download_rows.refresh(current_search_query)
 
-                def _sort_mod_rows(event: ModWebEventArgumentsContainer) -> None:
+                def _sort_mod_rows(event: ModWebValueContainer) -> None:
                     nonlocal current_sort_order
-                    current_sort_order = ModWebModSortOrder(_event_args_as_text(event))
+                    current_sort_order = ModWebModSortOrder(_value_as_text(event))
                     _mod_download_rows.refresh(current_search_query)
 
                 toolbar_bindings: _ModWebModToolbarBindings = self._render_mod_toolbar(
@@ -4059,6 +4319,11 @@ class ModWebAppPageMixin(
                     toggle_selection=toggle_selection,
                     download_selected=download_selected if capabilities.supports_raw_download else None,
                     open_client_pack=client_pack_dialog.open if supports_client_pack else None,
+                    open_client_pack_config=(
+                        client_pack_config_dialog.open
+                        if supports_client_pack and self._user_has_level(user, Power_Level.admin)
+                        else None
+                    ),
                     delete_selected=delete_dialog.open,
                     upload_mod=upload_picker_action,
                     show_search=show_search,
@@ -4678,11 +4943,12 @@ class ModWebAppPageMixin(
         download_selected: Callable[[], Awaitable[None]] | None,
         delete_selected: Callable[[], None],
         open_client_pack: Callable[[], None] | None = None,
+        open_client_pack_config: Callable[[], None] | None = None,
         upload_mod: Callable[[], object] | None = None,
         show_search: bool = False,
         on_search: Callable[[ModWebEventArgumentsContainer], None] | None = None,
         show_sort: bool = False,
-        on_sort: Callable[[ModWebEventArgumentsContainer], None] | None = None,
+        on_sort: Callable[[ModWebValueContainer], None] | None = None,
     ) -> _ModWebModToolbarBindings:
         can_upload_mod: bool = upload_mod is not None and self._user_has_level(user, Power_Level.user)
         can_delete_mods: bool = self._user_has_level(user, Power_Level.sudo) and any(
@@ -4719,16 +4985,16 @@ class ModWebAppPageMixin(
                 if show_sort:
                     if on_sort is None:
                         raise ValueError("Mod sort handler is not available.")
-                    sort_select: Select = (
+                    (
                         ui.select(
                             {order.value: order.label for order in ModWebModSortOrder},
                             value=ModWebModSortOrder.NEWEST.value,
                             label="Sort",
+                            on_change=on_sort,
                         )
                         .props("filled square dense hide-bottom-space color=accent options-dark")
                         .classes("mod-config-select mod-mods-toolbar-sort")
                     )
-                    sort_select.on("update:model-value", on_sort)
                 result_count_label = ui.label(
                     self._mod_result_count_label(
                         visible_count=len(model.mods.mods),
@@ -4746,6 +5012,11 @@ class ModWebAppPageMixin(
                     )
                     if open_client_pack is not None:
                         ui.button("Client Pack", on_click=open_client_pack).classes(
+                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                        )
+                    if open_client_pack_config is not None:
+                        configure_label = "Configure <!>" if model.client_pack_content_dirty else "Configure"
+                        ui.button(configure_label, on_click=open_client_pack_config).classes(
                             "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                         )
                     if download_selected is not None:

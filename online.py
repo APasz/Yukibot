@@ -119,6 +119,7 @@ IGNORED_ACTIVITY_NAMES = {
     "wordle",
     "vroid studio",
     "vtube studio",
+    "Satisfactory Modeler",
 }
 
 IGNORED_USER_IDS: set[hikari.Snowflake] = set()

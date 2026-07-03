@@ -166,6 +166,14 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
                 bundled_required=True,
             )
 
+    def test_alternative_client_pack_group_id_rejects_whitespace(self) -> None:
+        for group_id in ("visual options", " visual-options", "visual-options ", "visual\toptions"):
+            with self.subTest(group_id=group_id), self.assertRaisesRegex(ValueError, "cannot contain whitespace"):
+                ClientPackConfig(
+                    policy=ClientPackPolicy.ALTERNATIVE,
+                    choice_group=group_id,
+                )
+
     async def test_toggle_and_reload_preserve_disabled_mod_identity(self) -> None:
         manager = self._build_manager()
         await manager.add(self._write_source_file())
@@ -450,6 +458,22 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         client_pack = manager.get("example.zip").cfg.client_pack
         self.assertIs(client_pack.policy, ClientPackPolicy.OPTIONAL)
         self.assertFalse(client_pack.default_selected)
+
+    async def test_update_client_pack_configs_persists_all_updates_in_one_operation(self) -> None:
+        manager = self._build_manager()
+        await manager.add(self._write_source_file("alpha.zip"))
+        await manager.add(self._write_source_file("beta.zip"))
+        updates = {
+            "alpha.zip": ClientPackConfig(policy=ClientPackPolicy.OPTIONAL, default_selected=True),
+            "beta.zip": ClientPackConfig(policy=ClientPackPolicy.REQUIRED),
+        }
+
+        updated = await manager.update_client_pack_configs(updates)
+        await manager.reload_mods()
+
+        self.assertEqual(tuple(mod.name for mod in updated), ("alpha.zip", "beta.zip"))
+        self.assertEqual(manager.get("alpha.zip").cfg.client_pack, updates["alpha.zip"])
+        self.assertEqual(manager.get("beta.zip").cfg.client_pack, updates["beta.zip"])
 
     async def test_explicit_regular_classification_overrides_detected_server_type(self) -> None:
         manager = self._build_manager(mod_cls=_DetectedServerMod)

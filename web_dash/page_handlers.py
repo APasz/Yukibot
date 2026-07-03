@@ -626,6 +626,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     can_write_map_annotations=can_manage_app and app_entry.map_url is not None,
                     supports_chat=app_entry.supports_chat,
                     supports_updates=app_entry.supports_updates,
+                    client_pack_content_dirty=app_entry.client_pack_content_dirty,
                     chat_url=(
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),

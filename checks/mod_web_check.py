@@ -8376,10 +8376,14 @@ class ModWebTests(unittest.TestCase):
         class FakeContainer:
             def __init__(self) -> None:
                 self.class_value: str | None = None
+                self.visible = True
 
             def classes(self, value: str) -> "FakeContainer":
                 self.class_value = value
                 return self
+
+            def set_visibility(self, visible: bool) -> None:
+                self.visible = visible
 
             def __enter__(self) -> "FakeContainer":
                 return self
@@ -8432,23 +8436,43 @@ class ModWebTests(unittest.TestCase):
                 self.text = value
 
         class FakeInput:
-            def __init__(self, *, placeholder: str | None = None) -> None:
+            def __init__(self, *, placeholder: str | None = None, value: object = None) -> None:
                 self.placeholder = placeholder
+                self.value = value
                 self.class_value: str | None = None
                 self.props_value: str | None = None
                 self.handlers: dict[str, Callable[[object], None]] = {}
+                self.visible = True
 
             def props(self, value: str) -> "FakeInput":
                 self.props_value = value
                 return self
 
-            def classes(self, value: str) -> "FakeInput":
-                self.class_value = value
+            def classes(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+            ) -> "FakeInput":
+                if value is not None:
+                    self.class_value = value
+                if add is not None:
+                    self.class_value = f"{self.class_value or ''} {add}".strip()
+                if remove is not None and self.class_value is not None:
+                    self.class_value = self.class_value.replace(remove, "").strip()
                 return self
 
             def on(self, event_name: str, handler: Callable[[object], None]) -> "FakeInput":
                 self.handlers[event_name] = handler
                 return self
+
+            def on_change(self, handler: Callable[[object], None]) -> "FakeInput":
+                self.handlers["change"] = handler
+                return self
+
+            def set_visibility(self, visible: bool) -> None:
+                self.visible = visible
 
         class FakeUpload:
             def __init__(self) -> None:
@@ -8485,23 +8509,29 @@ class ModWebTests(unittest.TestCase):
                 return None
 
         class FakeRefreshable:
-            def __init__(self, func: Callable[[str], None]) -> None:
+            def __init__(self, func: Callable[..., None]) -> None:
                 self._func = func
 
-            def __call__(self, search_query: str) -> None:
-                self._func(search_query)
+            def __call__(self, *args: object) -> None:
+                self._func(*args)
 
-            def refresh(self, search_query: str) -> None:
-                self._func(search_query)
+            def refresh(self, *args: object) -> None:
+                self._func(*args)
 
         class FakeUi:
             def __init__(self) -> None:
                 self.labels: list[FakeLabel] = []
                 self.inputs: list[FakeInput] = []
+                self.config_search_inputs: list[FakeInput] = []
                 self.buttons: list[FakeButton] = []
+                self.policy_select_labels: list[object] = []
+                self.policy_selects: list[FakeInput] = []
+                self.group_inputs: list[FakeInput] = []
+                self.rows: list[FakeContainer] = []
+                self.sort_change_handler: Callable[[object], None] | None = None
                 self.navigate = SimpleNamespace(reload=lambda: None)
 
-            def refreshable(self, func: Callable[[str], None]) -> FakeRefreshable:
+            def refreshable(self, func: Callable[..., None]) -> FakeRefreshable:
                 return FakeRefreshable(func)
 
             def card(self) -> FakeContainer:
@@ -8511,7 +8541,9 @@ class ModWebTests(unittest.TestCase):
                 return FakeContainer()
 
             def row(self) -> FakeContainer:
-                return FakeContainer()
+                row = FakeContainer()
+                self.rows.append(row)
+                return row
 
             def element(self, tag: str) -> FakeContainer:
                 del tag
@@ -8523,6 +8555,10 @@ class ModWebTests(unittest.TestCase):
             def upload(self, *args: object, **kwargs: object) -> FakeUpload:
                 del args, kwargs
                 return FakeUpload()
+
+            def timer(self, *args: object, **kwargs: object) -> object:
+                del args, kwargs
+                return object()
 
             def button(self, *args: object, **kwargs: object) -> FakeButton:
                 del kwargs
@@ -8537,14 +8573,38 @@ class ModWebTests(unittest.TestCase):
                 return label
 
             def input(self, *args: object, **kwargs: object) -> FakeInput:
-                del args
-                control = FakeInput(placeholder=cast(str | None, kwargs.get("placeholder")))
-                self.inputs.append(control)
+                control = FakeInput(
+                    placeholder=cast(str | None, kwargs.get("placeholder")),
+                    value=kwargs.get("value"),
+                )
+                if control.placeholder == "Search mods":
+                    self.inputs.append(control)
+                elif control.placeholder == "Search pack mods":
+                    self.config_search_inputs.append(control)
+                if args and args[0] == "Group ID":
+                    self.group_inputs.append(control)
                 return control
 
+            def checkbox(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                return FakeInput(value=kwargs.get("value"))
+
             def select(self, *args: object, **kwargs: object) -> FakeInput:
-                del args, kwargs
-                return FakeInput()
+                if args and isinstance(args[0], dict) and set(args[0].values()) == {
+                    "Required",
+                    "Optional",
+                    "Alternative",
+                }:
+                    self.policy_select_labels.append(kwargs.get("label"))
+                    control = FakeInput(value=kwargs.get("value"))
+                    self.policy_selects.append(control)
+                    return control
+                if kwargs.get("label") == "Sort":
+                    self.sort_change_handler = cast(
+                        Callable[[object], None] | None,
+                        kwargs.get("on_change"),
+                    )
+                return FakeInput(value=kwargs.get("value"))
 
             def notify(self, message: str, *, type: str | None = None) -> None:
                 del message, type
@@ -8591,7 +8651,15 @@ class ModWebTests(unittest.TestCase):
                     non_downloadable_count=0,
                 ),
                 mods=(
-                    self._mod_entry(name="alpha-fabric.jar", friendly="Alpha Fabric"),
+                    self._mod_entry(
+                        name="alpha-fabric.jar",
+                        friendly="Alpha Fabric",
+                        mod_type=ModType.CLIENT,
+                        client_pack=ClientPackConfig(
+                            policy=ClientPackPolicy.OPTIONAL,
+                            default_selected=True,
+                        ),
+                    ),
                     self._mod_entry(name="beta-forge.jar", friendly="Beta Forge"),
                 ),
                 app_stats=None,
@@ -8602,19 +8670,44 @@ class ModWebTests(unittest.TestCase):
                 "alpha-fabric.jar": "/mods/download/alpha-fabric.jar",
                 "beta-forge.jar": "/mods/download/beta-forge.jar",
             },
+            client_pack_content_dirty=True,
         )
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
         ui = FakeUi()
         rendered_mod_names: list[str] = []
 
-        with patch.object(
-            ModWebService,
-            "_render_mod_download_row",
-            side_effect=lambda **kwargs: rendered_mod_names.append(kwargs["entry"].name) or None,
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(
+                ModWebService,
+                "_render_mod_download_row",
+                side_effect=lambda **kwargs: rendered_mod_names.append(kwargs["entry"].name) or None,
+            ),
         ):
             service._render_mods_section(ui=cast(ModWebUi, cast(object, ui)), model=model, user=user)
 
             self.assertEqual([control.placeholder for control in ui.inputs], ["Search mods"])
+            self.assertEqual(
+                [control.placeholder for control in ui.config_search_inputs],
+                ["Search pack mods"],
+            )
+            self.assertEqual(ui.policy_select_labels, [None, None])
+            config_rows = [
+                row
+                for row in ui.rows
+                if row.class_value is not None and "mod-client-pack-config-option" in row.class_value
+            ]
+            self.assertEqual(len(config_rows), 2)
+            ui.config_search_inputs[0].handlers["update:model-value"](SimpleNamespace(args="beta"))
+            self.assertEqual([row.visible for row in config_rows], [False, True])
+            ui.policy_selects[0].value = ClientPackPolicy.ALTERNATIVE.value
+            ui.policy_selects[0].handlers["update:model-value"](SimpleNamespace(args=None))
+            ui.group_inputs[0].handlers["update:model-value"](SimpleNamespace(args="renderer"))
+            self.assertIn("Default alternatives", [label.text for label in ui.labels])
+            ui.group_inputs[0].handlers["update:model-value"](SimpleNamespace(args="bad group"))
+            self.assertIn("mod-client-pack-config-invalid", ui.group_inputs[0].class_value or "")
+            ui.group_inputs[0].handlers["update:model-value"](SimpleNamespace(args="renderer_2"))
+            self.assertNotIn("mod-client-pack-config-invalid", ui.group_inputs[0].class_value or "")
             self.assertEqual(
                 ui.inputs[0].class_value,
                 "mod-config-search mod-settings-search mod-mods-toolbar-search",
@@ -8631,12 +8724,26 @@ class ModWebTests(unittest.TestCase):
             ]
             self.assertNotIn("Enabled ZIP", toolbar_text)
             self.assertIn("Client Pack", toolbar_text)
+            self.assertIn("Configure <!>", toolbar_text)
             self.assertIn("Clear", toolbar_text)
             self.assertIn("Download All/2", toolbar_text)
+            all_button_text = [button.text for button in ui.buttons]
+            self.assertNotIn("Publish & Download", all_button_text)
+            self.assertEqual(all_button_text.count("Save"), 1)
+            label_texts = [label.text for label in ui.labels]
+            self.assertLess(label_texts.index("Pack format"), label_texts.index("Optional mods"))
+            self.assertLess(label_texts.index("Optional mods"), label_texts.index("Required"))
+
+            sort_change_handler = ui.sort_change_handler
+            self.assertIsNotNone(sort_change_handler)
+            assert sort_change_handler is not None
+            sort_change_handler(SimpleNamespace(value=ModWebModSortOrder.TYPE.value))
+            self.assertEqual(rendered_mod_names[-2:], ["beta-forge.jar", "alpha-fabric.jar"])
+            rendered_mod_names.clear()
 
             search_handler = ui.inputs[0].handlers["update:model-value"]
             search_handler(SimpleNamespace(args="beta"))
-            self.assertEqual(rendered_mod_names, ["alpha-fabric.jar", "beta-forge.jar", "beta-forge.jar"])
+            self.assertEqual(rendered_mod_names, ["beta-forge.jar"])
             self.assertEqual(result_count_label.text, "1 of 2 mods")
 
             search_handler(SimpleNamespace(args="missing"))

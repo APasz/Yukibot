@@ -656,6 +656,7 @@ class ModWebBasePageModel:
     can_write_map_annotations: bool = field(default=False, kw_only=True)
     supports_chat: bool = field(default=False, kw_only=True)
     supports_updates: bool = field(default=False, kw_only=True)
+    client_pack_content_dirty: bool = field(default=False, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
     update_info: AppUpdateInfo | None = field(default=None, kw_only=True)
     update_status: AppUpdateStatus | None = field(default=None, kw_only=True)

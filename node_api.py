@@ -400,6 +400,7 @@ class NodeAppEntry:
     supports_chat: bool = False
     supports_updates: bool = False
     supports_sevendays_sandbox_options: bool = False
+    client_pack_content_dirty: bool = False
     runtime_fault: AppRuntimeFault | None = None
     update_info: AppUpdateInfo | None = None
     update_status: AppUpdateStatus | None = None
@@ -448,6 +449,7 @@ class NodeAppEntry:
         supports_chat = payload.get("supports_chat", False)
         supports_updates = payload.get("supports_updates", False)
         supports_sevendays_sandbox_options = payload.get("supports_sevendays_sandbox_options", False)
+        client_pack_content_dirty = payload.get("client_pack_content_dirty", False)
         raw_runtime_fault = payload.get("runtime_fault")
         raw_update_info = payload.get("update_info")
         raw_update_status = payload.get("update_status")
@@ -506,6 +508,8 @@ class NodeAppEntry:
             raise ValueError("Node app entry supports_updates is invalid.")
         if not isinstance(supports_sevendays_sandbox_options, bool):
             raise ValueError("Node app entry supports_sevendays_sandbox_options is invalid.")
+        if not isinstance(client_pack_content_dirty, bool):
+            raise ValueError("Node app entry client_pack_content_dirty is invalid.")
         if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
             raise ValueError("Node app entry runtime_fault is invalid.")
         if raw_update_info is not None and not isinstance(raw_update_info, Mapping):
@@ -579,6 +583,7 @@ class NodeAppEntry:
             supports_chat=supports_chat,
             supports_updates=supports_updates,
             supports_sevendays_sandbox_options=supports_sevendays_sandbox_options,
+            client_pack_content_dirty=client_pack_content_dirty,
             runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
             if raw_runtime_fault is not None
             else None,
@@ -640,6 +645,7 @@ class NodeAppEntry:
             "supports_chat": self.supports_chat,
             "supports_updates": self.supports_updates,
             "supports_sevendays_sandbox_options": self.supports_sevendays_sandbox_options,
+            "client_pack_content_dirty": self.client_pack_content_dirty,
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
             "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
             "update_status": self.update_status.to_mapping() if self.update_status is not None else None,
@@ -1117,6 +1123,22 @@ class NodeModPropertiesUpdateRequest(BaseModel):
     metadata_overrides: ModMetadataOverrides
     client_pack: ClientPackConfig | None = None
     launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
+
+
+class NodeClientPackModConfigUpdate(BaseModel):
+    mod_name: str = Field(min_length=1)
+    client_pack: ClientPackConfig
+
+
+class NodeClientPackConfigUpdateRequest(BaseModel):
+    mods: tuple[NodeClientPackModConfigUpdate, ...]
+
+    @model_validator(mode="after")
+    def validate_unique_mod_names(self) -> NodeClientPackConfigUpdateRequest:
+        mod_names = tuple(update.mod_name for update in self.mods)
+        if len(mod_names) != len(set(mod_names)):
+            raise ValueError("client-pack configuration contains duplicate mod names")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -4796,6 +4818,51 @@ class NodeApiService:
             )
             return result.to_mapping()
 
+        @nicegui_app.put(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/client-pack-config")
+        async def _update_client_pack_config(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API client-pack configuration request: node=%s app=%s",
+                self.node_name,
+                app_name,
+            )
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            return await self.update_client_pack_config(
+                app=self._resolve_app(app_name),
+                update=NodeClientPackConfigUpdateRequest.model_validate(payload),
+                actor_user_id=actor_user_id,
+            )
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/client-pack-config/publish")
+        async def _publish_client_pack_config(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            return await self.publish_client_pack_config(
+                app=self._resolve_app(app_name),
+                actor_user_id=actor_user_id,
+            )
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/configs")
         async def _list_configs(app_name: str, request: Request, access_token: str | None = None) -> dict[str, object]:
             traffic_log.info("Node API config list request: node=%s app=%s", self.node_name, app_name)
@@ -5473,6 +5540,7 @@ class NodeApiService:
             supports_chat=app.supports_chat_relay,
             supports_updates=update_info is not None,
             supports_sevendays_sandbox_options=bool(getattr(app, "supports_sevendays_sandbox_options", False)),
+            client_pack_content_dirty=app.cfg.client_pack_content_dirty,
             runtime_fault=getattr(app, "runtime_fault", None),
             update_info=update_info,
             update_status=update_status,
@@ -7941,9 +8009,7 @@ class NodeApiService:
                         selected_mod_names=frozenset(selected_mod_names or ()),
                         supplied=request.selected_only or bool(request.mod_names),
                     ),
-                    client_overrides_dir=(
-                        app.cfg.client_overrides_dir if capabilities.include_client_overrides else None
-                    ),
+                    client_overrides_dir=self._client_overrides_dir_for_pack(app),
                 )
             elif pack_purpose is PackPurpose.SERVER:
                 entries = build_server_pack_entries(app.has_mod_manager)
@@ -7973,21 +8039,7 @@ class NodeApiService:
 
         generated_pack_version: str | None = None
         if pack_purpose is PackPurpose.CLIENT:
-            version = app.cfg.version
-            hash_context = json.dumps(
-                {
-                    "format": request.pack_format.value,
-                    "app_version": None if version is None else version.model_dump(mode="json", exclude_none=True),
-                    "name": app.friendly,
-                    "summary": app.cfg.notes,
-                },
-                sort_keys=True,
-            )
-            current_hash = await asyncio.to_thread(
-                client_pack_content_hash,
-                entries,
-                format_name=hash_context,
-            )
+            current_hash = await self._client_pack_content_hash(app=app, entries=entries)
             if app.cfg.client_pack_current_hash != current_hash:
                 app.record_client_pack_content_hash(current_hash)
             if request.publish_client_pack:
@@ -8034,6 +8086,51 @@ class NodeApiService:
             archive_path,
         )
         return FileResponse(path=archive_path, filename=archive_path.name)
+
+    @staticmethod
+    async def _client_pack_content_hash(*, app: App, entries: tuple[ArchiveEntry, ...]) -> str:
+        version = app.cfg.version
+        hash_context = json.dumps(
+            {
+                "app_version": None if version is None else version.model_dump(mode="json", exclude_none=True),
+                "name": app.friendly,
+                "summary": app.cfg.notes,
+            },
+            sort_keys=True,
+        )
+        return await asyncio.to_thread(client_pack_content_hash, entries, format_name=hash_context)
+
+    @staticmethod
+    def _client_overrides_dir_for_pack(app: App) -> Path | None:
+        if not app.mod_capabilities.include_client_overrides:
+            return None
+        configured_dir = app.cfg.client_overrides_dir
+        if configured_dir is not None:
+            resolved_configured_dir = configured_dir.resolve()
+            if resolved_configured_dir.is_dir():
+                return resolved_configured_dir
+
+        fallback_dir = (app.directory / ".yukibot" / "client-overrides").resolve()
+        fallback_existed = fallback_dir.is_dir()
+        try:
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as xcp:
+            log.exception(
+                "Failed to create client overrides directory: app=%s path=%s",
+                app.name,
+                fallback_dir,
+            )
+            raise ClientPackValidationError(
+                f"Client overrides directory could not be created: {fallback_dir}"
+            ) from xcp
+        if not fallback_existed:
+            log.warning(
+                "Created fallback client overrides directory: app=%s configured_path=%s path=%s",
+                app.name,
+                configured_dir,
+                fallback_dir,
+            )
+        return fallback_dir
 
     def build_config_list(self, app: App, *, actor_user_id: int | None = None) -> NodeConfigList:
         configs: tuple[AppConfigFile, ...] = app.list_config_files()
@@ -8994,6 +9091,71 @@ class NodeApiService:
             message=f"Updated properties for {updated_mod.friendly}.",
             mod=self._mod_entry(updated_mod),
         )
+
+    async def update_client_pack_config(
+        self,
+        *,
+        app: App,
+        update: NodeClientPackConfigUpdateRequest,
+        actor_user_id: int,
+    ) -> dict[str, object]:
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
+        try:
+            updated_mods = await manager.update_client_pack_configs(
+                {item.mod_name: item.client_pack for item in update.mods}
+            )
+        except (ModuleNotFoundError, ValueError) as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+
+        traffic_log.info(
+            "Node API client-pack configuration updated: node=%s app=%s mods=%s actor=%s",
+            self.node_name,
+            app.name,
+            len(updated_mods),
+            actor_user_id,
+        )
+        app.invalidate_client_pack_content()
+        self._invalidate_mod_inventory(app.name)
+        return {
+            "app_name": app.name,
+            "updated_count": len(updated_mods),
+            "message": f"Updated client-pack configuration for {len(updated_mods)} mods.",
+        }
+
+    async def publish_client_pack_config(self, *, app: App, actor_user_id: int) -> dict[str, object]:
+        await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        try:
+            entries = build_client_pack_entries(
+                manager,
+                ClientPackSelection(),
+                client_overrides_dir=self._client_overrides_dir_for_pack(app),
+            )
+        except (ClientPackValidationError, NonDownloadableModError, ModuleNotFoundError) as xcp:
+            log.warning(
+                "Client-pack configuration publish rejected: app=%s actor=%s error=%s",
+                app.name,
+                actor_user_id,
+                xcp,
+            )
+            raise _http_exception(409, str(xcp)) from xcp
+        if not entries:
+            log.warning(
+                "Client-pack configuration publish rejected because the pack is empty: app=%s actor=%s",
+                app.name,
+                actor_user_id,
+            )
+            raise _http_exception(409, "The default client pack contains no mods.")
+        content_hash = await self._client_pack_content_hash(app=app, entries=entries)
+        version = app.publish_client_pack(content_hash)
+        return {
+            "app_name": app.name,
+            "published_version": version,
+            "message": f"Saved client-pack configuration as version {version}.",
+        }
 
     def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction:
         if not app.supports_console_actions:

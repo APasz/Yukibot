@@ -878,6 +878,13 @@ class ClientPackConfig(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
+    @field_validator("choice_group", mode="before")
+    @classmethod
+    def validate_choice_group(cls, value: object) -> object:
+        if isinstance(value, str) and any(character.isspace() for character in value):
+            raise ValueError("client-pack choice group IDs cannot contain whitespace")
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def preserve_legacy_optional_default(cls, raw: object) -> object:

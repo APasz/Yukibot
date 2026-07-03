@@ -73,6 +73,10 @@
             "main": "1.20.1",
             "framework": "47.4.10",
             "loader": "forge"
-        }
+        },
+        "client_pack_current_hash": "6bc33b5413334ba7105b25a070d068bd165ac154860d4f3505e8749a03e1c06d",
+        "client_pack_published_hash": "6bc33b5413334ba7105b25a070d068bd165ac154860d4f3505e8749a03e1c06d",
+        "client_pack_published_version": 1,
+        "client_pack_content_dirty": false
     }
 }

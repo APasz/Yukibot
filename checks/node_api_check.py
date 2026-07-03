@@ -92,6 +92,8 @@ from node_api import (
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
+    NodeClientPackConfigUpdateRequest,
+    NodeClientPackModConfigUpdate,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
@@ -2591,6 +2593,7 @@ class NodeApiTests(unittest.TestCase):
         app.cfg.lifecycle_notice_started = False
         app.cfg.lifecycle_notice_stopped = True
         app.cfg.lifecycle_notice_crashed = False
+        app.cfg.client_pack_content_dirty = True
         app.cfg.join_host = "play.example.test"
         app.cfg.join_port = 25565
         app.cfg.resource_points = SimpleNamespace(
@@ -2628,6 +2631,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertFalse(entry.lifecycle_notice_started)
         self.assertTrue(entry.lifecycle_notice_stopped)
         self.assertFalse(entry.lifecycle_notice_crashed)
+        self.assertTrue(entry.client_pack_content_dirty)
         self.assertIsNone(entry.relay_notice_player_session)
         self.assertIsNone(entry.relay_notice_player_death)
         self.assertIsNone(entry.relay_notice_progress)
@@ -3480,6 +3484,79 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.mod.friendly, "Example Override")
         self.assertEqual(result.mod.version, "3.0.0")
         self.assertEqual(result.mod.metadata_overrides, overrides)
+
+    def test_update_client_pack_config_uses_admin_access_and_single_bulk_write(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            alpha = _TestMod(Mod_Config(name="alpha.jar", directory=Path(temp_dir)))
+            beta = _TestMod(Mod_Config(name="beta.jar", directory=Path(temp_dir)))
+            alpha_config = ClientPackConfig(policy=ClientPackPolicy.OPTIONAL, default_selected=True)
+            beta_config = ClientPackConfig(policy=ClientPackPolicy.REQUIRED)
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.update_client_pack_configs = AsyncMock(return_value=(alpha, beta))
+            app = _build_app(manager)
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+
+            result = asyncio.run(
+                service.update_client_pack_config(
+                    app=app,
+                    update=NodeClientPackConfigUpdateRequest(
+                        mods=(
+                            NodeClientPackModConfigUpdate(mod_name=alpha.name, client_pack=alpha_config),
+                            NodeClientPackModConfigUpdate(mod_name=beta.name, client_pack=beta_config),
+                        )
+                    ),
+                    actor_user_id=42,
+                )
+            )
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.admin)
+        manager.update_client_pack_configs.assert_awaited_once_with(
+            {alpha.name: alpha_config, beta.name: beta_config}
+        )
+        self.assertEqual(result["updated_count"], 2)
+
+    def test_publish_client_pack_config_saves_default_pack_without_downloading(self) -> None:
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        app = _build_app(manager)
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        with TemporaryDirectory() as temp_dir:
+            app.directory = Path(temp_dir)
+            with (
+                patch("node_api.build_client_pack_entries", return_value=(Mock(),)),
+                patch.object(
+                    service,
+                    "_client_pack_content_hash",
+                    new=AsyncMock(return_value="a" * 64),
+                ),
+            ):
+                result = asyncio.run(service.publish_client_pack_config(app=app, actor_user_id=42))
+
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.admin)
+        self.assertEqual(result["published_version"], 1)
+        self.assertEqual(app.cfg.client_pack_published_hash, "a" * 64)
+        self.assertFalse(app.cfg.client_pack_content_dirty)
+
+    def test_missing_client_overrides_directory_creates_logged_yukibot_fallback(self) -> None:
+        app = _build_app(Mock())
+        with TemporaryDirectory() as temp_dir:
+            app.directory = Path(temp_dir)
+            app.cfg.client_overrides_dir = Path(temp_dir) / "client-overrides"
+
+            with self.assertLogs("node_api", level="WARNING") as captured:
+                resolved = NodeApiService._client_overrides_dir_for_pack(app)
+
+            self.assertEqual(resolved, Path(temp_dir) / ".yukibot" / "client-overrides")
+            self.assertTrue(resolved.is_dir())
+        self.assertIn("Created fallback client overrides directory", "\n".join(captured.output))
 
     def test_mutate_app_start_blocks_when_another_app_is_running(self) -> None:
         service = NodeApiService()
