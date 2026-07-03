@@ -20,6 +20,7 @@ from apps._config import (
     ClientPackPolicy,
     CurseForgeModMetadata,
     ModClassificationOverride,
+    Mod_Config,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPlacement,
@@ -83,6 +84,29 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         pointer = source_dir / name
         pointer.write_text("payload")
         return pointer
+
+    def _insert_existing_mod(
+        self,
+        manager: Mod_Manager,
+        name: str,
+        *,
+        placement: ModPlacement = ModPlacement.SERVER_ENABLED,
+        mod_type: ModType = ModType.REGULAR,
+        download_block_reason: ModDownloadBlockReason | None = None,
+    ) -> Mod:
+        mod = _FileMod(
+            Mod_Config(
+                name=name,
+                directory=self.mods_dir,
+                placement=placement,
+                mod_type=mod_type,
+                download_block_reason=download_block_reason,
+            )
+        )
+        mod.storage_path.write_text("payload", encoding="utf-8")
+        manager.index[mod.name] = mod
+        manager._rebuild_lookup()
+        return mod
 
     async def _build_client_pack_manager(self) -> Mod_Manager:
         manager = self._build_manager()
@@ -452,6 +476,96 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
             {entry.archive_path.as_posix() for entry in entries},
             {"required.zip", "client.zip", "optional-default.zip", "choice-default.zip"},
         )
+
+    def test_client_pack_candidate_matrix(self) -> None:
+        manager = self._build_manager()
+        shared = self._insert_existing_mod(manager, "shared.zip")
+        client_side = self._insert_existing_mod(manager, "client-side.zip", mod_type=ModType.CLIENT)
+        client_only = self._insert_existing_mod(
+            manager,
+            "client-only.zip",
+            placement=ModPlacement.CLIENT_ONLY,
+            mod_type=ModType.CLIENT,
+        )
+        disabled = self._insert_existing_mod(
+            manager,
+            "disabled.zip",
+            placement=ModPlacement.SERVER_DISABLED,
+        )
+        server = self._insert_existing_mod(manager, "server.zip", mod_type=ModType.SERVER)
+
+        entries = build_client_pack_entries(
+            manager,
+            ClientPackSelection(),
+            client_overrides_dir=None,
+        )
+
+        self.assertEqual(
+            {entry.archive_path.as_posix() for entry in entries},
+            {shared.name, client_side.name, client_only.name},
+        )
+        self.assertTrue(shared.client_pack_eligible)
+        self.assertTrue(client_side.client_pack_eligible)
+        self.assertTrue(client_only.client_pack_eligible)
+        self.assertFalse(disabled.client_pack_eligible)
+        self.assertFalse(server.client_pack_eligible)
+
+    def test_client_pack_rejects_explicitly_selected_disabled_mod(self) -> None:
+        manager = self._build_manager()
+        disabled = self._insert_existing_mod(
+            manager,
+            "disabled.zip",
+            placement=ModPlacement.SERVER_DISABLED,
+        )
+
+        with self.assertRaisesRegex(ClientPackValidationError, "not eligible.*disabled.zip"):
+            build_client_pack_entries(
+                manager,
+                ClientPackSelection(
+                    selected_mod_names=frozenset({disabled.name}),
+                    supplied=True,
+                ),
+                client_overrides_dir=None,
+            )
+
+    def test_client_pack_rejects_explicitly_selected_server_only_mod(self) -> None:
+        manager = self._build_manager()
+        server = self._insert_existing_mod(
+            manager,
+            "server.zip",
+            mod_type=ModType.SERVER,
+            download_block_reason=ModDownloadBlockReason.SERVER_ONLY,
+        )
+
+        with self.assertRaisesRegex(ClientPackValidationError, "not eligible.*server.zip"):
+            build_client_pack_entries(
+                manager,
+                ClientPackSelection(
+                    selected_mod_names=frozenset({server.name}),
+                    supplied=True,
+                ),
+                client_overrides_dir=None,
+            )
+
+    def test_client_only_mod_requires_client_side_classification(self) -> None:
+        manager = self._build_manager()
+        client = self._insert_existing_mod(
+            manager,
+            "client.zip",
+            placement=ModPlacement.CLIENT_ONLY,
+            mod_type=ModType.REGULAR,
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires client-side classification"):
+            manager.validate_client_pack_configuration()
+        with self.assertRaisesRegex(ValueError, "requires client-side classification"):
+            _ = client.client_pack_eligible
+        with self.assertRaisesRegex(ClientPackValidationError, "requires client-side classification"):
+            build_client_pack_entries(
+                manager,
+                ClientPackSelection(),
+                client_overrides_dir=None,
+            )
 
     async def test_client_pack_uses_explicit_optional_and_alternative_selection(self) -> None:
         manager = await self._build_client_pack_manager()

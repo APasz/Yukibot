@@ -31,8 +31,8 @@ from apps._config import (
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPlacement,
-    ModSide,
     ModType,
+    is_client_pack_candidate,
 )
 from apps._updater import (
     AppUpdateBranchState,
@@ -842,7 +842,7 @@ class ModWebTests(unittest.TestCase):
             size_text=size_text,
             placement=resolved_placement,
             server_loadable=resolved_placement.server_loadable,
-            client_pack_eligible=mod_type.side is not ModSide.SERVER
+            client_pack_eligible=is_client_pack_candidate(resolved_placement, mod_type.side)
             and (
                 downloadable
                 or (
@@ -8158,6 +8158,12 @@ class ModWebTests(unittest.TestCase):
             },
         )
 
+    def test_server_and_admin_pack_downloads_require_sudo(self) -> None:
+        self.assertIs(ModWebService._mod_download_required_level(None), Power_Level.visitor)
+        self.assertIs(ModWebService._mod_download_required_level(PackPurpose.CLIENT), Power_Level.visitor)
+        self.assertIs(ModWebService._mod_download_required_level(PackPurpose.SERVER), Power_Level.sudo)
+        self.assertIs(ModWebService._mod_download_required_level(PackPurpose.ADMIN), Power_Level.sudo)
+
     def test_config_root_download_url_uses_configs_read_scope(self) -> None:
         server = replace(config.MOD_WEB_SERVER, node_name="yuki", token_secret="shared-secret")
         node = ModWebNodeLink(
@@ -8222,6 +8228,15 @@ class ModWebTests(unittest.TestCase):
                 kind=ModDownloadKind.SINGLE,
                 app_friendly="Minecraft Alpha",
             )
+
+    def test_client_pack_download_feedback_is_specific(self) -> None:
+        self.assertEqual(
+            ModWebService._download_feedback_message(
+                kind=ModDownloadKind.CLIENT_PACK,
+                app_friendly="Minecraft Alpha",
+            ),
+            "Preparing client pack for Minecraft Alpha.",
+        )
 
     def test_filter_mod_entries_matches_name_version_and_state_tokens(self) -> None:
         service = ModWebService()
@@ -8333,6 +8348,20 @@ class ModWebTests(unittest.TestCase):
                 optional_names=frozenset(),
                 choice_names={},
             )
+
+    def test_client_pack_formats_only_offer_launcher_exports_for_minecraft(self) -> None:
+        self.assertEqual(
+            ModWebService._client_pack_format_options(None),
+            {PackFormat.GENERIC_ZIP.value: "Generic ZIP"},
+        )
+        self.assertEqual(
+            ModWebService._client_pack_format_options("minecraft"),
+            {
+                PackFormat.GENERIC_ZIP.value: "Generic ZIP",
+                PackFormat.MODRINTH.value: "Modrinth (.mrpack)",
+                PackFormat.CURSEFORGE.value: "CurseForge ZIP",
+            },
+        )
 
     def test_node_mod_entry_mapping_preserves_client_pack_policy(self) -> None:
         entry = self._mod_entry(
@@ -8595,6 +8624,15 @@ class ModWebTests(unittest.TestCase):
                 label for label in ui.labels if label.class_value == "mod-mods-toolbar-result-count"
             )
             self.assertEqual(result_count_label.text, "2 mods")
+            toolbar_text = [
+                button.text
+                for button in ui.buttons
+                if button.class_value is not None and "mod-toolbar-button" in button.class_value
+            ]
+            self.assertNotIn("Enabled ZIP", toolbar_text)
+            self.assertIn("Client Pack", toolbar_text)
+            self.assertIn("Clear", toolbar_text)
+            self.assertIn("Download All/2", toolbar_text)
 
             search_handler = ui.inputs[0].handlers["update:model-value"]
             search_handler(SimpleNamespace(args="beta"))
@@ -8870,7 +8908,7 @@ class ModWebTests(unittest.TestCase):
         toolbar_text = [
             button.text for button in ui.buttons if button.class_value is not None and "mod-toolbar-button" in button.class_value
         ]
-        self.assertIn("Delete", toolbar_text)
+        self.assertTrue(any(text.startswith("Delete") for text in toolbar_text))
         self.assertNotIn("on_multi_upload", ui.upload_kwargs)
         self.assertEqual(
             ui.upload_control.props["url"],

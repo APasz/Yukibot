@@ -169,6 +169,9 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-details-dialog-card", css)
         self.assertIn(".mod-app-details-section", css)
         self.assertIn(".mod-app-details-field", css)
+        self.assertIn(".mod-details-tab-row", css)
+        self.assertIn(".mod-details-tab-button", css)
+        self.assertIn(".mod-list-button.secondary.mod-details-tab-active", css)
         self.assertIn(".mod-mod-override-field", css)
         self.assertRegex(
             css,

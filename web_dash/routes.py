@@ -51,6 +51,12 @@ class _ModWebClientMapErrorReport(BaseModel):
 
 class ModWebRoutesMixin(ModWebServiceSupport):
     @staticmethod
+    def _mod_download_required_level(pack_purpose: PackPurpose | None) -> Power_Level:
+        if pack_purpose in {PackPurpose.SERVER, PackPurpose.ADMIN}:
+            return Power_Level.sudo
+        return Power_Level.visitor
+
+    @staticmethod
     def _static_text_asset_response(
         *,
         request: Request,
@@ -734,7 +740,10 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             pack_format: PackFormat = PackFormat.GENERIC_ZIP,
             pack_version: str | None = None,
         ) -> RedirectResponse:
-            user = self._require_http_user(request=request, required_level=Power_Level.visitor)
+            user = self._require_http_user(
+                request=request,
+                required_level=self._mod_download_required_level(pack_purpose),
+            )
             node = self._remote_node_link(node_name)
             mod_names = tuple(request.query_params.getlist("mod_name"))
             query = self._download_query(

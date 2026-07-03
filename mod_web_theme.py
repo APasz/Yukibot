@@ -3483,6 +3483,20 @@ class ModWebTheme:
                 .mod-app-details-field {{
                     width: 100%;
                 }}
+                .mod-details-tab-row {{
+                    display: grid !important;
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }}
+                .mod-details-tab-button {{
+                    width: 100%;
+                    min-width: 0;
+                }}
+                .mod-list-button.secondary.mod-details-tab-active {{
+                    color: #faf5ff !important;
+                    background: #2e1648 !important;
+                    border-color: #8b5cf6 !important;
+                    box-shadow: inset 0 -2px 0 #a78bfa !important;
+                }}
                 .mod-app-details-point-field {{
                     flex: 0 1 11.5rem;
                     max-width: 11.5rem;

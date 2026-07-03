@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import zipfile
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -22,9 +21,6 @@ from apps._config import (
     ModType,
 )
 from apps._mod import Mod, Mod_Manager
-
-log = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True, slots=True)
 class ModMutationResult:
@@ -167,6 +163,20 @@ def build_client_pack_entries(
     for selected_name in selection.selected_mod_names:
         selected_mod = manager.get(selected_name)
         selected_names.add(selected_mod.name)
+
+    try:
+        client_mods = tuple(mod for mod in mods if mod.client_pack_candidate)
+    except ValueError as xcp:
+        raise ClientPackValidationError(str(xcp)) from xcp
+
+    eligible_names = {mod.name for mod in client_mods}
+    ineligible_selected_names = selected_names.difference(eligible_names)
+    if ineligible_selected_names:
+        names = ", ".join(sorted(ineligible_selected_names))
+        raise ClientPackValidationError(f"Selected mods are not eligible for client packs: {names}")
+
+    for selected_name in selected_names:
+        selected_mod = manager.get(selected_name)
         client_pack = selected_mod.cfg.client_pack
         allows_bundled_required = (
             client_pack.policy is ClientPackPolicy.REQUIRED and client_pack.bundled_required
@@ -174,7 +184,6 @@ def build_client_pack_entries(
         if not selected_mod.downloadable and not allows_bundled_required:
             require_downloadable(selected_mod)
 
-    client_mods = tuple(mod for mod in mods if mod.mod_type.side is not ModSide.SERVER)
     choice_groups: dict[str, list[Mod]] = {}
     selected_mods: list[Mod] = []
     for mod in client_mods:
@@ -212,13 +221,6 @@ def build_client_pack_entries(
                 f"Client-pack choice group {group_name!r} has multiple selections: {selected}"
             )
         selected_mods.append(explicitly_selected[0] if explicitly_selected else defaults[0])
-
-    eligible_names = {mod.name for mod in client_mods}
-    ineligible_selected_names = selected_names.difference(eligible_names)
-    if ineligible_selected_names:
-        log_names = ", ".join(sorted(ineligible_selected_names))
-        # Server-only selections are ignored rather than copied into the pack.
-        log.info("Excluded server-only client-pack selections: %s", log_names)
 
     entries: list[ArchiveEntry] = [ModArchiveEntry.from_mod(mod) for mod in selected_mods]
     if client_overrides_dir is not None:

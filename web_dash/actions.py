@@ -17,6 +17,7 @@ from .runtime_imports import (
     Checkbox,
     ClientPackPolicy,
     CurseForgeModMetadata,
+    Literal,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPlacement,
@@ -845,6 +846,21 @@ class ModWebActionsMixin(ModWebServiceSupport):
             user,
             required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
         )
+        active_metadata_panel: Literal["overrides", "launcher"] | None = None
+
+        def toggle_metadata_panel(panel: Literal["overrides", "launcher"]) -> None:
+            nonlocal active_metadata_panel
+            active_metadata_panel = None if active_metadata_panel == panel else panel
+            overrides_section.set_visibility(active_metadata_panel == "overrides")
+            launcher_metadata_section.set_visibility(active_metadata_panel == "launcher")
+            if active_metadata_panel == "overrides":
+                overrides_button.classes(add="mod-details-tab-active")
+            else:
+                overrides_button.classes(remove="mod-details-tab-active")
+            if active_metadata_panel == "launcher":
+                launcher_metadata_button.classes(add="mod-details-tab-active")
+            else:
+                launcher_metadata_button.classes(remove="mod-details-tab-active")
 
         async def save_properties() -> None:
             try:
@@ -1031,10 +1047,15 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     .props("filled square dense hide-bottom-space color=accent options-dark")
                                     .classes("mod-app-details-field")
                                 )
-                            ui.button(
-                                "Overrides",
-                                on_click=lambda: overrides_section.set_visibility(True),
-                            ).classes("mod-list-button secondary")
+                            with ui.row().classes("w-full gap-2 mod-details-tab-row"):
+                                overrides_button = ui.button(
+                                    "Overrides",
+                                    on_click=lambda: toggle_metadata_panel("overrides"),
+                                ).classes("mod-list-button secondary mod-details-tab-button")
+                                launcher_metadata_button = ui.button(
+                                    "Launcher Metadata",
+                                    on_click=lambda: toggle_metadata_panel("launcher"),
+                                ).classes("mod-list-button secondary mod-details-tab-button")
                             with ui.column().classes("w-full gap-2") as overrides_section:
                                 ui.label("Overrides").classes("mod-stat-label")
                                 ui.label(
@@ -1086,46 +1107,68 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     )
                                 )
                             overrides_section.set_visibility(False)
-                            ui.label("Launcher metadata").classes("mod-stat-label")
-                            ui.label(
-                                "Leave every field for a platform blank to bundle the local file instead."
-                            ).classes("mod-subtitle text-xs")
-                            with ui.grid(columns=2).classes("w-full gap-2"):
-                                modrinth_project_input = ui.input(
-                                    "Modrinth project ID",
-                                    value=(
-                                        "" if entry.platforms.modrinth is None
-                                        else entry.platforms.modrinth.project_id
-                                    ),
-                                ).props("filled square dense clearable hide-bottom-space color=accent")
-                                modrinth_version_input = ui.input(
-                                    "Modrinth version ID",
-                                    value=(
-                                        "" if entry.platforms.modrinth is None
-                                        else entry.platforms.modrinth.version_id
-                                    ),
-                                ).props("filled square dense clearable hide-bottom-space color=accent")
-                                modrinth_url_input = ui.input(
-                                    "Modrinth HTTPS download URL",
-                                    value=(
-                                        "" if entry.platforms.modrinth is None
-                                        else entry.platforms.modrinth.download_url
-                                    ),
-                                ).props("filled square dense clearable hide-bottom-space color=accent")
-                                curseforge_project_input = ui.input(
-                                    "CurseForge project ID",
-                                    value=(
-                                        "" if entry.platforms.curseforge is None
-                                        else str(entry.platforms.curseforge.project_id)
-                                    ),
-                                ).props("filled square dense clearable hide-bottom-space color=accent")
-                                curseforge_file_input = ui.input(
-                                    "CurseForge file ID",
-                                    value=(
-                                        "" if entry.platforms.curseforge is None
-                                        else str(entry.platforms.curseforge.file_id)
-                                    ),
-                                ).props("filled square dense clearable hide-bottom-space color=accent")
+                            with ui.column().classes("w-full gap-2") as launcher_metadata_section:
+                                ui.label("Launcher Metadata").classes("mod-stat-label")
+                                ui.label(
+                                    "Leave every field for a platform blank to bundle the local file instead."
+                                ).classes("mod-subtitle text-xs")
+                                with ui.grid(columns=2).classes("w-full gap-2"):
+                                    modrinth_project_input = (
+                                        ui.input(
+                                            "Modrinth project ID",
+                                            value=(
+                                                "" if entry.platforms.modrinth is None
+                                                else entry.platforms.modrinth.project_id
+                                            ),
+                                        )
+                                        .props("filled square dense clearable hide-bottom-space color=accent")
+                                        .classes("mod-app-details-field mod-mod-launcher-field")
+                                    )
+                                    modrinth_version_input = (
+                                        ui.input(
+                                            "Modrinth version ID",
+                                            value=(
+                                                "" if entry.platforms.modrinth is None
+                                                else entry.platforms.modrinth.version_id
+                                            ),
+                                        )
+                                        .props("filled square dense clearable hide-bottom-space color=accent")
+                                        .classes("mod-app-details-field mod-mod-launcher-field")
+                                    )
+                                    modrinth_url_input = (
+                                        ui.input(
+                                            "Modrinth HTTPS download URL",
+                                            value=(
+                                                "" if entry.platforms.modrinth is None
+                                                else entry.platforms.modrinth.download_url
+                                            ),
+                                        )
+                                        .props("filled square dense clearable hide-bottom-space color=accent")
+                                        .classes("mod-app-details-field mod-mod-launcher-field")
+                                    )
+                                    curseforge_project_input = (
+                                        ui.input(
+                                            "CurseForge project ID",
+                                            value=(
+                                                "" if entry.platforms.curseforge is None
+                                                else str(entry.platforms.curseforge.project_id)
+                                            ),
+                                        )
+                                        .props("filled square dense clearable hide-bottom-space color=accent")
+                                        .classes("mod-app-details-field mod-mod-launcher-field")
+                                    )
+                                    curseforge_file_input = (
+                                        ui.input(
+                                            "CurseForge file ID",
+                                            value=(
+                                                "" if entry.platforms.curseforge is None
+                                                else str(entry.platforms.curseforge.file_id)
+                                            ),
+                                        )
+                                        .props("filled square dense clearable hide-bottom-space color=accent")
+                                        .classes("mod-app-details-field mod-mod-launcher-field")
+                                    )
+                            launcher_metadata_section.set_visibility(False)
                     if available_actions:
                         with ui.column().classes("gap-2"):
                             ui.label("Privileged Actions").classes("mod-stat-label")
@@ -1269,6 +1312,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return f"Preparing enabled mod download for {app_friendly}."
             case ModDownloadKind.ALL:
                 return f"Preparing full mod download for {app_friendly}."
+            case ModDownloadKind.CLIENT_PACK:
+                return f"Preparing client pack for {app_friendly}."
             case ModDownloadKind.SELECTED:
                 if selected_count is None or selected_count < 1:
                     raise ValueError("Selected downloads require a positive selected_count.")

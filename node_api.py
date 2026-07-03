@@ -77,8 +77,8 @@ from apps._config import (
     ModMetadataOverrides,
     ModPlacement,
     ModPlatformMetadata,
-    ModSide,
     ModType,
+    is_client_pack_candidate,
     normalise_activity_provider_ids,
     normalise_app_title_font,
 )
@@ -1007,7 +1007,7 @@ class NodeModEntry:
         if server_loadable is not placement.server_loadable:
             raise ValueError("Node mod server_loadable conflicts with placement.")
         raw_client_pack_eligible = payload.get("client_pack_eligible")
-        expected_client_pack_eligible = mod_type.side is not ModSide.SERVER and (
+        expected_client_pack_eligible = is_client_pack_candidate(placement, mod_type.side) and (
             downloadable
             or (client_pack.policy is ClientPackPolicy.REQUIRED and client_pack.bundled_required)
         )

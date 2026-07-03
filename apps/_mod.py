@@ -22,8 +22,8 @@ from apps._config import (
     ModMetadataOverrides,
     ModPlacement,
     ModPlatformMetadata,
-    ModSide,
     ModType,
+    is_client_pack_candidate,
 )
 
 log = logging.getLogger(__name__)
@@ -151,7 +151,11 @@ class Mod(ABC):
         has_eligible_artifact = self.downloadable or (
             client_pack.policy is ClientPackPolicy.REQUIRED and client_pack.bundled_required
         )
-        return has_eligible_artifact and self.mod_type.side is not ModSide.SERVER
+        return self.client_pack_candidate and has_eligible_artifact
+
+    @property
+    def client_pack_candidate(self) -> bool:
+        return is_client_pack_candidate(self.cfg.placement, self.mod_type.side)
 
     @property
     def logical_archive_name(self) -> str:
@@ -570,7 +574,7 @@ class Mod_Manager:
     def validate_client_pack_configuration(self, mods: Iterable[Mod] | None = None) -> None:
         choice_groups: dict[str, list[Mod]] = {}
         for mod in self.index.values() if mods is None else mods:
-            if mod.mod_type.side is ModSide.SERVER:
+            if not mod.client_pack_candidate:
                 continue
             client_pack = mod.cfg.client_pack
             if client_pack.policy is ClientPackPolicy.REQUIRED:

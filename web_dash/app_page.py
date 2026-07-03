@@ -60,6 +60,7 @@ from .runtime_imports import (
     Label,
     LiteralString,
     ModPlacement,
+    ModType,
     ModWebUser,
     NodeAppActivityProviderEntry,
     NodeAppMutationAction,
@@ -75,6 +76,7 @@ from .runtime_imports import (
     NodeSettingList,
     NodeSystemSummary,
     PackFormat,
+    PackPurpose,
     Power_Level,
     Select,
     Timer,
@@ -3506,6 +3508,18 @@ class ModWebAppPageMixin(
             )
         )
 
+    @staticmethod
+    def _client_pack_format_options(app_scope: str | None) -> dict[str, str]:
+        options: dict[str, str] = {PackFormat.GENERIC_ZIP.value: "Generic ZIP"}
+        if app_scope == "minecraft":
+            options.update(
+                {
+                    PackFormat.MODRINTH.value: "Modrinth (.mrpack)",
+                    PackFormat.CURSEFORGE.value: "CurseForge ZIP",
+                }
+            )
+        return options
+
     def _render_mods_section(
         self,
         *,
@@ -3513,7 +3527,6 @@ class ModWebAppPageMixin(
         model: ModWebPageModel,
         user: ModWebUser,
     ) -> None:
-        selected_mod_names: set[str] = set[str]()
         checkboxes: dict[str, Checkbox] = {}
         mod_options = self._mod_options(model.mods.mods)
         show_search: bool = len(mod_options) > 1
@@ -3523,6 +3536,11 @@ class ModWebAppPageMixin(
         downloadable_names: tuple[str, ...] = tuple[str, ...](
             entry.name for entry in model.mods.mods if entry.downloadable
         )
+        selected_mod_names: set[str] = {
+            entry.name
+            for entry in model.mods.mods
+            if entry.downloadable and entry.mod_type not in {ModType.BUILTIN, ModType.SERVER}
+        }
         optional_client_entries: tuple[NodeModEntry, ...] = tuple(
             entry
             for entry in model.mods.mods
@@ -3539,7 +3557,7 @@ class ModWebAppPageMixin(
                 *client_choice_groups.get(client_pack.choice_group, ()),
                 entry,
             )
-        has_client_pack_choices: bool = bool(optional_client_entries or client_choice_groups)
+        has_client_pack_entries: bool = any(entry.client_pack_eligible for entry in model.mods.mods)
         client_choice_defaults: dict[str, str] = {}
         for group_name, choices in client_choice_groups.items():
             defaults: tuple[NodeModEntry, ...] = tuple(entry for entry in choices if entry.client_pack.default_choice)
@@ -3655,9 +3673,6 @@ class ModWebAppPageMixin(
                 return
             if selected_mod_names:
                 ui.notify("No selected mods are downloadable.", type="warning")
-                return
-            if has_client_pack_choices:
-                client_pack_dialog.open()
                 return
             await self._start_download(
                 ui=ui,
@@ -3791,6 +3806,7 @@ class ModWebAppPageMixin(
 
         optional_client_checkboxes: dict[str, Checkbox] = {}
         client_choice_selects: dict[str, Select] = {}
+        client_pack_version_input: Input | None = None
 
         with ui.dialog() as upload_placement_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -3813,7 +3829,9 @@ class ModWebAppPageMixin(
 
         async def download_configured_client_pack() -> None:
             pack_format = PackFormat(_value_as_text(client_pack_format_select))
-            pack_version = _value_as_text(client_pack_version_input).strip()
+            pack_version = (
+                "" if client_pack_version_input is None else _value_as_text(client_pack_version_input).strip()
+            )
             if pack_format is not PackFormat.GENERIC_ZIP and not pack_version:
                 ui.notify("Pack version is required for launcher formats.", type="warning")
                 return
@@ -3840,13 +3858,14 @@ class ModWebAppPageMixin(
                 return
             client_pack_dialog.close()
             query: str = urlencode(
-                {
-                    "selected_only": "true",
-                    "client_pack": "true",
-                    "pack_format": pack_format.value,
-                    "pack_version": pack_version,
-                    "mod_name": list(mod_names),
-                },
+                self._download_query(
+                    enabled_only=False,
+                    selected_only=True,
+                    mod_names=mod_names,
+                    pack_purpose=PackPurpose.CLIENT,
+                    pack_format=pack_format,
+                    pack_version=(pack_version or None) if pack_format is not PackFormat.GENERIC_ZIP else None,
+                ),
                 doseq=True,
             )
             await self._start_download(
@@ -3855,41 +3874,37 @@ class ModWebAppPageMixin(
                 model=model,
                 url=f"{self._download_base_url(model)}?{query}",
                 message=self._download_feedback_message(
-                    kind=ModDownloadKind.SELECTED,
+                    kind=ModDownloadKind.CLIENT_PACK,
                     app_friendly=model.app_friendly,
-                    selected_count=len(mod_names),
                 ),
                 filenames=(f"{model.app_name}-client-pack{pack_format.suffix}",),
             )
 
         client_pack_dialog = ui.dialog()
-        if has_client_pack_choices:
+        if has_client_pack_entries:
             with client_pack_dialog:
                 with ui.card().classes("mod-card mod-dialog-card"):
                     with ui.column().classes("w-full gap-4 p-5"):
                         with ui.column().classes("gap-0"):
                             ui.label("Configure Client Pack").classes("text-xl font-black mod-title-small")
-                            ui.label("Required mods are always included. Optional mods start selected.").classes(
-                                "mod-subtitle text-sm"
-                            )
+                            ui.label(
+                                "Required mods are always included. Optional mods use their configured defaults."
+                            ).classes("mod-subtitle text-sm")
                         client_pack_format_select = (
                             ui.select(
-                                {
-                                    PackFormat.GENERIC_ZIP.value: "Generic ZIP",
-                                    PackFormat.MODRINTH.value: "Modrinth (.mrpack)",
-                                    PackFormat.CURSEFORGE.value: "CurseForge ZIP",
-                                },
+                                self._client_pack_format_options(model.app_scope),
                                 value=PackFormat.GENERIC_ZIP.value,
                                 label="Pack format",
                             )
                             .props("filled square dense hide-bottom-space color=accent options-dark")
                             .classes("w-full mod-config-select")
                         )
-                        client_pack_version_input = (
-                            ui.input("Pack version", value="1.0.0")
-                            .props("filled square dense clearable hide-bottom-space color=accent")
-                            .classes("w-full mod-config-select")
-                        )
+                        if model.app_scope == "minecraft":
+                            client_pack_version_input = (
+                                ui.input("Pack version (launcher formats)", value="1.0.0")
+                                .props("filled square dense clearable hide-bottom-space color=accent")
+                                .classes("w-full mod-config-select")
+                            )
                         required_entries: tuple[NodeModEntry, ...] = tuple(
                             entry
                             for entry in model.mods.mods
@@ -3899,11 +3914,7 @@ class ModWebAppPageMixin(
                             with ui.column().classes("w-full gap-2"):
                                 ui.label("Required").classes("mod-stat-label")
                                 for entry in required_entries:
-                                    required_checkbox: Checkbox = ui.checkbox(
-                                        entry.friendly,
-                                        value=True,
-                                    ).props("dense")
-                                    required_checkbox.disable()
+                                    ui.label(entry.friendly).classes("mod-pill")
                         if optional_client_entries:
                             with ui.column().classes("w-full gap-2"):
                                 ui.label("Optional").classes("mod-stat-label")
@@ -4014,6 +4025,7 @@ class ModWebAppPageMixin(
                     user=user,
                     toggle_selection=toggle_selection,
                     download_selected=download_selected,
+                    open_client_pack=client_pack_dialog.open if has_client_pack_entries else None,
                     delete_selected=delete_dialog.open,
                     upload_mod=upload_picker_action,
                     show_search=show_search,
@@ -4632,6 +4644,7 @@ class ModWebAppPageMixin(
         toggle_selection: Callable[[], None],
         download_selected: Callable[[], Awaitable[None]],
         delete_selected: Callable[[], None],
+        open_client_pack: Callable[[], None] | None = None,
         upload_mod: Callable[[], object] | None = None,
         show_search: bool = False,
         on_search: Callable[[ModWebEventArgumentsContainer], None] | None = None,
@@ -4698,6 +4711,10 @@ class ModWebAppPageMixin(
                     selection_button = ui.button("", on_click=toggle_selection).classes(
                         "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                     )
+                    if open_client_pack is not None:
+                        ui.button("Client Pack", on_click=open_client_pack).classes(
+                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                        )
                     download_button = ui.button("", on_click=download_selected).classes(
                         "mod-list-button mod-toolbar-button mod-toolbar-button-fill mod-toolbar-primary"
                     )

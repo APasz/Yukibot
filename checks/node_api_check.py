@@ -3238,6 +3238,24 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.source_path, str(client_path))
         self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()), entry)
 
+    def test_mod_entry_marks_server_disabled_mod_as_client_pack_ineligible(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mods_dir = Path(temp_dir)
+            disabled_path = mods_dir / "example.jar.disabled"
+            disabled_path.write_bytes(b"mod-data")
+            mod = _TestMod(
+                Mod_Config(
+                    name="example.jar",
+                    directory=mods_dir,
+                    placement=ModPlacement.SERVER_DISABLED,
+                )
+            )
+
+            entry = NodeApiService._mod_entry(mod)
+
+        self.assertFalse(entry.client_pack_eligible)
+        self.assertFalse(NodeModEntry.from_mapping(entry.to_mapping()).client_pack_eligible)
+
     def test_mutate_mod_enable_requires_admin_for_regular_mods(self) -> None:
         with TemporaryDirectory() as temp_dir:
             mod_path = Path(temp_dir) / "example.jar"
@@ -5441,11 +5459,26 @@ class NodeApiTests(unittest.TestCase):
                 response = asyncio.run(
                     NodeApiService().build_mod_download_response(
                         app=app,
-                        request=NodeDownloadRequest(mod_names=tuple(mods), client_pack=True),
+                        request=NodeDownloadRequest(client_pack=True),
                     )
                 )
                 with zipfile.ZipFile(Path(response.path)) as archive:
                     self.assertEqual(sorted(archive.namelist()), ["client.jar", "regular.jar"])
+
+                with self.assertRaises(HTTPException) as raised:
+                    asyncio.run(
+                        NodeApiService().build_mod_download_response(
+                            app=app,
+                            request=NodeDownloadRequest(
+                                mod_names=(server.name,),
+                                selected_only=True,
+                                client_pack=True,
+                            ),
+                        )
+                    )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 400)
+        self.assertIn("not eligible", str(getattr(raised.exception, "detail")))
 
     def test_client_pack_archive_includes_client_overrides(self) -> None:
         with TemporaryDirectory() as temp_dir:

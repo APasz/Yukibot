@@ -624,6 +624,19 @@ class ModPlacement(enum.StrEnum):
                 return "Client only"
 
 
+def is_client_pack_candidate(placement: ModPlacement, side: ModSide) -> bool:
+    """Return whether a mod placement and side may participate in client packs."""
+    if placement is ModPlacement.CLIENT_ONLY:
+        if side is not ModSide.CLIENT:
+            raise ValueError(
+                f"Client-only mod placement requires client-side classification, not {side.value!r}"
+            )
+        return True
+    if placement is ModPlacement.SERVER_DISABLED:
+        return False
+    return side is not ModSide.SERVER
+
+
 class ModType(enum.StrEnum):
     REGULAR = "regular"
     COREMOD = "coremod"

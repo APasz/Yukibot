@@ -504,6 +504,7 @@ class _ModWebFakeChatPreviewState:
 class ModDownloadKind(Enum):
     ENABLED = "enabled"
     ALL = "all"
+    CLIENT_PACK = "client_pack"
     SELECTED = "selected"
     SINGLE = "single"
 
