@@ -33,11 +33,13 @@ from .runtime_imports import (
     asyncio,
     cast,
     config,
+    quote,
     replace,
 )
 from .service_base import ModWebServiceSupport
 from .types import (
     ModWebAppLink,
+    ModWebAppTabLoadResult,
     ModWebBasePageModel,
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
@@ -45,6 +47,7 @@ from .types import (
     ModWebNodeLink,
     ModWebNodeStatus,
     ModWebPageLoadWarning,
+    ModWebPageModel,
     ModWebSevenDaysSandboxOptionsSummary,
 )
 
@@ -301,6 +304,131 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             app_name=app_name,
             request=request,
         )
+
+    async def _load_remote_app_tab(
+        self,
+        *,
+        tab_id: str,
+        model: ModWebBasePageModel,
+        node: ModWebNodeLink,
+        app_entry: NodeAppEntry,
+        app_name: str,
+        request: Request,
+        user: ModWebUser,
+    ) -> ModWebAppTabLoadResult:
+        normalized_tab_id: str = tab_id.strip().casefold()
+        available_tab_ids: frozenset[str] = frozenset(tab.tab_id.casefold() for tab in model.tabs)
+        if normalized_tab_id not in available_tab_ids:
+            raise ValueError(f"Unknown app tab: {tab_id}")
+
+        loaded_model: ModWebBasePageModel = replace(model, search_query="")
+        load_warnings: list[ModWebPageLoadWarning] = list(model.load_warnings)
+        if (
+            normalized_tab_id == "configs"
+            and model.supports_configs
+            and self._user_has_level(user, model.config_read_level)
+        ):
+            empty_configs = self._empty_config_list(
+                app_name=app_entry.name,
+                app_friendly=app_entry.friendly,
+                node_name=node.node_name,
+            )
+            configs = await self._safe_remote_optional_page_section(
+                node=node,
+                app_name=app_name,
+                section_label="Configs",
+                fallback=empty_configs,
+                load_warnings=load_warnings,
+                operation=lambda: self._remote_config_list_async(node, app_name, user),
+            )
+            loaded_model = replace(loaded_model, configs=configs)
+        elif normalized_tab_id == "saves" and model.saves is not None:
+            saves = await self._safe_remote_optional_page_section(
+                node=node,
+                app_name=app_name,
+                section_label="Saves",
+                fallback=self._empty_remote_save_list(app_entry=app_entry, node=node),
+                load_warnings=load_warnings,
+                operation=lambda: self._remote_save_list_async(node, app_name, user),
+            )
+            loaded_model = replace(loaded_model, saves=saves)
+        elif normalized_tab_id == "blueprints" and model.blueprints is not None:
+            blueprints = await self._safe_remote_optional_page_section(
+                node=node,
+                app_name=app_name,
+                section_label="Blueprints",
+                fallback=self._empty_remote_blueprint_list(app_entry=app_entry, node=node),
+                load_warnings=load_warnings,
+                operation=lambda: self._remote_blueprint_list_async(node, app_name, user),
+            )
+            loaded_model = replace(loaded_model, blueprints=blueprints)
+        elif normalized_tab_id == "settings" and model.settings is not None:
+            settings = await self._safe_remote_optional_page_section(
+                node=node,
+                app_name=app_name,
+                section_label="Settings",
+                fallback=self._empty_remote_setting_list(app_entry=app_entry, node=node),
+                load_warnings=load_warnings,
+                operation=lambda: self._remote_setting_list_async(node, app_name, user),
+            )
+            loaded_model = replace(loaded_model, settings=settings)
+        elif normalized_tab_id == "console" and model.console_actions is not None:
+            console_actions = await self._safe_remote_optional_page_section(
+                node=node,
+                app_name=app_name,
+                section_label="Console",
+                fallback=self._empty_remote_console_action_list(app_entry=app_entry, node=node),
+                load_warnings=load_warnings,
+                operation=lambda: self._remote_console_action_list_async(node, app_name, user),
+            )
+            loaded_model = replace(loaded_model, console_actions=console_actions)
+        elif normalized_tab_id == "mods" and isinstance(model, ModWebPageModel):
+            mods = await self._remote_mod_list_async(node, app_name, user)
+            app_api_url: str = model.download_all_url.partition("/mods/download")[0]
+            loaded_model = replace(
+                loaded_model,
+                mods=mods,
+                app_stats=mods.app_stats,
+                mod_download_urls={
+                    mod.name: f"{app_api_url}/mods/{quote(mod.name, safe='')}/download"
+                    for mod in mods.mods
+                    if mod.downloadable
+                },
+            )
+        elif normalized_tab_id == "recipes" and isinstance(model, ModWebPageModel):
+            recipes, item_registry = await self._remote_minecraft_recipe_summaries_async(
+                node,
+                app_name,
+                user,
+            )
+            loaded_model = replace(
+                loaded_model,
+                minecraft_recipes=recipes,
+                minecraft_item_registry=item_registry,
+            )
+        elif normalized_tab_id == "sandbox":
+            sandbox_options = await self._remote_sevendays_sandbox_options_summary_async(
+                node,
+                app_name,
+                user,
+            )
+            loaded_model = replace(loaded_model, sevendays_sandbox_options=sandbox_options)
+
+        if tuple(load_warnings) != loaded_model.load_warnings:
+            loaded_model = replace(loaded_model, load_warnings=tuple(load_warnings))
+
+        chat_surface = None
+        if normalized_tab_id == "chat" and loaded_model.supports_chat:
+            chat_surface = await self._remote_chat_surface_config(
+                node=node,
+                app_name=app_name,
+                request=request,
+                user=user,
+                app_entry=app_entry,
+                app_stats=loaded_model.app_stats,
+                include_runtime_updates=False,
+            )
+        return ModWebAppTabLoadResult(model=loaded_model, chat_surface=chat_surface)
 
     async def _render_node_system_page(self, *, ui: ModWebUi, node_name: str, request: Request) -> None:
         user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.sudo)
@@ -684,6 +812,17 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 async def _refresh_runtime_model() -> ModWebBasePageModel:
                     return await self._refresh_runtime_model(model=model, user=user)
 
+                async def _load_tab(tab_id: str) -> ModWebAppTabLoadResult:
+                    return await self._load_remote_app_tab(
+                        tab_id=tab_id,
+                        model=model,
+                        node=node,
+                        app_entry=app_entry,
+                        app_name=app_name,
+                        request=request,
+                        user=user,
+                    )
+
                 def _subscribe_app_state(
                     on_update: Callable[[NodeAppStateStreamEvent], None],
                 ) -> Callable[[], None]:
@@ -704,6 +843,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     subscribe_app_state_updates=_subscribe_app_state,
                     initial_system_summary=system_summary,
                     chat_surface=chat_surface,
+                    load_tab=_load_tab,
                 )
             else:
                 empty_saves = (
@@ -863,6 +1003,17 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 async def _refresh_runtime_model() -> ModWebBasePageModel:
                     return await self._refresh_runtime_model(model=model, user=user)
 
+                async def _load_tab(tab_id: str) -> ModWebAppTabLoadResult:
+                    return await self._load_remote_app_tab(
+                        tab_id=tab_id,
+                        model=model,
+                        node=node,
+                        app_entry=app_entry,
+                        app_name=app_name,
+                        request=request,
+                        user=user,
+                    )
+
                 def _subscribe_app_state(
                     on_update: Callable[[NodeAppStateStreamEvent], None],
                 ) -> Callable[[], None]:
@@ -883,6 +1034,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     subscribe_app_state_updates=_subscribe_app_state,
                     initial_system_summary=system_summary,
                     chat_surface=chat_surface,
+                    load_tab=_load_tab,
                 )
         except Exception as xcp:
             if self._remote_node_error_is_transient(xcp):

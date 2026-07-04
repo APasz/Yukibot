@@ -99,6 +99,7 @@ from .utils import _http_exception
 
 if TYPE_CHECKING:
     from nicegui.element import Element
+    from nicegui.elements.dialog import Dialog
 
 
 class ModWebServiceSupport:
@@ -772,9 +773,15 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_render_mod_download_row"]) -> Callable[..., Checkbox | None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_render_mod_info_dialog"]) -> Callable[..., "Dialog"]: ...
+
+    @overload
     def __getattr__(
         self, name: Literal["_mod_options"]
     ) -> Callable[[tuple[NodeModEntry, ...]], tuple[ModWebSearchOption, ...]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_mod_type_badge_tone"]) -> Callable[..., BadgeTone]: ...
 
     @overload
     def __getattr__(self, name: Literal["_mod_result_count_label"]) -> Callable[..., str]: ...

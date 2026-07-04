@@ -3001,6 +3001,63 @@ class ModWebTheme:
                         inset 0 0 0 1px rgba(196, 181, 253, 0.14);
                 }}
                 .mod-row-clickable {{ cursor: pointer; }}
+                .mod-virtual-mod-table {{
+                    max-height: min(70vh, 54rem);
+                    overflow: hidden;
+                    border: none;
+                    border-radius: 0;
+                    background: transparent !important;
+                }}
+                .mod-virtual-mod-table .q-table__middle {{ overflow: auto; }}
+                .mod-virtual-mod-table .q-table,
+                .mod-virtual-mod-table tbody {{
+                    background: #050507 !important;
+                }}
+                .mod-virtual-mod-table .mod-virtual-row {{
+                    background: transparent !important;
+                    border: none !important;
+                }}
+                .mod-virtual-mod-table tbody tr.selected,
+                .mod-virtual-mod-table tbody tr.selected > td,
+                .mod-virtual-mod-table tbody tr:hover > td {{
+                    background: transparent !important;
+                }}
+                .mod-virtual-mod-table tbody tr.selected > td::before,
+                .mod-virtual-mod-table tbody tr:hover > td::before {{
+                    background: transparent !important;
+                    opacity: 0 !important;
+                }}
+                .mod-virtual-mod-table .mod-virtual-row-cell {{
+                    height: auto !important;
+                    padding: 0.2rem 0 !important;
+                    border: none !important;
+                    background: #050507 !important;
+                    white-space: normal;
+                }}
+                .mod-virtual-mod-table .mod-row {{
+                    width: 100%;
+                    background: #0b0b10 !important;
+                    background-image: none !important;
+                }}
+                .mod-virtual-mod-table .mod-row.blocked {{
+                    background: #08080b !important;
+                }}
+                .mod-client-pack-required-table {{
+                    max-height: 24rem;
+                    overflow: hidden;
+                    border: 1px solid var(--mod-border);
+                    border-radius: 0.75rem;
+                    background: rgba(9, 9, 11, 0.72) !important;
+                }}
+                .mod-client-pack-required-table .q-table__middle {{ overflow: auto; }}
+                .mod-virtual-mod-table th {{
+                    position: sticky;
+                    top: 0;
+                    z-index: 1;
+                    background: #111114;
+                    color: var(--mod-dim);
+                }}
+                .mod-list-pagination {{ margin: 0.75rem auto 0; color: var(--mod-text); }}
                 .mod-row-disabled:hover {{ border-color: rgba(161, 161, 170, 0.82) !important; }}
                 .mod-row-client-only:hover {{ border-color: rgba(196, 181, 253, 0.86) !important; }}
                 .mod-row .q-checkbox__inner {{ color: var(--mod-purple) !important; }}

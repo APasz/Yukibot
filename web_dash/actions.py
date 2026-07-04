@@ -1574,9 +1574,21 @@ class ModWebActionsMixin(ModWebServiceSupport):
             row_classes.append("mod-row-client-only")
         elif entry.placement is ModPlacement.SERVER_DISABLED:
             row_classes.append("mod-row-disabled")
-        dialog = self._render_mod_info_dialog(ui=ui, entry=entry, model=model, user=user)
+        dialog: Dialog | None = None
+
+        def open_mod_info_dialog(_event: object | None = None) -> None:
+            nonlocal dialog
+            if dialog is None:
+                dialog = self._render_mod_info_dialog(
+                    ui=ui,
+                    entry=entry,
+                    model=model,
+                    user=user,
+                )
+            dialog.open()
+
         row = ui.row().classes(" ".join((*row_classes, "mod-row-clickable")))
-        row.on("click", lambda _: dialog.open())
+        row.on("click", open_mod_info_dialog)
         with row:
             if can_select:
                 checkbox = ui.checkbox(value=False, on_change=on_change).props("dense")

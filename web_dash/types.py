@@ -766,6 +766,12 @@ class ModWebOverviewPageModel(ModWebBasePageModel):
 
 
 @dataclass(frozen=True, slots=True)
+class ModWebAppTabLoadResult:
+    model: ModWebBasePageModel
+    chat_surface: _ModWebChatSurfaceConfig | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ModWebPageLoadWarning:
     title: str
     detail: str
@@ -1096,6 +1102,7 @@ __all__: tuple[str, ...] = (
     "ModWebAppSectionKind",
     "ModWebAppTabContext",
     "ModWebAppTabDefinition",
+    "ModWebAppTabLoadResult",
     "ModWebAppTabSettingSnapshot",
     "ModWebAppTabVisibilityKind",
     "ModWebAppTabVisibilityRule",

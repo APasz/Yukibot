@@ -102,6 +102,9 @@ from .types import (
     _SettingSecretConfig,
 )
 
+
+_SERVER_RENDERED_LIST_PAGE_SIZE = 40
+
 _SortableFileEntry = TypeVar("_SortableFileEntry", NodeSaveEntry, NodeBlueprintEntry)
 
 if TYPE_CHECKING:
@@ -788,6 +791,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         show_write_lock_note: bool = (model.supports_save_uploads or model.supports_save_rename) and not can_write
         current_search_query: str = model.search_query
         current_sort_order: ModWebFileSortOrder = ModWebFileSortOrder.LATEST_MODIFIED
+        save_page_number = 1
 
         root_select: Select | None = None
         save_upload_control: Upload | None = None
@@ -931,6 +935,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
                 @ui.refreshable
                 def _save_tile_grid(search_query: str) -> None:
+                    nonlocal save_page_number
                     filtered_saves: tuple[NodeSaveEntry, ...] = self._filter_save_entries(
                         saves=saves.saves,
                         options=save_options,
@@ -941,8 +946,18 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         with ui.card().classes("mod-setting-card locked w-full"):
                             ui.label("No saves match that search.").classes("mod-subtitle text-sm")
                         return
+                    page_count: int = max(
+                        1,
+                        (len(filtered_saves) + _SERVER_RENDERED_LIST_PAGE_SIZE - 1)
+                        // _SERVER_RENDERED_LIST_PAGE_SIZE,
+                    )
+                    save_page_number = min(save_page_number, page_count)
+                    page_start: int = (save_page_number - 1) * _SERVER_RENDERED_LIST_PAGE_SIZE
+                    visible_saves: tuple[NodeSaveEntry, ...] = filtered_saves[
+                        page_start : page_start + _SERVER_RENDERED_LIST_PAGE_SIZE
+                    ]
                     with ui.element("div").classes("mod-save-grid w-full"):
-                        for save in filtered_saves:
+                        for save in visible_saves:
                             self._render_save_tile(
                                 ui=ui,
                                 model=model,
@@ -951,6 +966,19 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                 root_count=len(saves.roots),
                                 can_write=can_write,
                             )
+                    if page_count > 1:
+                        def select_save_page(event: ModWebValueContainer) -> None:
+                            nonlocal save_page_number
+                            save_page_number = int(_value_as_text(event))
+                            _save_tile_grid.refresh(current_search_query)
+
+                        ui.pagination(
+                            1,
+                            page_count,
+                            value=save_page_number,
+                            direction_links=True,
+                            on_change=select_save_page,
+                        ).classes("mod-list-pagination")
 
                 if show_search or show_sort or show_upload_action:
                     with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
@@ -962,8 +990,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             )
 
                             def _submit_save_search() -> None:
-                                nonlocal current_search_query
+                                nonlocal current_search_query, save_page_number
                                 current_search_query = _value_as_text(search_input)
+                                save_page_number = 1
                                 self._replace_browser_search_query(ui=ui, search_query=current_search_query)
                                 _save_tile_grid.refresh(current_search_query)
 
@@ -971,8 +1000,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         if show_sort:
 
                             def _sort_save_tiles(event: ModWebValueContainer) -> None:
-                                nonlocal current_sort_order
+                                nonlocal current_sort_order, save_page_number
                                 current_sort_order = ModWebFileSortOrder(_value_as_text(event))
+                                save_page_number = 1
                                 _save_tile_grid.refresh(current_search_query)
 
                             self._render_file_sort_select(
@@ -1013,6 +1043,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         can_upload_blueprints: bool = target_session_name is not None
         current_search_query: str = model.search_query
         current_sort_order: ModWebFileSortOrder = ModWebFileSortOrder.NAME_ASCENDING
+        blueprint_page_number = 1
 
         async def upload_blueprints(event: "MultiUploadEventArguments") -> None:
             if target_session_name is None:
@@ -1074,6 +1105,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
                 @ui.refreshable
                 def _blueprint_tile_grid(search_query: str) -> None:
+                    nonlocal blueprint_page_number
                     filtered_blueprints: tuple[NodeBlueprintEntry, ...] = self._filter_blueprint_entries(
                         blueprints=blueprints.blueprints,
                         options=blueprint_options,
@@ -1084,9 +1116,32 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         with ui.card().classes("mod-setting-card locked w-full"):
                             ui.label("No blueprint files match that search.").classes("mod-subtitle text-sm")
                         return
+                    page_count: int = max(
+                        1,
+                        (len(filtered_blueprints) + _SERVER_RENDERED_LIST_PAGE_SIZE - 1)
+                        // _SERVER_RENDERED_LIST_PAGE_SIZE,
+                    )
+                    blueprint_page_number = min(blueprint_page_number, page_count)
+                    page_start: int = (blueprint_page_number - 1) * _SERVER_RENDERED_LIST_PAGE_SIZE
+                    visible_blueprints: tuple[NodeBlueprintEntry, ...] = filtered_blueprints[
+                        page_start : page_start + _SERVER_RENDERED_LIST_PAGE_SIZE
+                    ]
                     with ui.element("div").classes("mod-save-grid w-full"):
-                        for blueprint in filtered_blueprints:
+                        for blueprint in visible_blueprints:
                             self._render_blueprint_tile(ui=ui, model=model, user=user, blueprint=blueprint)
+                    if page_count > 1:
+                        def select_blueprint_page(event: ModWebValueContainer) -> None:
+                            nonlocal blueprint_page_number
+                            blueprint_page_number = int(_value_as_text(event))
+                            _blueprint_tile_grid.refresh(current_search_query)
+
+                        ui.pagination(
+                            1,
+                            page_count,
+                            value=blueprint_page_number,
+                            direction_links=True,
+                            on_change=select_blueprint_page,
+                        ).classes("mod-list-pagination")
 
                 with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
                     if show_search:
@@ -1097,8 +1152,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         )
 
                         def _submit_blueprint_search() -> None:
-                            nonlocal current_search_query
+                            nonlocal blueprint_page_number, current_search_query
                             current_search_query = _value_as_text(search_input)
+                            blueprint_page_number = 1
                             self._replace_browser_search_query(ui=ui, search_query=current_search_query)
                             _blueprint_tile_grid.refresh(current_search_query)
 
@@ -1106,8 +1162,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     if show_sort:
 
                         def _sort_blueprint_tiles(event: ModWebValueContainer) -> None:
-                            nonlocal current_sort_order
+                            nonlocal blueprint_page_number, current_sort_order
                             current_sort_order = ModWebFileSortOrder(_value_as_text(event))
+                            blueprint_page_number = 1
                             _blueprint_tile_grid.refresh(current_search_query)
 
                         self._render_file_sort_select(
@@ -1177,6 +1234,95 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 dialogs_to_close=(config_delete_dialog, config_dialog),
             )
 
+        def open_delete_dialog() -> None:
+            nonlocal delete_dialog
+            if delete_dialog is None:
+                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                    delete_dialog = created_dialog
+                    with ui.card().classes("mod-card w-full"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1"):
+                                ui.label("Delete Blueprint").classes("text-xl font-black mod-title-small")
+                                detail = (
+                                    f"Delete {blueprint.relative_path} from {model.app_friendly}?"
+                                    if config_file is None
+                                    else (
+                                        f"Delete {blueprint.relative_path} and its matching config "
+                                        f"from {model.app_friendly}?"
+                                    )
+                                )
+                                ui.label(detail).classes("mod-subtitle text-sm")
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Cancel", on_click=created_dialog.close).classes(
+                                    "mod-list-button secondary"
+                                )
+                                ui.button("Delete", on_click=delete_blueprint_selected).classes(
+                                    "mod-list-button danger"
+                                )
+            delete_dialog.open()
+
+        def open_config_delete_dialog() -> None:
+            nonlocal config_delete_dialog
+            if config_file is None:
+                raise ValueError("Blueprint config is not available.")
+            if config_delete_dialog is None:
+                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                    config_delete_dialog = created_dialog
+                    with ui.card().classes("mod-card w-full"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1"):
+                                ui.label("Delete Blueprint Config").classes(
+                                    "text-xl font-black mod-title-small"
+                                )
+                                ui.label(
+                                    f"Delete {config_file.relative_path} from {model.app_friendly}?"
+                                ).classes("mod-subtitle text-sm")
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Cancel", on_click=created_dialog.close).classes(
+                                    "mod-list-button secondary"
+                                )
+                                ui.button("Delete", on_click=delete_config_selected).classes(
+                                    "mod-list-button danger"
+                                )
+            config_delete_dialog.open()
+
+        def open_config_dialog() -> None:
+            nonlocal config_dialog
+            if config_file is None:
+                raise ValueError("Blueprint config is not available.")
+            if config_dialog is None:
+                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                    config_dialog = created_dialog
+                    with ui.card().classes("mod-card w-full"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1 w-full"):
+                                ui.label(self._normalise_blueprint_title(config_file.label)).classes(
+                                    "text-xl font-black mod-title-small break-all"
+                                )
+                                ui.label(config_file.relative_path).classes(
+                                    "mod-subtitle text-sm break-all mod-save-card-path"
+                                )
+                            with ui.row().classes("gap-2 flex-wrap"):
+                                self._badge(ui=ui, text=blueprint.session_name, tone="grey")
+                                self._badge(ui=ui, text=f"Modified {config_file.modified_at}", tone="purple")
+                                if config_file.uploaded_by_display_name is not None:
+                                    self._badge(
+                                        ui=ui,
+                                        text=f"By {config_file.uploaded_by_display_name}",
+                                        tone="grey",
+                                    )
+                                else:
+                                    self._badge(ui=ui, text="Owner unknown", tone="grey")
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Close", on_click=created_dialog.close).classes(
+                                    "mod-list-button secondary"
+                                )
+                                if config_file.can_delete:
+                                    ui.button("Delete Config", on_click=open_config_delete_dialog).classes(
+                                        "mod-list-button danger"
+                                    )
+            config_dialog.open()
+
         with ui.card().classes("mod-save-card"):
             with ui.column().classes("w-full gap-3 p-4"):
                 with ui.column().classes("gap-1 w-full"):
@@ -1196,83 +1342,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             tone="grey",
                             extra_classes="cursor-pointer",
                         )
-                        config_badge.on("click", lambda: config_dialog.open() if config_dialog is not None else None)
+                        config_badge.on("click", open_config_dialog)
                 if blueprint.can_delete:
-                    with ui.dialog().classes("mod-dialog-card") as delete_dialog:
-                        delete_dialog_ref: Dialog = delete_dialog
-                        with ui.card().classes("mod-card w-full"):
-                            with ui.column().classes("w-full gap-4 p-5"):
-                                with ui.column().classes("gap-1"):
-                                    ui.label("Delete Blueprint").classes("text-xl font-black mod-title-small")
-                                    if config_file is None:
-                                        ui.label(
-                                            f"Delete {blueprint.relative_path} from {model.app_friendly}?"
-                                        ).classes("mod-subtitle text-sm")
-                                    else:
-                                        ui.label(
-                                            f"Delete {blueprint.relative_path} and its matching config from {model.app_friendly}?"
-                                        ).classes("mod-subtitle text-sm")
-                                with ui.row().classes("w-full justify-end gap-2"):
-                                    ui.button("Cancel", on_click=delete_dialog_ref.close).classes(
-                                        "mod-list-button secondary"
-                                    )
-                                    ui.button("Delete", on_click=delete_blueprint_selected).classes(
-                                        "mod-list-button danger"
-                                    )
                     with ui.row().classes("mod-save-card-actions mod-save-card-actions-single"):
-                        ui.button("Delete", on_click=delete_dialog.open).classes(
+                        ui.button("Delete", on_click=open_delete_dialog).classes(
                             "mod-list-button danger mod-save-card-button"
                         )
-                if config_file is not None:
-                    with ui.dialog().classes("mod-dialog-card") as config_dialog:
-                        config_dialog_ref: Dialog = config_dialog
-                        with ui.card().classes("mod-card w-full"):
-                            with ui.column().classes("w-full gap-4 p-5"):
-                                with ui.column().classes("gap-1 w-full"):
-                                    ui.label(self._normalise_blueprint_title(config_file.label)).classes(
-                                        "text-xl font-black mod-title-small break-all"
-                                    )
-                                    ui.label(config_file.relative_path).classes(
-                                        "mod-subtitle text-sm break-all mod-save-card-path"
-                                    )
-                                with ui.row().classes("gap-2 flex-wrap"):
-                                    self._badge(ui=ui, text=blueprint.session_name, tone="grey")
-                                    self._badge(ui=ui, text=f"Modified {config_file.modified_at}", tone="purple")
-                                    if config_file.uploaded_by_display_name is not None:
-                                        self._badge(
-                                            ui=ui,
-                                            text=f"By {config_file.uploaded_by_display_name}",
-                                            tone="grey",
-                                        )
-                                    else:
-                                        self._badge(ui=ui, text="Owner unknown", tone="grey")
-                                with ui.row().classes("w-full justify-end gap-2"):
-                                    ui.button("Close", on_click=config_dialog_ref.close).classes(
-                                        "mod-list-button secondary"
-                                    )
-                                    if config_file.can_delete:
-                                        with ui.dialog().classes("mod-dialog-card") as config_delete_dialog:
-                                            config_delete_dialog_ref: Dialog = config_delete_dialog
-                                            with ui.card().classes("mod-card w-full"):
-                                                with ui.column().classes("w-full gap-4 p-5"):
-                                                    with ui.column().classes("gap-1"):
-                                                        ui.label("Delete Blueprint Config").classes(
-                                                            "text-xl font-black mod-title-small"
-                                                        )
-                                                        ui.label(
-                                                            f"Delete {config_file.relative_path} from {model.app_friendly}?"
-                                                        ).classes("mod-subtitle text-sm")
-                                                    with ui.row().classes("w-full justify-end gap-2"):
-                                                        ui.button(
-                                                            "Cancel",
-                                                            on_click=config_delete_dialog_ref.close,
-                                                        ).classes("mod-list-button secondary")
-                                                        ui.button("Delete", on_click=delete_config_selected).classes(
-                                                            "mod-list-button danger"
-                                                        )
-                                        ui.button("Delete Config", on_click=config_delete_dialog.open).classes(
-                                            "mod-list-button danger"
-                                        )
 
     def _render_save_tile(
         self,
@@ -1322,6 +1397,47 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
+        def open_rename_dialog() -> None:
+            nonlocal rename_dialog, rename_input
+            if rename_dialog is None:
+                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                    rename_dialog = created_dialog
+                    with ui.card().classes("mod-card w-full"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1"):
+                                ui.label("Rename Save").classes("text-xl font-black mod-title-small")
+                                ui.label(f"Choose a new name for {save.label}.").classes("mod-subtitle text-sm")
+                            rename_input = (
+                                ui.input(value=save.label, placeholder="New save name")
+                                .props("filled square dense clearable hide-bottom-space color=accent")
+                                .classes("w-full")
+                            )
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Cancel", on_click=created_dialog.close).classes(
+                                    "mod-list-button secondary"
+                                )
+                                ui.button("Rename", on_click=rename_selected).classes("mod-list-button")
+            rename_dialog.open()
+
+        def open_delete_dialog() -> None:
+            nonlocal delete_dialog
+            if delete_dialog is None:
+                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                    delete_dialog = created_dialog
+                    with ui.card().classes("mod-card w-full"):
+                        with ui.column().classes("w-full gap-4 p-5"):
+                            with ui.column().classes("gap-1"):
+                                ui.label("Delete Save").classes("text-xl font-black mod-title-small")
+                                ui.label(f"Delete {save.label} from {model.app_friendly}?").classes(
+                                    "mod-subtitle text-sm"
+                                )
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                ui.button("Cancel", on_click=created_dialog.close).classes(
+                                    "mod-list-button secondary"
+                                )
+                                ui.button("Delete", on_click=delete_selected).classes("mod-list-button danger")
+            delete_dialog.open()
+
         with ui.card().classes("mod-save-card"):
             with ui.column().classes("w-full gap-3 p-4"):
                 with ui.column().classes("gap-1 w-full"):
@@ -1356,44 +1472,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         on_click=_download_current_save,
                     ).classes("mod-list-button mod-save-card-button")
                     if model.supports_save_rename:
-                        with ui.dialog().classes("mod-dialog-card") as rename_dialog:
-                            rename_dialog_ref: Dialog = rename_dialog
-                            with ui.card().classes("mod-card w-full"):
-                                with ui.column().classes("w-full gap-4 p-5"):
-                                    with ui.column().classes("gap-1"):
-                                        ui.label("Rename Save").classes("text-xl font-black mod-title-small")
-                                        ui.label(f"Choose a new name for {save.label}.").classes("mod-subtitle text-sm")
-                                    rename_input = (
-                                        ui.input(value=save.label, placeholder="New save name")
-                                        .props("filled square dense clearable hide-bottom-space color=accent")
-                                        .classes("w-full")
-                                    )
-                                    with ui.row().classes("w-full justify-end gap-2"):
-                                        ui.button("Cancel", on_click=rename_dialog_ref.close).classes(
-                                            "mod-list-button secondary"
-                                        )
-                                        ui.button("Rename", on_click=rename_selected).classes("mod-list-button")
-                        rename_button = ui.button("Rename", on_click=rename_dialog_ref.open).classes(
+                        rename_button = ui.button("Rename", on_click=open_rename_dialog).classes(
                             "mod-list-button secondary mod-save-card-button"
                         )
                         if not can_write:
                             rename_button.disable()
                     if save.can_delete:
-                        with ui.dialog().classes("mod-dialog-card") as delete_dialog:
-                            delete_dialog_ref: Dialog = delete_dialog
-                            with ui.card().classes("mod-card w-full"):
-                                with ui.column().classes("w-full gap-4 p-5"):
-                                    with ui.column().classes("gap-1"):
-                                        ui.label("Delete Save").classes("text-xl font-black mod-title-small")
-                                        ui.label(f"Delete {save.label} from {model.app_friendly}?").classes(
-                                            "mod-subtitle text-sm"
-                                        )
-                                    with ui.row().classes("w-full justify-end gap-2"):
-                                        ui.button("Cancel", on_click=delete_dialog_ref.close).classes(
-                                            "mod-list-button secondary"
-                                        )
-                                        ui.button("Delete", on_click=delete_selected).classes("mod-list-button danger")
-                        delete_button = ui.button("Delete", on_click=delete_dialog_ref.open).classes(
+                        delete_button = ui.button("Delete", on_click=open_delete_dialog).classes(
                             "mod-list-button danger mod-save-card-button"
                         )
                         if not can_write:
@@ -1418,6 +1503,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         save_button: Button | None = None
         reload_button: Button | None = None
         search_query_text: str = model.search_query
+        setting_page_number = 1
         required_save_level: Power_Level = (
             Access_Control.parse_level(settings.required_save_level_name) or Power_Level.user
         )
@@ -1522,6 +1608,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
         @ui.refreshable
         def _setting_card_list(search_query: str) -> None:
+            nonlocal setting_page_number
             filtered_settings: tuple[NodeSettingEntry, ...] = self._filter_setting_entries(
                 settings=settings.settings,
                 options=setting_options,
@@ -1532,8 +1619,19 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     ui.label("No settings match that search.").classes("mod-subtitle text-sm")
                 return
 
+            page_count: int = max(
+                1,
+                (len(filtered_settings) + _SERVER_RENDERED_LIST_PAGE_SIZE - 1)
+                // _SERVER_RENDERED_LIST_PAGE_SIZE,
+            )
+            setting_page_number = min(setting_page_number, page_count)
+            page_start: int = (setting_page_number - 1) * _SERVER_RENDERED_LIST_PAGE_SIZE
+            visible_settings: tuple[NodeSettingEntry, ...] = filtered_settings[
+                page_start : page_start + _SERVER_RENDERED_LIST_PAGE_SIZE
+            ]
+
             with ui.column().classes("mod-settings-grid w-full"):
-                for setting in filtered_settings:
+                for setting in visible_settings:
                     self._render_setting_card(
                         ui=ui,
                         setting=setting,
@@ -1542,6 +1640,19 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         set_draft_value=set_draft_value,
                         set_setting_validity=set_setting_validity,
                     )
+            if page_count > 1:
+                def select_setting_page(event: ModWebValueContainer) -> None:
+                    nonlocal setting_page_number
+                    setting_page_number = int(_value_as_text(event))
+                    _setting_card_list.refresh(search_query_text)
+
+                ui.pagination(
+                    1,
+                    page_count,
+                    value=setting_page_number,
+                    direction_links=True,
+                    on_change=select_setting_page,
+                ).classes("mod-list-pagination")
 
         with ui.card().classes(self._flat_tab_card_classes()):
             with ui.column().classes(self._tab_section_body_classes()):
@@ -1558,8 +1669,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     )
 
                     def _submit_setting_search() -> None:
-                        nonlocal search_query_text
+                        nonlocal search_query_text, setting_page_number
                         search_query_text = _value_as_text(search_input)
+                        setting_page_number = 1
                         self._replace_browser_search_query(ui=ui, search_query=search_query_text)
                         _setting_card_list.refresh(search_query_text)
 

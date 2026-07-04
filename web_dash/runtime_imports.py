@@ -52,6 +52,7 @@ from nicegui.elements.input import Input
 from nicegui.elements.label import Label
 from nicegui.elements.scroll_area import ScrollArea
 from nicegui.elements.select import Select
+from nicegui.elements.table import Table
 from nicegui.elements.textarea import Textarea
 from nicegui.elements.timer import Timer
 from nicegui.elements.tooltip import Tooltip
@@ -332,6 +333,7 @@ __all__: tuple[str, ...] = (
     "ScrollArea",
     "Select",
     "StarletteResponse",
+    "Table",
     "Textarea",
     "TYPE_CHECKING",
     "Timer",

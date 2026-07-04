@@ -19,6 +19,7 @@ from .runtime_imports import (
     Protocol,
     ScrollArea,
     Select,
+    Table,
     Timer,
     Tooltip,
     TypeAlias,
@@ -139,6 +140,10 @@ class ModWebUi(Protocol):
     def textarea(self, *args: object, **kwargs: object) -> "Textarea": ...
 
     def select(self, *args: object, **kwargs: object) -> "Select": ...
+
+    def table(self, *args: object, **kwargs: object) -> "Table": ...
+
+    def pagination(self, *args: object, **kwargs: object) -> "Element": ...
 
     def checkbox(self, *args: object, **kwargs: object) -> "Checkbox": ...
 

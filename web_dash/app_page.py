@@ -5,7 +5,7 @@ import hashlib
 from functools import lru_cache
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
@@ -15,6 +15,7 @@ from apps._config import (
     CLIENT_PACK_METADATA_DESCRIPTION_MAX_LENGTH,
     CLIENT_PACK_METADATA_NAME_MAX_LENGTH,
     ModDistributionMode,
+    ModDownloadBlockReason,
     app_title_font_default_label,
     app_title_font_options,
     mod_capabilities_for_scope,
@@ -72,6 +73,7 @@ from .runtime_imports import (
     Input,
     Label,
     LiteralString,
+    Mapping,
     ModPlacement,
     ModType,
     ModWebUser,
@@ -93,12 +95,14 @@ from .runtime_imports import (
     PackPurpose,
     Power_Level,
     Select,
+    Table,
     Textarea,
     Timer,
     Upload,
     assert_never,
     asyncio,
     cast,
+    dataclass,
     escape,
     json,
     parse_qsl,
@@ -113,6 +117,7 @@ from .types import (
     ModDownloadKind,
     ModWebAppSectionKind,
     ModWebAppTabDefinition,
+    ModWebAppTabLoadResult,
     ModWebBasePageModel,
     ModWebDirectUploadTarget,
     ModWebModlistFormat,
@@ -139,9 +144,36 @@ if TYPE_CHECKING:
     from nicegui.elements.dialog import Dialog
     from nicegui.elements.tabs import Tab
     from nicegui.elements.tooltip import Tooltip
+    from nicegui.events import TableSelectionEventArguments
 
 
 _LEAFLET_VENDOR_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "vendor" / "leaflet"
+_VIRTUALIZED_LIST_MIN_ITEMS = 50
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebSectionChromeBindings:
+    endpoint_count_label: Label | None = None
+    endpoint_count_tooltip: "Tooltip | None" = None
+    endpoint_count_tooltip_content: Html | None = None
+
+
+class _VirtualModRow(TypedDict):
+    name: str
+    friendly: str
+    file: str
+    size: str
+    placement: str
+    policy: str
+    type: str
+    type_tone: str
+    downloadable: bool
+    download_block_label: str
+    selectable: bool
+    show_download_block: bool
+    show_placement: bool
+    show_policy: bool
+    state_class: str
 
 __all__ = (
     "ModWebAppPageMixin",
@@ -310,6 +342,7 @@ class ModWebAppPageMixin(
         | None = None,
         initial_system_summary: NodeSystemSummary | None = None,
         chat_surface: _ModWebChatSurfaceConfig | None = None,
+        load_tab: Callable[[str], Awaitable[ModWebAppTabLoadResult]] | None = None,
     ) -> None:
         if chat_surface is not None and not model.supports_chat:
             raise ValueError("App page received chat configuration for an app without chat support.")
@@ -366,6 +399,7 @@ class ModWebAppPageMixin(
                     tabs=tabs,
                     chat_surface=chat_surface,
                     refresh_async_runtime_model=refresh_async_runtime_model,
+                    load_tab=load_tab,
                 )
             )
             if subscribe_app_state_updates is not None:
@@ -417,6 +451,7 @@ class ModWebAppPageMixin(
         | None = None,
         initial_system_summary: NodeSystemSummary | None = None,
         chat_surface: _ModWebChatSurfaceConfig | None = None,
+        load_tab: Callable[[str], Awaitable[ModWebAppTabLoadResult]] | None = None,
     ) -> None:
         if chat_surface is not None and not model.supports_chat:
             raise ValueError("Overview page received chat configuration for an app without chat support.")
@@ -476,6 +511,7 @@ class ModWebAppPageMixin(
                         tabs=tabs,
                         chat_surface=chat_surface,
                         refresh_async_runtime_model=refresh_async_runtime_model,
+                        load_tab=load_tab,
                     )
                 )
             if subscribe_app_state_updates is not None:
@@ -3303,6 +3339,7 @@ class ModWebAppPageMixin(
         tabs: tuple[ModWebAppTabDefinition, ...],
         chat_surface: _ModWebChatSurfaceConfig | None,
         refresh_async_runtime_model: Callable[[], Awaitable[ModWebBasePageModel]] | None = None,
+        load_tab: Callable[[str], Awaitable[ModWebAppTabLoadResult]] | None = None,
     ) -> Callable[[ModWebBasePageModel], None] | None:
         if not tabs:
             return None
@@ -3315,10 +3352,10 @@ class ModWebAppPageMixin(
         )
         tab_by_id: dict[str, Tab] = {}
         section_chrome_by_tab_id: dict[str, "Element"] = {}
+        section_panel_by_tab_id: dict[str, "Element"] = {}
         section_runtime_appliers: list[Callable[[ModWebBasePageModel], None]] = []
-        chat_endpoint_count_label: Label | None = None
-        chat_endpoint_tooltip: Tooltip | None = None
-        chat_endpoint_tooltip_content: Html | None = None
+        loaded_tab_ids: set[str] = {initial_tab_id}
+        loading_tab_ids: set[str] = set()
 
         def set_section_chrome_visibility(tab_id: str) -> None:
             for chrome_tab_id, chrome in section_chrome_by_tab_id.items():
@@ -3327,123 +3364,185 @@ class ModWebAppPageMixin(
                 else:
                     chrome.style(add="display: none;")
 
-        def sync_section_url(event: ModWebValueContainer) -> None:
+        def render_section_chrome(
+            *,
+            tab: ModWebAppTabDefinition,
+            tab_model: ModWebBasePageModel,
+            tab_chat_surface: _ModWebChatSurfaceConfig | None,
+        ) -> _ModWebSectionChromeBindings:
+            section_actions: tuple[_ModWebTabActionSpec, ...] = self._page_tab_actions(
+                model=tab_model,
+                user=user,
+                tab=tab,
+                chat_surface=tab_chat_surface,
+            )
+            if tab.builtin_kind is ModWebAppSectionKind.CHAT:
+                if tab_chat_surface is None:
+                    raise ValueError("The Chat tab requires a chat surface configuration.")
+                with ui.column().classes("mod-section-chrome-badge-stack items-end gap-1"):
+                    with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
+                        with ui.column().classes("mod-section-chrome-badge-column items-end gap-1"):
+                            if tab_chat_surface.map_url is not None:
+                                self._badge_link(
+                                    ui=ui,
+                                    text="Map",
+                                    tone="purple",
+                                    url=tab_chat_surface.map_url,
+                                    new_tab=True,
+                                )
+                            endpoint_label, endpoint_tooltip, endpoint_tooltip_content = (
+                                self._render_chat_endpoint_badge(
+                                    ui=ui,
+                                    snapshot=tab_chat_surface.panel.initial_snapshot,
+                                )
+                            )
+                if section_actions:
+                    with ui.row().classes("mod-section-chrome-actions items-center justify-end gap-2"):
+                        for action in section_actions:
+                            self._action_link(
+                                ui=ui,
+                                label=action.label,
+                                url=action.url,
+                                compact=True,
+                                extra_classes=action.extra_classes,
+                                new_tab=action.new_tab,
+                            )
+                return _ModWebSectionChromeBindings(
+                    endpoint_count_label=endpoint_label,
+                    endpoint_count_tooltip=endpoint_tooltip,
+                    endpoint_count_tooltip_content=endpoint_tooltip_content,
+                )
+
+            section_badges: tuple[_ModWebBadgeSpec, ...] = self._page_section_badges(
+                model=tab_model,
+                user=user,
+                tab=tab,
+            )
+            if section_badges:
+                with ui.column().classes("mod-section-chrome-badge-stack items-end gap-1"):
+                    for badge_row in self._section_badge_rows(section_badges):
+                        with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
+                            for badge in badge_row:
+                                self._badge(ui=ui, text=badge.text, tone=badge.tone)
+            if section_actions:
+                with ui.row().classes("mod-section-chrome-actions items-center justify-end gap-2"):
+                    for action in section_actions:
+                        self._action_link(
+                            ui=ui,
+                            label=action.label,
+                            url=action.url,
+                            compact=True,
+                            extra_classes=action.extra_classes,
+                            new_tab=action.new_tab,
+                        )
+            return _ModWebSectionChromeBindings()
+
+        def render_section(
+            *,
+            tab: ModWebAppTabDefinition,
+            tab_model: ModWebBasePageModel,
+            tab_chat_surface: _ModWebChatSurfaceConfig | None,
+        ) -> None:
+            chrome = section_chrome_by_tab_id[tab.tab_id]
+            chrome.clear()
+            with chrome:
+                chrome_bindings = render_section_chrome(
+                    tab=tab,
+                    tab_model=tab_model,
+                    tab_chat_surface=tab_chat_surface,
+                )
+
+            panel = section_panel_by_tab_id[tab.tab_id]
+            panel.clear()
+            with panel:
+                section_runtime_model = self._render_page_section(
+                    ui=ui,
+                    model=tab_model,
+                    user=user,
+                    tab=tab,
+                    chat_surface=tab_chat_surface,
+                    refresh_async_runtime_model=refresh_async_runtime_model,
+                    chat_endpoint_count_label=chrome_bindings.endpoint_count_label,
+                    chat_endpoint_tooltip=chrome_bindings.endpoint_count_tooltip,
+                    chat_endpoint_tooltip_content=chrome_bindings.endpoint_count_tooltip_content,
+                )
+            if section_runtime_model is not None:
+                section_runtime_appliers.append(section_runtime_model)
+
+        async def sync_section(event: ModWebValueContainer) -> None:
             nonlocal current_section_url
             next_tab_id: str = _value_as_text(event).strip()
             if next_tab_id not in tab_by_id:
                 return
             current_section_url = self._page_tab_url(current_section_url, tab_id=next_tab_id)
-            ui.navigate.to(current_section_url)
+            self._replace_browser_url(ui=ui, target_url=current_section_url)
+            set_section_chrome_visibility(next_tab_id)
+            if next_tab_id in loaded_tab_ids or next_tab_id in loading_tab_ids:
+                return
+            if load_tab is None:
+                ui.navigate.to(current_section_url)
+                return
+
+            loading_tab_ids.add(next_tab_id)
+            target_panel = section_panel_by_tab_id[next_tab_id]
+            target_panel.clear()
+            with target_panel:
+                ui.label("Loading tab…").classes("mod-subtitle text-sm mod-tab-loading")
+            try:
+                loaded = await load_tab(next_tab_id)
+                tab = next(tab for tab in tabs if tab.tab_id == next_tab_id)
+                render_section(
+                    tab=tab,
+                    tab_model=loaded.model,
+                    tab_chat_surface=loaded.chat_surface,
+                )
+                loaded_tab_ids.add(next_tab_id)
+            except Exception as xcp:
+                log.warning(
+                    "App tab load failed: node=%s app=%s tab=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    next_tab_id,
+                    xcp,
+                )
+                target_panel.clear()
+                with target_panel:
+                    self._render_flat_tab_empty_state(
+                        ui=ui,
+                        title="Tab unavailable",
+                        description=f"Could not load this tab: {xcp}",
+                    )
+            finally:
+                loading_tab_ids.discard(next_tab_id)
 
         with ui.column().classes("mod-section-layout w-full"):
             with ui.row().classes("mod-section-strip w-full items-start justify-between gap-3 flex-wrap"):
                 with ui.element("div").classes("mod-section-tabs-shell"):
-                    with ui.tabs(value=initial_tab_id, on_change=sync_section_url).classes("mod-section-tabs") as section_tabs:
+                    with ui.tabs(value=initial_tab_id, on_change=sync_section).classes("mod-section-tabs") as section_tabs:
                         for tab in tabs:
                             tab_by_id[tab.tab_id] = ui.tab(tab.tab_id, label=tab.label)
                 with ui.row().classes("mod-section-chrome items-start justify-end gap-3 flex-wrap"):
                     for tab in tabs:
-                        if tab.tab_id != initial_tab_id:
-                            continue
-                        section_actions: tuple[_ModWebTabActionSpec, ...] = self._page_tab_actions(
-                            model=model,
-                            user=user,
-                            tab=tab,
-                            chat_surface=chat_surface,
-                        )
+                        chrome_classes = "mod-section-chrome-panel items-start justify-end gap-3 flex-wrap"
                         if tab.builtin_kind is ModWebAppSectionKind.CHAT:
-                            if chat_surface is None:
-                                raise ValueError("The Chat tab requires a chat surface configuration.")
-                            with (
-                                ui.row()
-                                .classes(
-                                    "mod-section-chrome-panel mod-section-chrome-chat items-start justify-end gap-3 flex-wrap"
-                                )
-                            ) as chat_section_chrome:
-                                section_chrome_by_tab_id[tab.tab_id] = chat_section_chrome
-                                with ui.column().classes("mod-section-chrome-badge-stack items-end gap-1"):
-                                    with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
-                                        with ui.column().classes("mod-section-chrome-badge-column items-end gap-1"):
-                                            if chat_surface.map_url is not None:
-                                                self._badge_link(
-                                                    ui=ui,
-                                                    text="Map",
-                                                    tone="purple",
-                                                    url=chat_surface.map_url,
-                                                    new_tab=True,
-                                                )
-                                            (
-                                                chat_endpoint_count_label,
-                                                chat_endpoint_tooltip,
-                                                chat_endpoint_tooltip_content,
-                                            ) = self._render_chat_endpoint_badge(
-                                                ui=ui,
-                                                snapshot=chat_surface.panel.initial_snapshot,
-                                            )
-                                if section_actions:
-                                    with ui.row().classes("mod-section-chrome-actions items-center justify-end gap-2"):
-                                        for action in section_actions:
-                                            self._action_link(
-                                                ui=ui,
-                                                label=action.label,
-                                                url=action.url,
-                                                compact=True,
-                                                extra_classes=action.extra_classes,
-                                                new_tab=action.new_tab,
-                                            )
-                            continue
-                        section_badges: tuple[_ModWebBadgeSpec, ...] = self._page_section_badges(
-                            model=model,
-                            user=user,
-                            tab=tab,
-                        )
-                        if not section_badges and not section_actions:
-                            continue
-                        with ui.row().classes(
-                            "mod-section-chrome-panel items-start justify-end gap-3 flex-wrap"
-                        ) as section_chrome:
-                            section_chrome_by_tab_id[tab.tab_id] = section_chrome
-                            if section_badges:
-                                with ui.column().classes("mod-section-chrome-badge-stack items-end gap-1"):
-                                    for badge_row in self._section_badge_rows(section_badges):
-                                        with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
-                                            for badge in badge_row:
-                                                self._badge(ui=ui, text=badge.text, tone=badge.tone)
-                            if section_actions:
-                                with ui.row().classes("mod-section-chrome-actions items-center justify-end gap-2"):
-                                    for action in section_actions:
-                                        self._action_link(
-                                            ui=ui,
-                                            label=action.label,
-                                            url=action.url,
-                                            compact=True,
-                                            extra_classes=action.extra_classes,
-                                            new_tab=action.new_tab,
-                                        )
+                            chrome_classes += " mod-section-chrome-chat"
+                        section_chrome_by_tab_id[tab.tab_id] = ui.row().classes(chrome_classes)
             with ui.tab_panels(
                 section_tabs,
                 value=initial_tab_id,
                 animated=False,
             ).classes("mod-section-panels w-full"):
                 for tab in tabs:
-                    with ui.tab_panel(tab_by_id[tab.tab_id]).classes("mod-section-panel w-full"):
-                        if tab.tab_id != initial_tab_id:
-                            continue
-                        section_runtime_model = self._render_page_section(
-                            ui=ui,
-                            model=section_model,
-                            user=user,
-                            tab=tab,
-                            chat_surface=chat_surface,
-                            refresh_async_runtime_model=refresh_async_runtime_model,
-                            chat_endpoint_count_label=chat_endpoint_count_label,
-                            chat_endpoint_tooltip=chat_endpoint_tooltip,
-                            chat_endpoint_tooltip_content=chat_endpoint_tooltip_content,
-                        )
-                        if section_runtime_model is not None:
-                            section_runtime_appliers.append(section_runtime_model)
-            if section_chrome_by_tab_id:
-                set_section_chrome_visibility(initial_tab_id)
+                    section_panel_by_tab_id[tab.tab_id] = (
+                        ui.tab_panel(tab_by_id[tab.tab_id]).classes("mod-section-panel w-full")
+                    )
+            initial_tab = next(tab for tab in tabs if tab.tab_id == initial_tab_id)
+            render_section(
+                tab=initial_tab,
+                tab_model=section_model,
+                tab_chat_surface=chat_surface,
+            )
+            set_section_chrome_visibility(initial_tab_id)
         if current_url != current_section_url:
             self._replace_browser_url(ui=ui, target_url=current_section_url)
         if not section_runtime_appliers:
@@ -3775,6 +3874,8 @@ class ModWebAppPageMixin(
             name=model.app_friendly,
         )
         checkboxes: dict[str, Checkbox] = {}
+        virtual_mod_table: Table | None = None
+        virtual_mod_rows: list[_VirtualModRow] = []
         mod_options = self._mod_options(model.mods.mods)
         show_search: bool = len(mod_options) > 1
         show_sort: bool = len(mod_options) > 1
@@ -3887,12 +3988,24 @@ class ModWebAppPageMixin(
             selected_mod_names.update(selectable_names)
             for checkbox in checkboxes.values():
                 checkbox.set_value(True)
+            if virtual_mod_table is not None:
+                selected_rows = [
+                    row for row in virtual_mod_rows if row["name"] in selected_mod_names
+                ]
+                virtual_mod_table.selected = cast(
+                    list[dict[object, object]],
+                    cast(object, selected_rows),
+                )
+                virtual_mod_table.update()
             update_count()
 
         def clear_selection() -> None:
             selected_mod_names.clear()
             for checkbox in checkboxes.values():
                 checkbox.set_value(False)
+            if virtual_mod_table is not None:
+                virtual_mod_table.selected = []
+                virtual_mod_table.update()
             update_count()
 
         def toggle_selection() -> None:
@@ -4342,7 +4455,21 @@ class ModWebAppPageMixin(
             ui.navigate.reload()
 
         client_pack_config_dialog = ui.dialog()
-        if supports_client_pack and self._user_has_level(user, Power_Level.admin):
+        can_configure_client_pack: bool = supports_client_pack and self._user_has_level(
+            user,
+            Power_Level.admin,
+        )
+        client_pack_config_rendered = False
+
+        def ensure_client_pack_config_dialog() -> None:
+            nonlocal client_pack_changelog_input, client_pack_config_rendered
+            nonlocal client_pack_description_input, client_pack_filename_template_input
+            nonlocal client_pack_name_input
+            if client_pack_config_rendered:
+                return
+            if not can_configure_client_pack:
+                raise PermissionError("Client-pack configuration requires admin access.")
+            client_pack_config_rendered = True
             with client_pack_config_dialog:
                 with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
                     with ui.column().classes("mod-client-pack-body w-full"):
@@ -4585,6 +4712,7 @@ class ModWebAppPageMixin(
 
         def open_client_pack_configuration() -> None:
             nonlocal client_pack_changelog_draft
+            ensure_client_pack_config_dialog()
             shared_draft = self._backend.client_pack_changelog_draft(
                 node_name=model.node_name,
                 app_name=model.app_name,
@@ -4610,7 +4738,15 @@ class ModWebAppPageMixin(
             )
 
         client_pack_changes_dialog = ui.dialog()
-        if supports_client_pack:
+        client_pack_changes_rendered = False
+
+        def ensure_client_pack_changes_dialog() -> None:
+            nonlocal client_pack_changes_rendered
+            if client_pack_changes_rendered:
+                return
+            if not supports_client_pack:
+                raise RuntimeError("Client-pack changes are unavailable for this app.")
+            client_pack_changes_rendered = True
             with client_pack_changes_dialog:
                 with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
                     with ui.column().classes("mod-client-pack-body w-full"):
@@ -4631,8 +4767,24 @@ class ModWebAppPageMixin(
                                 "mod-list-button secondary"
                             )
 
+        def open_client_pack_changes_dialog() -> None:
+            ensure_client_pack_changes_dialog()
+            client_pack_changes_dialog.open()
+
         client_pack_dialog = ui.dialog()
-        if supports_client_pack:
+        client_pack_dialog_rendered = False
+
+        def open_client_pack_dialog() -> None:
+            nonlocal client_pack_dialog_rendered
+            if not client_pack_dialog_rendered:
+                if not supports_client_pack:
+                    raise RuntimeError("Client packs are unavailable for this app.")
+                client_pack_dialog_rendered = True
+                render_client_pack_dialog()
+            client_pack_dialog.open()
+
+        def render_client_pack_dialog() -> None:
+            nonlocal client_pack_format_select, include_kubejs_scripts_checkbox
             with client_pack_dialog:
                 with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
                     with ui.column().classes("mod-client-pack-body w-full"):
@@ -4707,7 +4859,7 @@ class ModWebAppPageMixin(
                                             )
                         with ui.row().classes("mod-client-pack-actions w-full"):
                             ui.button("Cancel", on_click=client_pack_dialog.close).classes("mod-list-button secondary")
-                            ui.button("Changes", on_click=client_pack_changes_dialog.open).classes(
+                            ui.button("Changes", on_click=open_client_pack_changes_dialog).classes(
                                 "mod-list-button secondary"
                             )
                             client_pack_download_button = ui.button(
@@ -4725,10 +4877,45 @@ class ModWebAppPageMixin(
                                 ui.label("These mods are always included.").classes(
                                     "mod-client-pack-section-hint mod-subtitle"
                                 )
-                                with ui.column().classes("mod-client-pack-option-list w-full"):
-                                    for entry in required_entries:
-                                        with ui.row().classes("mod-client-pack-option w-full items-center"):
-                                            ui.label(entry.friendly).classes("mod-client-pack-option-label")
+                                if len(required_entries) >= _VIRTUALIZED_LIST_MIN_ITEMS:
+                                    required_rows: list[dict[object, object]] = [
+                                        {
+                                            "name": entry.name,
+                                            "friendly": entry.friendly,
+                                        }
+                                        for entry in required_entries
+                                    ]
+                                    (
+                                        ui.table(
+                                            rows=required_rows,
+                                            columns=[
+                                                {
+                                                    "name": "friendly",
+                                                    "label": "Mod",
+                                                    "field": "friendly",
+                                                    "align": "left",
+                                                },
+                                                {
+                                                    "name": "name",
+                                                    "label": "File",
+                                                    "field": "name",
+                                                    "align": "left",
+                                                },
+                                            ],
+                                            row_key="name",
+                                            pagination=0,
+                                        )
+                                        .props(
+                                            'flat dark virtual-scroll virtual-scroll-item-size=42 '
+                                            ':rows-per-page-options="[0]"'
+                                        )
+                                        .classes("mod-virtual-list mod-client-pack-required-table w-full")
+                                    )
+                                else:
+                                    with ui.column().classes("mod-client-pack-option-list w-full"):
+                                        for entry in required_entries:
+                                            with ui.row().classes("mod-client-pack-option w-full items-center"):
+                                                ui.label(entry.friendly).classes("mod-client-pack-option-label")
 
         modlist_dialog = ui.dialog()
         with modlist_dialog:
@@ -4848,7 +5035,10 @@ class ModWebAppPageMixin(
 
                 @ui.refreshable
                 def _mod_download_rows(search_query: str) -> None:
+                    nonlocal virtual_mod_rows, virtual_mod_table
                     checkboxes.clear()
+                    virtual_mod_table = None
+                    virtual_mod_rows = []
                     if not model.mods.mods:
                         update_result_count(0)
                         return
@@ -4863,6 +5053,189 @@ class ModWebAppPageMixin(
                     if not filtered_mods:
                         with ui.card().classes("mod-setting-card locked w-full"):
                             ui.label("No mods match that search.").classes("mod-subtitle text-sm")
+                        return
+
+                    if len(filtered_mods) >= _VIRTUALIZED_LIST_MIN_ITEMS and callable(
+                        getattr(ui, "table", None)
+                    ):
+                        mod_by_name: dict[str, NodeModEntry] = {
+                            entry.name: entry for entry in filtered_mods
+                        }
+                        rows: list[_VirtualModRow] = [
+                            {
+                                "name": entry.name,
+                                "friendly": entry.friendly,
+                                "file": entry.name,
+                                "size": entry.size_text,
+                                "placement": entry.placement.label,
+                                "policy": (
+                                    ""
+                                    if entry.client_pack.policy is ClientPackPolicy.REQUIRED
+                                    else entry.client_pack.policy.label
+                                ),
+                                "type": entry.mod_type.label,
+                                "type_tone": self._mod_type_badge_tone(entry.mod_type),
+                                "downloadable": capabilities.supports_raw_download and entry.downloadable,
+                                "download_block_label": entry.download_block_label or "Not downloadable",
+                                "selectable": entry.name in selectable_name_set,
+                                "show_download_block": not entry.downloadable
+                                and not (
+                                    entry.mod_type is ModType.SERVER
+                                    and entry.download_block_reason == ModDownloadBlockReason.SERVER_ONLY.value
+                                ),
+                                "show_placement": entry.placement is ModPlacement.CLIENT_ONLY,
+                                "show_policy": entry.client_pack.policy is not ClientPackPolicy.REQUIRED,
+                                "state_class": (
+                                    "blocked"
+                                    if not entry.downloadable
+                                    else (
+                                        "mod-row-client-only"
+                                        if entry.placement is ModPlacement.CLIENT_ONLY
+                                        else (
+                                            "mod-row-disabled"
+                                            if entry.placement is ModPlacement.SERVER_DISABLED
+                                            else ""
+                                        )
+                                    )
+                                ),
+                            }
+                            for entry in filtered_mods
+                        ]
+                        columns: list[dict[str, object]] = [
+                            {"name": "friendly", "label": "Mod", "field": "friendly", "align": "left"},
+                        ]
+
+                        def sync_virtual_selection(event: "TableSelectionEventArguments") -> None:
+                            visible_selectable_names: set[str] = {
+                                row["name"] for row in rows if row["selectable"]
+                            }
+                            selected_mod_names.difference_update(visible_selectable_names)
+                            selection_rows: list[object] = cast(
+                                list[object],
+                                cast(object, event.selection),
+                            )
+                            for raw_row in selection_rows:
+                                row: Mapping[str, object] = cast(Mapping[str, object], raw_row)
+                                mod_name: str = str(row.get("name", ""))
+                                if mod_name in visible_selectable_names:
+                                    selected_mod_names.add(mod_name)
+                            update_count()
+
+                        opened_dialogs: dict[str, Dialog] = {}
+
+                        def open_virtual_mod(event: ModWebEventArgumentsContainer) -> None:
+                            raw_args: object = getattr(event, "args", None)
+                            args: Mapping[str, object] | None = (
+                                cast(Mapping[str, object], raw_args)
+                                if isinstance(raw_args, Mapping)
+                                else None
+                            )
+                            raw_row: object = (
+                                args.get("row", args) if args is not None else raw_args
+                            )
+                            if not isinstance(raw_row, Mapping):
+                                return
+                            row: Mapping[str, object] = cast(Mapping[str, object], raw_row)
+                            mod_name: str = str(row.get("name", ""))
+                            entry: NodeModEntry | None = mod_by_name.get(mod_name)
+                            if entry is None:
+                                return
+                            dialog = opened_dialogs.get(mod_name)
+                            if dialog is None:
+                                dialog = self._render_mod_info_dialog(
+                                    ui=ui,
+                                    entry=entry,
+                                    model=model,
+                                    user=user,
+                                )
+                                opened_dialogs[mod_name] = dialog
+                            dialog.open()
+
+                        async def download_virtual_mod(event: ModWebEventArgumentsContainer) -> None:
+                            mod_name: str = _event_args_as_text(event).strip()
+                            entry: NodeModEntry | None = mod_by_name.get(mod_name)
+                            download_url: str | None = model.mod_download_urls.get(mod_name)
+                            if entry is None or download_url is None:
+                                return
+                            await self._start_download(
+                                ui=ui,
+                                user=user,
+                                model=model,
+                                url=download_url,
+                                message=self._download_feedback_message(
+                                    kind=ModDownloadKind.SINGLE,
+                                    app_friendly=model.app_friendly,
+                                    mod_friendly=entry.friendly,
+                                ),
+                                filenames=(entry.name,),
+                            )
+
+                        virtual_mod_table = (
+                            ui.table(
+                                rows=cast(list[dict[object, object]], cast(object, rows)),
+                                columns=columns,
+                                row_key="name",
+                                selection="multiple",
+                                pagination=0,
+                                on_select=sync_virtual_selection,
+                            )
+                            .props(
+                                'flat dark hide-header virtual-scroll virtual-scroll-item-size=76 '
+                                ':rows-per-page-options="[0]"'
+                            )
+                            .classes("mod-virtual-list mod-virtual-mod-table w-full")
+                        )
+                        virtual_mod_rows = rows
+                        initially_selected_rows = [
+                            row for row in rows if str(row["name"]) in selected_mod_names
+                        ]
+                        virtual_mod_table.selected = cast(
+                            list[dict[object, object]],
+                            cast(object, initially_selected_rows),
+                        )
+                        virtual_mod_table.add_slot(
+                            "body",
+                            """
+                            <q-tr :props="props" class="mod-virtual-row">
+                              <q-td :colspan="props.cols.length + 1" class="mod-virtual-row-cell">
+                                <div :class="['mod-row', 'mod-row-clickable', props.row.state_class]"
+                                     @click="$parent.$emit('modRowClick', {row: props.row})">
+                                  <q-checkbox v-if="props.row.selectable" v-model="props.selected"
+                                              dense @click.stop />
+                                  <q-checkbox v-else :model-value="false" dense disable @click.stop />
+                                  <div class="mod-row-main">
+                                    <div class="mod-row-title">{{ props.row.friendly }}</div>
+                                    <div class="mod-row-file">{{ props.row.file }}</div>
+                                  </div>
+                                  <div class="mod-row-meta">
+                                    <span class="mod-pill size">{{ props.row.size }}</span>
+                                    <span v-if="props.row.show_placement" class="mod-pill">
+                                      {{ props.row.placement }}
+                                    </span>
+                                    <span v-if="props.row.show_policy" class="mod-pill">
+                                      {{ props.row.policy }}
+                                    </span>
+                                    <span v-if="props.row.show_download_block" class="mod-pill blocked">
+                                      {{ props.row.download_block_label }}
+                                    </span>
+                                  </div>
+                                  <q-btn v-if="props.row.downloadable" flat dense no-caps label="Download"
+                                         class="mod-row-download"
+                                         @click.stop="$parent.$emit('modDownload', props.row.name)" />
+                                  <span v-else class="mod-row-download blocked">Blocked</span>
+                                  <div class="mod-setting-badge-rail mod-mod-type-badge-rail">
+                                    <span :class="['mod-badge', props.row.type_tone,
+                                                   'mod-setting-badge', 'mod-mod-type-badge']">
+                                      {{ props.row.type }}
+                                    </span>
+                                  </div>
+                                </div>
+                              </q-td>
+                            </q-tr>
+                            """,
+                        )
+                        virtual_mod_table.on("modRowClick", open_virtual_mod, ["row"])
+                        virtual_mod_table.on("modDownload", download_virtual_mod)
                         return
 
                     with ui.column().classes("w-full mod-list"):
@@ -4909,7 +5282,7 @@ class ModWebAppPageMixin(
                     user=user,
                     toggle_selection=toggle_selection,
                     download_selected=download_selected if capabilities.supports_raw_download else None,
-                    open_client_pack=client_pack_dialog.open if supports_client_pack else None,
+                    open_client_pack=open_client_pack_dialog if supports_client_pack else None,
                     open_modlist=modlist_dialog.open,
                     open_client_pack_config=(
                         open_client_pack_configuration
@@ -5287,7 +5660,21 @@ class ModWebAppPageMixin(
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
-        if can_open_details_dialog:
+        details_dialog_rendered = False
+
+        def ensure_details_dialog() -> None:
+            nonlocal details_dialog, details_dialog_rendered, details_enable_disable_button
+            nonlocal friendly_name_input, lifecycle_crashed_checkbox, lifecycle_started_checkbox
+            nonlocal lifecycle_stopped_checkbox, notes_input, relay_advancements_checkbox
+            nonlocal relay_notice_player_death_checkbox, relay_notice_player_session_checkbox
+            nonlocal relay_notice_progress_checkbox, running_cpu_points_input, running_ram_points_input
+            nonlocal startup_cpu_points_input, startup_ram_points_input, steam_update_branch_select
+            nonlocal steam_update_enabled_checkbox, title_font_select
+            if details_dialog_rendered:
+                return
+            if not can_open_details_dialog:
+                raise PermissionError("App properties are unavailable for this user.")
+            details_dialog_rendered = True
             with ui.dialog() as details_dialog:
                 with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
                     with ui.column().classes("w-full gap-4 mod-app-details-layout"):
@@ -5471,6 +5858,13 @@ class ModWebAppPageMixin(
                             if can_edit_app_details:
                                 ui.button("Save", on_click=_handle_details_submit).classes("mod-list-button")
 
+        def open_details_dialog() -> None:
+            ensure_details_dialog()
+            if details_dialog is None:
+                raise RuntimeError("App properties dialog was not rendered.")
+            _apply_runtime_control_model(current_runtime_model, force=True)
+            details_dialog.open()
+
         with ui.column().classes("mod-hero-toolbar w-full mod-select-form"):
             with ui.row().classes("mod-list-toolbar mod-hero-toolbar-surface w-full"):
                 with ui.row().classes("mod-list-actions"):
@@ -5495,10 +5889,10 @@ class ModWebAppPageMixin(
                             on_click=_create_app_action_handler(NodeAppMutationAction.KILL),
                         ).classes("mod-list-button danger mod-toolbar-button")
                         _apply_runtime_control_model(model, force=True)
-                    if can_open_details_dialog and details_dialog is not None:
+                    if can_open_details_dialog:
                         ui.button(
                             "Properties",
-                            on_click=details_dialog.open,
+                            on_click=open_details_dialog,
                         ).classes("mod-list-button secondary mod-toolbar-button")
         if (
             poll_runtime_model

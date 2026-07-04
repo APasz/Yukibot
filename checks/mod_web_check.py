@@ -180,6 +180,7 @@ from web_dash.types import (
     ModWebAppSectionKind,
     ModWebAppTabContext,
     ModWebAppTabDefinition,
+    ModWebAppTabLoadResult,
     ModWebAppTabVisibilityRule,
     ModWebBasePageModel,
     ModWebConfigEditorShape,
@@ -8447,6 +8448,114 @@ class ModWebTests(unittest.TestCase):
             "Preparing client pack for Minecraft Alpha.",
         )
 
+    def test_mod_download_row_builds_detail_dialog_only_when_first_opened(self) -> None:
+        service = ModWebService()
+        ui = MagicMock()
+        row = MagicMock()
+        ui.row.return_value.classes.return_value = row
+        dialog = MagicMock()
+        entry = self._mod_entry(name="alpha.jar", friendly="Alpha")
+        model = cast(ModWebPageModel, object())
+        user = cast(ModWebUser, object())
+
+        with patch.object(service, "_render_mod_info_dialog", return_value=dialog) as render_dialog:
+            service._render_mod_download_row(
+                ui=cast(ModWebUi, ui),
+                entry=entry,
+                download_url=None,
+                on_change=Mock(),
+                can_select=True,
+                app_friendly="Minecraft Alpha",
+                model=model,
+                user=user,
+            )
+
+            render_dialog.assert_not_called()
+            open_dialog = row.on.call_args_list[0].args[1]
+            open_dialog(None)
+            open_dialog(None)
+
+        render_dialog.assert_called_once_with(
+            ui=ui,
+            entry=entry,
+            model=model,
+            user=user,
+        )
+        self.assertEqual(dialog.open.call_count, 2)
+
+    def test_large_mod_list_uses_virtual_scroll_table(self) -> None:
+        service = ModWebService()
+        mods = tuple(
+            self._mod_entry(name=f"mod-{index}.jar", friendly=f"Mod {index}")
+            for index in range(50)
+        )
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            app_color_hex=None,
+            app_scope="factorio",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="factorio_alpha",
+                app_friendly="Factorio Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=self._mod_list(app_name="factorio_alpha", mods=mods),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={mod.name: f"/mods/{mod.name}" for mod in mods},
+        )
+        ui = MagicMock()
+        ui.refreshable.side_effect = lambda function: function
+        select = MagicMock()
+        select.props.return_value.classes.return_value = select
+        select.value = ModWebModlistFormat.PLAINTEXT.value
+        ui.select.return_value = select
+        table = MagicMock()
+        table.props.return_value.classes.return_value = table
+        table.rows = []
+        table.selected = []
+        ui.table.return_value = table
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=False),
+            patch.object(service, "_render_flat_tab_header"),
+            patch.object(
+                service,
+                "_render_mod_toolbar",
+                return_value=SimpleNamespace(
+                    selection_button=None,
+                    download_button=None,
+                    delete_control=None,
+                    result_count_label=None,
+                ),
+            ),
+            patch.object(service, "_render_mod_download_row") as render_standard_row,
+        ):
+            service._render_mods_section(ui=cast(ModWebUi, ui), model=model, user=user)
+
+        ui.table.assert_called_once()
+        self.assertEqual(len(ui.table.call_args.kwargs["rows"]), 50)
+        self.assertIn("virtual-scroll", table.props.call_args.args[0])
+        virtual_row_template = table.add_slot.call_args.args[1]
+        self.assertIn("['mod-row', 'mod-row-clickable', props.row.state_class]", virtual_row_template)
+        self.assertIn('class="mod-pill size"', virtual_row_template)
+        self.assertIn("'mod-setting-badge', 'mod-mod-type-badge'", virtual_row_template)
+        render_standard_row.assert_not_called()
+
     def test_filter_mod_entries_matches_name_version_and_state_tokens(self) -> None:
         service = ModWebService()
         mods = (
@@ -8960,6 +9069,10 @@ class ModWebTests(unittest.TestCase):
                 del tag
                 return FakeContainer()
 
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
             def dialog(self) -> FakeDialog:
                 dialog = FakeDialog()
                 self.dialogs.append(dialog)
@@ -9160,7 +9273,7 @@ class ModWebTests(unittest.TestCase):
         rendered_mod_names: list[str] = []
         remote_json = AsyncMock(return_value={"changelog": "Persisted after Save."})
         set_changelog_draft = Mock()
-        get_changelog_draft = Mock(return_value="Fresh shared draft.")
+        get_changelog_draft = Mock(side_effect=[None, "Fresh shared draft."])
 
         with (
             patch.object(service, "_user_has_level", return_value=True),
@@ -9182,6 +9295,21 @@ class ModWebTests(unittest.TestCase):
             ),
         ):
             service._render_mods_section(ui=cast(ModWebUi, cast(object, ui)), model=model, user=user)
+
+            self.assertEqual(ui.config_search_inputs, [])
+            self.assertNotIn("Include configured KubeJS scripts", ui.checkboxes)
+            configure_button = next(
+                item for item in ui.menu_items if item.text == "Configure <!>"
+            )
+            self.assertIsNotNone(configure_button.on_click)
+            assert configure_button.on_click is not None
+            configure_button.on_click()
+            client_pack_button = next(button for button in ui.buttons if button.text == "Client Pack")
+            self.assertIsNotNone(client_pack_button.on_click)
+            assert client_pack_button.on_click is not None
+            client_pack_button.on_click()
+            for dialog in ui.dialogs:
+                dialog.opened = 0
 
             changelog_handler = ui.textareas[-1].handlers["change"]
             changelog_handler(SimpleNamespace(value="Persisted after Save."))
@@ -12933,6 +13061,81 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(item_registry_summary.block_item_ids, ("minecraft:stone",))
         self.assertTrue(item_registry_summary.item_types_classified)
 
+    def test_lazy_app_tab_loader_fetches_only_requested_section(self) -> None:
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        app_entry = NodeAppEntry(
+            name="factorio_alpha",
+            friendly="Factorio Alpha",
+            node="erin",
+            running=False,
+            enabled=True,
+            supports_mods=False,
+            supports_configs=True,
+        )
+        empty_configs = NodeConfigList(
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            node="erin",
+            configs=(),
+        )
+        loaded_configs = replace(
+            empty_configs,
+            configs=(
+                self._config_entry(
+                    root_id="server",
+                    root_label="Server",
+                    relative_path="server.properties",
+                ),
+            ),
+        )
+        model_without_tabs = ModWebOverviewPageModel(
+            node_name="erin",
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            app_color_hex=None,
+            supports_configs=True,
+            config_read_level=Power_Level.visitor,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=empty_configs,
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+        )
+        model = replace(model_without_tabs, tabs=service._page_tabs(model_without_tabs))
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_config_list_async", AsyncMock(return_value=loaded_configs)) as load,
+        ):
+            result = asyncio.run(
+                service._load_remote_app_tab(
+                    tab_id="configs",
+                    model=model,
+                    node=node,
+                    app_entry=app_entry,
+                    app_name="factorio_alpha",
+                    request=cast(Any, SimpleNamespace()),
+                    user=user,
+                )
+            )
+
+        self.assertEqual(result.model.configs, loaded_configs)
+        self.assertIsNone(result.chat_surface)
+        load.assert_awaited_once_with(node, "factorio_alpha", user)
+
     def test_append_minecraft_recipe_mutation_posts_to_node_api(self) -> None:
         service = ModWebService()
         node = ModWebNodeLink(
@@ -13808,6 +14011,9 @@ class ModWebTests(unittest.TestCase):
                 self.removed_style = remove
                 return self
 
+            def clear(self) -> None:
+                return None
+
             def __enter__(self) -> "FakeContainer":
                 return self
 
@@ -13821,6 +14027,11 @@ class ModWebTests(unittest.TestCase):
                 return False
 
         class FakeUi:
+            def __init__(self) -> None:
+                self.tab_change_handler: Callable[[object], object] | None = None
+                self.navigate = SimpleNamespace(to=Mock())
+                self.javascript_calls: list[str] = []
+
             def column(self) -> FakeContainer:
                 return FakeContainer()
 
@@ -13831,8 +14042,13 @@ class ModWebTests(unittest.TestCase):
                 del tag
                 return FakeContainer()
 
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
             def tabs(self, *, value: str, on_change: object) -> FakeContainer:
-                del value, on_change
+                del value
+                self.tab_change_handler = cast(Callable[[object], object], on_change)
                 return FakeContainer()
 
             def tab(self, tab_id: str, *, label: str) -> object:
@@ -13847,6 +14063,10 @@ class ModWebTests(unittest.TestCase):
                 del tab
                 return FakeContainer()
 
+            def run_javascript(self, script: str, *, timeout: float = 1.0) -> None:
+                del timeout
+                self.javascript_calls.append(script)
+
         service = ModWebService()
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
         model = ModWebOverviewPageModel(
@@ -13854,7 +14074,7 @@ class ModWebTests(unittest.TestCase):
             app_name="minecraft_alpha",
             app_friendly="Minecraft Alpha",
             app_color_hex="#22C55E",
-            supports_configs=False,
+            supports_configs=True,
             config_read_level=Power_Level.user,
             config_write_level=Power_Level.sudo,
             supports_save_uploads=False,
@@ -13895,6 +14115,7 @@ class ModWebTests(unittest.TestCase):
         )
         ui = FakeUi()
         tabs = service._page_tabs(model)
+        load_tab = AsyncMock(return_value=ModWebAppTabLoadResult(model=model))
 
         with (
             patch.object(
@@ -13913,7 +14134,12 @@ class ModWebTests(unittest.TestCase):
                 current_url="/mod-web/apps/minecraft_alpha?tab=chat",
                 tabs=tabs,
                 chat_surface=chat_surface,
+                load_tab=load_tab,
             )
+
+            self.assertIsNotNone(ui.tab_change_handler)
+            assert ui.tab_change_handler is not None
+            asyncio.run(cast(Any, ui.tab_change_handler)(SimpleNamespace(value="configs")))
 
         self.assertIsNone(result)
         render_chat_endpoint_badge.assert_called_once()
@@ -13925,7 +14151,10 @@ class ModWebTests(unittest.TestCase):
             new_tab=True,
         )
         render_action_link.assert_called_once()
-        render_page_section.assert_called_once()
+        self.assertEqual(render_page_section.call_count, 2)
+        load_tab.assert_awaited_once_with("configs")
+        ui.navigate.to.assert_not_called()
+        self.assertTrue(any("history.replaceState" in script for script in ui.javascript_calls))
 
     def test_additional_app_tabs_stay_hidden_when_conditions_are_not_met(self) -> None:
         class HiddenTabService(ModWebService):
@@ -14590,8 +14819,9 @@ class ModWebTests(unittest.TestCase):
                 return None
 
         class FakeButton:
-            def __init__(self, text: str) -> None:
+            def __init__(self, text: str, on_click: Callable[[], object] | None = None) -> None:
                 self.text = text
+                self.on_click = on_click
                 self.class_value: str | None = None
 
             def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeButton":
@@ -14662,8 +14892,7 @@ class ModWebTests(unittest.TestCase):
                 return FakeDialog()
 
             def button(self, text: str = "", **kwargs: object) -> FakeButton:
-                del kwargs
-                button = FakeButton(text)
+                button = FakeButton(text, cast(Callable[[], object] | None, kwargs.get("on_click")))
                 self.buttons.append(button)
                 return button
 
@@ -14751,6 +14980,11 @@ class ModWebTests(unittest.TestCase):
             )
 
         self.assertIn("Properties", [button.text for button in ui.buttons])
+        self.assertEqual(ui.inputs, [])
+        properties_button = next(button for button in ui.buttons if button.text == "Properties")
+        self.assertIsNotNone(properties_button.on_click)
+        assert properties_button.on_click is not None
+        properties_button.on_click()
         self.assertIn("Disable", [button.text for button in ui.buttons])
         self.assertEqual(
             [control.value for control in ui.inputs],
