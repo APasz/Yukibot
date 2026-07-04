@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from modmux.models import Provider
 
 from apps._config import (
     CurseForgeFileReference,
+    KnownModPageProvider,
     LauncherProviderUrls,
+    known_mod_page_provider_for_url,
     launcher_provider_label,
     mod_capabilities_for_scope,
+    normalise_mod_page_url,
 )
-from apps._launcher_metadata import has_curseforge_api_key
+from apps._launcher_metadata import has_curseforge_api_key, launcher_project_page_url
 from apps.minecraft import MinecraftRecipeMutation
 
 from .constants import (
@@ -26,10 +30,14 @@ from .runtime_imports import (
     Checkbox,
     ClientPackConfig,
     ClientPackPolicy,
+    Column,
     Input,
+    LauncherMetadataResolution,
+    Label,
     Literal,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPageLink,
     ModPlacement,
     ModType,
     ModWebUser,
@@ -76,6 +84,14 @@ if TYPE_CHECKING:
     from nicegui.events import ValueChangeEventArguments
 
 
+@dataclass(slots=True)
+class _ModPageEditorRow:
+    container: Column
+    name_input: Input
+    url_input: Input
+    automatic_name: str | None = None
+
+
 class ModWebActionsMixin(ModWebServiceSupport):
     @staticmethod
     def _mod_type_badge_tone(mod_type: ModType) -> BadgeTone:
@@ -90,6 +106,39 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return "red"
             case ModType.BUILTIN:
                 return "black"
+
+    @staticmethod
+    def _mod_download_summary(entry: NodeModEntry) -> str:
+        if entry.downloadable:
+            return "Available"
+        reason = entry.download_block_label or entry.download_block_reason
+        return "Blocked" if reason is None else f"Blocked — {reason}"
+
+    @staticmethod
+    def _mod_client_pack_summary(entry: NodeModEntry) -> str:
+        if entry.mod_type in {ModType.SERVER, ModType.BUILTIN}:
+            return "Unavailable — Server-only"
+        if entry.placement is ModPlacement.SERVER_DISABLED:
+            return "Unavailable — Server disabled"
+        if not entry.downloadable:
+            return "Unavailable — Download blocked"
+        if not entry.client_pack.included_in_client:
+            return "Not included"
+        if not entry.client_pack_eligible:
+            return "Unavailable"
+
+        match entry.client_pack.policy:
+            case ClientPackPolicy.REQUIRED:
+                return "Required"
+            case ClientPackPolicy.OPTIONAL:
+                default_state = "included" if entry.client_pack.default_selected else "not included"
+                return f"Optional — {default_state} by default"
+            case ClientPackPolicy.ALTERNATIVE:
+                assert entry.client_pack.choice_group is not None
+                suffix = " (default)" if entry.client_pack.default_choice else ""
+                return f"Alternative — {entry.client_pack.choice_group}{suffix}"
+            case _:
+                assert_never(entry.client_pack.policy)
 
     @staticmethod
     def _is_protected_mod(entry: NodeModEntry) -> bool:
@@ -439,6 +488,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         mod_type: ModType,
         download_block_reason: ModDownloadBlockReason | None,
         metadata_overrides: ModMetadataOverrides,
+        mod_pages: tuple[ModPageLink, ...] = (),
         client_pack: ClientPackConfig | None = None,
         launcher_urls: LauncherProviderUrls,
         user: ModWebUser,
@@ -461,11 +511,38 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     download_block_reason.value if download_block_reason is not None else None
                 ),
                 "metadata_overrides": metadata_overrides.model_dump(mode="json"),
+                "mod_pages": [page.model_dump(mode="json") for page in mod_pages],
                 "client_pack": (client_pack or entry.client_pack).model_dump(mode="json"),
                 "launcher_urls": launcher_urls.model_dump(mode="json"),
             },
         )
         return NodeModMutationResult.from_mapping(payload)
+
+    async def _fetch_mod_launcher_metadata(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        launcher_urls: LauncherProviderUrls,
+        user: ModWebUser,
+    ) -> LauncherMetadataResolution:
+        if self._is_builtin_mod(entry):
+            raise PermissionError("Built-in mod metadata cannot be fetched from mod web.")
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to fetch mod metadata.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=(
+                f"/apps/{quote(model.app_name, safe='')}/mods/{quote(entry.name, safe='')}/launcher-metadata"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"launcher_urls": launcher_urls.model_dump(mode="json")},
+        )
+        return LauncherMetadataResolution.model_validate(payload)
 
     @staticmethod
     def _mod_action_label(action: NodeModMutationAction, entry: NodeModEntry) -> str:
@@ -847,10 +924,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
         model: ModWebPageModel,
         user: ModWebUser,
     ) -> "Dialog":
-        status_text = entry.placement.label
-        downloadable_text = "Yes" if entry.downloadable else "No"
         version_text: str = entry.version or "Unknown"
-        block_text: str = entry.download_block_label or entry.download_block_reason or "None"
+        download_text = self._mod_download_summary(entry)
+        client_pack_text = self._mod_client_pack_summary(entry)
         available_actions = self._available_mod_actions(user=user, entry=entry)
         can_edit_properties: bool = not self._is_builtin_mod(entry) and self._user_has_level(
             user,
@@ -861,6 +937,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
         launcher_url_inputs: dict[Provider, Input] = {}
         curseforge_project_id_input: Input | None = None
         curseforge_file_id_input: Input | None = None
+        metadata_suggestion_label: Label | None = None
+        mod_page_rows: list[_ModPageEditorRow] = []
+        mod_pages_container: Column | None = None
         curseforge_metadata = entry.platforms.curseforge
         use_curseforge_reference_inputs = Provider.CURSEFORGE in launcher_metadata_providers and (
             not has_curseforge_api_key()
@@ -887,6 +966,200 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 launcher_metadata_button.classes(add="mod-details-tab-active")
             else:
                 launcher_metadata_button.classes(remove="mod-details-tab-active")
+
+        def launcher_urls_from_inputs() -> LauncherProviderUrls:
+            curseforge_reference: CurseForgeFileReference | None = None
+            if use_curseforge_reference_inputs:
+                if curseforge_project_id_input is None or curseforge_file_id_input is None:
+                    raise RuntimeError("CurseForge identifier inputs were not rendered.")
+                project_id = _value_as_text(curseforge_project_id_input).strip()
+                file_id = _value_as_text(curseforge_file_id_input).strip()
+                if project_id or file_id:
+                    curseforge_reference = CurseForgeFileReference.model_validate(
+                        {"project_id": project_id, "file_id": file_id}
+                    )
+            return LauncherProviderUrls(
+                modrinth=(
+                    _value_as_text(launcher_url_inputs[Provider.MODRINTH]).strip()
+                    if Provider.MODRINTH in launcher_url_inputs
+                    else None
+                ),
+                curseforge=(
+                    _value_as_text(launcher_url_inputs[Provider.CURSEFORGE]).strip()
+                    if Provider.CURSEFORGE in launcher_url_inputs
+                    else None
+                ),
+                curseforge_reference=curseforge_reference,
+            )
+
+        def remove_mod_page_row(editor_row: _ModPageEditorRow) -> None:
+            mod_page_rows.remove(editor_row)
+            editor_row.container.delete()
+
+        def mod_page_url_validation(raw_url: str) -> str | None:
+            if not raw_url.strip():
+                return None
+            try:
+                normalise_mod_page_url(raw_url)
+            except (TypeError, ValueError):
+                return "Enter an absolute HTTPS URL."
+            return None
+
+        def refresh_mod_page_row(
+            editor_row: _ModPageEditorRow,
+            *,
+            raw_url: str | None = None,
+        ) -> None:
+            resolved_url = (
+                _value_as_text(editor_row.url_input).strip()
+                if raw_url is None
+                else raw_url.strip()
+            )
+            validation_error = mod_page_url_validation(resolved_url)
+            if validation_error is None:
+                editor_row.url_input.props('label="URL"')
+                editor_row.url_input.classes(remove="mod-page-url-invalid")
+            else:
+                editor_row.url_input.props(f'label="URL — {validation_error}"')
+                editor_row.url_input.classes(add="mod-page-url-invalid")
+            try:
+                normalise_mod_page_url(resolved_url)
+            except (TypeError, ValueError):
+                valid_url = False
+            else:
+                valid_url = True
+
+            provider = known_mod_page_provider_for_url(resolved_url)
+            if provider is not None:
+                canonical_name = provider.value
+                editor_row.name_input.set_value(canonical_name)
+                editor_row.automatic_name = canonical_name
+                editor_row.name_input.set_enabled(False)
+                return
+
+            current_name = _value_as_text(editor_row.name_input)
+            if editor_row.automatic_name is not None and current_name == editor_row.automatic_name:
+                editor_row.name_input.set_value("")
+            editor_row.automatic_name = None
+            editor_row.name_input.set_enabled(valid_url)
+
+        def add_mod_page_row(page: ModPageLink | None = None) -> None:
+            if mod_pages_container is None:
+                raise RuntimeError("Mod page editor was not rendered.")
+            with mod_pages_container:
+                with ui.column().classes("w-full gap-2") as row_container:
+                    url_input = (
+                        ui.input(
+                            "URL",
+                            value="" if page is None else page.url,
+                            placeholder="https://…",
+                        )
+                        .props("filled square dense clearable hide-bottom-space color=accent")
+                        .classes("w-full mod-app-details-field")
+                    )
+                    with ui.row().classes("w-full gap-2 items-end mod-page-editor-controls"):
+                        name_input = (
+                            ui.input(
+                                "Name",
+                                value="" if page is None else page.name,
+                                placeholder="Provider or page name",
+                            )
+                            .props("filled square dense clearable hide-bottom-space color=accent maxlength=80")
+                            .classes("mod-app-details-field grow")
+                        )
+                        remove_button = ui.button("Remove").classes("mod-list-button secondary")
+            editor_row = _ModPageEditorRow(
+                container=row_container,
+                name_input=name_input,
+                url_input=url_input,
+            )
+            mod_page_rows.append(editor_row)
+            remove_button.on_click(lambda: remove_mod_page_row(editor_row))
+            url_input.on_value_change(
+                lambda event: refresh_mod_page_row(
+                    editor_row,
+                    raw_url=str(event.value or ""),
+                )
+            )
+            url_input.on("keydown.enter", lambda: refresh_mod_page_row(editor_row))
+            refresh_mod_page_row(editor_row)
+
+        def mod_pages_from_inputs() -> tuple[ModPageLink, ...]:
+            pages: list[ModPageLink] = []
+            for row_number, editor_row in enumerate(mod_page_rows, start=1):
+                name = _value_as_text(editor_row.name_input).strip()
+                url = _value_as_text(editor_row.url_input).strip()
+                if not name and not url:
+                    continue
+                if not name or not url:
+                    raise ValueError(f"Mod page row {row_number} requires both a name and URL.")
+                pages.append(ModPageLink(name=name, url=url))
+            return tuple(pages)
+
+        def ensure_launcher_mod_page_rows(launcher_urls: LauncherProviderUrls) -> None:
+            existing_providers = {
+                provider
+                for editor_row in mod_page_rows
+                if (
+                    provider := known_mod_page_provider_for_url(
+                        _value_as_text(editor_row.url_input).strip()
+                    )
+                )
+                is not None
+            }
+            provider_mapping = (
+                (Provider.MODRINTH, KnownModPageProvider.MODRINTH),
+                (Provider.CURSEFORGE, KnownModPageProvider.CURSEFORGE),
+            )
+            for launcher_provider, page_provider in provider_mapping:
+                page_url = launcher_urls.for_provider(launcher_provider)
+                if page_url is None or page_provider in existing_providers:
+                    continue
+                try:
+                    project_page_url = launcher_project_page_url(page_url, launcher_provider)
+                except ValueError:
+                    continue
+                add_mod_page_row(
+                    ModPageLink(
+                        name=page_provider.value,
+                        url=project_page_url,
+                    )
+                )
+                existing_providers.add(page_provider)
+
+        async def fetch_launcher_metadata() -> None:
+            try:
+                launcher_urls = launcher_urls_from_inputs()
+                ensure_launcher_mod_page_rows(launcher_urls)
+                resolution = await self._fetch_mod_launcher_metadata(
+                    model=model,
+                    entry=entry,
+                    launcher_urls=launcher_urls,
+                    user=user,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Mod launcher metadata fetch failed: node=%s app=%s mod=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    entry.name,
+                    xcp,
+                )
+                ui.notify(f"Metadata fetch failed: {xcp}", type="negative")
+                return
+            if metadata_suggestion_label is None:
+                raise RuntimeError("Metadata suggestion label was not rendered.")
+            if resolution.suggested_mod_type is None:
+                metadata_suggestion_label.set_text(
+                    "Suggested type: unavailable from the supplied provider metadata."
+                )
+            else:
+                assert resolution.suggestion_provider is not None
+                metadata_suggestion_label.set_text(
+                    f"Suggested type: {resolution.suggested_mod_type.label} "
+                    f"({launcher_provider_label(resolution.suggestion_provider)})"
+                )
+            ui.notify("Launcher metadata fetched.", type="positive")
 
         async def save_properties() -> None:
             try:
@@ -929,35 +1202,15 @@ class ModWebActionsMixin(ModWebServiceSupport):
                             else False
                         ),
                     )
-                curseforge_reference: CurseForgeFileReference | None = None
-                if use_curseforge_reference_inputs:
-                    if curseforge_project_id_input is None or curseforge_file_id_input is None:
-                        raise RuntimeError("CurseForge identifier inputs were not rendered.")
-                    project_id = _value_as_text(curseforge_project_id_input).strip()
-                    file_id = _value_as_text(curseforge_file_id_input).strip()
-                    if project_id or file_id:
-                        curseforge_reference = CurseForgeFileReference.model_validate(
-                            {"project_id": project_id, "file_id": file_id}
-                        )
-                launcher_urls = LauncherProviderUrls(
-                    modrinth=(
-                        _value_as_text(launcher_url_inputs[Provider.MODRINTH]).strip()
-                        if Provider.MODRINTH in launcher_url_inputs
-                        else None
-                    ),
-                    curseforge=(
-                        _value_as_text(launcher_url_inputs[Provider.CURSEFORGE]).strip()
-                        if Provider.CURSEFORGE in launcher_url_inputs
-                        else None
-                    ),
-                    curseforge_reference=curseforge_reference,
-                )
+                launcher_urls = launcher_urls_from_inputs()
+                ensure_launcher_mod_page_rows(launcher_urls)
                 result = await self._update_mod_properties(
                     model=model,
                     entry=entry,
                     mod_type=selected_mod_type,
                     download_block_reason=selected_block_reason,
                     metadata_overrides=metadata_overrides,
+                    mod_pages=mod_pages_from_inputs(),
                     client_pack=client_pack,
                     launcher_urls=launcher_urls,
                     user=user,
@@ -1024,42 +1277,29 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         ui.label(entry.friendly).classes("text-xl font-black mod-title-small")
                         ui.label(entry.name).classes("mod-subtitle text-sm break-all")
                     with ui.grid(columns=2).classes("mod-detail-grid"):
-                        self._render_mod_detail_item(ui=ui, label="Status", value=status_text)
-                        self._render_mod_detail_item(
-                            ui=ui,
-                            label="Server loadable",
-                            value="Yes" if entry.server_loadable else "No",
-                        )
-                        self._render_mod_detail_item(
-                            ui=ui,
-                            label="Client-pack eligible",
-                            value="Yes" if entry.client_pack_eligible else "No",
-                        )
+                        self._render_mod_detail_item(ui=ui, label="Placement", value=entry.placement.label)
                         self._render_mod_detail_item(ui=ui, label="Type", value=entry.mod_type.label)
-                        self._render_mod_detail_item(ui=ui, label="Size", value=entry.size_text)
-                        self._render_mod_detail_item(ui=ui, label="Downloadable", value=downloadable_text)
-                        self._render_mod_detail_item(ui=ui, label="Coremod", value="Yes" if entry.coremod else "No")
-                        self._render_mod_detail_item(ui=ui, label="Origin", value=entry.origin)
                         self._render_mod_detail_item(ui=ui, label="Version", value=version_text)
+                        self._render_mod_detail_item(ui=ui, label="Size", value=entry.size_text)
+                        self._render_mod_detail_item(ui=ui, label="Origin", value=entry.origin)
                         self._render_mod_detail_item(ui=ui, label="Added", value=entry.added)
-                        self._render_mod_detail_item(ui=ui, label="Blocked", value=block_text)
-                        self._render_mod_detail_item(
-                            ui=ui,
-                            label="Client pack",
-                            value=entry.client_pack.policy.label,
-                        )
-                        if entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE:
-                            assert entry.client_pack.choice_group is not None
+                        self._render_mod_detail_item(ui=ui, label="Download", value=download_text)
+                        if supports_client_pack:
                             self._render_mod_detail_item(
                                 ui=ui,
-                                label="Choice group",
-                                value=entry.client_pack.choice_group,
+                                label="Client pack",
+                                value=client_pack_text,
                             )
-                            self._render_mod_detail_item(
-                                ui=ui,
-                                label="Default choice",
-                                value="Yes" if entry.client_pack.default_choice else "No",
-                            )
+                    if entry.mod_pages:
+                        with ui.column().classes("mod-detail-item mod-mod-page-links gap-1"):
+                            ui.label("Mod pages").classes("mod-stat-label")
+                            with ui.row().classes("w-full gap-3 flex-wrap"):
+                                for mod_page in entry.mod_pages:
+                                    ui.link(
+                                        mod_page.name,
+                                        mod_page.url,
+                                        new_tab=True,
+                                    ).props('rel="noopener noreferrer"').classes("mod-mod-page-link")
                     if can_edit_properties:
                         with ui.column().classes("w-full gap-3 mod-app-details-section"):
                             ui.label("Classification").classes("mod-stat-label")
@@ -1096,6 +1336,19 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     )
                                     .props("filled square dense hide-bottom-space color=accent options-dark")
                                     .classes("mod-app-details-field")
+                                )
+                            with ui.column().classes("w-full gap-2"):
+                                ui.label("Mod pages").classes("mod-stat-label")
+                                ui.label(
+                                    "Add links to this mod's project or information pages. "
+                                    "Recognized providers are named automatically."
+                                ).classes("mod-subtitle text-xs")
+                                with ui.column().classes("w-full gap-2") as mod_pages_container:
+                                    pass
+                                for mod_page in entry.mod_pages:
+                                    add_mod_page_row(mod_page)
+                                ui.button("Add mod page", on_click=lambda: add_mod_page_row()).classes(
+                                    "mod-list-button secondary"
                                 )
                             if supports_client_pack:
                                 with ui.column().classes("w-full gap-2"):
@@ -1261,6 +1514,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                             .props("filled square dense clearable hide-bottom-space color=accent")
                                             .classes("w-full mod-app-details-field mod-mod-launcher-field")
                                         )
+                                        launcher_url_inputs[provider].on_value_change(
+                                            lambda _: ensure_launcher_mod_page_rows(
+                                                launcher_urls_from_inputs()
+                                            )
+                                        )
+                                ensure_launcher_mod_page_rows(launcher_urls_from_inputs())
+                                metadata_suggestion_label = ui.label(
+                                    "Suggested type: fetch metadata to check provider support."
+                                ).classes("mod-subtitle text-xs")
+                                with ui.row().classes("w-full justify-end"):
+                                    ui.button(
+                                        "Fetch Metadata",
+                                        on_click=fetch_launcher_metadata,
+                                    ).classes("mod-list-button secondary")
                             launcher_metadata_section.set_visibility(False)
                     if available_actions:
                         with ui.column().classes("gap-2"):

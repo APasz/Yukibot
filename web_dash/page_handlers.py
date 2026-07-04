@@ -632,6 +632,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     client_pack_published_changelog=app_entry.client_pack_published_changelog,
                     client_pack_releases=app_entry.client_pack_releases,
                     client_pack_kubejs_scripts=app_entry.client_pack_kubejs_scripts,
+                    client_pack_metadata=app_entry.client_pack_metadata,
                     chat_url=(
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),
@@ -884,5 +885,15 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     chat_surface=chat_surface,
                 )
         except Exception as xcp:
-            log.exception("Remote mod web app page render failed: node=%s app=%s", node_name, app_name)
-            self._render_error_page(ui=ui, title="Page unavailable", detail=str(xcp), app_name=app_name)
+            if self._remote_node_error_is_transient(xcp):
+                detail = self._friendly_remote_node_error_text(xcp)
+                log.info(
+                    "Remote mod web app temporarily unavailable: node=%s app=%s reason=%s",
+                    node_name,
+                    app_name,
+                    detail,
+                )
+            else:
+                detail = str(xcp)
+                log.exception("Remote mod web app page render failed: node=%s app=%s", node_name, app_name)
+            self._render_error_page(ui=ui, title="Page unavailable", detail=detail, app_name=app_name)

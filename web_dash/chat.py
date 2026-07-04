@@ -80,7 +80,6 @@ from .runtime_imports import (
     config,
     escape,
     hashlib,
-    json,
     mimetypes,
     quote,
     re,
@@ -104,7 +103,7 @@ from .types import (
     _ModWebChatSurfaceConfig,
     RemoteChatBrokerEvent,
 )
-from .ui_helpers import ModWebUiHelpersMixin
+from .ui_helpers import ModWebUiHelpersMixin, copy_text_to_clipboard
 
 if TYPE_CHECKING:
     from nicegui.element import Element
@@ -1846,7 +1845,11 @@ class ModWebChatMixin(ModWebServiceSupport):
                     if copy_text:
                         ui.menu_item(
                             "Copy",
-                            on_click=lambda ui=ui, copy_text=copy_text: self._copy_chat_text(ui=ui, text=copy_text),
+                            on_click=lambda ui=ui, copy_text=copy_text: copy_text_to_clipboard(
+                                ui=ui,
+                                text=copy_text,
+                                empty_message="This message has no text to copy.",
+                            ),
                         ).classes("mod-chat-entry-menu-item")
                     if can_reply:
                         ui.menu_item("Reply", on_click=lambda event=event: on_reply(event)).classes(
@@ -2628,37 +2631,6 @@ class ModWebChatMixin(ModWebServiceSupport):
             return ""
         return reference.content.strip()
 
-    @staticmethod
-    def _copy_chat_text(*, ui: ModWebUi, text: str) -> None:
-        normalised_text: str = text.strip()
-        if not normalised_text:
-            ui.notify("This message has no text to copy.", type="warning")
-            return
-        encoded_text: str = json.dumps(normalised_text)
-        ui.run_javascript(
-            (
-                "(async () => {"
-                f"const text = {encoded_text};"
-                "try {"
-                "if (navigator.clipboard && navigator.clipboard.writeText) {"
-                "await navigator.clipboard.writeText(text);"
-                "} else {"
-                "const textarea = document.createElement('textarea');"
-                "textarea.value = text;"
-                "textarea.setAttribute('readonly', 'true');"
-                "textarea.style.position = 'fixed';"
-                "textarea.style.opacity = '0';"
-                "document.body.appendChild(textarea);"
-                "textarea.focus();"
-                "textarea.select();"
-                "document.execCommand('copy');"
-                "document.body.removeChild(textarea);"
-                "}"
-                "} catch (_error) {}"
-                "})()"
-            ),
-            timeout=1.0,
-        )
         ui.notify("Copied message text.", type="positive")
 
     @staticmethod

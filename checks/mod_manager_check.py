@@ -20,14 +20,17 @@ from apps._config import (
     ClientPackConfig,
     ClientPackPolicy,
     CurseForgeModMetadata,
+    KnownModPageProvider,
     ModClassificationOverride,
     Mod_Config,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPageLink,
     ModPlacement,
     ModPlatformMetadata,
     ModrinthModMetadata,
     ModType,
+    known_mod_page_provider_for_url,
 )
 from apps._mod import Mod, Mod_Manager
 
@@ -46,6 +49,35 @@ class _DetectedServerMod(_FileMod):
 
 
 class ModManagerTests(unittest.IsolatedAsyncioTestCase):
+    def test_mod_page_links_require_a_name_and_absolute_https_url(self) -> None:
+        with self.assertRaises(ValueError):
+            ModPageLink(name="", url="https://modrinth.com/mod/example")
+        with self.assertRaises(ValueError):
+            ModPageLink(name="Modrinth", url="http://modrinth.com/mod/example")
+
+    def test_recognises_known_mod_page_providers(self) -> None:
+        cases = {
+            "https://modrinth.com/mod/example": KnownModPageProvider.MODRINTH,
+            "https://www.curseforge.com/minecraft/mc-mods/example": KnownModPageProvider.CURSEFORGE,
+            "https://www.nexusmods.com/skyrimspecialedition/mods/1": KnownModPageProvider.NEXUSMODS,
+            "https://7daystodiemods.com/example": KnownModPageProvider.SEVEN_DAYS_TO_DIE_MODS,
+            "https://mods.factorio.com/mod/example": KnownModPageProvider.FACTORIO_MODS,
+            "https://mod.io/g/example/m/mod": KnownModPageProvider.MOD_IO,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=1": KnownModPageProvider.STEAM_WORKSHOP,
+            "https://www.transportfever.net/filebase/entry/1": KnownModPageProvider.TRANSPORT_FEVER_NET,
+            "https://thunderstore.io/c/example/p/mod/": KnownModPageProvider.THUNDERSTORE,
+            "https://www.planetminecraft.com/mod/example/": KnownModPageProvider.PLANET_MINECRAFT,
+            "https://www.spigotmc.org/resources/example.1/": KnownModPageProvider.SPIGOT_MC,
+            "https://hangar.papermc.io/example": KnownModPageProvider.HANGAR,
+            "https://dev.bukkit.org/projects/example": KnownModPageProvider.BUKKIT,
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                self.assertIs(known_mod_page_provider_for_url(url), expected)
+
+        self.assertIsNone(known_mod_page_provider_for_url("https://example.com/mod/example"))
+        self.assertIsNone(known_mod_page_provider_for_url("not a URL"))
+
     def setUp(self) -> None:
         Mod_Manager._instances.clear()
         self._temp_dir = TemporaryDirectory()
@@ -450,6 +482,25 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reloaded.cfg.metadata_overrides.friendly_name, "Example Client Mod")
         self.assertEqual(reloaded.version, "2.4.0")
         self.assertEqual(reloaded.origin, "curated")
+
+    async def test_update_properties_persists_mod_page_links(self) -> None:
+        manager = self._build_manager()
+        await manager.add(self._write_source_file())
+        mod_pages = (
+            ModPageLink(name="Modrinth", url="https://modrinth.com/mod/example"),
+            ModPageLink(name="CurseForge", url="https://www.curseforge.com/minecraft/mc-mods/example"),
+        )
+
+        await manager.update_properties(
+            "example.zip",
+            mod_type=ModType.REGULAR,
+            download_block_reason=None,
+            metadata_overrides=ModMetadataOverrides(),
+            mod_pages=mod_pages,
+        )
+        await manager.reload_mods()
+
+        self.assertEqual(manager.get("example.zip").cfg.mod_pages, mod_pages)
 
     async def test_update_properties_persists_optional_client_pack_policy(self) -> None:
         manager = self._build_manager()

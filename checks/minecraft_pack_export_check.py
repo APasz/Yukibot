@@ -177,6 +177,8 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
             manifest["dependencies"],
             {"minecraft": "1.21.1", "fabric-loader": "0.16.10"},
         )
+        self.assertEqual(manifest["name"], "Example Pack")
+        self.assertEqual(manifest["summary"], "Example summary")
         files = {entry["path"]: entry for entry in manifest["files"]}
         self.assertEqual(
             requested_urls,
@@ -222,6 +224,8 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(manifest["version"], "2026-07-04")
+        self.assertEqual(manifest["name"], "Example Pack")
+        self.assertEqual(manifest["description"], "Example summary")
         self.assertEqual(
             manifest["files"],
             [

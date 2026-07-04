@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 from functools import lru_cache
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
     CLIENT_PACK_CHANGELOG_MAX_LENGTH,
+    CLIENT_PACK_FILENAME_PLACEHOLDERS,
+    CLIENT_PACK_FILENAME_TEMPLATE_MAX_LENGTH,
+    CLIENT_PACK_METADATA_DESCRIPTION_MAX_LENGTH,
+    CLIENT_PACK_METADATA_NAME_MAX_LENGTH,
     ModDistributionMode,
     app_title_font_default_label,
     app_title_font_options,
@@ -17,7 +23,6 @@ from apps._config import (
 )
 from font_assets import font_assets
 
-from .assets import extract_html_tag_contents
 from .app_page_minecraft import (
     ModWebAppPageMinecraftMixin,
     _MinecraftRecipeBrowserEntry,
@@ -31,6 +36,7 @@ from .app_page_minecraft import (
 )
 from .app_page_sevendays import ModWebAppPageSevenDaysMixin
 from .app_page_updates import ModWebAppPageUpdateMixin
+from .assets import extract_html_tag_contents
 from .constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
@@ -59,6 +65,8 @@ from .runtime_imports import (
     Card,
     Checkbox,
     ClientPackConfig,
+    ClientPackKubeJsScript,
+    ClientPackMetadataConfig,
     ClientPackPolicy,
     Html,
     Input,
@@ -67,13 +75,13 @@ from .runtime_imports import (
     ModPlacement,
     ModType,
     ModWebUser,
+    NodeApiScope,
     NodeAppActivityProviderEntry,
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
-    NodeApiScope,
     NodeConsoleActionList,
     NodeModEntry,
     NodeModMutationAction,
@@ -107,6 +115,7 @@ from .types import (
     ModWebAppTabDefinition,
     ModWebBasePageModel,
     ModWebDirectUploadTarget,
+    ModWebModlistFormat,
     ModWebModSortOrder,
     ModWebOverviewPageModel,
     ModWebPageLoadWarning,
@@ -115,6 +124,7 @@ from .types import (
     _ModWebAppHeroRuntimeDetails,
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
+    _ModWebEnableableControl,
     _ModWebKillControlState,
     _ModWebModToolbarBindings,
     _ModWebNodePresenceBadgeSpec,
@@ -122,7 +132,7 @@ from .types import (
     _ModWebStartStopControlState,
     _ModWebTabActionSpec,
 )
-from .ui_helpers import ModWebUiHelpersMixin
+from .ui_helpers import ModWebUiHelpersMixin, copy_text_to_clipboard
 
 if TYPE_CHECKING:
     from nicegui.element import Element
@@ -3580,6 +3590,160 @@ class ModWebAppPageMixin(
         return PackFormat.GENERIC_ZIP
 
     @staticmethod
+    def _render_modlist(
+        mods: tuple[NodeModEntry, ...],
+        *,
+        instance_name: str,
+        pack_version: str | None,
+        output_format: ModWebModlistFormat,
+        include_version: bool,
+        include_filename: bool,
+        include_disabled: bool = False,
+        include_builtin: bool = False,
+        include_client: bool = True,
+    ) -> str:
+        ordered_mods = tuple(
+            sorted(
+                (
+                    entry
+                    for entry in mods
+                    if (include_disabled or entry.placement is not ModPlacement.SERVER_DISABLED)
+                    and (include_builtin or entry.mod_type is not ModType.BUILTIN)
+                    and (include_client or entry.mod_type is not ModType.CLIENT)
+                ),
+                key=lambda entry: (entry.friendly.casefold(), entry.name.casefold()),
+            )
+        )
+
+        def is_optional(entry: NodeModEntry) -> bool:
+            return entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+
+        def structured_item(entry: NodeModEntry) -> dict[str, object]:
+            item: dict[str, object] = {"name": entry.friendly}
+            if include_version:
+                item["version"] = entry.version
+            if include_filename:
+                item["filename"] = entry.archive_name
+            if is_optional(entry):
+                item["optional"] = True
+            return item
+
+        def display_line(entry: NodeModEntry, escape_text: Callable[[str], str]) -> str:
+            parts: list[str] = [escape_text(entry.friendly)]
+            if is_optional(entry):
+                parts.append("[Optional]")
+            if include_version:
+                parts.append(f"[{escape_text(entry.version or 'Unknown')}]")
+            if include_filename:
+                parts.append(f"({escape_text(entry.archive_name)})")
+            return " ".join(parts)
+
+        def markdown_text(value: str) -> str:
+            escaped = value.replace("\\", "\\\\").replace("\n", " ")
+            for character in "`*_[]<>":
+                escaped = escaped.replace(character, f"\\{character}")
+            return escaped
+
+        def discord_text(value: str) -> str:
+            escaped = value.replace("\\", "\\\\").replace("\n", " ")
+            for character in "*_~|":
+                escaped = escaped.replace(character, f"\\{character}")
+            return escaped
+
+        def discord_code(value: str) -> str:
+            delimiter = "`"
+            while delimiter in value:
+                delimiter += "`"
+            return f"{delimiter}{value}{delimiter}"
+
+        version_label = pack_version or "Unpublished"
+        plaintext_heading = f"{instance_name} [{version_label}]"
+
+        match output_format:
+            case ModWebModlistFormat.PLAINTEXT:
+                body = "\n".join(display_line(entry, lambda value: value) for entry in ordered_mods)
+                return f"{plaintext_heading}\n\n{body}" if body else plaintext_heading
+            case ModWebModlistFormat.JSON:
+                payload = [structured_item(entry) for entry in ordered_mods]
+                return json.dumps(payload, ensure_ascii=False, indent=4)
+            case ModWebModlistFormat.JSONL:
+                return "\n".join(json.dumps(structured_item(entry), ensure_ascii=False) for entry in ordered_mods)
+            case ModWebModlistFormat.CSV:
+                columns = ["name"]
+                if include_version:
+                    columns.append("version")
+                if include_filename:
+                    columns.append("filename")
+                if any(is_optional(entry) for entry in ordered_mods):
+                    columns.append("optional")
+                output = StringIO(newline="")
+                writer = csv.writer(output, lineterminator="\n")
+                writer.writerow(columns)
+                for entry in ordered_mods:
+                    item = structured_item(entry)
+                    row: list[object] = []
+                    for column in columns:
+                        value = item.get(column)
+                        row.append(value if value is not None else "")
+                    writer.writerow(row)
+                return output.getvalue().rstrip("\n")
+            case ModWebModlistFormat.MARKDOWN_GFM:
+
+                def markdown_cell(value: str) -> str:
+                    return value.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
+
+                columns = ["Name"]
+                if include_version:
+                    columns.append("Version")
+                if include_filename:
+                    columns.append("Filename")
+                header = f"| {' | '.join(columns)} |"
+                separator = f"| {' | '.join('---' for _column in columns)} |"
+                rows: list[str] = [header, separator]
+                for entry in ordered_mods:
+                    display_name = markdown_cell(entry.friendly)
+                    if is_optional(entry):
+                        display_name = f"{display_name} [Optional]"
+                    cells = [display_name]
+                    if include_version:
+                        cells.append(markdown_cell(entry.version or "Unknown"))
+                    if include_filename:
+                        cells.append(markdown_cell(entry.archive_name))
+                    rows.append(f"| {' | '.join(cells)} |")
+                heading = f"# {markdown_text(instance_name)} [{markdown_text(version_label)}]"
+                body = "\n".join(rows)
+                return f"{heading}\n\n{body}"
+            case ModWebModlistFormat.MARKDOWN_COMMONMARK:
+                body = "\n".join(f"- {display_line(entry, markdown_text)}" for entry in ordered_mods)
+                heading = f"# {markdown_text(instance_name)} [{markdown_text(version_label)}]"
+                return f"{heading}\n\n{body}" if body else heading
+            case ModWebModlistFormat.DISCORD:
+                lines: list[str] = []
+                for entry in ordered_mods:
+                    parts = [f"**{discord_text(entry.friendly)}**"]
+                    if is_optional(entry):
+                        parts.append("[Optional]")
+                    if include_version:
+                        parts.append(f"[{discord_code(entry.version or 'Unknown')}]")
+                    if include_filename:
+                        parts.append(f"({discord_code(entry.archive_name)})")
+                    lines.append(f"- {' '.join(parts)}")
+                heading = f"**{discord_text(instance_name)} [{discord_text(version_label)}]**"
+                body = "\n".join(lines)
+                return f"{heading}\n\n{body}" if body else heading
+            case _:
+                assert_never(output_format)
+
+    @staticmethod
+    def _show_client_pack_kubejs_toggle(
+        app_scope: str | None,
+        scripts: tuple[ClientPackKubeJsScript, ...],
+    ) -> bool:
+        return (
+            app_scope is not None and app_scope.casefold() == "minecraft" and any(script.included for script in scripts)
+        )
+
+    @staticmethod
     def _default_mod_download_names(
         mods: tuple[NodeModEntry, ...],
         distribution_mode: ModDistributionMode,
@@ -3602,6 +3766,13 @@ class ModWebAppPageMixin(
         capabilities = mod_capabilities_for_scope(model.app_scope)
         is_minecraft_app: bool = (
             model.app_scope is not None and model.app_scope.casefold() == "minecraft"
+        )
+        show_client_pack_kubejs_toggle: bool = self._show_client_pack_kubejs_toggle(
+            model.app_scope,
+            model.client_pack_kubejs_scripts,
+        )
+        client_pack_metadata: ClientPackMetadataConfig = model.client_pack_metadata or ClientPackMetadataConfig(
+            name=model.app_friendly,
         )
         checkboxes: dict[str, Checkbox] = {}
         mod_options = self._mod_options(model.mods.mods)
@@ -3656,7 +3827,7 @@ class ModWebAppPageMixin(
         can_upload_mod: bool = self._user_has_level(user, Power_Level.user)
         selection_button = None
         download_button = None
-        delete_button = None
+        delete_control: _ModWebEnableableControl | None = None
         result_count_label: Label | None = None
 
         def update_result_count(visible_count: int) -> None:
@@ -3702,9 +3873,8 @@ class ModWebAppPageMixin(
                 )
                 download_button.set_enabled(can_download)
             selection_button.set_enabled(bool(selectable_names))
-            if delete_button is not None:
-                delete_button.set_text(self._delete_selection_label(selected_count=selected_deletable_count))
-                delete_button.set_enabled(selected_deletable_count > 0)
+            if delete_control is not None:
+                delete_control.set_enabled(selected_deletable_count > 0)
 
         def set_selected(mod_name: str, selected: bool) -> None:
             if selected:
@@ -3993,6 +4163,9 @@ class ModWebAppPageMixin(
         config_default_selects: dict[str, Select] = {}
         config_rows: dict[str, Element] = {}
         config_kubejs_script_checkboxes: dict[str, Checkbox] = {}
+        client_pack_name_input: Input | None = None
+        client_pack_description_input: Textarea | None = None
+        client_pack_filename_template_input: Input | None = None
         client_pack_changelog_draft: str = model.client_pack_changelog or ""
         client_pack_changelog_input: Textarea | None = None
         config_default_names: dict[str, str] = {
@@ -4070,8 +4243,24 @@ class ModWebAppPageMixin(
                 updates.append((entry, client_pack))
             return tuple(updates)
 
+        def configured_client_pack_metadata() -> ClientPackMetadataConfig | None:
+            if not is_minecraft_app:
+                return None
+            if (
+                client_pack_name_input is None
+                or client_pack_description_input is None
+                or client_pack_filename_template_input is None
+            ):
+                raise RuntimeError("Minecraft client-pack metadata controls are unavailable.")
+            return ClientPackMetadataConfig(
+                name=_value_as_text(client_pack_name_input),
+                description=_value_as_text(client_pack_description_input),
+                filename_template=_value_as_text(client_pack_filename_template_input),
+            )
+
         async def persist_client_pack_configuration() -> None:
             updates = client_pack_configuration_updates()
+            metadata = configured_client_pack_metadata()
             await self._remote_json_async(
                 node=self._remote_node_link(model.node_name),
                 app_name=model.app_name,
@@ -4093,9 +4282,7 @@ class ModWebAppPageMixin(
                                 {
                                     "relative_path": script.relative_path,
                                     "included": bool(
-                                        _value_as_object(
-                                            config_kubejs_script_checkboxes[script.relative_path]
-                                        )
+                                        _value_as_object(config_kubejs_script_checkboxes[script.relative_path])
                                     ),
                                 }
                                 for script in model.client_pack_kubejs_scripts
@@ -4104,6 +4291,7 @@ class ModWebAppPageMixin(
                         if is_minecraft_app
                         else {}
                     ),
+                    **({"metadata": metadata.model_dump(mode="json")} if metadata is not None else {}),
                 },
             )
             self._backend.set_client_pack_changelog_draft(
@@ -4159,11 +4347,9 @@ class ModWebAppPageMixin(
                 with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
                     with ui.column().classes("mod-client-pack-body w-full"):
                         with ui.column().classes("mod-client-pack-header w-full"):
-                            ui.label("Configure Client Pack Policies").classes(
-                                "text-xl font-black mod-title-small"
-                            )
+                            ui.label("Configure Client Pack").classes("text-xl font-black mod-title-small")
                             ui.label(
-                                "Save policy changes independently, then publish them with release notes."
+                                "Save configuration changes independently, then publish them with release notes."
                             ).classes("mod-subtitle text-sm")
                         (
                             ui.input(placeholder="Search pack mods")
@@ -4280,6 +4466,52 @@ class ModWebAppPageMixin(
                                 entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
                             )
                         render_config_default_choices()
+                        if is_minecraft_app:
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("Pack metadata").classes("mod-stat-label")
+                                ui.label("Used for launcher manifests and the downloaded archive filename.").classes(
+                                    "mod-client-pack-section-hint mod-subtitle"
+                                )
+                                client_pack_name_input = (
+                                    ui.input(
+                                        "Name",
+                                        value=client_pack_metadata.name,
+                                    )
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        f"maxlength={CLIENT_PACK_METADATA_NAME_MAX_LENGTH}"
+                                    )
+                                    .classes("w-full mod-config-input")
+                                )
+                                client_pack_description_input = (
+                                    ui.textarea(
+                                        "Description",
+                                        value=client_pack_metadata.description,
+                                    )
+                                    .props(
+                                        "filled square stack-label hide-bottom-space color=accent rows=2 "
+                                        f"maxlength={CLIENT_PACK_METADATA_DESCRIPTION_MAX_LENGTH}"
+                                    )
+                                    .classes("w-full mod-config-input")
+                                )
+                                client_pack_filename_template_input = (
+                                    ui.input(
+                                        "Filename stem",
+                                        value=client_pack_metadata.filename_template,
+                                    )
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        f"maxlength={CLIENT_PACK_FILENAME_TEMPLATE_MAX_LENGTH}"
+                                    )
+                                    .classes("w-full mod-config-input")
+                                )
+                                ui.label(
+                                    "Placeholders: "
+                                    + ", ".join(
+                                        f"{{{placeholder}}}" for placeholder in CLIENT_PACK_FILENAME_PLACEHOLDERS
+                                    )
+                                    + ". The file extension is added automatically."
+                                ).classes("mod-client-pack-section-hint mod-subtitle text-xs")
                         if is_minecraft_app:
                             with ui.column().classes("mod-client-pack-section w-full"):
                                 ui.label("KubeJS scripts").classes("mod-stat-label")
@@ -4418,7 +4650,7 @@ class ModWebAppPageMixin(
                                 ).props("filled square dense hide-bottom-space color=accent options-dark").classes(
                                     "mod-config-select mod-client-pack-select w-full"
                                 )
-                        if is_minecraft_app and model.client_pack_kubejs_scripts:
+                        if show_client_pack_kubejs_toggle:
                             with ui.column().classes("mod-client-pack-section w-full"):
                                 ui.label("KubeJS").classes("mod-stat-label")
                                 include_kubejs_scripts_checkbox = (
@@ -4497,6 +4729,96 @@ class ModWebAppPageMixin(
                                     for entry in required_entries:
                                         with ui.row().classes("mod-client-pack-option w-full items-center"):
                                             ui.label(entry.friendly).classes("mod-client-pack-option-label")
+
+        modlist_dialog = ui.dialog()
+        with modlist_dialog:
+            with ui.card().classes("mod-card mod-dialog-card mod-modlist-dialog-card"):
+                with ui.column().classes("mod-modlist-body w-full"):
+                    with ui.column().classes("gap-1 w-full"):
+                        ui.label("Modlist").classes("text-xl font-black mod-title-small")
+                        ui.label("Format and copy the current indexed mod list.").classes("mod-subtitle text-sm")
+                    modlist_format_select = (
+                        ui.select(
+                            {output_format.value: output_format.label for output_format in ModWebModlistFormat},
+                            value=ModWebModlistFormat.PLAINTEXT.value,
+                            label="Format",
+                        )
+                        .props("filled square dense hide-bottom-space color=accent options-dark")
+                        .classes("mod-config-select mod-modlist-format w-full")
+                    )
+                    with ui.row().classes("mod-modlist-options w-full flex-wrap"):
+                        modlist_include_version = (
+                            ui.checkbox("Version", value=True)
+                            .props("dense color=accent keep-color")
+                            .classes("mod-client-pack-checkbox mod-modlist-toggle")
+                        )
+                        modlist_include_filename = (
+                            ui.checkbox("Filename", value=False)
+                            .props("dense color=accent keep-color")
+                            .classes("mod-client-pack-checkbox mod-modlist-toggle")
+                        )
+                    with ui.row().classes("mod-modlist-options w-full flex-wrap"):
+                        modlist_include_disabled = (
+                            ui.checkbox("Disabled", value=False)
+                            .props("dense color=accent keep-color")
+                            .classes("mod-client-pack-checkbox mod-modlist-toggle")
+                        )
+                        modlist_include_builtin = (
+                            ui.checkbox("Built-in", value=False)
+                            .props("dense color=accent keep-color")
+                            .classes("mod-client-pack-checkbox mod-modlist-toggle")
+                        )
+                        modlist_include_client = (
+                            ui.checkbox("Client", value=True)
+                            .props("dense color=accent keep-color")
+                            .classes("mod-client-pack-checkbox mod-modlist-toggle")
+                        )
+
+                    def current_modlist_text() -> str:
+                        return self._render_modlist(
+                            model.mods.mods,
+                            instance_name=model.app_friendly,
+                            pack_version=model.client_pack_published_version,
+                            output_format=ModWebModlistFormat(_value_as_text(modlist_format_select)),
+                            include_version=bool(_value_as_object(modlist_include_version)),
+                            include_filename=bool(_value_as_object(modlist_include_filename)),
+                            include_disabled=bool(_value_as_object(modlist_include_disabled)),
+                            include_builtin=bool(_value_as_object(modlist_include_builtin)),
+                            include_client=bool(_value_as_object(modlist_include_client)),
+                        )
+
+                    def copy_modlist() -> None:
+                        if copy_text_to_clipboard(
+                            ui=ui,
+                            text=current_modlist_text(),
+                            empty_message="There are no mods to copy.",
+                        ):
+                            ui.notify("Copied modlist to the clipboard.", type="positive")
+
+                    with ui.column().classes("mod-modlist-preview-section w-full"):
+                        ui.label("Preview").classes("mod-stat-label")
+                        with ui.element("div").classes("mod-modlist-preview-frame"):
+
+                            @ui.refreshable
+                            def render_modlist_preview() -> None:
+                                ui.label(current_modlist_text() or "No mods are currently indexed.").classes(
+                                    "mod-modlist-preview w-full"
+                                )
+
+                            render_modlist_preview()
+
+                    def refresh_modlist_preview(_event: ModWebEventArgumentsContainer) -> None:
+                        render_modlist_preview.refresh()
+
+                    modlist_format_select.on("update:model-value", refresh_modlist_preview)
+                    modlist_include_version.on("update:model-value", refresh_modlist_preview)
+                    modlist_include_filename.on("update:model-value", refresh_modlist_preview)
+                    modlist_include_disabled.on("update:model-value", refresh_modlist_preview)
+                    modlist_include_builtin.on("update:model-value", refresh_modlist_preview)
+                    modlist_include_client.on("update:model-value", refresh_modlist_preview)
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Copy", on_click=copy_modlist).classes("mod-list-button")
+                        ui.button("Close", on_click=modlist_dialog.close).classes("mod-list-button secondary")
 
         with ui.dialog() as delete_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -4588,6 +4910,7 @@ class ModWebAppPageMixin(
                     toggle_selection=toggle_selection,
                     download_selected=download_selected if capabilities.supports_raw_download else None,
                     open_client_pack=client_pack_dialog.open if supports_client_pack else None,
+                    open_modlist=modlist_dialog.open,
                     open_client_pack_config=(
                         open_client_pack_configuration
                         if supports_client_pack and self._user_has_level(user, Power_Level.admin)
@@ -4603,7 +4926,7 @@ class ModWebAppPageMixin(
                 )
                 selection_button: Button | None = toolbar_bindings.selection_button
                 download_button: Button | None = toolbar_bindings.download_button
-                delete_button: Button | None = toolbar_bindings.delete_button
+                delete_control = toolbar_bindings.delete_control
                 result_count_label = toolbar_bindings.result_count_label
                 update_count()
 
@@ -5213,6 +5536,7 @@ class ModWebAppPageMixin(
         download_selected: Callable[[], Awaitable[None]] | None,
         delete_selected: Callable[[], None],
         open_client_pack: Callable[[], None] | None = None,
+        open_modlist: Callable[[], None] | None = None,
         open_client_pack_config: Callable[[], None] | None = None,
         upload_mod: Callable[[], object] | None = None,
         show_search: bool = False,
@@ -5230,13 +5554,13 @@ class ModWebAppPageMixin(
             return _ModWebModToolbarBindings(
                 selection_button=None,
                 download_button=None,
-                delete_button=None,
+                delete_control=None,
                 result_count_label=None,
             )
 
         selection_button: Button | None = None
         download_button: Button | None = None
-        delete_button: Button | None = None
+        delete_control: _ModWebEnableableControl | None = None
         result_count_label: Label | None = None
 
         with ui.row().classes("mod-tab-toolbar mod-mods-toolbar w-full"):
@@ -5273,35 +5597,69 @@ class ModWebAppPageMixin(
                     )
                 ).classes("mod-mods-toolbar-result-count")
             with ui.row().classes("mod-tab-toolbar-actions mod-mods-toolbar-actions"):
-                if can_upload_mod:
-                    ui.button("Upload", on_click=upload_mod).classes(
-                        "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
-                    )
                 if show_bulk_mod_actions:
                     selection_button = ui.button("", on_click=toggle_selection).classes(
-                        "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                        "mod-list-button secondary mod-toolbar-button mod-toolbar-selection-button"
                     )
-                    if open_client_pack is not None:
-                        ui.button("Client Pack", on_click=open_client_pack).classes(
-                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
-                        )
-                    if open_client_pack_config is not None:
-                        configure_label = "Configure <!>" if model.client_pack_content_dirty else "Configure"
-                        ui.button(configure_label, on_click=open_client_pack_config).classes(
-                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
-                        )
                     if download_selected is not None:
                         download_button = ui.button("", on_click=download_selected).classes(
                             "mod-list-button mod-toolbar-button mod-toolbar-button-fill mod-toolbar-primary"
                         )
-                    if can_delete_mods:
-                        delete_button = ui.button("", on_click=delete_selected).classes(
-                            "mod-list-button danger mod-toolbar-button mod-toolbar-button-fill"
+                    if open_client_pack is not None:
+                        ui.button("Client Pack", on_click=open_client_pack).classes(
+                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                         )
+                    if open_modlist is not None:
+                        ui.button("Modlist", on_click=open_modlist).classes(
+                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                        )
+                has_menu_actions = can_upload_mod or open_client_pack_config is not None or can_delete_mods
+                if has_menu_actions:
+                    configure_label = "Configure <!>" if model.client_pack_content_dirty else "Configure"
+                    menu_supported = callable(getattr(ui, "menu", None)) and callable(getattr(ui, "menu_item", None))
+                    if menu_supported:
+                        with (
+                            ui.button("")
+                            .props("icon=menu flat aria-label=Mod actions")
+                            .classes("mod-list-button secondary mod-toolbar-button mod-toolbar-menu-button")
+                        ):
+                            with ui.menu().classes("mod-chat-entry-menu mod-toolbar-menu"):
+                                if can_upload_mod:
+                                    ui.menu_item("Upload", on_click=upload_mod).classes(
+                                        "mod-chat-entry-menu-item mod-toolbar-menu-item"
+                                    )
+                                if open_client_pack_config is not None:
+                                    ui.menu_item(configure_label, on_click=open_client_pack_config).classes(
+                                        "mod-chat-entry-menu-item mod-toolbar-menu-item"
+                                    )
+                                if can_delete_mods:
+                                    delete_control = cast(
+                                        _ModWebEnableableControl,
+                                        cast(
+                                            object,
+                                            ui.menu_item("Delete", on_click=delete_selected).classes(
+                                                "mod-chat-entry-menu-item mod-toolbar-menu-item "
+                                                "mod-toolbar-menu-item-danger"
+                                            ),
+                                        ),
+                                    )
+                    else:
+                        if can_upload_mod:
+                            ui.button("Upload", on_click=upload_mod).classes(
+                                "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                            )
+                        if open_client_pack_config is not None:
+                            ui.button(configure_label, on_click=open_client_pack_config).classes(
+                                "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                            )
+                        if can_delete_mods:
+                            delete_control = ui.button("Delete", on_click=delete_selected).classes(
+                                "mod-list-button danger mod-toolbar-button mod-toolbar-button-fill"
+                            )
         return _ModWebModToolbarBindings(
             selection_button=selection_button,
             download_button=download_button,
-            delete_button=delete_button,
+            delete_control=delete_control,
             result_count_label=result_count_label,
         )
 

@@ -46,7 +46,8 @@
         "notes": null,
         "lifecycle_notice_started": true,
         "lifecycle_notice_stopped": true,
-        "lifecycle_notice_crashed": true
+        "lifecycle_notice_crashed": true,
+        "client_pack_content_dirty": true
     },
     "beta": {
         "friendly_name": "7D2D-2",

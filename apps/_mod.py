@@ -21,6 +21,7 @@ from apps._config import (
     ModClassificationOverride,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPageLink,
     ModPlacement,
     ModPlatformMetadata,
     ModType,
@@ -724,6 +725,7 @@ class Mod_Manager:
         mod_type: ModType,
         download_block_reason: ModDownloadBlockReason | None,
         metadata_overrides: ModMetadataOverrides,
+        mod_pages: tuple[ModPageLink, ...] | None = None,
         client_pack: ClientPackConfig | None = None,
         platforms: ModPlatformMetadata | None = None,
     ) -> Mod:
@@ -733,6 +735,7 @@ class Mod_Manager:
         if download_block_reason is ModDownloadBlockReason.BUILTIN:
             raise ValueError("The built-in download block reason is reserved for detected built-in mods")
         previous_classification_override = mod.cfg.classification_override
+        previous_mod_pages = mod.cfg.mod_pages
         previous_metadata_overrides = mod.cfg.metadata_overrides
         previous_client_pack = mod.cfg.client_pack
         previous_platforms = mod.cfg.platforms
@@ -742,6 +745,8 @@ class Mod_Manager:
                 mod_type=mod_type,
                 download_block_reason=download_block_reason,
             )
+            if mod_pages is not None:
+                mod.cfg.mod_pages = mod_pages
             mod.cfg.metadata_overrides = metadata_overrides
             if client_pack is not None:
                 mod.cfg.client_pack = client_pack
@@ -752,6 +757,7 @@ class Mod_Manager:
             await self.save_mods()
         except Exception:
             mod.cfg.classification_override = previous_classification_override
+            mod.cfg.mod_pages = previous_mod_pages
             mod.cfg.metadata_overrides = previous_metadata_overrides
             mod.cfg.client_pack = previous_client_pack
             mod.cfg.platforms = previous_platforms

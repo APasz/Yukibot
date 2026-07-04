@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastapi.exceptions import RequestValidationError
+
 from relay_notices import (
     AppLifecycleNotice,
     AppLifecycleState,
@@ -261,6 +263,42 @@ class ModWebStatusMixin(ModWebServiceSupport):
                 detail_label="Details",
                 actions=(_ModWebLinkSpec(label="Home", url=self.index_path()),),
             )
+        if 400 <= status_code < 500:
+            title = "Request could not be completed"
+            support_text = (
+                "The server rejected this request. Review the details below, then return to the app and try again."
+            )
+            if status_code == 400:
+                title = "Invalid request"
+            elif status_code in {401, 403}:
+                title = "Access denied"
+            elif status_code == 429:
+                title = "Too many requests"
+                support_text = "The server received too many requests. Wait briefly, then try again."
+            return _ModWebStatusPageConfig(
+                title=title,
+                support_text=support_text,
+                badge_text=str(status_code),
+                badge_tone="warn",
+                accent_color_hex="#f59e0b",
+                icon_markup=self._framework_error_icon_markup(),
+                detail_text=self._framework_http_error_detail_text(exception),
+                detail_label="Details",
+                actions=(_ModWebLinkSpec(label="Home", url=self.index_path()),),
+            )
+        http_detail: object | None = getattr(exception, "detail", None)
+        if isinstance(http_detail, str) and http_detail.strip():
+            return _ModWebStatusPageConfig(
+                title="Service unavailable" if status_code == 503 else "Server error",
+                support_text="The server could not complete this request. Wait briefly, then try again.",
+                badge_text=str(status_code),
+                badge_tone="red",
+                accent_color_hex="#dc2626",
+                icon_markup=self._framework_error_icon_markup(),
+                detail_text=http_detail.strip(),
+                detail_label="Details",
+                actions=(_ModWebLinkSpec(label="Home", url=self.index_path()),),
+            )
         return _ModWebStatusPageConfig(
             title="Server error",
             support_text="The page failed while rendering. Refresh to retry or return home.",
@@ -278,13 +316,21 @@ class ModWebStatusMixin(ModWebServiceSupport):
         detail: object | None = getattr(exception, "detail", None)
         if isinstance(detail, str) and detail.strip():
             return detail.strip()
+        if isinstance(exception, RequestValidationError):
+            validation_details: list[str] = []
+            for error in exception.errors():
+                location = ".".join(str(part) for part in error["loc"])
+                message = error["msg"].strip()
+                validation_details.append(f"{location}: {message}" if location else message)
+            if validation_details:
+                return "\n".join(validation_details)
         return ModWebStatusMixin._exception_detail_text(exception)
 
     @staticmethod
     def _should_render_framework_error_page(*, method: str, path: str, accept_header: str | None) -> bool:
         if method != "GET":
             return False
-        if path.startswith(("/api/", "/_nicegui", "/static")):
+        if path.startswith(("/_nicegui", "/static")):
             return False
         if accept_header is None:
             return False

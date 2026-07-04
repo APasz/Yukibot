@@ -75,11 +75,11 @@
             "framework": "47.4.10",
             "loader": "forge"
         },
-        "client_pack_current_hash": "27c82da6b91d0f0a35e1aba5e475da53bb6f62128415b62c34b736102eb43b57",
-        "client_pack_published_hash": "27c82da6b91d0f0a35e1aba5e475da53bb6f62128415b62c34b736102eb43b57",
-        "client_pack_published_version": "2026-07-04.3",
-        "client_pack_content_dirty": false,
-        "client_pack_published_changelog": "woa",
+        "client_pack_current_hash": "0acd30877188cfac5d34e1c064db5e156018eacfd612584547f49f572626736f",
+        "client_pack_published_hash": "0acd30877188cfac5d34e1c064db5e156018eacfd612584547f49f572626736f",
+        "client_pack_published_version": "2026-07-05",
+        "client_pack_content_dirty": true,
+        "client_pack_published_changelog": "testing",
         "client_pack_releases": [
             {
                 "version": "2026-07-04",
@@ -87,8 +87,31 @@
             },
             {
                 "version": "2026-07-04.3",
-                "changelog": "woa"
+                "changelog": "refetched modrinth metadata"
+            },
+            {
+                "version": "2026-07-04.4",
+                "changelog": "change"
+            },
+            {
+                "version": "2026-07-04.5",
+                "changelog": "jm url"
+            },
+            {
+                "version": "2026-07-05",
+                "changelog": "testing"
             }
-        ]
+        ],
+        "client_pack_excluded_kubejs_scripts": [
+            "server_scripts/yuki_item_registry.js",
+            "server_scripts/yuki_log.js",
+            "server_scripts/yuki_recipes.js",
+            "startup_scripts/yuki_item_registry.js"
+        ],
+        "client_pack_metadata": {
+            "name": "TestErm",
+            "description": "",
+            "filename_template": "{pack_name}-{version}"
+        }
     }
 }

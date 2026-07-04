@@ -16,6 +16,7 @@ from apps._config import (
     AppVersion,
     App_Config,
     ClientPackKubeJsScript,
+    ClientPackMetadataConfig,
     ClientPackRelease,
     ModDistributionMode,
     mod_capabilities_for_scope,
@@ -104,6 +105,27 @@ class AppModCapabilitiesTests(unittest.TestCase):
             app_config.client_pack_excluded_kubejs_scripts,
             ("server_scripts/events.js", "startup_scripts/registry.js"),
         )
+
+    def test_client_pack_metadata_validates_and_renders_filename_template(self) -> None:
+        metadata = ClientPackMetadataConfig(
+            name="Example Pack",
+            description="Client performance and interface mods.",
+            filename_template="{app_name}-{pack_name}-{version}-{minecraft_version}-{format}",
+        )
+
+        self.assertEqual(
+            metadata.filename_stem(
+                app_name="minecraft_alpha",
+                version="2026-07-04.2",
+                minecraft_version="1.21.1",
+                format_name="modrinth",
+            ),
+            "minecraft_alpha-Example_Pack-2026-07-04.2-1.21.1-modrinth",
+        )
+        with self.assertRaisesRegex(ValueError, "unknown client-pack filename placeholder"):
+            ClientPackMetadataConfig(name="Example", filename_template="{unknown}")
+        with self.assertRaisesRegex(ValueError, "path separators"):
+            ClientPackMetadataConfig(name="Example", filename_template="packs/{version}")
 
     def test_sevendays_supports_generic_client_packs_only(self) -> None:
         capabilities = mod_capabilities_for_scope("sevendays")

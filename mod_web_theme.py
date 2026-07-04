@@ -62,6 +62,8 @@ class ModWebTheme:
                     --mod-warning: {palette.warning};
                     --mod-warning-dark: {palette.warning_dark};
                     --mod-panel: {palette.panel};
+                    --mod-scrollbar-thumb: rgba(161, 161, 170, 0.34);
+                    --mod-scrollbar-thumb-hover: rgba(161, 161, 170, 0.52);
                 }}"""
 
     def css(self) -> str:
@@ -84,6 +86,30 @@ class ModWebTheme:
                 html {{
                     overflow-y: scroll;
                     scrollbar-gutter: stable;
+                }}
+                * {{
+                    scrollbar-color: var(--mod-scrollbar-thumb) transparent;
+                    scrollbar-width: thin;
+                }}
+                *::-webkit-scrollbar {{
+                    width: 0.5rem;
+                    height: 0.5rem;
+                }}
+                *::-webkit-scrollbar-track {{
+                    background: transparent;
+                }}
+                *::-webkit-scrollbar-thumb {{
+                    border: 1px solid transparent;
+                    border-radius: 999px;
+                    background: var(--mod-scrollbar-thumb);
+                    background-clip: padding-box;
+                }}
+                *::-webkit-scrollbar-thumb:hover {{
+                    background: var(--mod-scrollbar-thumb-hover);
+                    background-clip: padding-box;
+                }}
+                *::-webkit-scrollbar-corner {{
+                    background: transparent;
                 }}
                 .q-dialog__backdrop {{
                     background: rgba(2, 2, 4, 0.78) !important;
@@ -1058,6 +1084,84 @@ class ModWebTheme:
                     flex: 1 1 11rem;
                     min-width: 11rem;
                 }}
+                .mod-mods-toolbar-actions .mod-toolbar-selection-button {{
+                    flex: 0 0 auto;
+                    min-width: 4.75rem;
+                    width: auto;
+                    padding-inline: 0.62rem !important;
+                }}
+                .mod-mods-toolbar-actions .mod-toolbar-menu-button {{
+                    flex: 0 0 2.5rem;
+                    width: 2.5rem;
+                    min-width: 2.5rem;
+                    padding: 0 !important;
+                }}
+                .mod-toolbar-menu {{
+                    min-width: 12rem;
+                }}
+                .mod-toolbar-menu-item-danger,
+                .mod-toolbar-menu-item-danger .q-item__label {{
+                    color: #fca5a5 !important;
+                }}
+                .mod-toolbar-menu-item-danger:hover,
+                .mod-toolbar-menu-item-danger.q-manual-focusable--focused {{
+                    background: rgba(127, 29, 29, 0.42) !important;
+                    color: #fecaca !important;
+                }}
+                .mod-modlist-dialog-card {{
+                    width: min(46rem, calc(100vw - 1.5rem));
+                    max-height: min(48rem, calc(100vh - 1.5rem));
+                    height: auto !important;
+                    overflow: hidden;
+                }}
+                .mod-modlist-dialog-card > .nicegui-content,
+                .mod-modlist-dialog-card .nicegui-content {{
+                    width: 100%;
+                    height: auto !important;
+                    min-height: 0 !important;
+                    padding: 0 !important;
+                }}
+                .mod-modlist-body {{
+                    display: grid !important;
+                    grid-template-columns: minmax(0, 1fr);
+                    align-content: start;
+                    gap: 0.85rem;
+                    padding: 1.1rem;
+                    height: auto !important;
+                    min-height: 0 !important;
+                    overflow: auto;
+                }}
+                .mod-modlist-format {{
+                    min-width: 0;
+                }}
+                .mod-modlist-options {{
+                    gap: 0.5rem;
+                }}
+                .mod-modlist-toggle {{
+                    min-width: 7rem;
+                }}
+                .mod-modlist-preview-section {{
+                    gap: 0.4rem;
+                }}
+                .mod-modlist-preview-frame {{
+                    width: calc(100% + 2.2rem);
+                    margin-inline: -1.1rem;
+                }}
+                .mod-modlist-preview {{
+                    min-height: 4.25rem;
+                    max-height: min(24rem, 50vh);
+                    margin: 0;
+                    padding: 0.8rem;
+                    overflow: auto;
+                    border: 1px solid rgba(82, 82, 91, 0.78);
+                    background: rgba(7, 7, 11, 0.96) !important;
+                    color: var(--mod-text) !important;
+                    font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+                    font-size: 0.78rem;
+                    line-height: 1.5;
+                    overflow-wrap: normal;
+                    white-space: pre;
+                }}
                 .mod-list-button {{
                     border-radius: 0 !important;
                     min-height: 2.25rem !important;
@@ -1175,6 +1279,45 @@ class ModWebTheme:
                 .mod-config-select {{
                     flex: 1 1 26rem;
                     min-width: 18rem;
+                }}
+                :is(.mod-config-input, .mod-config-select) .q-field__control {{
+                    color: var(--mod-text) !important;
+                    background-color: rgba(17, 17, 24, 0.96) !important;
+                    color-scheme: dark;
+                }}
+                :is(.mod-config-input, .mod-config-select) .q-field__native,
+                :is(.mod-config-input, .mod-config-select) .q-field__input,
+                :is(.mod-config-input, .mod-config-select) input,
+                :is(.mod-config-input, .mod-config-select) textarea {{
+                    color: var(--mod-text) !important;
+                    -webkit-text-fill-color: var(--mod-text) !important;
+                    caret-color: var(--mod-purple) !important;
+                    opacity: 1 !important;
+                }}
+                :is(.mod-config-input, .mod-config-select) .q-field__label,
+                :is(.mod-config-input, .mod-config-select) .q-field__marginal,
+                :is(.mod-config-input, .mod-config-select) .q-icon {{
+                    color: var(--mod-muted) !important;
+                    opacity: 1 !important;
+                }}
+                :is(.mod-config-input, .mod-config-select) .q-field--focused .q-field__label,
+                :is(.mod-config-input, .mod-config-select) .q-field--float .q-field__label {{
+                    color: #ddd6fe !important;
+                }}
+                :is(.mod-config-input, .mod-config-select) .q-field__native::placeholder,
+                :is(.mod-config-input, .mod-config-select) .q-field__input::placeholder,
+                :is(.mod-config-input, .mod-config-select) input::placeholder,
+                :is(.mod-config-input, .mod-config-select) textarea::placeholder {{
+                    color: var(--mod-muted) !important;
+                    -webkit-text-fill-color: var(--mod-muted) !important;
+                    opacity: 1 !important;
+                }}
+                :is(.mod-config-input, .mod-config-select) input:-webkit-autofill,
+                :is(.mod-config-input, .mod-config-select) input:-webkit-autofill:hover,
+                :is(.mod-config-input, .mod-config-select) input:-webkit-autofill:focus {{
+                    -webkit-text-fill-color: var(--mod-text) !important;
+                    box-shadow: 0 0 0 1000px rgba(17, 17, 24, 0.98) inset !important;
+                    caret-color: var(--mod-purple) !important;
                 }}
                 .mod-recipe-field .q-field__control {{
                     min-height: 3.05rem !important;
@@ -3451,21 +3594,6 @@ class ModWebTheme:
                     padding: 1.2rem 1.25rem 1rem;
                     max-height: min(48rem, calc(100vh - 2rem));
                     overflow-y: auto;
-                    scrollbar-width: thin;
-                    scrollbar-color: rgba(161, 161, 170, 0.28) transparent;
-                }}
-                .mod-client-pack-body::-webkit-scrollbar {{
-                    width: 0.35rem;
-                }}
-                .mod-client-pack-body::-webkit-scrollbar-track {{
-                    background: transparent;
-                }}
-                .mod-client-pack-body::-webkit-scrollbar-thumb {{
-                    border-radius: 999px;
-                    background: rgba(161, 161, 170, 0.24);
-                }}
-                .mod-client-pack-body::-webkit-scrollbar-thumb:hover {{
-                    background: rgba(161, 161, 170, 0.4);
                 }}
                 .mod-client-pack-header {{
                     gap: 0.18rem;
@@ -3696,6 +3824,16 @@ class ModWebTheme:
                 }}
                 .mod-app-details-field {{
                     width: 100%;
+                }}
+                .mod-page-editor-controls {{
+                    display: grid !important;
+                    grid-template-columns: minmax(0, 1fr) max-content;
+                    align-items: end;
+                }}
+                .mod-app-details-field.mod-page-url-invalid .q-field__control {{
+                    box-shadow:
+                        inset 0 1px 0 rgba(255, 255, 255, 0.04),
+                        inset 0 -2px 0 #ef4444 !important;
                 }}
                 .mod-details-tab-row {{
                     display: grid !important;
@@ -4593,6 +4731,21 @@ class ModWebTheme:
                     padding-top: 0.4rem;
                     border-top: 1px solid rgba(63, 63, 70, 0.45);
                 }}
+                .mod-mod-page-links {{
+                    width: 100%;
+                }}
+                .mod-mod-page-link {{
+                    color: #c4b5fd !important;
+                    font-size: 0.88rem !important;
+                    font-weight: 900 !important;
+                    text-decoration: underline !important;
+                    text-decoration-color: rgba(167, 139, 250, 0.62) !important;
+                    text-underline-offset: 0.2rem;
+                }}
+                .mod-mod-page-link:hover {{
+                    color: #ede9fe !important;
+                    text-decoration-color: #c4b5fd !important;
+                }}
                 .mod-action {{
                     border-radius: 0 !important;
                     background: #22113a !important;
@@ -4738,6 +4891,16 @@ class ModWebTheme:
                     .mod-mods-toolbar-actions .mod-toolbar-button {{
                         width: 100%;
                         min-width: 0;
+                    }}
+                    .mod-mods-toolbar-actions .mod-toolbar-selection-button {{
+                        width: auto;
+                        min-width: 4.75rem;
+                        justify-self: end;
+                    }}
+                    .mod-mods-toolbar-actions .mod-toolbar-menu-button {{
+                        width: 2.5rem;
+                        min-width: 2.5rem;
+                        justify-self: end;
                     }}
                     .mod-mods-toolbar-actions .mod-list-button.danger {{
                         grid-column: 2;

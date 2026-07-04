@@ -38,7 +38,46 @@ from .types import _ModWebBadgeSpec, _ModWebNodePresenceBadgeSpec
 if TYPE_CHECKING:
     from nicegui.element import Element
 
+def copy_text_to_clipboard(
+    *,
+    ui: ModWebUi,
+    text: str,
+    empty_message: str,
+) -> bool:
+    normalised_text: str = text.strip()
+    if not normalised_text:
+        ui.notify(empty_message, type="warning")
+        return False
+    encoded_text: str = json.dumps(normalised_text)
+    ui.run_javascript(
+        (
+            "(async () => {"
+            f"const text = {encoded_text};"
+            "try {"
+            "if (navigator.clipboard && navigator.clipboard.writeText) {"
+            "await navigator.clipboard.writeText(text);"
+            "} else {"
+            "const textarea = document.createElement('textarea');"
+            "textarea.value = text;"
+            "textarea.setAttribute('readonly', 'true');"
+            "textarea.style.position = 'fixed';"
+            "textarea.style.opacity = '0';"
+            "document.body.appendChild(textarea);"
+            "textarea.focus();"
+            "textarea.select();"
+            "document.execCommand('copy');"
+            "document.body.removeChild(textarea);"
+            "}"
+            "} catch (_error) {}"
+            "})()"
+        ),
+        timeout=1.0,
+    )
+    return True
+
+
 class ModWebUiHelpersMixin(ModWebServiceSupport):
+
     @staticmethod
     def _badge_class_name(*, tone: BadgeTone, extra_classes: str = "") -> str:
         return f"{mod_web_badge_class(tone)} {extra_classes}".strip()

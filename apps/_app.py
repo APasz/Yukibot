@@ -423,6 +423,8 @@ class App(Generic[ConfigT], ABC):
             overrides["client_pack_excluded_kubejs_scripts"] = list(
                 self.cfg.client_pack_excluded_kubejs_scripts
             )
+        if self.cfg.client_pack_metadata is not None:
+            overrides["client_pack_metadata"] = self.cfg.client_pack_metadata.model_dump(mode="json")
         if self.cfg.steam_update is not None:
             overrides["steam_update"] = self.cfg.steam_update.model_dump(mode="json", exclude_none=True)
         if self.config_file_read_level_override is not None:

@@ -17,7 +17,6 @@ from _mod_ops import (
 )
 from apps._config import ClientPackKubeJsScript, ClientPackPolicy, ModSide
 
-
 _KUBEJS_CLIENT_PACK_SCRIPT_DIRECTORIES = ("server_scripts", "startup_scripts")
 _NO_EXCLUDED_KUBEJS_SCRIPTS: frozenset[str] = frozenset()
 
@@ -119,7 +118,7 @@ def client_pack_kubejs_entries(
 
 
 def _json_entry(archive_path: str, payload: dict[str, object]) -> ArchiveDataEntry:
-    content = json.dumps(payload, ensure_ascii=False, indent=2).encode(config.STR_ENCODE) + b"\n"
+    content = json.dumps(payload, ensure_ascii=False, indent=4).encode(config.STR_ENCODE) + b"\n"
     return ArchiveDataEntry(archive_path=PurePosixPath(archive_path), content=content)
 
 
@@ -352,6 +351,8 @@ def _curseforge_entries(
         "files": manifest_files,
         "overrides": "overrides",
     }
+    if spec.summary:
+        manifest["description"] = spec.summary
     return (_json_entry("manifest.json", manifest), *archive_entries)
 
 

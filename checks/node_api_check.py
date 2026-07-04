@@ -15,28 +15,38 @@ from urllib.parse import parse_qs, urlsplit
 
 import hikari
 import requests
-from fastapi import HTTPException, Request, WebSocketDisconnect
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from fastapi import FastAPI, HTTPException, Request, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.testclient import TestClient
+from modmux.models import Provider
 
 import config
 from _manager import AppStartBlocker, AppStartBlockerKind
 from _security import Access_Control, Power_Level
-from apps._app import App, AppActivityProvider, AppActivityProviderMetadata, AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
+from apps._app import (
+    App,
+    AppActivityProvider,
+    AppActivityProviderMetadata,
+    AppRuntimeFault,
+    AppRuntimeFaultKind,
+    ChatRelaySupport,
+)
 from apps._config import (
     App_Config,
     AppTitleFont,
     AppVersion,
     ClientPackConfig,
     ClientPackKubeJsScript,
+    ClientPackMetadataConfig,
     ClientPackPolicy,
     ClientPackRelease,
+    LauncherMetadataResolution,
     LauncherProviderUrls,
     Mod_Config,
     ModClassificationOverride,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPageLink,
     ModPlacement,
     ModPlatformMetadata,
     ModType,
@@ -74,11 +84,11 @@ from apps.minecraft import (
     MinecraftShapelessRecipe,
 )
 from apps.minecraft.pack_export import PackFormat, PackPurpose
-from apps.sevendays import SevenDays, SevenDaysSandboxOption, SevenDaysSandboxOptionsSnapshot
 from apps.satisfactory import Satisfactory, SatisfactoryBlueprintOwnershipStore, SatisfactoryServerState
+from apps.sevendays import SevenDays, SevenDaysSandboxOption, SevenDaysSandboxOptionsSnapshot
 from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, ChatEvent, ChatHub
-from map_annotations import MapAnnotationDraft
 from maintenance import MaintenanceService
+from map_annotations import MapAnnotationDraft
 from node_api import (
     NodeApiService,
     NodeAppActivityProviderEntry,
@@ -104,30 +114,30 @@ from node_api import (
     NodeConsoleStdoutStreamEvent,
     NodeConsoleStdoutStreamEventKind,
     NodeDiscordSettingsMutationResult,
-    NodeDownloadRequest,
     NodeDiskEntry,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
+    NodeDownloadRequest,
     NodeFontSourceSettingsMutationResult,
-    NodeMinecraftRecipeMutationResult,
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationRequest,
-    NodeMinecraftRecipeWorkspaceState,
+    NodeMinecraftRecipeMutationResult,
+    NodeModEntry,
+    NodeModList,
+    NodeModMetadataFetchRequest,
     NodeModMutationAction,
     NodeModMutationResult,
     NodeModPropertiesUpdateRequest,
-    NodeModList,
-    NodeModEntry,
     NodeModUploadBatchResult,
     NodeModUploadResult,
     NodeModUploadSource,
-    NodeRestartScheduleState,
     NodeRelayTTSRequest,
+    NodeRestartScheduleState,
     NodeSaveList,
     NodeSaveMutationResult,
-    NodeSevenDaysSandboxOptionsState,
     NodeSettingEntry,
     NodeSettingList,
+    NodeSevenDaysSandboxOptionsState,
     NodeStateStreamEvent,
     NodeStateTopic,
     NodeSystemAction,
@@ -2526,6 +2536,28 @@ class NodeApiTests(unittest.TestCase):
             ],
         )
 
+    def test_node_app_entry_round_trips_client_pack_metadata(self) -> None:
+        metadata = ClientPackMetadataConfig(
+            name="Example Pack",
+            description="Example description",
+            filename_template="{pack_name}-{version}",
+        )
+        entry = NodeAppEntry.from_mapping(
+            {
+                "name": "minecraft_alpha",
+                "friendly": "Minecraft Alpha",
+                "node": "erin",
+                "supports_mods": True,
+                "client_pack_metadata": metadata.model_dump(mode="json"),
+            }
+        )
+
+        self.assertEqual(entry.client_pack_metadata, metadata)
+        self.assertEqual(
+            entry.to_mapping()["client_pack_metadata"],
+            metadata.model_dump(mode="json"),
+        )
+
     def test_node_app_entry_round_trips_join_addresses(self) -> None:
         entry = NodeAppEntry.from_mapping(
             {
@@ -3473,12 +3505,16 @@ class NodeApiTests(unittest.TestCase):
                 policy=ClientPackPolicy.OPTIONAL,
                 default_selected=False,
             )
+            mod_pages = (
+                ModPageLink(name="Modrinth", url="https://modrinth.com/mod/example"),
+            )
             updated = _TestMod(
                 Mod_Config(
                     name=mod_path.name,
                     directory=Path(temp_dir),
                     mod_type=ModType.CLIENT,
                     download_block_reason=ModDownloadBlockReason.ARTIFACT,
+                    mod_pages=mod_pages,
                     metadata_overrides=overrides,
                 )
             )
@@ -3500,6 +3536,7 @@ class NodeApiTests(unittest.TestCase):
                         mod_type=ModType.CLIENT,
                         download_block_reason=ModDownloadBlockReason.ARTIFACT,
                         metadata_overrides=overrides,
+                        mod_pages=mod_pages,
                         client_pack=client_pack,
                         launcher_urls=LauncherProviderUrls(),
                     ),
@@ -3513,6 +3550,7 @@ class NodeApiTests(unittest.TestCase):
             mod_type=ModType.CLIENT,
             download_block_reason=ModDownloadBlockReason.ARTIFACT,
             metadata_overrides=overrides,
+            mod_pages=mod_pages,
             client_pack=client_pack,
             platforms=ModPlatformMetadata(),
         )
@@ -3522,6 +3560,48 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.mod.friendly, "Example Override")
         self.assertEqual(result.mod.version, "3.0.0")
         self.assertEqual(result.mod.metadata_overrides, overrides)
+        self.assertEqual(result.mod.mod_pages, mod_pages)
+
+    def test_fetch_mod_launcher_metadata_resolves_without_updating_mod(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mod = _TestMod(Mod_Config(name="client.jar", directory=Path(temp_dir)))
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = mod
+            app = _build_app(manager)
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+            launcher_urls = LauncherProviderUrls(
+                modrinth="https://modrinth.com/mod/client-mod/version/client-version"
+            )
+            expected = LauncherMetadataResolution(
+                suggested_mod_type=ModType.CLIENT,
+                suggestion_provider=Provider.MODRINTH,
+            )
+
+            with patch(
+                "node_api.resolve_launcher_metadata_resolution",
+                new=AsyncMock(return_value=expected),
+            ) as resolve_metadata:
+                result = asyncio.run(
+                    service.fetch_mod_launcher_metadata(
+                        app=app,
+                        mod_name=mod.name,
+                        fetch_request=NodeModMetadataFetchRequest(launcher_urls=launcher_urls),
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(result, expected)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        resolve_metadata.assert_awaited_once_with(
+            scope=app.scope,
+            urls=launcher_urls,
+            local_filename=mod.storage_path.name,
+        )
+        manager.update_properties.assert_not_called()
 
     def test_update_client_pack_config_uses_admin_access_and_single_bulk_write(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3601,6 +3681,11 @@ class NodeApiTests(unittest.TestCase):
                     app=cast(App, app),
                     update=NodeClientPackConfigUpdateRequest(
                         mods=(),
+                        metadata=ClientPackMetadataConfig(
+                            name="Example Pack",
+                            description="Example description",
+                            filename_template="{pack_name}-{version}",
+                        ),
                         kubejs_scripts=(
                             ClientPackKubeJsScript(
                                 relative_path="server_scripts/events.js",
@@ -3617,8 +3702,41 @@ class NodeApiTests(unittest.TestCase):
             app.cfg.client_pack_excluded_kubejs_scripts,
             ("server_scripts/events.js",),
         )
+        self.assertEqual(app.cfg.client_pack_metadata.name, "Example Pack")
         app.invalidate_client_pack_content.assert_called_once_with()
         app.persist_instance_config_overrides.assert_called_once_with()
+
+    def test_client_pack_archive_name_uses_configured_metadata_template(self) -> None:
+        app = Mock(spec=Minecraft)
+        app.name = "minecraft_alpha"
+        app.friendly = "Minecraft Alpha"
+        app.cfg = App_Config(
+            name="minecraft_alpha",
+            instance_key="alpha",
+            friendly_name="Minecraft Alpha",
+            directory=Path("/tmp/minecraft-alpha"),
+            apps_dir=Path("/tmp"),
+            mods_dir=None,
+            scope="minecraft",
+            version=AppVersion(main="1.21.1", loader="fabric", framework="0.16.10"),
+            client_pack_metadata=ClientPackMetadataConfig(
+                name="Example Pack",
+                description="Example description",
+                filename_template="{pack_name}-{version}",
+            ),
+        )
+
+        archive_name = NodeApiService()._archive_name(
+            app=cast(App, app),
+            entries=(),
+            request=NodeDownloadRequest(
+                pack_purpose=PackPurpose.CLIENT,
+                pack_format=PackFormat.MODRINTH,
+            ),
+            client_pack_version="2026-07-04.2",
+        )
+
+        self.assertEqual(archive_name, "Example_Pack-2026-07-04.2-modrinth.mrpack")
 
     def test_client_pack_changes_are_dirty_before_first_publication(self) -> None:
         app = _build_app(Mock())

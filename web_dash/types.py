@@ -16,6 +16,7 @@ from .runtime_imports import (
     ChatEvent,
     ChatReferenceKind,
     ClientPackKubeJsScript,
+    ClientPackMetadataConfig,
     ClientPackRelease,
     Enum,
     Label,
@@ -34,6 +35,7 @@ from .runtime_imports import (
     NodeSettingList,
     NodeSystemSummary,
     Power_Level,
+    Protocol,
     TypeAlias,
     dataclass,
     field,
@@ -340,6 +342,10 @@ class _ModWebRuntimeToolbarBindings:
     apply_runtime_model: Callable[["ModWebBasePageModel"], None] | None = None
 
 
+class _ModWebEnableableControl(Protocol):
+    def set_enabled(self, value: bool) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _ModWebAppHeroCornerBindings:
     apply_node_summary: Callable[[NodeSystemSummary | None], None]
@@ -350,7 +356,7 @@ class _ModWebAppHeroCornerBindings:
 class _ModWebModToolbarBindings:
     selection_button: Button | None
     download_button: Button | None
-    delete_button: Button | None
+    delete_control: _ModWebEnableableControl | None
     result_count_label: Label | None
 
 
@@ -539,6 +545,34 @@ class ModWebModSortOrder(Enum):
                 return "Mod type"
 
 
+class ModWebModlistFormat(Enum):
+    PLAINTEXT = "plaintext"
+    DISCORD = "discord"
+    JSON = "json"
+    JSONL = "jsonl"
+    MARKDOWN_GFM = "markdown_gfm"
+    MARKDOWN_COMMONMARK = "markdown_commonmark"
+    CSV = "csv"
+
+    @property
+    def label(self) -> str:
+        match self:
+            case ModWebModlistFormat.PLAINTEXT:
+                return "Plaintext"
+            case ModWebModlistFormat.DISCORD:
+                return "Discord"
+            case ModWebModlistFormat.JSON:
+                return "JSON"
+            case ModWebModlistFormat.JSONL:
+                return "JSONL"
+            case ModWebModlistFormat.MARKDOWN_GFM:
+                return "Markdown [GitHub/GFM]"
+            case ModWebModlistFormat.MARKDOWN_COMMONMARK:
+                return "Markdown [CommonMark]"
+            case ModWebModlistFormat.CSV:
+                return "CSV"
+
+
 class ModWebFileSortOrder(Enum):
     LATEST_MODIFIED = "latest_modified"
     OLDEST_MODIFIED = "oldest_modified"
@@ -691,6 +725,7 @@ class ModWebBasePageModel:
     client_pack_published_changelog: str | None = field(default=None, kw_only=True)
     client_pack_releases: tuple[ClientPackRelease, ...] = field(default=(), kw_only=True)
     client_pack_kubejs_scripts: tuple[ClientPackKubeJsScript, ...] = field(default=(), kw_only=True)
+    client_pack_metadata: ClientPackMetadataConfig | None = field(default=None, kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
     update_info: AppUpdateInfo | None = field(default=None, kw_only=True)
     update_status: AppUpdateStatus | None = field(default=None, kw_only=True)

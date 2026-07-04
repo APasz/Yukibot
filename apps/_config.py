@@ -9,6 +9,7 @@ from datetime import date, datetime
 from itertools import zip_longest
 from pathlib import Path, PurePosixPath
 from re import Pattern
+from string import Formatter
 from urllib.parse import urlsplit
 
 import hikari
@@ -23,6 +24,18 @@ log = logging.getLogger(__name__)
 
 _CLIENT_PACK_VERSION_RE: Pattern[str] = re.compile(r"(?:\d+|\d{4}-\d{2}-\d{2}(?:\.\d+)?)")
 CLIENT_PACK_CHANGELOG_MAX_LENGTH = 4000
+CLIENT_PACK_METADATA_NAME_MAX_LENGTH = 100
+CLIENT_PACK_METADATA_DESCRIPTION_MAX_LENGTH = 1000
+CLIENT_PACK_FILENAME_TEMPLATE_MAX_LENGTH = 200
+CLIENT_PACK_FILENAME_STEM_MAX_LENGTH = 180
+CLIENT_PACK_FILENAME_TEMPLATE_DEFAULT = "{pack_name}-{version}"
+CLIENT_PACK_FILENAME_PLACEHOLDERS: tuple[str, ...] = (
+    "app_name",
+    "pack_name",
+    "version",
+    "minecraft_version",
+    "format",
+)
 
 
 def next_client_pack_version(current_version: str | None, *, published_on: date | None = None) -> str:
@@ -233,6 +246,68 @@ class ClientPackKubeJsScript(BaseModel):
     @classmethod
     def validate_relative_path(cls, raw: object) -> str:
         return normalise_client_pack_kubejs_script_path(raw)
+
+
+class ClientPackMetadataConfig(BaseModel):
+    name: str = Field(min_length=1, max_length=CLIENT_PACK_METADATA_NAME_MAX_LENGTH)
+    description: str = Field(default="", max_length=CLIENT_PACK_METADATA_DESCRIPTION_MAX_LENGTH)
+    filename_template: str = Field(
+        default=CLIENT_PACK_FILENAME_TEMPLATE_DEFAULT,
+        min_length=1,
+        max_length=CLIENT_PACK_FILENAME_TEMPLATE_MAX_LENGTH,
+    )
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("filename_template")
+    @classmethod
+    def validate_filename_template(cls, template: str) -> str:
+        if "/" in template or "\\" in template:
+            raise ValueError("client-pack filename templates cannot contain path separators")
+        if any(character in '<>:"|?*' or ord(character) < 32 for character in template):
+            raise ValueError("client-pack filename templates contain invalid filename characters")
+        allowed_placeholders = frozenset(CLIENT_PACK_FILENAME_PLACEHOLDERS)
+        try:
+            fields = tuple(Formatter().parse(template))
+        except ValueError as xcp:
+            raise ValueError("client-pack filename template contains invalid braces") from xcp
+        for _literal, field_name, format_spec, conversion in fields:
+            if field_name is None:
+                continue
+            if field_name not in allowed_placeholders:
+                raise ValueError(f"unknown client-pack filename placeholder: {field_name}")
+            if format_spec or conversion:
+                raise ValueError("client-pack filename placeholders do not support formatting options")
+        return template
+
+    def filename_stem(
+        self,
+        *,
+        app_name: str,
+        version: str,
+        minecraft_version: str,
+        format_name: str,
+    ) -> str:
+        def filename_token(value: str) -> str:
+            token = "".join(
+                character if character.isalnum() or character in {"-", "_", "."} else "_" for character in value.strip()
+            ).strip("._")
+            return token or "client-pack"
+
+        stem = self.filename_template.format(
+            app_name=filename_token(app_name),
+            pack_name=filename_token(self.name),
+            version=filename_token(version),
+            minecraft_version=filename_token(minecraft_version),
+            format=filename_token(format_name),
+        ).strip()
+        if not stem or stem in {".", ".."}:
+            raise ValueError("client-pack filename template produced an empty filename")
+        if len(stem) > CLIENT_PACK_FILENAME_STEM_MAX_LENGTH:
+            raise ValueError(
+                f"client-pack filename stem must be at most {CLIENT_PACK_FILENAME_STEM_MAX_LENGTH} characters"
+            )
+        return stem
 
 
 def normalise_activity_provider_ids(raw: object) -> tuple[str, ...]:
@@ -858,6 +933,89 @@ class ModMetadataOverrides(BaseModel):
         return normalise_optional_text(raw)
 
 
+class KnownModPageProvider(enum.StrEnum):
+    MODRINTH = "Modrinth"
+    CURSEFORGE = "CurseForge"
+    NEXUSMODS = "NexusMods"
+    SEVEN_DAYS_TO_DIE_MODS = "7D2Dmods"
+    FACTORIO_MODS = "FactorioMods"
+    MOD_IO = "mod.io"
+    STEAM_WORKSHOP = "Steam Workshop"
+    TRANSPORT_FEVER_NET = "TransportFever.net"
+    THUNDERSTORE = "Thunderstore"
+    PLANET_MINECRAFT = "Planet Minecraft"
+    SPIGOT_MC = "SpigotMC"
+    HANGAR = "Hangar"
+    BUKKIT = "Bukkit"
+
+    @property
+    def domains(self) -> tuple[str, ...]:
+        match self:
+            case KnownModPageProvider.MODRINTH:
+                return ("modrinth.com",)
+            case KnownModPageProvider.CURSEFORGE:
+                return ("curseforge.com",)
+            case KnownModPageProvider.NEXUSMODS:
+                return ("nexusmods.com",)
+            case KnownModPageProvider.SEVEN_DAYS_TO_DIE_MODS:
+                return ("7daystodiemods.com",)
+            case KnownModPageProvider.FACTORIO_MODS:
+                return ("mods.factorio.com",)
+            case KnownModPageProvider.MOD_IO:
+                return ("mod.io",)
+            case KnownModPageProvider.STEAM_WORKSHOP:
+                return ("steamcommunity.com",)
+            case KnownModPageProvider.TRANSPORT_FEVER_NET:
+                return ("transportfever.net",)
+            case KnownModPageProvider.THUNDERSTORE:
+                return ("thunderstore.io",)
+            case KnownModPageProvider.PLANET_MINECRAFT:
+                return ("planetminecraft.com",)
+            case KnownModPageProvider.SPIGOT_MC:
+                return ("spigotmc.org",)
+            case KnownModPageProvider.HANGAR:
+                return ("hangar.papermc.io",)
+            case KnownModPageProvider.BUKKIT:
+                return ("dev.bukkit.org",)
+
+
+def normalise_mod_page_url(raw: object) -> str:
+    url = _normalise_required_text(raw, field_name="Mod page URL")
+    parsed = urlsplit(url)
+    if parsed.scheme.casefold() != "https" or parsed.hostname is None:
+        raise ValueError("Mod page URLs must be absolute HTTPS URLs")
+    return url
+
+
+def known_mod_page_provider_for_url(raw: object) -> KnownModPageProvider | None:
+    try:
+        url = normalise_mod_page_url(raw)
+    except (TypeError, ValueError):
+        return None
+    hostname = urlsplit(url).hostname
+    assert hostname is not None
+    normalised_hostname = hostname.casefold()
+    for provider in KnownModPageProvider:
+        if any(
+            normalised_hostname == domain or normalised_hostname.endswith(f".{domain}")
+            for domain in provider.domains
+        ):
+            return provider
+    return None
+
+
+class ModPageLink(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    url: str
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def validate_url(cls, raw: object) -> str:
+        return normalise_mod_page_url(raw)
+
+
 class ModClassificationOverride(BaseModel):
     """Operator-selected classification that takes precedence over automatic detection."""
 
@@ -1008,6 +1166,18 @@ class ModPlatformMetadata(BaseModel):
                 return None if self.curseforge is None else self.curseforge.page_url
             case _:
                 raise ValueError(f"Launcher metadata does not support {provider.value}.")
+
+
+class LauncherMetadataResolution(BaseModel):
+    platforms: ModPlatformMetadata = Field(default_factory=ModPlatformMetadata)
+    suggested_mod_type: ModType | None = None
+    suggestion_provider: Provider | None = None
+
+    @model_validator(mode="after")
+    def validate_suggestion_provider(self) -> LauncherMetadataResolution:
+        if (self.suggested_mod_type is None) != (self.suggestion_provider is None):
+            raise ValueError("Launcher metadata suggestions require both a mod type and provider")
+        return self
 
 
 class ClientPackPolicy(enum.StrEnum):
@@ -1229,6 +1399,7 @@ class App_Config(BaseModel):
     client_pack_verified_hash: str | None = None
     client_pack_content_dirty: bool = False
     client_pack_excluded_kubejs_scripts: tuple[str, ...] = ()
+    client_pack_metadata: ClientPackMetadataConfig | None = None
     settings_pointer: Path | None = None
     server_log_file: Path | None = None
     join_host: str = config.PUBLIC_ADDR
@@ -1498,6 +1669,7 @@ class Mod_Config(BaseModel):
     mod_type: ModType = ModType.REGULAR
     download_block_reason: ModDownloadBlockReason | None = None
     classification_override: ModClassificationOverride | None = None
+    mod_pages: tuple[ModPageLink, ...] = ()
     metadata_overrides: ModMetadataOverrides = Field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = Field(default_factory=ClientPackConfig)
     platforms: ModPlatformMetadata = Field(default_factory=ModPlatformMetadata)

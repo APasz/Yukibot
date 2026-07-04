@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
 from font_assets import font_assets
@@ -153,6 +155,8 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             return response
 
         previous_404_handler = nicegui_app.exception_handlers.get(404)
+        previous_http_exception_handler = nicegui_app.exception_handlers.get(StarletteHTTPException)
+        previous_validation_exception_handler = nicegui_app.exception_handlers.get(RequestValidationError)
         previous_exception_handler = nicegui_app.exception_handlers.get(Exception)
 
         @nicegui_app.exception_handler(404)
@@ -172,9 +176,53 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 raise exception
             return await self._resolve_exception_handler_result(previous_404_handler(request, exception))
 
+        @nicegui_app.exception_handler(StarletteHTTPException)
+        async def _framework_http_error(
+            request: Request,
+            exception: StarletteHTTPException,
+        ) -> object:
+            if self._should_render_framework_error_page(
+                method=request.method,
+                path=request.url.path,
+                accept_header=request.headers.get("accept"),
+            ):
+                return await self._build_framework_error_response(
+                    ui=ui,
+                    request=request,
+                    status_code=exception.status_code,
+                    exception=exception,
+                )
+            if previous_http_exception_handler is None:
+                raise exception
+            return await self._resolve_exception_handler_result(
+                previous_http_exception_handler(request, exception)
+            )
+
+        @nicegui_app.exception_handler(RequestValidationError)
+        async def _framework_request_validation_error(
+            request: Request,
+            exception: RequestValidationError,
+        ) -> object:
+            if self._should_render_framework_error_page(
+                method=request.method,
+                path=request.url.path,
+                accept_header=request.headers.get("accept"),
+            ):
+                return await self._build_framework_error_response(
+                    ui=ui,
+                    request=request,
+                    status_code=422,
+                    exception=exception,
+                )
+            if previous_validation_exception_handler is None:
+                raise exception
+            return await self._resolve_exception_handler_result(
+                previous_validation_exception_handler(request, exception)
+            )
+
         @nicegui_app.exception_handler(Exception)
         async def _framework_http_exception(request: Request, exception: Exception) -> object:
-            if request.scope.get("nicegui_page_path") and self._should_render_framework_error_page(
+            if self._should_render_framework_error_page(
                 method=request.method,
                 path=request.url.path,
                 accept_header=request.headers.get("accept"),

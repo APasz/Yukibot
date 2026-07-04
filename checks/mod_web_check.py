@@ -18,6 +18,7 @@ import requests
 from aiohttp.client_reqrep import RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from nicegui.elements.link import Link
+from modmux.models import Provider
 from yarl import URL
 
 import config
@@ -28,12 +29,15 @@ from apps._config import (
     AppTitleFont,
     ClientPackConfig,
     ClientPackKubeJsScript,
+    ClientPackMetadataConfig,
     ClientPackPolicy,
     ClientPackRelease,
+    LauncherMetadataResolution,
     LauncherProviderUrls,
     ModDistributionMode,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPageLink,
     ModPlacement,
     ModType,
     is_client_pack_candidate,
@@ -185,6 +189,7 @@ from web_dash.types import (
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
     ModWebModSortOrder,
+    ModWebModlistFormat,
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
@@ -2195,6 +2200,54 @@ class ModWebTests(unittest.TestCase):
             "This node is unreachable right now. It may be offline or still waking up.",
         )
         self.assertFalse(ModWebService._remote_node_error_is_transient(ValueError("invalid payload")))
+
+    def test_app_page_logs_transient_node_restart_without_traceback(self) -> None:
+        async def exercise() -> None:
+            service = ModWebService()
+            node = ModWebNodeLink(
+                node_name="yuki",
+                label="Yuki",
+                url="/mod-web/nodes/yuki",
+                api_base_url="http://127.0.0.1:8082/api/node",
+                api_url="/api/node-proxy/yuki/apps",
+                is_current=True,
+            )
+            user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+            connection_error = RuntimeError("Remote node request failed")
+            connection_error.__cause__ = aiohttp.ClientConnectionError("node restarting")
+            ui = cast(ModWebUi, cast(object, SimpleNamespace()))
+            render_error = Mock()
+
+            with (
+                patch.object(service, "_authorised_page_user", new=AsyncMock(return_value=user)),
+                patch.object(service, "_remote_node_link", return_value=node),
+                patch.object(service, "_remote_app_entry_async", new=AsyncMock(side_effect=connection_error)),
+                patch.object(service, "_render_error_page", new=render_error),
+                patch("web_dash.page_handlers.log.info") as log_info,
+                patch("web_dash.page_handlers.log.exception") as log_exception,
+            ):
+                await service._render_node_mods_page(
+                    ui=ui,
+                    node_name="yuki",
+                    app_name="minecraft_all_fabric",
+                    request=cast(Any, SimpleNamespace()),
+                )
+
+            log_info.assert_called_once_with(
+                "Remote mod web app temporarily unavailable: node=%s app=%s reason=%s",
+                "yuki",
+                "minecraft_all_fabric",
+                "This node is unreachable right now. It may be offline or still waking up.",
+            )
+            log_exception.assert_not_called()
+            render_error.assert_called_once_with(
+                ui=ui,
+                title="Page unavailable",
+                detail="This node is unreachable right now. It may be offline or still waking up.",
+                app_name="minecraft_all_fabric",
+            )
+
+        asyncio.run(exercise())
 
     def test_format_uptime_seconds_compacts_duration(self) -> None:
         self.assertEqual(ModWebService._format_uptime_seconds(59), "<1m")
@@ -5368,6 +5421,67 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(config.detail_text, "Missing page")
         self.assertIsNotNone(config.icon_markup)
 
+    def test_framework_http_error_config_formats_api_conflict_page(self) -> None:
+        from fastapi import HTTPException
+
+        service = ModWebService()
+        config = service._framework_http_error_config(
+            status_code=409,
+            exception=HTTPException(
+                409,
+                "Client pack content has changed; publish or regenerate it before download.",
+            ),
+        )
+
+        self.assertEqual(config.title, "Request could not be completed")
+        self.assertEqual(config.badge_text, "409")
+        self.assertEqual(config.badge_tone, "warn")
+        self.assertEqual(config.detail_label, "Details")
+        self.assertEqual(
+            config.detail_text,
+            "Client pack content has changed; publish or regenerate it before download.",
+        )
+
+    def test_framework_http_error_config_formats_api_service_error_page(self) -> None:
+        from fastapi import HTTPException
+
+        service = ModWebService()
+        config = service._framework_http_error_config(
+            status_code=503,
+            exception=HTTPException(503, "Node is still starting."),
+        )
+
+        self.assertEqual(config.title, "Service unavailable")
+        self.assertEqual(config.badge_text, "503")
+        self.assertEqual(config.badge_tone, "red")
+        self.assertEqual(config.detail_label, "Details")
+        self.assertEqual(config.detail_text, "Node is still starting.")
+
+    def test_framework_http_error_config_formats_request_validation_page(self) -> None:
+        from fastapi.exceptions import RequestValidationError
+
+        service = ModWebService()
+        config = service._framework_http_error_config(
+            status_code=422,
+            exception=RequestValidationError(
+                [
+                    {
+                        "type": "enum",
+                        "loc": ("query", "pack_format"),
+                        "msg": "Input should be a supported pack format",
+                        "input": "invalid",
+                    }
+                ]
+            ),
+        )
+
+        self.assertEqual(config.title, "Request could not be completed")
+        self.assertEqual(config.badge_text, "422")
+        self.assertEqual(
+            config.detail_text,
+            "query.pack_format: Input should be a supported pack format",
+        )
+
     def test_framework_http_error_config_formats_redirect_loop_page(self) -> None:
         service = ModWebService()
 
@@ -5712,11 +5826,18 @@ class ModWebTests(unittest.TestCase):
                 accept_header="text/html,application/xhtml+xml",
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             ModWebService._should_render_framework_error_page(
                 method="GET",
                 path="/api/node/apps",
                 accept_header="text/html,application/xhtml+xml",
+            )
+        )
+        self.assertFalse(
+            ModWebService._should_render_framework_error_page(
+                method="GET",
+                path="/api/node/apps",
+                accept_header="application/json",
             )
         )
         self.assertFalse(
@@ -8591,6 +8712,36 @@ class ModWebTests(unittest.TestCase):
             PackFormat.GENERIC_ZIP,
         )
 
+    def test_client_pack_kubejs_toggle_requires_an_included_minecraft_script(self) -> None:
+        included_script = ClientPackKubeJsScript(
+            relative_path="server_scripts/events.js",
+            included=True,
+        )
+        excluded_script = ClientPackKubeJsScript(
+            relative_path="startup_scripts/registry.js",
+            included=False,
+        )
+
+        self.assertTrue(
+            ModWebService._show_client_pack_kubejs_toggle(
+                "minecraft",
+                (excluded_script, included_script),
+            )
+        )
+        self.assertFalse(
+            ModWebService._show_client_pack_kubejs_toggle(
+                "minecraft",
+                (excluded_script,),
+            )
+        )
+        self.assertFalse(ModWebService._show_client_pack_kubejs_toggle("minecraft", ()))
+        self.assertFalse(
+            ModWebService._show_client_pack_kubejs_toggle(
+                "sevendays",
+                (included_script,),
+            )
+        )
+
     def test_node_mod_entry_mapping_preserves_client_pack_policy(self) -> None:
         entry = self._mod_entry(
             name="optional.jar",
@@ -8636,9 +8787,21 @@ class ModWebTests(unittest.TestCase):
                 self.on_click = on_click
                 self.enabled: bool = True
                 self.class_value: str | None = None
+                self.props_value: str | None = None
+
+            def __enter__(self) -> "FakeButton":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                del exc_type, exc, tb
+                return False
 
             def classes(self, value: str) -> "FakeButton":
                 self.class_value = value
+                return self
+
+            def props(self, value: str) -> "FakeButton":
+                self.props_value = value
                 return self
 
             def on(
@@ -8766,6 +8929,7 @@ class ModWebTests(unittest.TestCase):
                 self.textareas: list[FakeInput] = []
                 self.config_search_inputs: list[FakeInput] = []
                 self.buttons: list[FakeButton] = []
+                self.menu_items: list[FakeButton] = []
                 self.policy_select_labels: list[object] = []
                 self.policy_selects: list[FakeInput] = []
                 self.checkboxes: dict[str, FakeInput] = {}
@@ -8775,6 +8939,7 @@ class ModWebTests(unittest.TestCase):
                 self.render_events: list[str] = []
                 self.javascript_calls: list[str] = []
                 self.sort_change_handler: Callable[[object], None] | None = None
+                self.modlist_format_select: FakeInput | None = None
                 self.navigate = SimpleNamespace(reload=lambda: None)
 
             def refreshable(self, func: Callable[..., None]) -> FakeRefreshable:
@@ -8799,6 +8964,17 @@ class ModWebTests(unittest.TestCase):
                 dialog = FakeDialog()
                 self.dialogs.append(dialog)
                 return dialog
+
+            def menu(self) -> FakeContainer:
+                return FakeContainer()
+
+            def menu_item(self, *args: object, **kwargs: object) -> FakeButton:
+                item = FakeButton(
+                    str(args[0]) if args else "",
+                    on_click=cast(Callable[[], object] | None, kwargs.get("on_click")),
+                )
+                self.menu_items.append(item)
+                return item
 
             def upload(self, *args: object, **kwargs: object) -> FakeUpload:
                 del args, kwargs
@@ -8856,6 +9032,10 @@ class ModWebTests(unittest.TestCase):
                 return control
 
             def select(self, *args: object, **kwargs: object) -> FakeInput:
+                if kwargs.get("label") == "Format":
+                    control = FakeInput(value=kwargs.get("value"))
+                    self.modlist_format_select = control
+                    return control
                 if args and isinstance(args[0], dict) and set(args[0].values()) == {
                     "Required",
                     "Optional",
@@ -8882,7 +9062,8 @@ class ModWebTests(unittest.TestCase):
                 del html
                 return None
 
-            def run_javascript(self, script: str) -> None:
+            def run_javascript(self, script: str, *, timeout: float = 1.0) -> None:
+                del timeout
                 self.javascript_calls.append(script)
 
         service = ModWebService()
@@ -8968,6 +9149,11 @@ class ModWebTests(unittest.TestCase):
                     included=False,
                 ),
             ),
+            client_pack_metadata=ClientPackMetadataConfig(
+                name="Example Pack",
+                description="Example description",
+                filename_template="{pack_name}-{version}",
+            ),
         )
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
         ui = FakeUi()
@@ -8997,7 +9183,7 @@ class ModWebTests(unittest.TestCase):
         ):
             service._render_mods_section(ui=cast(ModWebUi, cast(object, ui)), model=model, user=user)
 
-            changelog_handler = ui.textareas[0].handlers["change"]
+            changelog_handler = ui.textareas[-1].handlers["change"]
             changelog_handler(SimpleNamespace(value="Persisted after Save."))
             ui.checkboxes["server_scripts/events.js"].value = False
             save_button = next(button for button in ui.buttons if button.text == "Save")
@@ -9015,6 +9201,14 @@ class ModWebTests(unittest.TestCase):
                     {"relative_path": "server_scripts/events.js", "included": False},
                     {"relative_path": "startup_scripts/registry.js", "included": False},
                 ],
+            )
+            self.assertEqual(
+                remote_json.await_args.kwargs["json_payload"]["metadata"],
+                {
+                    "name": "Example Pack",
+                    "description": "Example description",
+                    "filename_template": "{pack_name}-{version}",
+                },
             )
             self.assertTrue(ui.checkboxes["Include configured KubeJS scripts"].value)
             set_changelog_draft.assert_called_once_with(
@@ -9062,9 +9256,57 @@ class ModWebTests(unittest.TestCase):
             ]
             self.assertNotIn("Enabled ZIP", toolbar_text)
             self.assertIn("Client Pack", toolbar_text)
-            self.assertIn("Configure <!>", toolbar_text)
+            self.assertIn("Modlist", toolbar_text)
+            self.assertNotIn("Configure <!>", toolbar_text)
+            self.assertNotIn("Upload", toolbar_text)
+            self.assertNotIn("Delete", toolbar_text)
             self.assertIn("Clear", toolbar_text)
             self.assertIn("Download All/2", toolbar_text)
+            self.assertEqual(
+                toolbar_text[toolbar_text.index("Clear") : toolbar_text.index("Clear") + 2],
+                ["Clear", "Download All/2"],
+            )
+            self.assertEqual(
+                [item.text for item in ui.menu_items],
+                ["Upload", "Configure <!>", "Delete"],
+            )
+            self.assertIsNotNone(ui.modlist_format_select)
+            assert ui.modlist_format_select is not None
+            self.assertFalse(ui.checkboxes["Disabled"].value)
+            self.assertFalse(ui.checkboxes["Built-in"].value)
+            self.assertTrue(ui.checkboxes["Client"].value)
+            ui.modlist_format_select.value = ModWebModlistFormat.JSON.value
+            ui.checkboxes["Filename"].value = True
+            ui.modlist_format_select.handlers["update:model-value"](SimpleNamespace(args=None))
+            preview_labels = [
+                label for label in ui.labels if label.class_value == "mod-modlist-preview w-full"
+            ]
+            self.assertEqual(
+                json.loads(preview_labels[-1].text),
+                [
+                    {
+                        "name": "Alpha Fabric",
+                        "version": "1.0.0",
+                        "filename": "alpha-fabric.jar",
+                        "optional": True,
+                    },
+                    {"name": "Beta Forge", "version": "1.0.0", "filename": "beta-forge.jar"},
+                ],
+            )
+            copy_button = next(button for button in ui.buttons if button.text == "Copy")
+            self.assertIsNotNone(copy_button.on_click)
+            assert copy_button.on_click is not None
+            copy_button.on_click()
+            self.assertIn("navigator.clipboard.writeText", ui.javascript_calls[-1])
+            ui.javascript_calls.clear()
+            menu_button = next(
+                button
+                for button in ui.buttons
+                if button.class_value is not None and "mod-toolbar-menu-button" in button.class_value
+            )
+            self.assertIn("icon=menu", menu_button.props_value or "")
+            selection_button = next(button for button in ui.buttons if button.text == "Clear")
+            self.assertIn("mod-toolbar-selection-button", selection_button.class_value or "")
             all_button_text = [button.text for button in ui.buttons]
             self.assertNotIn("Publish & Download", all_button_text)
             self.assertIn("Changes", all_button_text)
@@ -9082,25 +9324,29 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(all_button_text.count("Publish"), 1)
             self.assertEqual(
                 [control.placeholder for control in ui.textareas],
-                ["Describe client-pack changes in this release…"],
+                [None, "Describe client-pack changes in this release…"],
             )
-            self.assertEqual([control.value for control in ui.textareas], ["Shared draft notes."])
-            self.assertIn("stack-label", ui.textareas[0].props_value or "")
-            self.assertIn("rows=3", ui.textareas[0].props_value or "")
-            self.assertNotIn("debounce=", ui.textareas[0].props_value or "")
-            self.assertIn("change", ui.textareas[0].handlers)
+            self.assertEqual(
+                [control.value for control in ui.textareas],
+                ["Example description", "Shared draft notes."],
+            )
+            self.assertIn("rows=2", ui.textareas[0].props_value or "")
+            self.assertIn("stack-label", ui.textareas[-1].props_value or "")
+            self.assertIn("rows=3", ui.textareas[-1].props_value or "")
+            self.assertNotIn("debounce=", ui.textareas[-1].props_value or "")
+            self.assertIn("change", ui.textareas[-1].handlers)
             label_texts = [label.text for label in ui.labels]
             self.assertIn(
                 "Draft notes are shared when this configuration is saved.",
                 label_texts,
             )
             configure_button = next(
-                button for button in ui.buttons if button.text == "Configure <!>"
+                item for item in ui.menu_items if item.text == "Configure <!>"
             )
             self.assertIsNotNone(configure_button.on_click)
             assert configure_button.on_click is not None
             configure_button.on_click()
-            self.assertEqual(ui.textareas[0].value, "Fresh shared draft.")
+            self.assertEqual(ui.textareas[-1].value, "Fresh shared draft.")
             changelog_labels = [
                 label.text
                 for label in ui.labels
@@ -9206,6 +9452,9 @@ class ModWebTests(unittest.TestCase):
                 self.text = value
 
         class FakeInput:
+            def __init__(self, value: object = None) -> None:
+                self.value: object = value
+
             def props(self, value: str) -> "FakeInput":
                 del value
                 return self
@@ -9253,14 +9502,14 @@ class ModWebTests(unittest.TestCase):
                 return None
 
         class FakeRefreshable:
-            def __init__(self, func: Callable[[str], None]) -> None:
+            def __init__(self, func: Callable[..., None]) -> None:
                 self._func = func
 
-            def __call__(self, search_query: str) -> None:
-                self._func(search_query)
+            def __call__(self, *args: object) -> None:
+                self._func(*args)
 
-            def refresh(self, search_query: str) -> None:
-                self._func(search_query)
+            def refresh(self, *args: object) -> None:
+                self._func(*args)
 
         class FakeUi:
             def __init__(self) -> None:
@@ -9273,7 +9522,7 @@ class ModWebTests(unittest.TestCase):
                 self.upload_control = FakeUpload()
                 self.upload_kwargs: dict[str, object] = {}
 
-            def refreshable(self, func: Callable[[str], None]) -> FakeRefreshable:
+            def refreshable(self, func: Callable[..., None]) -> FakeRefreshable:
                 return FakeRefreshable(func)
 
             def card(self) -> FakeContainer:
@@ -9316,8 +9565,12 @@ class ModWebTests(unittest.TestCase):
                 return FakeInput()
 
             def select(self, *args: object, **kwargs: object) -> FakeInput:
-                del args, kwargs
-                return FakeInput()
+                del args
+                return FakeInput(kwargs.get("value"))
+
+            def checkbox(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                return FakeInput(kwargs.get("value"))
 
             def notify(self, message: str, *, type: str | None = None) -> None:
                 del message, type
@@ -9642,6 +9895,9 @@ class ModWebTests(unittest.TestCase):
             policy=ClientPackPolicy.OPTIONAL,
             default_selected=False,
         )
+        mod_pages = (
+            ModPageLink(name="Modrinth", url="https://modrinth.com/mod/alpha"),
+        )
         updated_entry = replace(
             entry,
             friendly="Alpha Override",
@@ -9652,6 +9908,7 @@ class ModWebTests(unittest.TestCase):
             download_block_label=ModDownloadBlockReason.ARTIFACT.label,
             version="2.0.0",
             origin="curated",
+            mod_pages=mod_pages,
             metadata_overrides=overrides,
             client_pack=client_pack,
         )
@@ -9700,6 +9957,7 @@ class ModWebTests(unittest.TestCase):
                     mod_type=ModType.CLIENT,
                     download_block_reason=ModDownloadBlockReason.ARTIFACT,
                     metadata_overrides=overrides,
+                    mod_pages=mod_pages,
                     client_pack=client_pack,
                     launcher_urls=LauncherProviderUrls(
                         modrinth="https://modrinth.com/mod/alpha/version/alpha-2.0.0",
@@ -9726,6 +9984,9 @@ class ModWebTests(unittest.TestCase):
                     "origin": "curated",
                     "added": None,
                 },
+                "mod_pages": [
+                    {"name": "Modrinth", "url": "https://modrinth.com/mod/alpha"},
+                ],
                 "client_pack": {
                     "included_in_client": True,
                     "policy": "optional",
@@ -9739,6 +10000,59 @@ class ModWebTests(unittest.TestCase):
                     "curseforge_reference": None,
                 },
             },
+        )
+
+    def test_fetch_mod_launcher_metadata_uses_non_mutating_resolver_endpoint(self) -> None:
+        service = ModWebService()
+        entry = self._mod_entry(name="alpha.jar")
+        launcher_urls = LauncherProviderUrls(
+            modrinth="https://modrinth.com/mod/alpha/version/alpha-2.0.0"
+        )
+        expected = LauncherMetadataResolution(
+            suggested_mod_type=ModType.CLIENT,
+            suggestion_provider=Provider.MODRINTH,
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="minecraft_alpha")),
+        )
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="https://yuki.example/api/node",
+            api_url="/api/node-proxy/yuki/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_json_async",
+                new=AsyncMock(return_value=expected.model_dump(mode="json")),
+            ) as remote_json,
+        ):
+            result = asyncio.run(
+                service._fetch_mod_launcher_metadata(
+                    model=model,
+                    entry=entry,
+                    launcher_urls=launcher_urls,
+                    user=user,
+                )
+            )
+
+        self.assertEqual(result, expected)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="minecraft_alpha",
+            path="/apps/minecraft_alpha/mods/alpha.jar/launcher-metadata",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"launcher_urls": launcher_urls.model_dump(mode="json")},
         )
 
     def test_render_saves_editor_uses_direct_upload_and_settings_search_styling(self) -> None:
@@ -11451,9 +11765,290 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ModWebService._mod_type_badge_tone(ModType.SERVER), "warn")
         self.assertEqual(ModWebService._mod_type_badge_tone(ModType.CLIENT), "purple")
 
+    def test_mod_detail_summaries_combine_derived_distribution_fields(self) -> None:
+        entry = self._mod_entry(name="example.jar")
+        self.assertEqual(ModWebService._mod_download_summary(entry), "Available")
+        self.assertEqual(ModWebService._mod_client_pack_summary(entry), "Required")
+
+        blocked = replace(
+            entry,
+            downloadable=False,
+            download_block_label="Artifact",
+            client_pack_eligible=False,
+        )
+        self.assertEqual(ModWebService._mod_download_summary(blocked), "Blocked — Artifact")
+        self.assertEqual(
+            ModWebService._mod_client_pack_summary(blocked),
+            "Unavailable — Download blocked",
+        )
+
+        optional = replace(
+            entry,
+            client_pack=ClientPackConfig(
+                policy=ClientPackPolicy.OPTIONAL,
+                default_selected=True,
+            ),
+        )
+        self.assertEqual(
+            ModWebService._mod_client_pack_summary(optional),
+            "Optional — included by default",
+        )
+
+        alternative = replace(
+            entry,
+            client_pack=ClientPackConfig(
+                policy=ClientPackPolicy.ALTERNATIVE,
+                choice_group="minimap",
+                default_choice=True,
+            ),
+        )
+        self.assertEqual(
+            ModWebService._mod_client_pack_summary(alternative),
+            "Alternative — minimap (default)",
+        )
+
+        excluded = replace(
+            entry,
+            client_pack=ClientPackConfig(included_in_client=False),
+            client_pack_eligible=False,
+        )
+        self.assertEqual(ModWebService._mod_client_pack_summary(excluded), "Not included")
+
+        server_only = replace(
+            entry,
+            mod_type=ModType.SERVER,
+            client_pack_eligible=False,
+        )
+        self.assertEqual(
+            ModWebService._mod_client_pack_summary(server_only),
+            "Unavailable — Server-only",
+        )
+
     def test_selection_toggle_label_switches_between_select_all_and_clear(self) -> None:
         self.assertEqual(ModWebService._selection_toggle_label(selected_count=0), "Select All")
         self.assertEqual(ModWebService._selection_toggle_label(selected_count=2), "Clear")
+
+    def test_render_modlist_supports_all_formats_and_field_options(self) -> None:
+        alpha = self._mod_entry(
+            name="alpha.jar",
+            friendly="Alpha | Tools",
+            version="1.2.0",
+        )
+        beta = self._mod_entry(
+            name="beta.jar",
+            friendly="Beta",
+            version=None,
+        )
+        mods = (beta, alpha)
+
+        self.assertEqual(
+            ModWebService._render_modlist(
+                mods,
+                instance_name="Minecraft Alpha",
+                pack_version="2026-07-04",
+                output_format=ModWebModlistFormat.PLAINTEXT,
+                include_version=True,
+                include_filename=True,
+            ),
+            "Minecraft Alpha [2026-07-04]\n\n"
+            "Alpha | Tools [1.2.0] (alpha.jar)\n"
+            "Beta [Unknown] (beta.jar)",
+        )
+        self.assertEqual(
+            ModWebService._render_modlist(
+                mods,
+                instance_name="Minecraft Alpha",
+                pack_version="2026-07-04",
+                output_format=ModWebModlistFormat.PLAINTEXT,
+                include_version=False,
+                include_filename=True,
+            ),
+            "Minecraft Alpha [2026-07-04]\n\nAlpha | Tools (alpha.jar)\nBeta (beta.jar)",
+        )
+        self.assertEqual(
+            ModWebService._render_modlist(
+                mods,
+                instance_name="Minecraft Alpha",
+                pack_version="2026-07-04",
+                output_format=ModWebModlistFormat.PLAINTEXT,
+                include_version=False,
+                include_filename=False,
+            ),
+            "Minecraft Alpha [2026-07-04]\n\nAlpha | Tools\nBeta",
+        )
+        self.assertEqual(
+            json.loads(
+                ModWebService._render_modlist(
+                    mods,
+                    instance_name="Minecraft Alpha",
+                    pack_version="2026-07-04",
+                    output_format=ModWebModlistFormat.JSON,
+                    include_version=False,
+                    include_filename=True,
+                )
+            ),
+            [
+                {"name": "Alpha | Tools", "filename": "alpha.jar"},
+                {"name": "Beta", "filename": "beta.jar"},
+            ],
+        )
+        jsonl = ModWebService._render_modlist(
+            mods,
+            instance_name="Minecraft Alpha",
+            pack_version="2026-07-04",
+            output_format=ModWebModlistFormat.JSONL,
+            include_version=True,
+            include_filename=False,
+        )
+        self.assertEqual(
+            [json.loads(line) for line in jsonl.splitlines()],
+            [
+                {"name": "Alpha | Tools", "version": "1.2.0"},
+                {"name": "Beta", "version": None},
+            ],
+        )
+        self.assertEqual(
+            ModWebService._render_modlist(
+                (
+                    self._mod_entry(
+                        name="quoted.jar",
+                        friendly='Comma, "Quoted"',
+                        version="2.0.0",
+                    ),
+                ),
+                instance_name="Minecraft Alpha",
+                pack_version="2026-07-04",
+                output_format=ModWebModlistFormat.CSV,
+                include_version=True,
+                include_filename=True,
+            ),
+            'name,version,filename\n"Comma, ""Quoted""",2.0.0,quoted.jar',
+        )
+        self.assertEqual(
+            ModWebService._render_modlist(
+                mods,
+                instance_name="Minecraft Alpha",
+                pack_version="2026-07-04",
+                output_format=ModWebModlistFormat.MARKDOWN_GFM,
+                include_version=True,
+                include_filename=False,
+            ),
+            "# Minecraft Alpha [2026-07-04]\n\n"
+            "| Name | Version |\n"
+            "| --- | --- |\n"
+            "| Alpha \\| Tools | 1.2.0 |\n"
+            "| Beta | Unknown |",
+        )
+        self.assertEqual(
+            ModWebService._render_modlist(
+                mods,
+                instance_name="Minecraft Alpha",
+                pack_version="2026-07-04",
+                output_format=ModWebModlistFormat.MARKDOWN_COMMONMARK,
+                include_version=True,
+                include_filename=True,
+            ),
+            "# Minecraft Alpha [2026-07-04]\n\n"
+            "- Alpha | Tools [1.2.0] (alpha.jar)\n"
+            "- Beta [Unknown] (beta.jar)",
+        )
+        self.assertEqual(
+            ModWebService._render_modlist(
+                mods,
+                instance_name="Minecraft Alpha",
+                pack_version="2026-07-04",
+                output_format=ModWebModlistFormat.DISCORD,
+                include_version=True,
+                include_filename=True,
+            ),
+            "**Minecraft Alpha [2026-07-04]**\n\n"
+            "- **Alpha \\| Tools** [`1.2.0`] (`alpha.jar`)\n"
+            "- **Beta** [`Unknown`] (`beta.jar`)",
+        )
+        self.assertEqual(
+            [output_format.label for output_format in ModWebModlistFormat],
+            [
+                "Plaintext",
+                "Discord",
+                "JSON",
+                "JSONL",
+                "Markdown [GitHub/GFM]",
+                "Markdown [CommonMark]",
+                "CSV",
+            ],
+        )
+
+    def test_render_modlist_filters_categories_and_marks_optional_client_mods(self) -> None:
+        regular = self._mod_entry(name="regular.jar", friendly="Regular")
+        disabled = self._mod_entry(
+            name="disabled.jar",
+            friendly="Disabled",
+            enabled=False,
+            placement=ModPlacement.SERVER_DISABLED,
+        )
+        builtin = self._mod_entry(
+            name="builtin.jar",
+            friendly="Built-in",
+            mod_type=ModType.BUILTIN,
+        )
+        optional_client = self._mod_entry(
+            name="client.jar",
+            friendly="Client Optional",
+            enabled=False,
+            mod_type=ModType.CLIENT,
+            placement=ModPlacement.CLIENT_ONLY,
+            client_pack=ClientPackConfig(policy=ClientPackPolicy.OPTIONAL),
+        )
+        mods = (regular, disabled, builtin, optional_client)
+
+        def render(
+            output_format: ModWebModlistFormat,
+            *,
+            include_disabled: bool = False,
+            include_builtin: bool = False,
+            include_client: bool = True,
+        ) -> str:
+            return ModWebService._render_modlist(
+                mods,
+                instance_name="Minecraft Alpha",
+                pack_version="2026-07-04",
+                output_format=output_format,
+                include_version=False,
+                include_filename=False,
+                include_disabled=include_disabled,
+                include_builtin=include_builtin,
+                include_client=include_client,
+            )
+
+        self.assertEqual(
+            render(ModWebModlistFormat.PLAINTEXT),
+            "Minecraft Alpha [2026-07-04]\n\nClient Optional [Optional]\nRegular",
+        )
+        self.assertEqual(
+            render(ModWebModlistFormat.PLAINTEXT, include_client=False),
+            "Minecraft Alpha [2026-07-04]\n\nRegular",
+        )
+        self.assertEqual(
+            render(
+                ModWebModlistFormat.PLAINTEXT,
+                include_disabled=True,
+                include_builtin=True,
+                include_client=True,
+            ),
+            "Minecraft Alpha [2026-07-04]\n\n"
+            "Built-in\nClient Optional [Optional]\nDisabled\nRegular",
+        )
+        self.assertEqual(
+            json.loads(render(ModWebModlistFormat.JSON)),
+            [{"name": "Client Optional", "optional": True}, {"name": "Regular"}],
+        )
+        self.assertIn("Client Optional [Optional]", render(ModWebModlistFormat.MARKDOWN_GFM))
+        self.assertIn("Client Optional [Optional]", render(ModWebModlistFormat.MARKDOWN_COMMONMARK))
+        self.assertIn("**Client Optional** [Optional]", render(ModWebModlistFormat.DISCORD))
+        self.assertEqual(
+            render(ModWebModlistFormat.CSV),
+            "name,optional\nClient Optional,True\nRegular,",
+        )
 
     def test_mod_result_count_label_distinguishes_filtered_and_total_counts(self) -> None:
         self.assertEqual(ModWebService._mod_result_count_label(visible_count=7, total_count=7), "7 mods")

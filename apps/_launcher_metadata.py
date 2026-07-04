@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import enum
 import logging
 from collections.abc import Mapping
 from typing import cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import httpx
 from modmux import Muxer
@@ -17,15 +19,28 @@ import config
 from apps._config import (
     CurseForgeFileReference,
     CurseForgeModMetadata,
+    LauncherMetadataResolution,
     LauncherProviderUrls,
     ModPlatformMetadata,
     ModrinthModMetadata,
+    ModType,
     launcher_provider_label,
     mod_capabilities_for_scope,
 )
 
 
 log = logging.getLogger(__name__)
+
+
+class ModrinthSideSupport(enum.StrEnum):
+    REQUIRED = "required"
+    OPTIONAL = "optional"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
+
+    @property
+    def supported(self) -> bool:
+        return self in {ModrinthSideSupport.REQUIRED, ModrinthSideSupport.OPTIONAL}
 
 
 def _provider_mod_id(page_url: str, expected_provider: Provider) -> ModID:
@@ -48,6 +63,22 @@ def _version_reference(page_url: str, provider: Provider) -> str:
     return reference
 
 
+def launcher_project_page_url(page_url: str, provider: Provider) -> str:
+    if provider not in {Provider.MODRINTH, Provider.CURSEFORGE}:
+        raise ValueError(f"Launcher project pages do not support {provider.value}.")
+    _provider_mod_id(page_url, provider)
+    _version_reference(page_url, provider)
+    parsed = urlsplit(page_url)
+    segments = [unquote(segment) for segment in parsed.path.split("/") if segment]
+    marker = "version" if provider is Provider.MODRINTH else "files"
+    marker_index = segments.index(marker)
+    if marker_index < 2:
+        raise ValueError(f"{launcher_provider_label(provider)} URL has an invalid project path.")
+    assert parsed.hostname is not None
+    project_path = "/" + "/".join(segments[:marker_index])
+    return urlunsplit(("https", parsed.hostname.casefold(), project_path, "", ""))
+
+
 def _required_mapping(raw: object, *, label: str) -> Mapping[str, object]:
     if not isinstance(raw, Mapping):
         raise ValueError(f"{label} returned invalid metadata.")
@@ -68,20 +99,54 @@ def _required_positive_int(payload: Mapping[str, object], key: str, *, label: st
     return value
 
 
+def _required_modrinth_side_support(
+    payload: Mapping[str, object],
+    key: str,
+) -> ModrinthSideSupport:
+    value = payload.get(key)
+    try:
+        return ModrinthSideSupport(value)
+    except (TypeError, ValueError) as xcp:
+        raise ValueError(f"Modrinth project metadata has invalid {key}.") from xcp
+
+
+def _suggest_mod_type_from_modrinth(
+    *,
+    client: ModrinthSideSupport,
+    server: ModrinthSideSupport,
+) -> ModType | None:
+    if ModrinthSideSupport.UNKNOWN in {client, server}:
+        return None
+    if client is ModrinthSideSupport.UNSUPPORTED and server.supported:
+        return ModType.SERVER
+    if server is ModrinthSideSupport.UNSUPPORTED and client.supported:
+        return ModType.CLIENT
+    if client.supported and server.supported:
+        return ModType.REGULAR
+    return None
+
+
 async def _resolve_modrinth(
     page_url: str,
     *,
     local_filename: str,
     http: httpx.AsyncClient,
-) -> ModrinthModMetadata:
+) -> tuple[ModrinthModMetadata, ModType | None]:
     mod_id = _provider_mod_id(page_url, Provider.MODRINTH)
     version_reference = _version_reference(page_url, Provider.MODRINTH)
-    response = await http.get(
-        f"https://api.modrinth.com/v2/project/{mod_id.id}/version",
-        timeout=30,
+    versions_response, project_response = await asyncio.gather(
+        http.get(
+            f"https://api.modrinth.com/v2/project/{mod_id.id}/version",
+            timeout=30,
+        ),
+        http.get(
+            f"https://api.modrinth.com/v2/project/{mod_id.id}",
+            timeout=30,
+        ),
     )
-    response.raise_for_status()
-    raw_versions = cast(object, response.json())
+    versions_response.raise_for_status()
+    project_response.raise_for_status()
+    raw_versions = cast(object, versions_response.json())
     if not isinstance(raw_versions, list):
         raise ValueError("Modrinth returned invalid version metadata.")
 
@@ -114,6 +179,12 @@ async def _resolve_modrinth(
 
     hashes = _required_mapping(selected_file.get("hashes"), label="Modrinth file hashes")
 
+    project = _required_mapping(cast(object, project_response.json()), label="Modrinth project")
+    suggested_mod_type = _suggest_mod_type_from_modrinth(
+        client=_required_modrinth_side_support(project, "client_side"),
+        server=_required_modrinth_side_support(project, "server_side"),
+    )
+
     return ModrinthModMetadata(
         page_url=page_url,
         project_id=_required_text(version, "project_id", label="Modrinth version"),
@@ -123,7 +194,7 @@ async def _resolve_modrinth(
         sha1=_required_text(hashes, "sha1", label="Modrinth file hashes"),
         sha512=_required_text(hashes, "sha512", label="Modrinth file hashes"),
         size=_required_positive_int(selected_file, "size", label="Modrinth file"),
-    )
+    ), suggested_mod_type
 
 
 def _curseforge_api_key() -> str | None:
@@ -212,13 +283,13 @@ async def _resolve_curseforge_source(
     return await _resolve_curseforge(urls.curseforge, http=http)
 
 
-async def resolve_launcher_metadata(
+async def resolve_launcher_metadata_resolution(
     *,
     scope: str,
     urls: LauncherProviderUrls,
     local_filename: str,
     http: httpx.AsyncClient | None = None,
-) -> ModPlatformMetadata:
+) -> LauncherMetadataResolution:
     capabilities = mod_capabilities_for_scope(scope)
     supported = frozenset(capabilities.launcher_metadata_providers)
     supplied_urls = {
@@ -238,17 +309,38 @@ async def resolve_launcher_metadata(
     client = http or httpx.AsyncClient()
     try:
         try:
-            modrinth = (
-                await _resolve_modrinth(
-                    supplied_urls[Provider.MODRINTH], local_filename=local_filename, http=client
+            modrinth: ModrinthModMetadata | None = None
+            suggested_mod_type: ModType | None = None
+            if Provider.MODRINTH in supplied_urls:
+                modrinth, suggested_mod_type = await _resolve_modrinth(
+                    supplied_urls[Provider.MODRINTH],
+                    local_filename=local_filename,
+                    http=client,
                 )
-                if Provider.MODRINTH in supplied_urls
-                else None
-            )
             curseforge = await _resolve_curseforge_source(urls, http=client)
         except httpx.HTTPError as xcp:
             raise ValueError(f"Launcher metadata lookup failed: {xcp}") from xcp
-        return ModPlatformMetadata(modrinth=modrinth, curseforge=curseforge)
+        return LauncherMetadataResolution(
+            platforms=ModPlatformMetadata(modrinth=modrinth, curseforge=curseforge),
+            suggested_mod_type=suggested_mod_type,
+            suggestion_provider=(Provider.MODRINTH if suggested_mod_type is not None else None),
+        )
     finally:
         if owned_http:
             await client.aclose()
+
+
+async def resolve_launcher_metadata(
+    *,
+    scope: str,
+    urls: LauncherProviderUrls,
+    local_filename: str,
+    http: httpx.AsyncClient | None = None,
+) -> ModPlatformMetadata:
+    resolution = await resolve_launcher_metadata_resolution(
+        scope=scope,
+        urls=urls,
+        local_filename=local_filename,
+        http=http,
+    )
+    return resolution.platforms

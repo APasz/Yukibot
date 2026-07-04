@@ -149,7 +149,43 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-mods-toolbar-filters", css)
         self.assertIn(".mod-mods-toolbar-result-count", css)
         self.assertIn(".mod-list-button.mod-toolbar-primary", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-selection-button \{.*?"
+            r"min-width: 4\.75rem;.*?width: auto;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-menu-button \{.*?"
+            r"width: 2\.5rem;.*?min-width: 2\.5rem;",
+        )
+        self.assertIn(".mod-toolbar-menu-item-danger", css)
+        self.assertIn(".mod-modlist-dialog-card", css)
+        self.assertIn(".mod-modlist-preview-frame", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-modlist-preview \{.*?max-height: min\(24rem, 50vh\);.*?"
+            r"color: var\(--mod-text\) !important;.*?white-space: pre;",
+        )
+        self.assertRegex(css, r"(?s)\* \{.*?scrollbar-color: var\(--mod-scrollbar-thumb\) transparent;")
+        self.assertIn("*::-webkit-scrollbar-thumb", css)
+        self.assertIn("*::-webkit-scrollbar-corner", css)
         self.assertIn(":is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__native", css)
+        self.assertRegex(
+            css,
+            r"(?s):is\(\.mod-config-input, \.mod-config-select\) \.q-field__native,.*?"
+            r"-webkit-text-fill-color: var\(--mod-text\) !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s):is\(\.mod-config-input, \.mod-config-select\) input:-webkit-autofill,.*?"
+            r"-webkit-text-fill-color: var\(--mod-text\) !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s):is\(\.mod-config-input, \.mod-config-select\) \.q-field__native::placeholder,.*?"
+            r"-webkit-text-fill-color: var\(--mod-muted\) !important;",
+        )
         self.assertIn(".mod-hero-support", css)
         self.assertIn(".mod-hero-actions", css)
         self.assertIn(".mod-status-card", css)
@@ -169,6 +205,9 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-details-dialog-card", css)
         self.assertIn(".mod-app-details-section", css)
         self.assertIn(".mod-app-details-field", css)
+        self.assertIn(".mod-page-editor-controls", css)
+        self.assertIn(".mod-page-url-invalid", css)
+        self.assertIn(".mod-mod-page-link", css)
         self.assertIn(".mod-details-tab-row", css)
         self.assertIn(".mod-details-tab-button", css)
         self.assertIn(".mod-list-button.secondary.mod-details-tab-active", css)
@@ -189,7 +228,6 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-details-toggle", css)
         self.assertIn(".mod-client-pack-dialog-card", css)
         self.assertRegex(css, r"(?s)\.mod-section-layout \{.*?gap: 0\.35rem;")
-        self.assertIn(".mod-client-pack-body::-webkit-scrollbar-thumb", css)
         self.assertIn("scrollbar-color:", css)
         self.assertIn(".mod-client-pack-checkbox .q-checkbox__inner--truthy", css)
         self.assertIn(".mod-client-pack-select", css)

@@ -75,10 +75,13 @@ from apps._config import (
     CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     ClientPackConfig,
     ClientPackKubeJsScript,
+    ClientPackMetadataConfig,
     ClientPackRelease,
+    LauncherMetadataResolution,
     LauncherProviderUrls,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPageLink,
     ModPlacement,
     ModPlatformMetadata,
     ModType,
@@ -88,7 +91,7 @@ from apps._config import (
     normalise_app_title_font,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
-from apps._launcher_metadata import resolve_launcher_metadata
+from apps._launcher_metadata import resolve_launcher_metadata, resolve_launcher_metadata_resolution
 from apps._console import (
     ConsoleAction,
     ConsoleActionParameter,
@@ -411,6 +414,7 @@ class NodeAppEntry:
     client_pack_published_changelog: str | None = None
     client_pack_releases: tuple[ClientPackRelease, ...] = ()
     client_pack_kubejs_scripts: tuple[ClientPackKubeJsScript, ...] = ()
+    client_pack_metadata: ClientPackMetadataConfig | None = None
     runtime_fault: AppRuntimeFault | None = None
     update_info: AppUpdateInfo | None = None
     update_status: AppUpdateStatus | None = None
@@ -465,6 +469,7 @@ class NodeAppEntry:
         client_pack_published_changelog = _optional_string(payload, "client_pack_published_changelog")
         raw_client_pack_releases = payload.get("client_pack_releases", ())
         raw_client_pack_kubejs_scripts = payload.get("client_pack_kubejs_scripts", ())
+        raw_client_pack_metadata = payload.get("client_pack_metadata")
         raw_runtime_fault = payload.get("runtime_fault")
         raw_update_info = payload.get("update_info")
         raw_update_status = payload.get("update_status")
@@ -538,6 +543,13 @@ class NodeAppEntry:
         client_pack_kubejs_scripts = tuple(
             ClientPackKubeJsScript.model_validate(script_payload)
             for script_payload in raw_client_pack_kubejs_scripts
+        )
+        if raw_client_pack_metadata is not None and not isinstance(raw_client_pack_metadata, Mapping):
+            raise ValueError("Node app entry client_pack_metadata is invalid.")
+        client_pack_metadata = (
+            ClientPackMetadataConfig.model_validate(raw_client_pack_metadata)
+            if raw_client_pack_metadata is not None
+            else None
         )
         client_pack_releases = tuple(
             ClientPackRelease.model_validate(release_payload)
@@ -635,6 +647,7 @@ class NodeAppEntry:
             client_pack_published_changelog=client_pack_published_changelog,
             client_pack_releases=client_pack_releases,
             client_pack_kubejs_scripts=client_pack_kubejs_scripts,
+            client_pack_metadata=client_pack_metadata,
             runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
             if raw_runtime_fault is not None
             else None,
@@ -706,6 +719,11 @@ class NodeAppEntry:
             "client_pack_kubejs_scripts": [
                 script.model_dump(mode="json") for script in self.client_pack_kubejs_scripts
             ],
+            "client_pack_metadata": (
+                self.client_pack_metadata.model_dump(mode="json")
+                if self.client_pack_metadata is not None
+                else None
+            ),
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
             "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
             "update_status": self.update_status.to_mapping() if self.update_status is not None else None,
@@ -1014,6 +1032,7 @@ class NodeModEntry:
     archive_name: str
     source_path: str
     client_path: str | None = None
+    mod_pages: tuple[ModPageLink, ...] = ()
     metadata_overrides: ModMetadataOverrides = field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = field(default_factory=ClientPackConfig)
     platforms: ModPlatformMetadata = field(default_factory=ModPlatformMetadata)
@@ -1045,6 +1064,9 @@ class NodeModEntry:
         raw_metadata_overrides = payload.get("metadata_overrides")
         if raw_metadata_overrides is not None and not isinstance(raw_metadata_overrides, Mapping):
             raise ValueError("Node mod metadata overrides are invalid.")
+        raw_mod_pages = payload.get("mod_pages", ())
+        if not isinstance(raw_mod_pages, (list, tuple)):
+            raise ValueError("Node mod pages are invalid.")
         raw_platforms = payload.get("platforms")
         if raw_platforms is not None and not isinstance(raw_platforms, Mapping):
             raise ValueError("Node mod platform metadata is invalid.")
@@ -1109,6 +1131,10 @@ class NodeModEntry:
             client_pack_eligible=client_pack_eligible,
             archive_name=_optional_string(payload, "archive_name") or name,
             source_path=_optional_string(payload, "source_path") or client_path or name,
+            mod_pages=tuple(
+                ModPageLink.model_validate(page)
+                for page in cast(list[object] | tuple[object, ...], raw_mod_pages)
+            ),
             metadata_overrides=(
                 ModMetadataOverrides()
                 if raw_metadata_overrides is None
@@ -1143,6 +1169,7 @@ class NodeModEntry:
             "client_pack_eligible": self.client_pack_eligible,
             "archive_name": self.archive_name,
             "source_path": self.source_path,
+            "mod_pages": [page.model_dump(mode="json") for page in self.mod_pages],
             "metadata_overrides": self.metadata_overrides.model_dump(mode="json"),
             "client_pack": self.client_pack.model_dump(mode="json"),
             "platforms": self.platforms.model_dump(mode="json"),
@@ -1183,8 +1210,13 @@ class NodeModPropertiesUpdateRequest(BaseModel):
     mod_type: ModType
     download_block_reason: ModDownloadBlockReason | None
     metadata_overrides: ModMetadataOverrides
+    mod_pages: tuple[ModPageLink, ...] | None = None
     client_pack: ClientPackConfig | None = None
     launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
+
+
+class NodeModMetadataFetchRequest(BaseModel):
+    launcher_urls: LauncherProviderUrls
 
 
 class NodeClientPackModConfigUpdate(BaseModel):
@@ -1195,6 +1227,7 @@ class NodeClientPackModConfigUpdate(BaseModel):
 class NodeClientPackConfigUpdateRequest(BaseModel):
     mods: tuple[NodeClientPackModConfigUpdate, ...]
     kubejs_scripts: tuple[ClientPackKubeJsScript, ...] | None = None
+    metadata: ClientPackMetadataConfig | None = None
 
     @model_validator(mode="after")
     def validate_unique_mod_names(self) -> NodeClientPackConfigUpdateRequest:
@@ -4900,6 +4933,36 @@ class NodeApiService:
             )
             return result.to_mapping()
 
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/launcher-metadata")
+        async def _fetch_mod_launcher_metadata(
+            app_name: str,
+            mod_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            grant = self._require_access(
+                request,
+                access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+            )
+            fetch_request = NodeModMetadataFetchRequest.model_validate(payload)
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            resolution = await self.fetch_mod_launcher_metadata(
+                app=self._resolve_app(app_name),
+                mod_name=mod_name,
+                fetch_request=fetch_request,
+                actor_user_id=actor_user_id,
+            )
+            return resolution.model_dump(mode="json")
+
         @nicegui_app.put(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/client-pack-config")
         async def _update_client_pack_config(
             app_name: str,
@@ -5630,6 +5693,7 @@ class NodeApiService:
             client_pack_published_changelog=app.cfg.client_pack_published_changelog,
             client_pack_releases=app.client_pack_releases,
             client_pack_kubejs_scripts=self._client_pack_kubejs_scripts(app),
+            client_pack_metadata=self._client_pack_metadata(app),
             runtime_fault=getattr(app, "runtime_fault", None),
             update_info=update_info,
             update_status=update_status,
@@ -8156,7 +8220,12 @@ class NodeApiService:
             else:
                 generated_pack_version = app.cfg.client_pack_published_version
 
-        archive_name = self._archive_name(app=app, entries=entries, request=request)
+        archive_name = self._archive_name(
+            app=app,
+            entries=entries,
+            request=request,
+            client_pack_version=generated_pack_version,
+        )
         if pack_purpose is not None:
             version = app.cfg.version
             if version is None and request.pack_format is not PackFormat.GENERIC_ZIP:
@@ -8164,19 +8233,28 @@ class NodeApiService:
             if version is None:
                 archive_path = await compress_mod_archive_entries(entries, archive_name)
             else:
+                client_pack_metadata = (
+                    self._client_pack_metadata(app)
+                    if pack_purpose is PackPurpose.CLIENT
+                    else None
+                )
                 try:
                     archive_path = await export_minecraft_pack(
                         entries,
                         MinecraftPackSpec(
                             purpose=pack_purpose,
                             format=request.pack_format,
-                            name=app.friendly,
+                            name=(client_pack_metadata.name if client_pack_metadata is not None else app.friendly),
                             version_id=generated_pack_version or version.main,
                             minecraft_version=version.main,
                             loader=version.loader,
                             loader_version=version.framework,
                             author=getattr(app.cfg, "pack_author", "Yukibot"),
-                            summary=app.cfg.notes,
+                            summary=(
+                                client_pack_metadata.description or None
+                                if client_pack_metadata is not None
+                                else app.cfg.notes
+                            ),
                         ),
                         archive_name,
                     )
@@ -8194,17 +8272,17 @@ class NodeApiService:
         )
         return FileResponse(path=archive_path, filename=archive_path.name)
 
-    @staticmethod
-    async def _client_pack_content_hash(*, app: App, entries: tuple[ArchiveEntry, ...]) -> str:
+    async def _client_pack_content_hash(self, *, app: App, entries: tuple[ArchiveEntry, ...]) -> str:
         version = app.cfg.version
-        hash_context = json.dumps(
-            {
-                "app_version": None if version is None else version.model_dump(mode="json", exclude_none=True),
-                "name": app.friendly,
-                "summary": app.cfg.notes,
-            },
-            sort_keys=True,
-        )
+        metadata = self._client_pack_metadata(app)
+        hash_context_payload: dict[str, object] = {
+            "app_version": None if version is None else version.model_dump(mode="json", exclude_none=True),
+            "name": metadata.name if metadata is not None else app.friendly,
+            "summary": metadata.description if metadata is not None else app.cfg.notes,
+        }
+        if metadata is not None and app.cfg.client_pack_metadata is not None:
+            hash_context_payload["filename_template"] = metadata.filename_template
+        hash_context = json.dumps(hash_context_payload, sort_keys=True)
         return await asyncio.to_thread(client_pack_content_hash, entries, format_name=hash_context)
 
     @staticmethod
@@ -8246,6 +8324,18 @@ class NodeApiService:
         return discover_client_pack_kubejs_scripts(
             app.directory,
             excluded_paths=frozenset(app.cfg.client_pack_excluded_kubejs_scripts),
+        )
+
+    @staticmethod
+    def _client_pack_metadata(app: App) -> ClientPackMetadataConfig | None:
+        if not isinstance(app, Minecraft):
+            return None
+        configured_metadata = app.cfg.client_pack_metadata
+        if configured_metadata is not None:
+            return configured_metadata
+        return ClientPackMetadataConfig(
+            name=app.friendly,
+            description=app.cfg.notes or "",
         )
 
     def _client_pack_entries(
@@ -9195,6 +9285,30 @@ class NodeApiService:
             mod=result_mod_entry,
         )
 
+    async def fetch_mod_launcher_metadata(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        fetch_request: NodeModMetadataFetchRequest,
+        actor_user_id: int,
+    ) -> LauncherMetadataResolution:
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        mod: Mod = manager.get(mod_name)
+        await self._require_acl().perm_check(
+            actor_user_id,
+            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+        )
+        try:
+            return await resolve_launcher_metadata_resolution(
+                scope=app.scope,
+                urls=fetch_request.launcher_urls,
+                local_filename=mod.storage_path.name,
+            )
+        except ValueError as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+
     async def update_mod_properties(
         self,
         *,
@@ -9223,6 +9337,7 @@ class NodeApiService:
                 mod_type=update.mod_type,
                 download_block_reason=update.download_block_reason,
                 metadata_overrides=update.metadata_overrides,
+                mod_pages=update.mod_pages,
                 client_pack=update.client_pack or mod.cfg.client_pack,
                 platforms=platforms,
             )
@@ -9259,6 +9374,8 @@ class NodeApiService:
         await manager.reload_mods()
         await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
         excluded_kubejs_scripts: tuple[str, ...] | None = None
+        if update.metadata is not None and not isinstance(app, Minecraft):
+            raise _http_exception(409, "Client-pack metadata is only supported for Minecraft apps.")
         if update.kubejs_scripts is not None:
             if not isinstance(app, Minecraft):
                 raise _http_exception(409, "KubeJS client-pack scripts are only supported for Minecraft apps.")
@@ -9287,6 +9404,8 @@ class NodeApiService:
             app.cfg.client_pack_excluded_kubejs_scripts = tuple(
                 excluded_kubejs_scripts
             )
+        if update.metadata is not None:
+            app.cfg.client_pack_metadata = update.metadata
 
         traffic_log.info(
             "Node API client-pack configuration updated: node=%s app=%s mods=%s actor=%s",
@@ -10119,6 +10238,7 @@ class NodeApiService:
             added=mod.added.isoformat(sep=" ", timespec="seconds"),
             size_bytes=size_bytes,
             size_text=Utilities.humanise_bytes(size_bytes),
+            mod_pages=mod.cfg.mod_pages,
             metadata_overrides=mod.cfg.metadata_overrides,
             client_pack=mod.cfg.client_pack,
             platforms=mod.cfg.platforms,
@@ -10225,8 +10345,35 @@ class NodeApiService:
             config_file=config_file,
         )
 
-    @staticmethod
-    def _archive_name(*, app: App, entries: tuple[ArchiveEntry, ...], request: NodeDownloadRequest) -> str:
+    def _archive_name(
+        self,
+        *,
+        app: App,
+        entries: tuple[ArchiveEntry, ...],
+        request: NodeDownloadRequest,
+        client_pack_version: str | None = None,
+    ) -> str:
+        if request.resolved_pack_purpose is PackPurpose.CLIENT:
+            metadata = self._client_pack_metadata(app)
+            version = app.cfg.version
+            if metadata is not None and version is not None:
+                pack_version = (
+                    client_pack_version
+                    or app.cfg.client_pack_published_version
+                    or version.main
+                )
+                format_name = {
+                    PackFormat.MODRINTH: "modrinth",
+                    PackFormat.CURSEFORGE: "curseforge",
+                    PackFormat.GENERIC_ZIP: "generic",
+                }[request.pack_format]
+                stem = metadata.filename_stem(
+                    app_name=app.name,
+                    version=pack_version,
+                    minecraft_version=version.main,
+                    format_name=format_name,
+                )
+                return f"{stem}{request.pack_format.suffix}"
         if request.resolved_pack_purpose is not None:
             suffix = f"{request.resolved_pack_purpose.value}_pack"
         elif request.selected_only or request.mod_names:
