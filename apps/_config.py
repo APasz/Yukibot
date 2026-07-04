@@ -7,13 +7,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import zip_longest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from re import Pattern
 from urllib.parse import urlsplit
 
 import hikari
 from modmux.models import Provider
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 import config
 from _resolator import Resolutator
@@ -200,6 +200,39 @@ class ClientPackRelease(BaseModel):
         changelog = normalise_client_pack_changelog(raw, required=True)
         assert changelog is not None
         return changelog
+
+
+_CLIENT_PACK_KUBEJS_SCRIPT_ROOTS = frozenset({"server_scripts", "startup_scripts"})
+
+
+def normalise_client_pack_kubejs_script_path(raw: object) -> str:
+    if not isinstance(raw, str):
+        raise TypeError("client-pack KubeJS script paths must be strings")
+    path = PurePosixPath(raw.strip().replace("\\", "/"))
+    if (
+        path.is_absolute()
+        or len(path.parts) < 2
+        or path.parts[0] not in _CLIENT_PACK_KUBEJS_SCRIPT_ROOTS
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ValueError(
+            "client-pack KubeJS script paths must be relative to server_scripts or startup_scripts"
+        )
+    if path.name.casefold() == "example.js":
+        raise ValueError("the built-in KubeJS example.js cannot be included in client packs")
+    return path.as_posix()
+
+
+class ClientPackKubeJsScript(BaseModel):
+    relative_path: str
+    included: bool = True
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("relative_path", mode="before")
+    @classmethod
+    def validate_relative_path(cls, raw: object) -> str:
+        return normalise_client_pack_kubejs_script_path(raw)
 
 
 def normalise_activity_provider_ids(raw: object) -> tuple[str, ...]:
@@ -837,6 +870,10 @@ class ModrinthModMetadata(BaseModel):
     project_id: str
     version_id: str
     download_url: str
+    filename: str | None = None
+    sha1: str | None = None
+    sha512: str | None = None
+    size: int | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -844,6 +881,42 @@ class ModrinthModMetadata(BaseModel):
     @classmethod
     def validate_identifier(cls, raw: object) -> str:
         return _normalise_required_text(raw, field_name="Modrinth identifier")
+
+    @field_validator("filename", mode="before")
+    @classmethod
+    def validate_filename(cls, raw: object) -> str | None:
+        if raw is None:
+            return None
+        filename = _normalise_required_text(raw, field_name="Modrinth filename")
+        if PurePosixPath(filename).name != filename or filename in {".", ".."}:
+            raise ValueError("Modrinth filename must be a single file name")
+        return filename
+
+    @field_validator("sha1", "sha512", mode="before")
+    @classmethod
+    def validate_hash(cls, raw: object, info: ValidationInfo) -> str | None:
+        if raw is None:
+            return None
+        digest = _normalise_required_text(raw, field_name=f"Modrinth {info.field_name}").casefold()
+        expected_length = 40 if info.field_name == "sha1" else 128
+        if len(digest) != expected_length or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError(
+                f"Modrinth {info.field_name} must be a {expected_length}-character hexadecimal digest"
+            )
+        return digest
+
+    @field_validator("size", mode="before")
+    @classmethod
+    def validate_size(cls, raw: object) -> int | None:
+        if raw is None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise TypeError("Modrinth file size must be an integer")
+        if raw <= 0:
+            raise ValueError("Modrinth file size must be positive")
+        return raw
 
     @field_validator("page_url", "download_url", mode="before")
     @classmethod
@@ -1155,6 +1228,7 @@ class App_Config(BaseModel):
     client_pack_releases: tuple[ClientPackRelease, ...] = ()
     client_pack_verified_hash: str | None = None
     client_pack_content_dirty: bool = False
+    client_pack_excluded_kubejs_scripts: tuple[str, ...] = ()
     settings_pointer: Path | None = None
     server_log_file: Path | None = None
     join_host: str = config.PUBLIC_ADDR
@@ -1220,6 +1294,18 @@ class App_Config(BaseModel):
     @classmethod
     def validate_client_pack_changelog(cls, value: object) -> str | None:
         return normalise_client_pack_changelog(value)
+
+    @field_validator("client_pack_excluded_kubejs_scripts", mode="before")
+    @classmethod
+    def validate_client_pack_excluded_kubejs_scripts(cls, raw: object) -> tuple[str, ...]:
+        if raw is None:
+            return ()
+        if not isinstance(raw, list | tuple | set | frozenset):
+            raise TypeError("client_pack_excluded_kubejs_scripts must be a sequence")
+        paths = tuple(normalise_client_pack_kubejs_script_path(value) for value in raw)
+        if len(paths) != len(set(paths)):
+            raise ValueError("client-pack excluded KubeJS script paths must be unique")
+        return tuple(sorted(paths, key=str.casefold))
 
     @field_validator("notes", mode="before")
     @classmethod

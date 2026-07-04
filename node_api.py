@@ -74,6 +74,7 @@ from apps._config import (
     AppTitleFont,
     CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     ClientPackConfig,
+    ClientPackKubeJsScript,
     ClientPackRelease,
     LauncherProviderUrls,
     ModDownloadBlockReason,
@@ -112,6 +113,8 @@ from apps.minecraft.pack_export import (
     MinecraftPackSpec,
     PackFormat,
     PackPurpose,
+    client_pack_kubejs_entries,
+    discover_client_pack_kubejs_scripts,
     export_minecraft_pack,
 )
 from apps.sevendays import SevenDays
@@ -407,6 +410,7 @@ class NodeAppEntry:
     client_pack_next_version: str | None = None
     client_pack_published_changelog: str | None = None
     client_pack_releases: tuple[ClientPackRelease, ...] = ()
+    client_pack_kubejs_scripts: tuple[ClientPackKubeJsScript, ...] = ()
     runtime_fault: AppRuntimeFault | None = None
     update_info: AppUpdateInfo | None = None
     update_status: AppUpdateStatus | None = None
@@ -460,6 +464,7 @@ class NodeAppEntry:
         client_pack_next_version = _optional_string(payload, "client_pack_next_version")
         client_pack_published_changelog = _optional_string(payload, "client_pack_published_changelog")
         raw_client_pack_releases = payload.get("client_pack_releases", ())
+        raw_client_pack_kubejs_scripts = payload.get("client_pack_kubejs_scripts", ())
         raw_runtime_fault = payload.get("runtime_fault")
         raw_update_info = payload.get("update_info")
         raw_update_status = payload.get("update_status")
@@ -525,6 +530,15 @@ class NodeAppEntry:
             for release_payload in raw_client_pack_releases
         ):
             raise ValueError("Node app entry client_pack_releases is invalid.")
+        if not isinstance(raw_client_pack_kubejs_scripts, list | tuple) or any(
+            not isinstance(script_payload, Mapping)
+            for script_payload in raw_client_pack_kubejs_scripts
+        ):
+            raise ValueError("Node app entry client_pack_kubejs_scripts is invalid.")
+        client_pack_kubejs_scripts = tuple(
+            ClientPackKubeJsScript.model_validate(script_payload)
+            for script_payload in raw_client_pack_kubejs_scripts
+        )
         client_pack_releases = tuple(
             ClientPackRelease.model_validate(release_payload)
             for release_payload in raw_client_pack_releases
@@ -620,6 +634,7 @@ class NodeAppEntry:
             client_pack_next_version=client_pack_next_version,
             client_pack_published_changelog=client_pack_published_changelog,
             client_pack_releases=client_pack_releases,
+            client_pack_kubejs_scripts=client_pack_kubejs_scripts,
             runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
             if raw_runtime_fault is not None
             else None,
@@ -687,6 +702,9 @@ class NodeAppEntry:
             "client_pack_published_changelog": self.client_pack_published_changelog,
             "client_pack_releases": [
                 release.model_dump(mode="json") for release in self.client_pack_releases
+            ],
+            "client_pack_kubejs_scripts": [
+                script.model_dump(mode="json") for script in self.client_pack_kubejs_scripts
             ],
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
             "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
@@ -1176,12 +1194,17 @@ class NodeClientPackModConfigUpdate(BaseModel):
 
 class NodeClientPackConfigUpdateRequest(BaseModel):
     mods: tuple[NodeClientPackModConfigUpdate, ...]
+    kubejs_scripts: tuple[ClientPackKubeJsScript, ...] | None = None
 
     @model_validator(mode="after")
     def validate_unique_mod_names(self) -> NodeClientPackConfigUpdateRequest:
         mod_names = tuple(update.mod_name for update in self.mods)
         if len(mod_names) != len(set(mod_names)):
             raise ValueError("client-pack configuration contains duplicate mod names")
+        if self.kubejs_scripts is not None:
+            script_paths = tuple(script.relative_path for script in self.kubejs_scripts)
+            if len(script_paths) != len(set(script_paths)):
+                raise ValueError("client-pack configuration contains duplicate KubeJS script paths")
         return self
 
 
@@ -3663,6 +3686,7 @@ class NodeDownloadRequest:
     pack_format: PackFormat = PackFormat.GENERIC_ZIP
     publish_client_pack: bool = False
     publish_changelog: str | None = None
+    include_kubejs_scripts: bool = True
 
     @property
     def resolved_pack_purpose(self) -> PackPurpose | None:
@@ -4732,6 +4756,7 @@ class NodeApiService:
             pack_purpose: PackPurpose | None = None,
             pack_format: PackFormat = PackFormat.GENERIC_ZIP,
             publish_client_pack: bool = False,
+            include_kubejs_scripts: bool = True,
             access_token: str | None = None,
         ) -> FileResponse:
             mod_names = tuple(request.query_params.getlist("mod_name"))
@@ -4762,6 +4787,7 @@ class NodeApiService:
                     pack_purpose=pack_purpose,
                     pack_format=pack_format,
                     publish_client_pack=publish_client_pack,
+                    include_kubejs_scripts=include_kubejs_scripts,
                 ),
             )
 
@@ -5603,6 +5629,7 @@ class NodeApiService:
             client_pack_next_version=app.next_client_pack_version,
             client_pack_published_changelog=app.cfg.client_pack_published_changelog,
             client_pack_releases=app.client_pack_releases,
+            client_pack_kubejs_scripts=self._client_pack_kubejs_scripts(app),
             runtime_fault=getattr(app, "runtime_fault", None),
             update_info=update_info,
             update_status=update_status,
@@ -8072,13 +8099,13 @@ class NodeApiService:
         entries: tuple[ArchiveEntry, ...]
         try:
             if pack_purpose is PackPurpose.CLIENT:
-                entries = build_client_pack_entries(
-                    app.has_mod_manager,
-                    ClientPackSelection(
+                entries = self._client_pack_entries(
+                    app=app,
+                    selection=ClientPackSelection(
                         selected_mod_names=frozenset(selected_mod_names or ()),
                         supplied=request.selected_only or bool(request.mod_names),
                     ),
-                    client_overrides_dir=self._client_overrides_dir_for_pack(app),
+                    include_kubejs_scripts=request.include_kubejs_scripts,
                 )
             elif pack_purpose is PackPurpose.SERVER:
                 entries = build_server_pack_entries(app.has_mod_manager)
@@ -8108,7 +8135,12 @@ class NodeApiService:
 
         generated_pack_version: str | None = None
         if pack_purpose is PackPurpose.CLIENT:
-            current_hash = await self._client_pack_content_hash(app=app, entries=entries)
+            published_entries = self._client_pack_entries(
+                app=app,
+                selection=ClientPackSelection(),
+                include_kubejs_scripts=True,
+            )
+            current_hash = await self._client_pack_content_hash(app=app, entries=published_entries)
             if app.cfg.client_pack_current_hash != current_hash:
                 app.record_client_pack_content_hash(current_hash)
             if request.publish_client_pack:
@@ -8206,6 +8238,37 @@ class NodeApiService:
                 fallback_dir,
             )
         return fallback_dir
+
+    @staticmethod
+    def _client_pack_kubejs_scripts(app: App) -> tuple[ClientPackKubeJsScript, ...]:
+        if not isinstance(app, Minecraft):
+            return ()
+        return discover_client_pack_kubejs_scripts(
+            app.directory,
+            excluded_paths=frozenset(app.cfg.client_pack_excluded_kubejs_scripts),
+        )
+
+    def _client_pack_entries(
+        self,
+        selection: ClientPackSelection,
+        *,
+        app: App,
+        include_kubejs_scripts: bool,
+    ) -> tuple[ArchiveEntry, ...]:
+        entries = build_client_pack_entries(
+            app.has_mod_manager,
+            selection,
+            client_overrides_dir=self._client_overrides_dir_for_pack(app),
+        )
+        if not include_kubejs_scripts or not isinstance(app, Minecraft):
+            return entries
+        return (
+            *entries,
+            *client_pack_kubejs_entries(
+                app.directory,
+                excluded_paths=frozenset(app.cfg.client_pack_excluded_kubejs_scripts),
+            ),
+        )
 
     def build_config_list(self, app: App, *, actor_user_id: int | None = None) -> NodeConfigList:
         configs: tuple[AppConfigFile, ...] = app.list_config_files()
@@ -9195,12 +9258,35 @@ class NodeApiService:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
         await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
+        excluded_kubejs_scripts: tuple[str, ...] | None = None
+        if update.kubejs_scripts is not None:
+            if not isinstance(app, Minecraft):
+                raise _http_exception(409, "KubeJS client-pack scripts are only supported for Minecraft apps.")
+            discovered_scripts = self._client_pack_kubejs_scripts(app)
+            discovered_paths = {script.relative_path for script in discovered_scripts}
+            submitted_paths = {script.relative_path for script in update.kubejs_scripts}
+            if submitted_paths != discovered_paths:
+                raise _http_exception(
+                    409,
+                    "KubeJS scripts changed since the client-pack configuration was loaded; reload and try again.",
+                )
+            excluded_kubejs_scripts = tuple(
+                sorted(
+                    (script.relative_path for script in update.kubejs_scripts if not script.included),
+                    key=str.casefold,
+                )
+            )
         try:
             updated_mods = await manager.update_client_pack_configs(
                 {item.mod_name: item.client_pack for item in update.mods}
             )
         except (ModuleNotFoundError, ValueError) as xcp:
             raise _http_exception(409, str(xcp)) from xcp
+
+        if excluded_kubejs_scripts is not None:
+            app.cfg.client_pack_excluded_kubejs_scripts = tuple(
+                excluded_kubejs_scripts
+            )
 
         traffic_log.info(
             "Node API client-pack configuration updated: node=%s app=%s mods=%s actor=%s",
@@ -9229,10 +9315,10 @@ class NodeApiService:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
         try:
-            entries = build_client_pack_entries(
-                manager,
-                ClientPackSelection(),
-                client_overrides_dir=self._client_overrides_dir_for_pack(app),
+            entries = self._client_pack_entries(
+                app=app,
+                selection=ClientPackSelection(),
+                include_kubejs_scripts=True,
             )
         except (ClientPackValidationError, NonDownloadableModError, ModuleNotFoundError) as xcp:
             log.warning(

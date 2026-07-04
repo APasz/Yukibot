@@ -27,6 +27,7 @@ from apps._app import AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
 from apps._config import (
     AppTitleFont,
     ClientPackConfig,
+    ClientPackKubeJsScript,
     ClientPackPolicy,
     ClientPackRelease,
     LauncherProviderUrls,
@@ -8229,9 +8230,21 @@ class ModWebTests(unittest.TestCase):
                 "client_pack": "true",
                 "pack_purpose": "client",
                 "pack_format": "mrpack",
+                "include_kubejs_scripts": "true",
                 "mod_name": ["client.jar"],
             },
         )
+
+    def test_download_query_can_exclude_kubejs_scripts_from_client_pack(self) -> None:
+        query = ModWebService._download_query(
+            enabled_only=False,
+            selected_only=True,
+            mod_names=("client.jar",),
+            pack_purpose=PackPurpose.CLIENT,
+            include_kubejs_scripts=False,
+        )
+
+        self.assertEqual(query["include_kubejs_scripts"], "false")
 
     def test_server_and_admin_pack_downloads_require_sudo(self) -> None:
         self.assertIs(ModWebService._mod_download_required_level(None), Power_Level.visitor)
@@ -8755,6 +8768,7 @@ class ModWebTests(unittest.TestCase):
                 self.buttons: list[FakeButton] = []
                 self.policy_select_labels: list[object] = []
                 self.policy_selects: list[FakeInput] = []
+                self.checkboxes: dict[str, FakeInput] = {}
                 self.group_inputs: list[FakeInput] = []
                 self.rows: list[FakeContainer] = []
                 self.dialogs: list[FakeDialog] = []
@@ -8836,8 +8850,10 @@ class ModWebTests(unittest.TestCase):
                 return control
 
             def checkbox(self, *args: object, **kwargs: object) -> FakeInput:
-                del args
-                return FakeInput(value=kwargs.get("value"))
+                control = FakeInput(value=kwargs.get("value"))
+                if args:
+                    self.checkboxes[str(args[0])] = control
+                return control
 
             def select(self, *args: object, **kwargs: object) -> FakeInput:
                 if args and isinstance(args[0], dict) and set(args[0].values()) == {
@@ -8942,6 +8958,16 @@ class ModWebTests(unittest.TestCase):
                     changelog="Added client performance fixes.\nUpdated the default renderer.",
                 ),
             ),
+            client_pack_kubejs_scripts=(
+                ClientPackKubeJsScript(
+                    relative_path="server_scripts/events.js",
+                    included=True,
+                ),
+                ClientPackKubeJsScript(
+                    relative_path="startup_scripts/registry.js",
+                    included=False,
+                ),
+            ),
         )
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
         ui = FakeUi()
@@ -8973,6 +8999,7 @@ class ModWebTests(unittest.TestCase):
 
             changelog_handler = ui.textareas[0].handlers["change"]
             changelog_handler(SimpleNamespace(value="Persisted after Save."))
+            ui.checkboxes["server_scripts/events.js"].value = False
             save_button = next(button for button in ui.buttons if button.text == "Save")
             self.assertIsNotNone(save_button.on_click)
             assert save_button.on_click is not None
@@ -8982,6 +9009,14 @@ class ModWebTests(unittest.TestCase):
                 remote_json.await_args.kwargs["json_payload"].get("changelog"),
                 None,
             )
+            self.assertEqual(
+                remote_json.await_args.kwargs["json_payload"]["kubejs_scripts"],
+                [
+                    {"relative_path": "server_scripts/events.js", "included": False},
+                    {"relative_path": "startup_scripts/registry.js", "included": False},
+                ],
+            )
+            self.assertTrue(ui.checkboxes["Include configured KubeJS scripts"].value)
             set_changelog_draft.assert_called_once_with(
                 node_name="yuki",
                 app_name="minecraft_alpha",

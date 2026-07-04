@@ -631,6 +631,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     client_pack_next_version=app_entry.client_pack_next_version,
                     client_pack_published_changelog=app_entry.client_pack_published_changelog,
                     client_pack_releases=app_entry.client_pack_releases,
+                    client_pack_kubejs_scripts=app_entry.client_pack_kubejs_scripts,
                     chat_url=(
                         self.node_app_chat_path(node.node_name, app_entry.name) if app_entry.supports_chat else None
                     ),

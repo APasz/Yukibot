@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import enum
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+import httpx
 
 import config
 from _mod_ops import (
@@ -14,7 +15,11 @@ from _mod_ops import (
     WritableArchiveEntry,
     compress_archive_entries,
 )
-from apps._config import ClientPackPolicy, ModSide
+from apps._config import ClientPackKubeJsScript, ClientPackPolicy, ModSide
+
+
+_KUBEJS_CLIENT_PACK_SCRIPT_DIRECTORIES = ("server_scripts", "startup_scripts")
+_NO_EXCLUDED_KUBEJS_SCRIPTS: frozenset[str] = frozenset()
 
 
 class PackPurpose(enum.StrEnum):
@@ -64,6 +69,53 @@ class MinecraftPackSpec:
             and not self.loader_version
         ):
             raise MinecraftPackExportError("Minecraft loader version is required for launcher pack exports")
+
+
+def discover_client_pack_kubejs_scripts(
+    instance_directory: Path,
+    *,
+    excluded_paths: frozenset[str] = _NO_EXCLUDED_KUBEJS_SCRIPTS,
+) -> tuple[ClientPackKubeJsScript, ...]:
+    kubejs_directory = instance_directory / "kubejs"
+    scripts: list[ClientPackKubeJsScript] = []
+    for directory_name in _KUBEJS_CLIENT_PACK_SCRIPT_DIRECTORIES:
+        script_directory = kubejs_directory / directory_name
+        if not script_directory.is_dir():
+            continue
+        for script_path in script_directory.rglob("*"):
+            if (
+                not script_path.is_file()
+                or script_path.is_symlink()
+                or script_path.name.casefold() == "example.js"
+            ):
+                continue
+            relative_path = script_path.relative_to(kubejs_directory).as_posix()
+            scripts.append(
+                ClientPackKubeJsScript(
+                    relative_path=relative_path,
+                    included=relative_path not in excluded_paths,
+                )
+            )
+    return tuple(sorted(scripts, key=lambda script: script.relative_path.casefold()))
+
+
+def client_pack_kubejs_entries(
+    instance_directory: Path,
+    *,
+    excluded_paths: frozenset[str],
+) -> tuple[ArchiveEntry, ...]:
+    scripts = discover_client_pack_kubejs_scripts(
+        instance_directory,
+        excluded_paths=excluded_paths,
+    )
+    return tuple(
+        ArchiveEntry(
+            source_path=instance_directory / "kubejs" / script.relative_path,
+            archive_path=PurePosixPath("overrides/kubejs") / script.relative_path,
+        )
+        for script in scripts
+        if script.included
+    )
 
 
 def _json_entry(archive_path: str, payload: dict[str, object]) -> ArchiveDataEntry:
@@ -134,23 +186,6 @@ def _modrinth_env(entry: ModArchiveEntry) -> dict[str, str]:
             return {"client": client_requirement, "server": "required"}
 
 
-def _file_hashes(path: Path) -> dict[str, str]:
-    sha1 = hashlib.sha1(usedforsecurity=False)
-    sha512 = hashlib.sha512()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            sha1.update(chunk)
-            sha512.update(chunk)
-    return {"sha1": sha1.hexdigest(), "sha512": sha512.hexdigest()}
-
-
-def _modrinth_download_url(entry: ModArchiveEntry) -> str:
-    metadata = entry.platforms.modrinth
-    if metadata is None:
-        raise MinecraftPackExportError(f"Modrinth metadata is missing for {entry.mod_name}")
-    return metadata.download_url
-
-
 def _modrinth_entries(
     entries: tuple[ArchiveEntry, ...], spec: MinecraftPackSpec
 ) -> tuple[WritableArchiveEntry, ...]:
@@ -164,15 +199,33 @@ def _modrinth_entries(
         if entry.platforms.modrinth is None:
             archive_entries.append(_bundled_mod_entry(entry, override_root=bundled_override_root))
             continue
-        if not entry.source_path.is_file():
-            raise MinecraftPackExportError(f"Modrinth manifest mod must be a file: {entry.mod_name}")
+        metadata = entry.platforms.modrinth
+        missing_fields = tuple(
+            field_name
+            for field_name, value in (
+                ("filename", metadata.filename),
+                ("sha1", metadata.sha1),
+                ("sha512", metadata.sha512),
+                ("size", metadata.size),
+            )
+            if value is None
+        )
+        if missing_fields:
+            fields = ", ".join(missing_fields)
+            raise MinecraftPackExportError(
+                f"Modrinth metadata for {entry.mod_name} is missing {fields}; resolve its provider metadata again"
+            )
+        assert metadata.filename is not None
+        assert metadata.sha1 is not None
+        assert metadata.sha512 is not None
+        assert metadata.size is not None
         manifest_files.append(
             {
-                "path": _mod_destination(entry).as_posix(),
-                "hashes": _file_hashes(entry.source_path),
+                "path": (PurePosixPath("mods") / metadata.filename).as_posix(),
+                "hashes": {"sha1": metadata.sha1, "sha512": metadata.sha512},
                 "env": _modrinth_env(entry),
-                "downloads": [_modrinth_download_url(entry)],
-                "fileSize": entry.source_path.stat().st_size,
+                "downloads": [metadata.download_url],
+                "fileSize": metadata.size,
             }
         )
     manifest: dict[str, object] = {
@@ -186,6 +239,42 @@ def _modrinth_entries(
     if spec.summary:
         manifest["summary"] = spec.summary
     return (_json_entry("modrinth.index.json", manifest), *archive_entries)
+
+
+async def _preflight_remote_download(
+    *,
+    mod_name: str,
+    download_url: str,
+    http: httpx.AsyncClient,
+) -> None:
+    try:
+        async with http.stream(
+            "GET",
+            download_url,
+            headers={"range": "bytes=0-0"},
+            follow_redirects=True,
+            timeout=30,
+        ) as response:
+            response.raise_for_status()
+    except httpx.HTTPError as xcp:
+        raise MinecraftPackExportError(
+            f"Remote download for {mod_name} is not reachable: {download_url} ({xcp})"
+        ) from xcp
+
+
+async def _preflight_modrinth_downloads(
+    entries: tuple[ArchiveEntry, ...],
+    *,
+    http: httpx.AsyncClient,
+) -> None:
+    for entry in entries:
+        if not isinstance(entry, ModArchiveEntry) or entry.platforms.modrinth is None:
+            continue
+        await _preflight_remote_download(
+            mod_name=entry.mod_name,
+            download_url=entry.platforms.modrinth.download_url,
+            http=http,
+        )
 
 
 def _curseforge_loader_id(spec: MinecraftPackSpec) -> str | None:
@@ -213,13 +302,17 @@ def _curseforge_entries(
     manifest_files: list[dict[str, object]] = []
     archive_entries: list[WritableArchiveEntry] = []
     seen_projects: set[int] = set()
+    unsupported_mods: list[str] = []
     for entry in entries:
         if not isinstance(entry, ModArchiveEntry):
             archive_entries.append(entry)
             continue
         metadata = entry.platforms.curseforge
         if metadata is None:
-            archive_entries.append(_bundled_mod_entry(entry))
+            if entry.bundle_eligible:
+                archive_entries.append(_bundled_mod_entry(entry))
+            else:
+                unsupported_mods.append(entry.mod_name)
             continue
         if metadata.project_id in seen_projects:
             raise MinecraftPackExportError(
@@ -235,6 +328,12 @@ def _curseforge_entries(
                     or entry.client_pack_policy is ClientPackPolicy.REQUIRED
                 ),
             }
+        )
+    if unsupported_mods:
+        names = ", ".join(sorted(unsupported_mods, key=str.casefold))
+        raise MinecraftPackExportError(
+            "CurseForge export cannot include these non-CurseForge mods because bundling is disabled: "
+            f"{names}"
         )
     loader_id = _curseforge_loader_id(spec)
     mod_loaders: list[dict[str, object]] = []
@@ -260,6 +359,8 @@ async def export_minecraft_pack(
     entries: tuple[ArchiveEntry, ...],
     spec: MinecraftPackSpec,
     archive_name: str,
+    *,
+    http: httpx.AsyncClient | None = None,
 ) -> Path:
     if not entries:
         raise MinecraftPackExportError("Minecraft pack requires at least one entry")
@@ -270,6 +371,19 @@ async def export_minecraft_pack(
             export_entries = entries
         case PackFormat.MODRINTH:
             export_entries = _modrinth_entries(entries, spec)
+            remote_entries = tuple(
+                entry
+                for entry in entries
+                if isinstance(entry, ModArchiveEntry) and entry.platforms.modrinth is not None
+            )
+            if remote_entries:
+                owned_http = http is None
+                client = http or httpx.AsyncClient()
+                try:
+                    await _preflight_modrinth_downloads(remote_entries, http=client)
+                finally:
+                    if owned_http:
+                        await client.aclose()
         case PackFormat.CURSEFORGE:
             export_entries = _curseforge_entries(entries, spec)
     return await compress_archive_entries(

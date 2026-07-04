@@ -3600,6 +3600,9 @@ class ModWebAppPageMixin(
         user: ModWebUser,
     ) -> None:
         capabilities = mod_capabilities_for_scope(model.app_scope)
+        is_minecraft_app: bool = (
+            model.app_scope is not None and model.app_scope.casefold() == "minecraft"
+        )
         checkboxes: dict[str, Checkbox] = {}
         mod_options = self._mod_options(model.mods.mods)
         show_search: bool = len(mod_options) > 1
@@ -3681,21 +3684,24 @@ class ModWebAppPageMixin(
             )
 
         def update_count() -> None:
-            if selection_button is None or download_button is None:
+            if selection_button is None:
                 return
             selected_count: int = len(selected_mod_names)
             selected_downloadable_count: int = len(selected_downloadable_mod_names_in_page_order())
             selected_deletable_count: int = len(selected_deletable_mod_names_in_page_order())
             selection_button.set_text(self._selection_toggle_label(selected_count=selected_count))
-            download_button.set_text(
-                self._download_selection_label(
-                    selected_count=selected_downloadable_count,
-                    downloadable_count=downloadable_count,
+            if download_button is not None:
+                download_button.set_text(
+                    self._download_selection_label(
+                        selected_count=selected_downloadable_count,
+                        downloadable_count=downloadable_count,
+                    )
                 )
-            )
-            can_download: bool = downloadable_count > 0 and (not selected_mod_names or selected_downloadable_count > 0)
+                can_download: bool = downloadable_count > 0 and (
+                    not selected_mod_names or selected_downloadable_count > 0
+                )
+                download_button.set_enabled(can_download)
             selection_button.set_enabled(bool(selectable_names))
-            download_button.set_enabled(can_download)
             if delete_button is not None:
                 delete_button.set_text(self._delete_selection_label(selected_count=selected_deletable_count))
                 delete_button.set_enabled(selected_deletable_count > 0)
@@ -3882,6 +3888,7 @@ class ModWebAppPageMixin(
         optional_client_checkboxes: dict[str, Checkbox] = {}
         client_choice_selects: dict[str, Select] = {}
         client_pack_format_select: Select | None = None
+        include_kubejs_scripts_checkbox: Checkbox | None = None
         with ui.dialog() as upload_placement_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
@@ -3929,6 +3936,11 @@ class ModWebAppPageMixin(
                     pack_purpose=PackPurpose.CLIENT,
                     pack_format=pack_format,
                     publish_client_pack=False,
+                    include_kubejs_scripts=(
+                        True
+                        if include_kubejs_scripts_checkbox is None
+                        else bool(_value_as_object(include_kubejs_scripts_checkbox))
+                    ),
                 ),
                 doseq=True,
             )
@@ -3980,6 +3992,7 @@ class ModWebAppPageMixin(
         }
         config_default_selects: dict[str, Select] = {}
         config_rows: dict[str, Element] = {}
+        config_kubejs_script_checkboxes: dict[str, Checkbox] = {}
         client_pack_changelog_draft: str = model.client_pack_changelog or ""
         client_pack_changelog_input: Textarea | None = None
         config_default_names: dict[str, str] = {
@@ -4074,6 +4087,23 @@ class ModWebAppPageMixin(
                         }
                         for entry, client_pack in updates
                     ],
+                    **(
+                        {
+                            "kubejs_scripts": [
+                                {
+                                    "relative_path": script.relative_path,
+                                    "included": bool(
+                                        _value_as_object(
+                                            config_kubejs_script_checkboxes[script.relative_path]
+                                        )
+                                    ),
+                                }
+                                for script in model.client_pack_kubejs_scripts
+                            ]
+                        }
+                        if is_minecraft_app
+                        else {}
+                    ),
                 },
             )
             self._backend.set_client_pack_changelog_draft(
@@ -4250,6 +4280,27 @@ class ModWebAppPageMixin(
                                 entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
                             )
                         render_config_default_choices()
+                        if is_minecraft_app:
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("KubeJS scripts").classes("mod-stat-label")
+                                ui.label(
+                                    "Choose which server and startup scripts are included in the client pack."
+                                ).classes("mod-client-pack-section-hint mod-subtitle")
+                                if model.client_pack_kubejs_scripts:
+                                    with ui.column().classes("mod-client-pack-option-list w-full"):
+                                        for script in model.client_pack_kubejs_scripts:
+                                            config_kubejs_script_checkboxes[script.relative_path] = (
+                                                ui.checkbox(
+                                                    script.relative_path,
+                                                    value=script.included,
+                                                )
+                                                .props("dense color=accent keep-color")
+                                                .classes("mod-client-pack-checkbox w-full")
+                                            )
+                                else:
+                                    ui.label("No KubeJS server or startup scripts were found.").classes(
+                                        "mod-client-pack-section-hint mod-subtitle text-sm"
+                                    )
                         with ui.column().classes(
                             "mod-client-pack-section mod-client-pack-release-section w-full"
                         ):
@@ -4366,6 +4417,17 @@ class ModWebAppPageMixin(
                                     value=self._default_client_pack_format(model.app_scope).value,
                                 ).props("filled square dense hide-bottom-space color=accent options-dark").classes(
                                     "mod-config-select mod-client-pack-select w-full"
+                                )
+                        if is_minecraft_app and model.client_pack_kubejs_scripts:
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("KubeJS").classes("mod-stat-label")
+                                include_kubejs_scripts_checkbox = (
+                                    ui.checkbox(
+                                        "Include configured KubeJS scripts",
+                                        value=True,
+                                    )
+                                    .props("dense color=accent keep-color")
+                                    .classes("mod-client-pack-checkbox w-full")
                                 )
                         required_entries: tuple[NodeModEntry, ...] = tuple(
                             entry

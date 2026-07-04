@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import cast
 from urllib.parse import unquote, urlsplit
@@ -22,6 +23,9 @@ from apps._config import (
     launcher_provider_label,
     mod_capabilities_for_scope,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 def _provider_mod_id(page_url: str, expected_provider: Provider) -> ModID:
@@ -55,6 +59,13 @@ def _required_text(payload: Mapping[str, object], key: str, *, label: str) -> st
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} metadata is missing {key}.")
     return value.strip()
+
+
+def _required_positive_int(payload: Mapping[str, object], key: str, *, label: str) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{label} metadata is missing a positive integer {key}.")
+    return value
 
 
 async def _resolve_modrinth(
@@ -101,11 +112,17 @@ async def _resolve_modrinth(
     if selected_file is None:
         selected_file = next((file_payload for file_payload in files if file_payload.get("primary") is True), files[0])
 
+    hashes = _required_mapping(selected_file.get("hashes"), label="Modrinth file hashes")
+
     return ModrinthModMetadata(
         page_url=page_url,
         project_id=_required_text(version, "project_id", label="Modrinth version"),
         version_id=_required_text(version, "id", label="Modrinth version"),
         download_url=_required_text(selected_file, "url", label="Modrinth file"),
+        filename=_required_text(selected_file, "filename", label="Modrinth file"),
+        sha1=_required_text(hashes, "sha1", label="Modrinth file hashes"),
+        sha512=_required_text(hashes, "sha512", label="Modrinth file hashes"),
+        size=_required_positive_int(selected_file, "size", label="Modrinth file"),
     )
 
 
@@ -123,8 +140,37 @@ def _modmux_credentials() -> list[CurseforgeCreds]:
     return [] if api_key is None else [CurseforgeCreds(api_key=SecretStr(api_key))]
 
 
-def _curseforge_metadata_from_reference(reference: CurseForgeFileReference) -> CurseForgeModMetadata:
-    return CurseForgeModMetadata(project_id=reference.project_id, file_id=reference.file_id)
+async def _curseforge_metadata_from_reference(
+    reference: CurseForgeFileReference,
+    *,
+    http: httpx.AsyncClient,
+) -> CurseForgeModMetadata:
+    api_key = _curseforge_api_key()
+    if api_key is None:
+        log.warning(
+            "CurseForge project/file pair is unverified because CURSEFORGE_API_KEY is unavailable: "
+            "project_id=%s file_id=%s",
+            reference.project_id,
+            reference.file_id,
+        )
+        return CurseForgeModMetadata(project_id=reference.project_id, file_id=reference.file_id)
+
+    response = await http.get(
+        f"https://api.curseforge.com/v1/mods/{reference.project_id}/files/{reference.file_id}",
+        headers={"x-api-key": api_key},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = _required_mapping(cast(object, response.json()), label="CurseForge file response")
+    file_payload = _required_mapping(payload.get("data"), label="CurseForge file")
+    project_id = _required_positive_int(file_payload, "modId", label="CurseForge file")
+    file_id = _required_positive_int(file_payload, "id", label="CurseForge file")
+    if (project_id, file_id) != (reference.project_id, reference.file_id):
+        raise ValueError(
+            "CurseForge returned a different project/file pair: "
+            f"expected {reference.project_id}/{reference.file_id}, got {project_id}/{file_id}."
+        )
+    return CurseForgeModMetadata(project_id=project_id, file_id=file_id)
 
 
 async def _resolve_curseforge(
@@ -160,7 +206,7 @@ async def _resolve_curseforge_source(
     http: httpx.AsyncClient,
 ) -> CurseForgeModMetadata | None:
     if urls.curseforge_reference is not None:
-        return _curseforge_metadata_from_reference(urls.curseforge_reference)
+        return await _curseforge_metadata_from_reference(urls.curseforge_reference, http=http)
     if urls.curseforge is None:
         return None
     return await _resolve_curseforge(urls.curseforge, http=http)

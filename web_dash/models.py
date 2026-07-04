@@ -45,6 +45,7 @@ from .runtime_imports import (
     BotMetadataSnapshot,
     Card,
     Callable,
+    ClientPackKubeJsScript,
     ClientPackRelease,
     Iterable,
     Label,
@@ -693,6 +694,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             client_pack_next_version=page_data.app_entry.client_pack_next_version,
             client_pack_published_changelog=page_data.app_entry.client_pack_published_changelog,
             client_pack_releases=page_data.app_entry.client_pack_releases,
+            client_pack_kubejs_scripts=page_data.app_entry.client_pack_kubejs_scripts,
             chat_url=(self.app_chat_path(page_data.app_entry.name) if page_data.app_entry.supports_chat else None),
             update_info=page_data.app_entry.update_info,
             update_status=page_data.app_entry.update_status,
@@ -815,6 +817,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         client_pack_next_version: str | None = None,
         client_pack_published_changelog: str | None = None,
         client_pack_releases: tuple[ClientPackRelease, ...] = (),
+        client_pack_kubejs_scripts: tuple[ClientPackKubeJsScript, ...] = (),
         chat_url: str | None,
         update_info: AppUpdateInfo | None,
         update_status: AppUpdateStatus | None,
@@ -879,6 +882,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     client_pack_changelog=shared_changelog_draft,
                     client_pack_published_changelog=client_pack_published_changelog,
                     client_pack_releases=client_pack_releases,
+                    client_pack_kubejs_scripts=client_pack_kubejs_scripts,
                     chat_url=chat_url,
                     update_info=update_info,
                     update_status=update_status,
@@ -1992,6 +1996,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         pack_purpose: PackPurpose | None = None,
         pack_format: PackFormat = PackFormat.GENERIC_ZIP,
         publish_client_pack: bool = False,
+        include_kubejs_scripts: bool = True,
     ) -> dict[str, object]:
         query: dict[str, object] = {
             "enabled_only": str(enabled_only).lower(),
@@ -2005,6 +2010,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             query["pack_purpose"] = pack_purpose.value
         if publish_client_pack:
             query["publish_client_pack"] = "true"
+        if pack_purpose is PackPurpose.CLIENT:
+            query["include_kubejs_scripts"] = str(include_kubejs_scripts).lower()
         if mod_names:
             query["mod_name"] = list[str](mod_names)
         return query

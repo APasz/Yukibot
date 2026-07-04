@@ -15,6 +15,7 @@ from .runtime_imports import (
     ChatEndpointKind,
     ChatEvent,
     ChatReferenceKind,
+    ClientPackKubeJsScript,
     ClientPackRelease,
     Enum,
     Label,
@@ -689,6 +690,7 @@ class ModWebBasePageModel:
     client_pack_changelog: str | None = field(default=None, kw_only=True)
     client_pack_published_changelog: str | None = field(default=None, kw_only=True)
     client_pack_releases: tuple[ClientPackRelease, ...] = field(default=(), kw_only=True)
+    client_pack_kubejs_scripts: tuple[ClientPackKubeJsScript, ...] = field(default=(), kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
     update_info: AppUpdateInfo | None = field(default=None, kw_only=True)
     update_status: AppUpdateStatus | None = field(default=None, kw_only=True)

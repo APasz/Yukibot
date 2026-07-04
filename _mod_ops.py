@@ -56,6 +56,7 @@ class ModArchiveEntry(ArchiveEntry):
     mod_type: ModType
     client_pack_policy: ClientPackPolicy
     platforms: ModPlatformMetadata
+    bundle_eligible: bool
 
     @classmethod
     def from_mod(cls, mod: Mod) -> ModArchiveEntry:
@@ -70,6 +71,7 @@ class ModArchiveEntry(ArchiveEntry):
             mod_type=mod.mod_type,
             client_pack_policy=mod.cfg.client_pack.policy,
             platforms=mod.cfg.platforms,
+            bundle_eligible=mod.downloadable,
         )
 
 

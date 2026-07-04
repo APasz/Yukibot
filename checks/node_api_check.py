@@ -29,6 +29,7 @@ from apps._config import (
     AppTitleFont,
     AppVersion,
     ClientPackConfig,
+    ClientPackKubeJsScript,
     ClientPackPolicy,
     ClientPackRelease,
     LauncherProviderUrls,
@@ -2490,6 +2491,41 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.map_url, map_url)
         self.assertEqual(entry.to_mapping()["map_url"], map_url)
 
+    def test_node_app_entry_round_trips_client_pack_kubejs_scripts(self) -> None:
+        entry = NodeAppEntry.from_mapping(
+            {
+                "name": "minecraft_alpha",
+                "friendly": "Minecraft Alpha",
+                "node": "erin",
+                "supports_mods": True,
+                "client_pack_kubejs_scripts": [
+                    {"relative_path": "server_scripts/events.js", "included": True},
+                    {"relative_path": "startup_scripts/registry.js", "included": False},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            entry.client_pack_kubejs_scripts,
+            (
+                ClientPackKubeJsScript(
+                    relative_path="server_scripts/events.js",
+                    included=True,
+                ),
+                ClientPackKubeJsScript(
+                    relative_path="startup_scripts/registry.js",
+                    included=False,
+                ),
+            ),
+        )
+        self.assertEqual(
+            entry.to_mapping()["client_pack_kubejs_scripts"],
+            [
+                {"relative_path": "server_scripts/events.js", "included": True},
+                {"relative_path": "startup_scripts/registry.js", "included": False},
+            ],
+        )
+
     def test_node_app_entry_round_trips_join_addresses(self) -> None:
         entry = NodeAppEntry.from_mapping(
             {
@@ -3532,6 +3568,57 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(app.cfg.client_pack_published_version, "2026-07-03")
         self.assertTrue(persisted_overrides[-1]["client_pack_content_dirty"])
         self.assertIsNone(service._app_entries_cache)
+
+    def test_update_client_pack_config_persists_minecraft_kubejs_exclusions(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            instance_directory = Path(temp_dir)
+            script_directory = instance_directory / "kubejs" / "server_scripts"
+            script_directory.mkdir(parents=True)
+            (script_directory / "events.js").write_text("events", encoding="utf-8")
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.update_client_pack_configs = AsyncMock(return_value=())
+            app = Mock(spec=Minecraft)
+            app.name = "minecraft_alpha"
+            app.directory = instance_directory
+            app.has_mod_manager = manager
+            app.cfg = App_Config(
+                name="minecraft_alpha",
+                instance_key="alpha",
+                friendly_name="Minecraft Alpha",
+                directory=instance_directory,
+                apps_dir=instance_directory,
+                mods_dir=None,
+                scope="minecraft",
+            )
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+
+            result = asyncio.run(
+                service.update_client_pack_config(
+                    app=cast(App, app),
+                    update=NodeClientPackConfigUpdateRequest(
+                        mods=(),
+                        kubejs_scripts=(
+                            ClientPackKubeJsScript(
+                                relative_path="server_scripts/events.js",
+                                included=False,
+                            ),
+                        ),
+                    ),
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertEqual(result["updated_count"], 0)
+        self.assertEqual(
+            app.cfg.client_pack_excluded_kubejs_scripts,
+            ("server_scripts/events.js",),
+        )
+        app.invalidate_client_pack_content.assert_called_once_with()
+        app.persist_instance_config_overrides.assert_called_once_with()
 
     def test_client_pack_changes_are_dirty_before_first_publication(self) -> None:
         app = _build_app(Mock())

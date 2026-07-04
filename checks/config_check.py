@@ -14,6 +14,8 @@ from modmux.models import Provider
 import config
 from apps._config import (
     AppVersion,
+    App_Config,
+    ClientPackKubeJsScript,
     ClientPackRelease,
     ModDistributionMode,
     mod_capabilities_for_scope,
@@ -69,6 +71,39 @@ class AppModCapabilitiesTests(unittest.TestCase):
             ClientPackRelease(version="", changelog="Changes")
         with self.assertRaisesRegex(ValueError, "requires a changelog"):
             ClientPackRelease(version="2026-07-04", changelog="  ")
+
+    def test_client_pack_kubejs_paths_are_typed_and_restricted_to_script_roots(self) -> None:
+        script = ClientPackKubeJsScript(
+            relative_path=" server_scripts/recipes/custom.js ",
+            included=False,
+        )
+
+        self.assertEqual(script.relative_path, "server_scripts/recipes/custom.js")
+        self.assertFalse(script.included)
+        with self.assertRaisesRegex(ValueError, "server_scripts or startup_scripts"):
+            ClientPackKubeJsScript(relative_path="../secrets.txt")
+        with self.assertRaisesRegex(ValueError, "example.js"):
+            ClientPackKubeJsScript(relative_path="startup_scripts/example.js")
+
+    def test_app_config_normalises_excluded_kubejs_script_paths(self) -> None:
+        app_config = App_Config(
+            name="minecraft_test",
+            instance_key="test",
+            friendly_name="Test",
+            directory=Path("/tmp/minecraft-test"),
+            apps_dir=Path("/tmp"),
+            mods_dir=None,
+            client_pack_excluded_kubejs_scripts=(
+                "startup_scripts/registry.js",
+                "server_scripts/events.js",
+            ),
+            scope="minecraft",
+        )
+
+        self.assertEqual(
+            app_config.client_pack_excluded_kubejs_scripts,
+            ("server_scripts/events.js", "startup_scripts/registry.js"),
+        )
 
     def test_sevendays_supports_generic_client_packs_only(self) -> None:
         capabilities = mod_capabilities_for_scope("sevendays")

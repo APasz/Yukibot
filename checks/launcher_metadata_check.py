@@ -33,11 +33,15 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
                                     "filename": "different-loader.jar",
                                     "primary": True,
                                     "url": "https://cdn.modrinth.com/different-loader.jar",
+                                    "hashes": {"sha1": "1" * 40, "sha512": "2" * 128},
+                                    "size": 123,
                                 },
                                 {
                                     "filename": "journeymap.jar",
                                     "primary": False,
                                     "url": "https://cdn.modrinth.com/journeymap.jar",
+                                    "hashes": {"sha1": "3" * 40, "sha512": "4" * 128},
+                                    "size": 456,
                                 },
                             ],
                         }
@@ -89,6 +93,10 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata.modrinth.project_id, "journeymap-project-id")
         self.assertEqual(metadata.modrinth.version_id, "journeymap-version-id")
         self.assertEqual(metadata.modrinth.download_url, "https://cdn.modrinth.com/journeymap.jar")
+        self.assertEqual(metadata.modrinth.filename, "journeymap.jar")
+        self.assertEqual(metadata.modrinth.sha1, "3" * 40)
+        self.assertEqual(metadata.modrinth.sha512, "4" * 128)
+        self.assertEqual(metadata.modrinth.size, 456)
         self.assertIsNotNone(metadata.curseforge)
         assert metadata.curseforge is not None
         self.assertEqual(metadata.curseforge.page_url, curseforge_page)
@@ -123,7 +131,10 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_curseforge_reference_does_not_require_api_key(self) -> None:
-        with patch.object(config, "env_opt", return_value=None):
+        with (
+            patch.object(config, "env_opt", return_value=None),
+            self.assertLogs("apps._launcher_metadata", level="WARNING") as captured,
+        ):
             metadata = await resolve_launcher_metadata(
                 scope="minecraft",
                 urls=LauncherProviderUrls(
@@ -137,6 +148,54 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata.curseforge.project_id, 32274)
         self.assertEqual(metadata.curseforge.file_id, 5789363)
         self.assertIsNone(metadata.curseforge.page_url)
+        self.assertIn("unverified", captured.output[0])
+
+    async def test_curseforge_reference_is_validated_when_api_key_is_available(self) -> None:
+        async def handle_request(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/mods/32274/files/5789363")
+            self.assertEqual(request.headers["x-api-key"], "curseforge-test-key")
+            return httpx.Response(200, json={"data": {"modId": 32274, "id": 5789363}})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http:
+            with patch.object(config, "env_opt", return_value="curseforge-test-key"):
+                metadata = await resolve_launcher_metadata(
+                    scope="minecraft",
+                    urls=LauncherProviderUrls(
+                        curseforge_reference=CurseForgeFileReference(
+                            project_id=32274,
+                            file_id=5789363,
+                        )
+                    ),
+                    local_filename="journeymap.jar",
+                    http=http,
+                )
+
+        self.assertIsNotNone(metadata.curseforge)
+        assert metadata.curseforge is not None
+        self.assertEqual(metadata.curseforge.project_id, 32274)
+        self.assertEqual(metadata.curseforge.file_id, 5789363)
+        self.assertIsNone(metadata.curseforge.page_url)
+
+    async def test_curseforge_reference_rejects_mismatched_api_response(self) -> None:
+        async def handle_request(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": {"modId": 999, "id": 5789363}})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http:
+            with (
+                patch.object(config, "env_opt", return_value="curseforge-test-key"),
+                self.assertRaisesRegex(ValueError, "different project/file pair"),
+            ):
+                await resolve_launcher_metadata(
+                    scope="minecraft",
+                    urls=LauncherProviderUrls(
+                        curseforge_reference=CurseForgeFileReference(
+                            project_id=32274,
+                            file_id=5789363,
+                        )
+                    ),
+                    local_filename="journeymap.jar",
+                    http=http,
+                )
 
     def test_rejects_multiple_curseforge_sources(self) -> None:
         with self.assertRaisesRegex(ValueError, "either a CurseForge file page"):
