@@ -5,7 +5,7 @@ import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from itertools import zip_longest
 from pathlib import Path
 from re import Pattern
@@ -20,6 +20,22 @@ from _resolator import Resolutator
 from _security import Access_Control, Power_Level
 
 log = logging.getLogger(__name__)
+
+_CLIENT_PACK_VERSION_RE: Pattern[str] = re.compile(r"(?:\d+|\d{4}-\d{2}-\d{2}(?:\.\d+)?)")
+CLIENT_PACK_CHANGELOG_MAX_LENGTH = 4000
+
+
+def next_client_pack_version(current_version: str | None, *, published_on: date | None = None) -> str:
+    release_date = published_on or date.today()
+    date_version = release_date.isoformat()
+    if current_version == date_version:
+        return f"{date_version}.2"
+    prefix = f"{date_version}."
+    if current_version is not None and current_version.startswith(prefix):
+        sequence_text = current_version.removeprefix(prefix)
+        if sequence_text.isdecimal():
+            return f"{date_version}.{int(sequence_text) + 1}"
+    return date_version
 
 
 class ModDistributionMode(enum.StrEnum):
@@ -135,6 +151,55 @@ def normalise_optional_text(raw: object) -> str | None:
         return None
     text = str(raw).strip()
     return text or None
+
+
+def normalise_client_pack_changelog(raw: object, *, required: bool = False) -> str | None:
+    text = normalise_optional_text(raw)
+    if required and text is None:
+        raise ValueError("Client pack publication requires a changelog.")
+    if text is not None and len(text) > CLIENT_PACK_CHANGELOG_MAX_LENGTH:
+        raise ValueError(
+            f"client pack changelog must be at most {CLIENT_PACK_CHANGELOG_MAX_LENGTH} characters"
+        )
+    return text
+
+
+def normalise_client_pack_version(raw: object, *, required: bool = False) -> str | None:
+    if raw is None or raw == 0:
+        if required:
+            raise ValueError("client pack release requires a version")
+        return None
+    if isinstance(raw, bool):
+        raise ValueError("client pack version must be a date version")
+    normalised = str(raw).strip()
+    if not normalised:
+        if required:
+            raise ValueError("client pack release requires a version")
+        return None
+    if _CLIENT_PACK_VERSION_RE.fullmatch(normalised) is None:
+        raise ValueError("client pack version must be numeric or use YYYY-MM-DD[.N]")
+    return normalised
+
+
+class ClientPackRelease(BaseModel):
+    version: str
+    changelog: str
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def validate_version(cls, raw: object) -> str:
+        version = normalise_client_pack_version(raw, required=True)
+        assert version is not None
+        return version
+
+    @field_validator("changelog", mode="before")
+    @classmethod
+    def validate_changelog(cls, raw: object) -> str:
+        changelog = normalise_client_pack_changelog(raw, required=True)
+        assert changelog is not None
+        return changelog
 
 
 def normalise_activity_provider_ids(raw: object) -> tuple[str, ...]:
@@ -693,16 +758,14 @@ class ModPlacement(enum.StrEnum):
 
 
 def is_client_pack_candidate(placement: ModPlacement, side: ModSide) -> bool:
-    """Return whether a mod placement and side may participate in client packs."""
+    """Return whether a mod placement may participate in client packs."""
     if placement is ModPlacement.CLIENT_ONLY:
         if side is not ModSide.CLIENT:
             raise ValueError(
                 f"Client-only mod placement requires client-side classification, not {side.value!r}"
             )
         return True
-    if placement is ModPlacement.SERVER_DISABLED:
-        return False
-    return side is not ModSide.SERVER
+    return placement is not ModPlacement.SERVER_DISABLED
 
 
 class ModType(enum.StrEnum):
@@ -735,6 +798,10 @@ class ModType(enum.StrEnum):
                 return ModSide.SERVER
             case ModType.CLIENT:
                 return ModSide.CLIENT
+
+    @property
+    def included_in_client_by_default(self) -> bool:
+        return self.side is not ModSide.SERVER
 
 
 class ModMetadataOverrides(BaseModel):
@@ -788,8 +855,7 @@ class ModrinthModMetadata(BaseModel):
         return url
 
 
-class CurseForgeModMetadata(BaseModel):
-    page_url: str
+class CurseForgeFileReference(BaseModel):
     project_id: int
     file_id: int
 
@@ -808,9 +874,15 @@ class CurseForgeModMetadata(BaseModel):
             raise ValueError("CurseForge identifiers must be positive")
         return identifier
 
+
+class CurseForgeModMetadata(CurseForgeFileReference):
+    page_url: str | None = None
+
     @field_validator("page_url", mode="before")
     @classmethod
-    def validate_page_url(cls, raw: object) -> str:
+    def validate_page_url(cls, raw: object) -> str | None:
+        if raw is None:
+            return None
         url = _normalise_required_text(raw, field_name="CurseForge URL")
         parsed = urlsplit(url)
         if parsed.scheme.casefold() != "https" or parsed.hostname is None:
@@ -821,6 +893,7 @@ class CurseForgeModMetadata(BaseModel):
 class LauncherProviderUrls(BaseModel):
     modrinth: str | None = None
     curseforge: str | None = None
+    curseforge_reference: CurseForgeFileReference | None = None
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -837,6 +910,17 @@ class LauncherProviderUrls(BaseModel):
                 return self.curseforge
             case _:
                 raise ValueError(f"Launcher metadata URLs do not support {provider.value}.")
+
+    def has_provider(self, provider: Provider) -> bool:
+        if provider is Provider.CURSEFORGE and self.curseforge_reference is not None:
+            return True
+        return self.for_provider(provider) is not None
+
+    @model_validator(mode="after")
+    def validate_curseforge_source(self) -> LauncherProviderUrls:
+        if self.curseforge is not None and self.curseforge_reference is not None:
+            raise ValueError("Provide either a CurseForge file page or CurseForge project and file IDs, not both.")
+        return self
 
 
 class ModPlatformMetadata(BaseModel):
@@ -870,13 +954,22 @@ class ClientPackPolicy(enum.StrEnum):
 
 
 class ClientPackConfig(BaseModel):
+    included_in_client: bool = True
     policy: ClientPackPolicy = ClientPackPolicy.REQUIRED
     choice_group: str | None = None
     default_choice: bool = False
     default_selected: bool = False
-    bundled_required: bool = False
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+    def apply_default_inclusion(self, mod_type: ModType) -> None:
+        """Apply the type-derived default without marking it as an operator override."""
+        if "included_in_client" not in self.model_fields_set:
+            object.__setattr__(
+                self,
+                "included_in_client",
+                mod_type.included_in_client_by_default,
+            )
 
     @field_validator("choice_group", mode="before")
     @classmethod
@@ -903,8 +996,6 @@ class ClientPackConfig(BaseModel):
                 raise ValueError("alternative client-pack mods require a choice group")
             if self.default_selected:
                 raise ValueError("alternative client-pack mods use default_choice, not default_selected")
-            if self.bundled_required:
-                raise ValueError("only required client-pack mods may allow a bundled file")
             return self
         if self.choice_group is not None:
             raise ValueError("only alternative client-pack mods may have a choice group")
@@ -912,8 +1003,6 @@ class ClientPackConfig(BaseModel):
             raise ValueError("only alternative client-pack mods may be the default choice")
         if self.policy is not ClientPackPolicy.OPTIONAL and self.default_selected:
             raise ValueError("only optional client-pack mods may be selected by default")
-        if self.policy is not ClientPackPolicy.REQUIRED and self.bundled_required:
-            raise ValueError("only required client-pack mods may allow a bundled file")
         return self
 
 
@@ -1061,7 +1150,9 @@ class App_Config(BaseModel):
     client_overrides_dir: Path | None = None
     client_pack_current_hash: str | None = None
     client_pack_published_hash: str | None = None
-    client_pack_published_version: int = 0
+    client_pack_published_version: str | None = None
+    client_pack_published_changelog: str | None = None
+    client_pack_releases: tuple[ClientPackRelease, ...] = ()
     client_pack_verified_hash: str | None = None
     client_pack_content_dirty: bool = False
     settings_pointer: Path | None = None
@@ -1109,12 +1200,26 @@ class App_Config(BaseModel):
             raise ValueError("client pack hashes must be SHA-256 hex digests")
         return normalised
 
-    @field_validator("client_pack_published_version")
+    @field_validator("client_pack_published_version", mode="before")
     @classmethod
-    def validate_client_pack_published_version(cls, value: int) -> int:
-        if isinstance(value, bool) or value < 0:
-            raise ValueError("client pack published version must be a non-negative integer")
-        return value
+    def validate_client_pack_published_version(cls, value: object) -> str | None:
+        return normalise_client_pack_version(value)
+
+    @field_validator("client_pack_releases")
+    @classmethod
+    def validate_client_pack_releases(
+        cls,
+        releases: tuple[ClientPackRelease, ...],
+    ) -> tuple[ClientPackRelease, ...]:
+        versions = [release.version for release in releases]
+        if len(versions) != len(set(versions)):
+            raise ValueError("client pack release versions must be unique")
+        return releases
+
+    @field_validator("client_pack_published_changelog", mode="before")
+    @classmethod
+    def validate_client_pack_changelog(cls, value: object) -> str | None:
+        return normalise_client_pack_changelog(value)
 
     @field_validator("notes", mode="before")
     @classmethod
@@ -1341,6 +1446,12 @@ class Mod_Config(BaseModel):
     @model_validator(mode="after")
     def sync_legacy_enabled_field(self) -> Mod_Config:
         self.enabled = self.placement.enabled
+        mod_type = (
+            self.mod_type
+            if self.classification_override is None
+            else self.classification_override.mod_type
+        )
+        self.client_pack.apply_default_inclusion(mod_type)
         return self
 
     def set_placement(self, placement: ModPlacement) -> None:

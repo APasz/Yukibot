@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, call, patch
@@ -12,7 +12,13 @@ from hikari import applications
 from modmux.models import Provider
 
 import config
-from apps._config import ModDistributionMode, AppVersion, mod_capabilities_for_scope
+from apps._config import (
+    AppVersion,
+    ClientPackRelease,
+    ModDistributionMode,
+    mod_capabilities_for_scope,
+    next_client_pack_version,
+)
 from restart_targets import RestartTarget
 
 
@@ -39,6 +45,30 @@ class AppModCapabilitiesTests(unittest.TestCase):
             capabilities.launcher_metadata_providers,
             (Provider.MODRINTH, Provider.CURSEFORGE),
         )
+
+    def test_client_pack_versions_are_date_based_and_sequence_same_day_releases(self) -> None:
+        published_on = date(2026, 7, 4)
+
+        self.assertEqual(next_client_pack_version(None, published_on=published_on), "2026-07-04")
+        self.assertEqual(
+            next_client_pack_version("2026-07-04", published_on=published_on),
+            "2026-07-04.2",
+        )
+        self.assertEqual(
+            next_client_pack_version("2026-07-04.2", published_on=published_on),
+            "2026-07-04.3",
+        )
+        self.assertEqual(next_client_pack_version("7", published_on=published_on), "2026-07-04")
+
+    def test_client_pack_release_normalises_and_requires_versioned_changes(self) -> None:
+        release = ClientPackRelease(version=" 2026-07-04 ", changelog=" Added renderer options. ")
+
+        self.assertEqual(release.version, "2026-07-04")
+        self.assertEqual(release.changelog, "Added renderer options.")
+        with self.assertRaisesRegex(ValueError, "requires a version"):
+            ClientPackRelease(version="", changelog="Changes")
+        with self.assertRaisesRegex(ValueError, "requires a changelog"):
+            ClientPackRelease(version="2026-07-04", changelog="  ")
 
     def test_sevendays_supports_generic_client_packs_only(self) -> None:
         capabilities = mod_capabilities_for_scope("sevendays")

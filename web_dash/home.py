@@ -98,6 +98,21 @@ def _restart_interval_parts(interval_minutes: int) -> tuple[int, int, int]:
     return days, hours, minutes
 
 
+def _format_restart_hours_input(hours: int, minutes: int) -> str:
+    return str(hours) if minutes == 0 else f"{hours}:{minutes:02d}"
+
+
+def _parse_restart_hours_input(value: str) -> tuple[int, int]:
+    parts = value.strip().split(":")
+    if len(parts) not in (1, 2) or any(not part.isdigit() for part in parts):
+        raise ValueError("Use hours as H or H:MM.")
+    hours = int(parts[0])
+    minutes = int(parts[1]) if len(parts) == 2 else 0
+    if hours > 23 or minutes > 59:
+        raise ValueError("Use 0–23 hours and 0–59 minutes.")
+    return hours, minutes
+
+
 def _restart_interval_from_parts(*, days: int, hours: int, minutes: int) -> int:
     if days < 0 or hours < 0 or minutes < 0 or hours > 23 or minutes > 59:
         raise ValueError("Use 0–23 hours and 0–59 minutes.")
@@ -1709,6 +1724,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     initial_days, initial_hours, initial_minutes = _restart_interval_parts(
                         initial_entry.interval_minutes
                     )
+                    initial_hours_input = _format_restart_hours_input(initial_hours, initial_minutes)
                     initial_anchor_timestamp = initial_entry.anchor_timestamp or initial_entry.next_restart_timestamp
                     if initial_anchor_timestamp is None:
                         initial_anchor_timestamp = int(datetime.now().timestamp()) + initial_entry.interval_minutes * 60
@@ -1731,11 +1747,12 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             days_input = ui.input("Days", value=str(initial_days)).props(
                                 f"{_RESTART_SCHEDULE_FIELD_PROPS} type=number min=0 max=7 step=1"
                             ).classes("w-full mod-system-schedule-field")
-                            hours_input = ui.input("Hours", value=str(initial_hours)).props(
-                                f"{_RESTART_SCHEDULE_FIELD_PROPS} type=number min=0 max=23 step=1"
-                            ).classes("w-full mod-system-schedule-field")
-                            minutes_input = ui.input("Minutes", value=str(initial_minutes)).props(
-                                f"{_RESTART_SCHEDULE_FIELD_PROPS} type=number min=0 max=59 step=1"
+                            hours_input = ui.input(
+                                "Hours",
+                                value=initial_hours_input,
+                                placeholder="H or H:MM",
+                            ).props(
+                                f"{_RESTART_SCHEDULE_FIELD_PROPS} maxlength=5 inputmode=text"
                             ).classes("w-full mod-system-schedule-field")
                             weekday_select = ui.select(
                                 _RESTART_WEEKDAY_OPTIONS,
@@ -1788,7 +1805,6 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             schedule_target: RestartTarget = target,
                             schedule_days_input: Input = days_input,
                             schedule_hours_input: Input = hours_input,
-                            schedule_minutes_input: Input = minutes_input,
                             schedule_weekday_select: Select = weekday_select,
                             schedule_anchor_time_input: Input = anchor_time_input,
                             schedule_timezone_select: Select = timezone_select,
@@ -1801,10 +1817,15 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         ) -> None:
                             try:
                                 interval_days = int(_value_as_text(schedule_days_input))
-                                interval_hours = int(_value_as_text(schedule_hours_input))
-                                interval_remainder_minutes = int(_value_as_text(schedule_minutes_input))
                             except ValueError:
-                                _notify_error("Use whole values for days, hours, and minutes.")
+                                _notify_error("Use a whole number of days.")
+                                return
+                            try:
+                                interval_hours, interval_remainder_minutes = _parse_restart_hours_input(
+                                    _value_as_text(schedule_hours_input)
+                                )
+                            except ValueError as xcp:
+                                _notify_error(str(xcp))
                                 return
                             try:
                                 interval_minutes = _restart_interval_from_parts(
@@ -1907,8 +1928,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             schedules_by_target[schedule_target] = entry
                             next_days, next_hours, next_minutes = _restart_interval_parts(entry.interval_minutes)
                             schedule_days_input.set_value(str(next_days))
-                            schedule_hours_input.set_value(str(next_hours))
-                            schedule_minutes_input.set_value(str(next_minutes))
+                            schedule_hours_input.set_value(
+                                _format_restart_hours_input(next_hours, next_minutes)
+                            )
                             _set_schedule_buttons_busy(
                                 schedule_target=schedule_target,
                                 save=schedule_save_button,

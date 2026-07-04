@@ -75,6 +75,14 @@ class Mod(ABC):
                 cfg.mod_type = self.default_mod_type()
             if cfg.download_block_reason is None:
                 cfg.download_block_reason = self.default_download_block_reason()
+        if cfg.classification_override is not None:
+            if cfg.classification_override.download_block_reason is ModDownloadBlockReason.SERVER_ONLY:
+                cfg.classification_override = cfg.classification_override.model_copy(
+                    update={"download_block_reason": None}
+                )
+        elif cfg.download_block_reason is ModDownloadBlockReason.SERVER_ONLY:
+            cfg.download_block_reason = None
+        cfg.client_pack.apply_default_inclusion(self.mod_type)
 
     @property
     def enabled_path(self) -> Path:
@@ -140,7 +148,7 @@ class Mod(ABC):
 
     @property
     def downloadable(self) -> bool:
-        return self.download_block_reason is None
+        return self.download_block_reason in {None, ModDownloadBlockReason.SERVER_ONLY}
 
     @property
     def server_loadable(self) -> bool:
@@ -148,15 +156,12 @@ class Mod(ABC):
 
     @property
     def client_pack_eligible(self) -> bool:
-        client_pack = self.cfg.client_pack
-        has_eligible_artifact = self.downloadable or (
-            client_pack.policy is ClientPackPolicy.REQUIRED and client_pack.bundled_required
-        )
-        return self.client_pack_candidate and has_eligible_artifact
+        return self.client_pack_candidate and self.downloadable
 
     @property
     def client_pack_candidate(self) -> bool:
-        return is_client_pack_candidate(self.cfg.placement, self.mod_type.side)
+        placement_allows_client_pack = is_client_pack_candidate(self.cfg.placement, self.mod_type.side)
+        return placement_allows_client_pack and self.cfg.client_pack.included_in_client
 
     @property
     def logical_archive_name(self) -> str:
@@ -212,8 +217,9 @@ class Mod(ABC):
 
     @property
     def download_block_label(self) -> str | None:
-        if self.download_block_reason is None:
+        if self.downloadable:
             return None
+        assert self.download_block_reason is not None
         return self.download_block_reason.label
 
     def default_mod_type(self) -> ModType:
@@ -222,8 +228,6 @@ class Mod(ABC):
     def default_download_block_reason(self) -> ModDownloadBlockReason | None:
         if self.is_builtin:
             return ModDownloadBlockReason.BUILTIN
-        if self.is_server_only:
-            return ModDownloadBlockReason.SERVER_ONLY
         return None
 
     def exists(self) -> bool:
@@ -579,8 +583,6 @@ class Mod_Manager:
                 continue
             client_pack = mod.cfg.client_pack
             if client_pack.policy is ClientPackPolicy.REQUIRED:
-                if client_pack.bundled_required and not mod.storage_path.exists():
-                    raise ValueError(f"Bundled client-pack mod {mod.name!r} has no local file")
                 continue
             if client_pack.policy is ClientPackPolicy.ALTERNATIVE:
                 assert client_pack.choice_group is not None

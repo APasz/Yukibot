@@ -15,6 +15,7 @@ from .runtime_imports import (
     ChatEndpointKind,
     ChatEvent,
     ChatReferenceKind,
+    ClientPackRelease,
     Enum,
     Label,
     Literal,
@@ -537,6 +538,31 @@ class ModWebModSortOrder(Enum):
                 return "Mod type"
 
 
+class ModWebFileSortOrder(Enum):
+    LATEST_MODIFIED = "latest_modified"
+    OLDEST_MODIFIED = "oldest_modified"
+    NAME_ASCENDING = "name_ascending"
+    NAME_DESCENDING = "name_descending"
+    SIZE_DESCENDING = "size_descending"
+    SIZE_ASCENDING = "size_ascending"
+
+    @property
+    def label(self) -> str:
+        match self:
+            case ModWebFileSortOrder.LATEST_MODIFIED:
+                return "Latest modified"
+            case ModWebFileSortOrder.OLDEST_MODIFIED:
+                return "Oldest modified"
+            case ModWebFileSortOrder.NAME_ASCENDING:
+                return "Name A–Z"
+            case ModWebFileSortOrder.NAME_DESCENDING:
+                return "Name Z–A"
+            case ModWebFileSortOrder.SIZE_DESCENDING:
+                return "Largest first"
+            case ModWebFileSortOrder.SIZE_ASCENDING:
+                return "Smallest first"
+
+
 @dataclass(frozen=True, slots=True)
 class ModWebAppLink:
     name: str
@@ -648,6 +674,7 @@ class ModWebBasePageModel:
     app_stats: NodeAppRuntimeSummary | None
     app_start_blocked: bool
     settings: NodeSettingList | None
+    search_query: str = field(default="", kw_only=True)
     app_title_font_preset: str = field(default=AppTitleFont.AUTO.value, kw_only=True)
     console_actions: NodeConsoleActionList | None = field(default=None, kw_only=True)
     blueprints: NodeBlueprintList | None = field(default=None, kw_only=True)
@@ -657,6 +684,11 @@ class ModWebBasePageModel:
     supports_chat: bool = field(default=False, kw_only=True)
     supports_updates: bool = field(default=False, kw_only=True)
     client_pack_content_dirty: bool = field(default=False, kw_only=True)
+    client_pack_published_version: str | None = field(default=None, kw_only=True)
+    client_pack_next_version: str | None = field(default=None, kw_only=True)
+    client_pack_changelog: str | None = field(default=None, kw_only=True)
+    client_pack_published_changelog: str | None = field(default=None, kw_only=True)
+    client_pack_releases: tuple[ClientPackRelease, ...] = field(default=(), kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
     update_info: AppUpdateInfo | None = field(default=None, kw_only=True)
     update_status: AppUpdateStatus | None = field(default=None, kw_only=True)

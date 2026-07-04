@@ -6,7 +6,7 @@ from unittest.mock import patch
 import httpx
 
 import config
-from apps._config import LauncherProviderUrls, ModPlatformMetadata
+from apps._config import CurseForgeFileReference, LauncherProviderUrls, ModPlatformMetadata
 from apps._launcher_metadata import resolve_launcher_metadata
 
 
@@ -111,7 +111,7 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
                 local_filename="journeymap.jar",
             )
 
-    async def test_curseforge_requires_api_key(self) -> None:
+    async def test_curseforge_file_page_requires_api_key(self) -> None:
         with patch.object(config, "env_opt", return_value=None):
             with self.assertRaisesRegex(ValueError, "CURSEFORGE_API_KEY is required"):
                 await resolve_launcher_metadata(
@@ -121,6 +121,29 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     local_filename="journeymap.jar",
                 )
+
+    async def test_curseforge_reference_does_not_require_api_key(self) -> None:
+        with patch.object(config, "env_opt", return_value=None):
+            metadata = await resolve_launcher_metadata(
+                scope="minecraft",
+                urls=LauncherProviderUrls(
+                    curseforge_reference=CurseForgeFileReference(project_id=32274, file_id=5789363)
+                ),
+                local_filename="journeymap.jar",
+            )
+
+        self.assertIsNotNone(metadata.curseforge)
+        assert metadata.curseforge is not None
+        self.assertEqual(metadata.curseforge.project_id, 32274)
+        self.assertEqual(metadata.curseforge.file_id, 5789363)
+        self.assertIsNone(metadata.curseforge.page_url)
+
+    def test_rejects_multiple_curseforge_sources(self) -> None:
+        with self.assertRaisesRegex(ValueError, "either a CurseForge file page"):
+            LauncherProviderUrls(
+                curseforge="https://www.curseforge.com/minecraft/mc-mods/journeymap/files/5789363",
+                curseforge_reference=CurseForgeFileReference(project_id=32274, file_id=5789363),
+            )
 
 
 if __name__ == "__main__":

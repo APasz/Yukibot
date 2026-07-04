@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from _mod_ops import (
     ClientPackSelection,
     ClientPackValidationError,
+    ModArchiveEntry,
     NonDownloadableModError,
     build_client_pack_entries,
     build_admin_pack_entries,
@@ -159,12 +160,23 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(legacy.default_selected)
         self.assertFalse(explicit_opt_out.default_selected)
 
-    def test_bundled_required_policy_is_limited_to_required_mods(self) -> None:
-        with self.assertRaisesRegex(ValueError, "only required"):
-            ClientPackConfig(
-                policy=ClientPackPolicy.OPTIONAL,
-                bundled_required=True,
-            )
+    def test_client_pack_inclusion_is_explicitly_typed(self) -> None:
+        self.assertTrue(ClientPackConfig().included_in_client)
+        self.assertFalse(ClientPackConfig(included_in_client=False).included_in_client)
+
+    def test_client_pack_inclusion_defaults_from_mod_type(self) -> None:
+        regular = Mod_Config(name="regular.zip", directory=self.mods_dir)
+        server = Mod_Config(name="server.zip", directory=self.mods_dir, mod_type=ModType.SERVER)
+        explicitly_included_server = Mod_Config(
+            name="included-server.zip",
+            directory=self.mods_dir,
+            mod_type=ModType.SERVER,
+            client_pack=ClientPackConfig(included_in_client=True),
+        )
+
+        self.assertTrue(regular.client_pack.included_in_client)
+        self.assertFalse(server.client_pack.included_in_client)
+        self.assertTrue(explicitly_included_server.client_pack.included_in_client)
 
     def test_alternative_client_pack_group_id_rejects_whitespace(self) -> None:
         for group_id in ("visual options", " visual-options", "visual-options ", "visual\toptions"):
@@ -374,16 +386,16 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         manager = self._build_manager()
         await manager.add(self._write_source_file())
 
-        updated = await manager.set_download_block_reason("example.zip", ModDownloadBlockReason.SERVER_ONLY)
+        updated = await manager.set_download_block_reason("example.zip", ModDownloadBlockReason.OTHER)
 
         self.assertFalse(updated.downloadable)
-        self.assertEqual(updated.download_block_label, "Server only")
+        self.assertEqual(updated.download_block_label, "Not downloadable")
 
         await manager.reload_mods()
 
         reloaded = manager.get("example.zip")
         self.assertFalse(reloaded.downloadable)
-        self.assertEqual(reloaded.cfg.download_block_reason, ModDownloadBlockReason.SERVER_ONLY)
+        self.assertEqual(reloaded.cfg.download_block_reason, ModDownloadBlockReason.OTHER)
 
     async def test_platform_metadata_persists_across_reload(self) -> None:
         manager = self._build_manager()
@@ -559,6 +571,34 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(disabled.client_pack_eligible)
         self.assertFalse(server.client_pack_eligible)
 
+    async def test_server_mod_is_directly_downloadable_and_can_be_included_in_client(self) -> None:
+        manager = self._build_manager(mod_cls=_DetectedServerMod)
+        server = await manager.add(self._write_source_file("server.zip"))
+
+        self.assertIs(server.mod_type, ModType.SERVER)
+        self.assertTrue(server.downloadable)
+        self.assertFalse(server.cfg.client_pack.included_in_client)
+        self.assertFalse(server.client_pack_eligible)
+        self.assertEqual(
+            download_paths(manager, (server.name,), default_enabled_only=False),
+            (server.storage_path,),
+        )
+
+        server.cfg.client_pack.included_in_client = True
+        self.assertTrue(server.client_pack_eligible)
+        self.assertEqual(
+            tuple(
+                entry.mod_name
+                for entry in build_client_pack_entries(
+                    manager,
+                    ClientPackSelection(),
+                    client_overrides_dir=None,
+                )
+                if isinstance(entry, ModArchiveEntry)
+            ),
+            (server.name,),
+        )
+
     def test_client_pack_rejects_explicitly_selected_disabled_mod(self) -> None:
         manager = self._build_manager()
         disabled = self._insert_existing_mod(
@@ -646,22 +686,20 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
                 client_overrides_dir=None,
             )
 
-    async def test_client_pack_allows_explicitly_bundled_required_file(self) -> None:
+    async def test_client_pack_does_not_bypass_download_block_for_required_file(self) -> None:
         manager = self._build_manager()
-        bundled = await manager.add(self._write_source_file("bundled.zip"))
-        bundled.cfg.classification_override = ModClassificationOverride(
+        blocked = await manager.add(self._write_source_file("blocked.zip"))
+        blocked.cfg.classification_override = ModClassificationOverride(
             mod_type=ModType.CLIENT,
             download_block_reason=ModDownloadBlockReason.ARTIFACT,
         )
-        bundled.cfg.client_pack = ClientPackConfig(bundled_required=True)
 
-        entries = build_client_pack_entries(
-            manager,
-            ClientPackSelection(),
-            client_overrides_dir=None,
-        )
-
-        self.assertEqual(tuple(entry.archive_path.as_posix() for entry in entries), ("bundled.zip",))
+        with self.assertRaisesRegex(ClientPackValidationError, "must be downloadable"):
+            build_client_pack_entries(
+                manager,
+                ClientPackSelection(),
+                client_overrides_dir=None,
+            )
 
     async def test_client_pack_rejects_non_downloadable_required_file_without_bundle_policy(self) -> None:
         manager = self._build_manager()
@@ -671,7 +709,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
             download_block_reason=ModDownloadBlockReason.ARTIFACT,
         )
 
-        with self.assertRaisesRegex(ClientPackValidationError, "downloadable or explicitly bundled"):
+        with self.assertRaisesRegex(ClientPackValidationError, "must be downloadable"):
             build_client_pack_entries(
                 manager,
                 ClientPackSelection(),
@@ -743,7 +781,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         manager = self._build_manager()
         downloadable = await manager.add(self._write_source_file("downloadable.zip"))
         blocked = await manager.add(self._write_source_file("server-only.zip"))
-        await manager.set_download_block_reason(blocked, ModDownloadBlockReason.SERVER_ONLY)
+        await manager.set_download_block_reason(blocked, ModDownloadBlockReason.OTHER)
 
         paths = download_paths(manager, default_enabled_only=False)
 
@@ -761,7 +799,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
     async def test_download_paths_reject_blocked_direct_download(self) -> None:
         manager = self._build_manager()
         blocked = await manager.add(self._write_source_file("server-only.zip"))
-        await manager.set_download_block_reason(blocked, ModDownloadBlockReason.SERVER_ONLY)
+        await manager.set_download_block_reason(blocked, ModDownloadBlockReason.OTHER)
 
         with self.assertRaises(NonDownloadableModError):
             download_paths(manager, (blocked.name,), default_enabled_only=False)

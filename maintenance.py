@@ -111,17 +111,21 @@ class MaintenanceService:
                     last_triggered_timestamp=None,
                     skipped_through_timestamp=None,
                 )
-                next_restart = self._next_restart_for_schedule(next_schedule)
-                if next_restart is None:
-                    raise RuntimeError("Enabled restart schedule unexpectedly has no next restart.")
-                next_restart_timestamp = int(next_restart.timestamp())
-                if next_restart_timestamp <= save_cutoff:
-                    interval_seconds = interval_minutes * 60
-                    skipped_intervals = (save_cutoff - next_restart_timestamp) // interval_seconds + 1
-                    skipped_through_timestamp = next_restart_timestamp + (skipped_intervals - 1) * interval_seconds
-                    next_schedule = next_schedule.model_copy(
-                        update={"skipped_through_timestamp": skipped_through_timestamp}
-                    )
+                if anchor is None:
+                    raise RuntimeError("Enabled restart schedule unexpectedly has no anchor timestamp.")
+                interval_seconds = interval_minutes * 60
+                intervals_to_next = (save_cutoff - anchor) // interval_seconds + 1
+                next_restart_timestamp = anchor + intervals_to_next * interval_seconds
+                if next_restart_timestamp != anchor:
+                    skipped_through_timestamp = next_restart_timestamp - interval_seconds
+                    if skipped_through_timestamp <= 0:
+                        next_schedule = next_schedule.model_copy(
+                            update={"anchor_timestamp": next_restart_timestamp}
+                        )
+                    else:
+                        next_schedule = next_schedule.model_copy(
+                            update={"skipped_through_timestamp": skipped_through_timestamp}
+                        )
                 next_schedules[target] = next_schedule
             bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
             config.save_bot_configuration(self._bot_configuration_path, bot_config)
@@ -281,14 +285,17 @@ class MaintenanceService:
         if not schedule.enabled or schedule.anchor_timestamp is None:
             return None
         if schedule.last_triggered_timestamp is None:
-            next_timestamp = schedule.anchor_timestamp
+            if schedule.skipped_through_timestamp is None:
+                next_timestamp = schedule.anchor_timestamp
+            else:
+                next_timestamp = schedule.skipped_through_timestamp + schedule.interval_minutes * 60
         else:
             next_timestamp = schedule.last_triggered_timestamp + schedule.interval_minutes * 60
-        if (
-            schedule.skipped_through_timestamp is not None
-            and schedule.skipped_through_timestamp >= next_timestamp
-        ):
-            next_timestamp = schedule.skipped_through_timestamp + schedule.interval_minutes * 60
+            if (
+                schedule.skipped_through_timestamp is not None
+                and schedule.skipped_through_timestamp >= next_timestamp
+            ):
+                next_timestamp = schedule.skipped_through_timestamp + schedule.interval_minutes * 60
         return datetime.fromtimestamp(next_timestamp).astimezone()
 
     @staticmethod

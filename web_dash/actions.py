@@ -4,7 +4,13 @@ from typing import TYPE_CHECKING
 
 from modmux.models import Provider
 
-from apps._config import LauncherProviderUrls, launcher_provider_label, mod_capabilities_for_scope
+from apps._config import (
+    CurseForgeFileReference,
+    LauncherProviderUrls,
+    launcher_provider_label,
+    mod_capabilities_for_scope,
+)
+from apps._launcher_metadata import has_curseforge_api_key
 from apps.minecraft import MinecraftRecipeMutation
 
 from .constants import (
@@ -853,6 +859,19 @@ class ModWebActionsMixin(ModWebServiceSupport):
         supports_client_pack: bool = mod_capabilities_for_scope(model.app_scope).supports_client_pack
         launcher_metadata_providers = mod_capabilities_for_scope(model.app_scope).launcher_metadata_providers
         launcher_url_inputs: dict[Provider, Input] = {}
+        curseforge_project_id_input: Input | None = None
+        curseforge_file_id_input: Input | None = None
+        curseforge_metadata = entry.platforms.curseforge
+        use_curseforge_reference_inputs = Provider.CURSEFORGE in launcher_metadata_providers and (
+            not has_curseforge_api_key()
+            or (curseforge_metadata is not None and curseforge_metadata.page_url is None)
+        )
+        launcher_metadata_description = (
+            "Paste the exact provider file page, or enter the numeric CurseForge project and file IDs. "
+            "Leave fields blank to bundle the local file."
+            if use_curseforge_reference_inputs
+            else "Paste the exact provider file page. Leave it blank to bundle the local file."
+        )
         active_metadata_panel: Literal["overrides", "launcher"] | None = None
 
         def toggle_metadata_panel(panel: Literal["overrides", "launcher"]) -> None:
@@ -892,6 +911,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 if supports_client_pack:
                     selected_client_pack_policy = ClientPackPolicy(_value_as_text(client_pack_policy_select))
                     client_pack = ClientPackConfig(
+                        included_in_client=bool(_value_as_object(client_pack_included_checkbox)),
                         policy=selected_client_pack_policy,
                         choice_group=(
                             _value_as_text(client_pack_choice_group_input).strip()
@@ -899,7 +919,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                             else None
                         ),
                         default_choice=(
-                            bool(_value_as_object(client_pack_default_choice_checkbox))
+                            entry.client_pack.default_choice
                             if selected_client_pack_policy is ClientPackPolicy.ALTERNATIVE
                             else False
                         ),
@@ -908,12 +928,17 @@ class ModWebActionsMixin(ModWebServiceSupport):
                             if selected_client_pack_policy is ClientPackPolicy.OPTIONAL
                             else False
                         ),
-                        bundled_required=(
-                            bool(_value_as_object(client_pack_bundled_required_checkbox))
-                            if selected_client_pack_policy is ClientPackPolicy.REQUIRED
-                            else False
-                        ),
                     )
+                curseforge_reference: CurseForgeFileReference | None = None
+                if use_curseforge_reference_inputs:
+                    if curseforge_project_id_input is None or curseforge_file_id_input is None:
+                        raise RuntimeError("CurseForge identifier inputs were not rendered.")
+                    project_id = _value_as_text(curseforge_project_id_input).strip()
+                    file_id = _value_as_text(curseforge_file_id_input).strip()
+                    if project_id or file_id:
+                        curseforge_reference = CurseForgeFileReference.model_validate(
+                            {"project_id": project_id, "file_id": file_id}
+                        )
                 launcher_urls = LauncherProviderUrls(
                     modrinth=(
                         _value_as_text(launcher_url_inputs[Provider.MODRINTH]).strip()
@@ -925,6 +950,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         if Provider.CURSEFORGE in launcher_url_inputs
                         else None
                     ),
+                    curseforge_reference=curseforge_reference,
                 )
                 result = await self._update_mod_properties(
                     model=model,
@@ -1029,6 +1055,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                 label="Choice group",
                                 value=entry.client_pack.choice_group,
                             )
+                            self._render_mod_detail_item(
+                                ui=ui,
+                                label="Default choice",
+                                value="Yes" if entry.client_pack.default_choice else "No",
+                            )
                     if can_edit_properties:
                         with ui.column().classes("w-full gap-3 mod-app-details-section"):
                             ui.label("Classification").classes("mod-stat-label")
@@ -1053,7 +1084,11 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                             **{
                                                 reason.value: reason.label
                                                 for reason in ModDownloadBlockReason
-                                                if reason is not ModDownloadBlockReason.BUILTIN
+                                                if reason
+                                                not in {
+                                                    ModDownloadBlockReason.BUILTIN,
+                                                    ModDownloadBlockReason.SERVER_ONLY,
+                                                }
                                             },
                                         },
                                         value=entry.download_block_reason or "",
@@ -1066,8 +1101,15 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                 with ui.column().classes("w-full gap-2"):
                                     ui.label("Client pack").classes("mod-stat-label")
                                     ui.label(
-                                        "Choose whether this mod is always included, optional, or one of several alternatives."
+                                        "Choose whether this mod is included in client packs and, when included, "
+                                        "whether it is required, optional, or one of several alternatives."
                                     ).classes("mod-subtitle text-xs")
+                                    client_pack_included_checkbox = ui.checkbox(
+                                        "Included in Client",
+                                        value=entry.client_pack.included_in_client,
+                                    ).props("dense color=accent keep-color").classes(
+                                        "mod-client-pack-checkbox w-full"
+                                    )
                                     client_pack_policy_select = (
                                         ui.select(
                                             {policy.value: policy.label for policy in ClientPackPolicy},
@@ -1094,20 +1136,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                             .props("filled square dense clearable hide-bottom-space color=accent")
                                             .classes("mod-app-details-field")
                                         )
-                                        client_pack_default_choice_checkbox = ui.checkbox(
-                                            "Default choice",
-                                            value=entry.client_pack.default_choice,
-                                        ).props("dense color=accent keep-color").classes(
-                                            "mod-client-pack-checkbox w-full"
-                                        )
-                                    with ui.column().classes("w-full gap-1") as required_client_pack_controls:
-                                        client_pack_bundled_required_checkbox = ui.checkbox(
-                                            "Allow bundled local file when downloads are blocked",
-                                            value=entry.client_pack.bundled_required,
-                                        ).props("dense color=accent keep-color").classes(
-                                            "mod-client-pack-checkbox w-full"
-                                        )
-
                                     def refresh_client_pack_policy_controls() -> None:
                                         selected_policy = ClientPackPolicy(_value_as_text(client_pack_policy_select))
                                         optional_client_pack_controls.set_visibility(
@@ -1115,9 +1143,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         )
                                         alternative_client_pack_controls.set_visibility(
                                             selected_policy is ClientPackPolicy.ALTERNATIVE
-                                        )
-                                        required_client_pack_controls.set_visibility(
-                                            selected_policy is ClientPackPolicy.REQUIRED
                                         )
 
                                     client_pack_policy_select.on(
@@ -1188,11 +1213,45 @@ class ModWebActionsMixin(ModWebServiceSupport):
                             overrides_section.set_visibility(False)
                             with ui.column().classes("w-full gap-2") as launcher_metadata_section:
                                 ui.label("Launcher Metadata").classes("mod-stat-label")
-                                ui.label(
-                                    "Paste the exact provider file page. Leave it blank to bundle the local file."
-                                ).classes("mod-subtitle text-xs")
+                                ui.label(launcher_metadata_description).classes("mod-subtitle text-xs")
                                 with ui.column().classes("w-full gap-2"):
                                     for provider in launcher_metadata_providers:
+                                        if provider is Provider.CURSEFORGE and use_curseforge_reference_inputs:
+                                            curseforge_project_id_input = (
+                                                ui.input(
+                                                    "CurseForge project ID",
+                                                    value=(
+                                                        ""
+                                                        if curseforge_metadata is None
+                                                        else str(curseforge_metadata.project_id)
+                                                    ),
+                                                )
+                                                .props(
+                                                    "filled square dense clearable hide-bottom-space color=accent "
+                                                    "type=number min=1 step=1"
+                                                )
+                                                .classes(
+                                                    "w-full mod-app-details-field mod-mod-launcher-field"
+                                                )
+                                            )
+                                            curseforge_file_id_input = (
+                                                ui.input(
+                                                    "CurseForge file ID",
+                                                    value=(
+                                                        ""
+                                                        if curseforge_metadata is None
+                                                        else str(curseforge_metadata.file_id)
+                                                    ),
+                                                )
+                                                .props(
+                                                    "filled square dense clearable hide-bottom-space color=accent "
+                                                    "type=number min=1 step=1"
+                                                )
+                                                .classes(
+                                                    "w-full mod-app-details-field mod-mod-launcher-field"
+                                                )
+                                            )
+                                            continue
                                         launcher_url_inputs[provider] = (
                                             ui.input(
                                                 f"{launcher_provider_label(provider)} file page",

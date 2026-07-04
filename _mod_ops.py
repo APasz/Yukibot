@@ -214,11 +214,7 @@ def build_client_pack_entries(
 
     for selected_name in selected_names:
         selected_mod = manager.get(selected_name)
-        client_pack = selected_mod.cfg.client_pack
-        allows_bundled_required = (
-            client_pack.policy is ClientPackPolicy.REQUIRED and client_pack.bundled_required
-        )
-        if not selected_mod.downloadable and not allows_bundled_required:
+        if not selected_mod.downloadable:
             require_downloadable(selected_mod)
 
     choice_groups: dict[str, list[Mod]] = {}
@@ -226,12 +222,8 @@ def build_client_pack_entries(
     for mod in client_mods:
         client_pack = mod.cfg.client_pack
         if client_pack.policy is ClientPackPolicy.REQUIRED:
-            if not mod.downloadable and not client_pack.bundled_required:
-                raise ClientPackValidationError(
-                    f"Required client-pack mod {mod.name!r} must be downloadable or explicitly bundled"
-                )
-            if client_pack.bundled_required and not mod.storage_path.exists():
-                raise ClientPackValidationError(f"Bundled client-pack mod is missing: {mod.name}")
+            if not mod.downloadable:
+                raise ClientPackValidationError(f"Required client-pack mod {mod.name!r} must be downloadable")
             selected_mods.append(mod)
             continue
         if not mod.downloadable:
@@ -438,7 +430,7 @@ async def toggle_downloadable(
     *,
     acl: Access_Control,
     actor_user_id: int,
-    blocked_reason: ModDownloadBlockReason = ModDownloadBlockReason.SERVER_ONLY,
+    blocked_reason: ModDownloadBlockReason = ModDownloadBlockReason.OTHER,
 ) -> Mod:
     await acl.perm_check(actor_user_id, acl.LvL.sudo)
     mod = manager.get(mod_name)

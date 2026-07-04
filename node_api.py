@@ -72,8 +72,9 @@ from apps._blueprint_files import (
 )
 from apps._config import (
     AppTitleFont,
+    CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     ClientPackConfig,
-    ClientPackPolicy,
+    ClientPackRelease,
     LauncherProviderUrls,
     ModDownloadBlockReason,
     ModMetadataOverrides,
@@ -81,6 +82,7 @@ from apps._config import (
     ModPlatformMetadata,
     ModType,
     is_client_pack_candidate,
+    normalise_client_pack_changelog,
     normalise_activity_provider_ids,
     normalise_app_title_font,
 )
@@ -401,6 +403,10 @@ class NodeAppEntry:
     supports_updates: bool = False
     supports_sevendays_sandbox_options: bool = False
     client_pack_content_dirty: bool = False
+    client_pack_published_version: str | None = None
+    client_pack_next_version: str | None = None
+    client_pack_published_changelog: str | None = None
+    client_pack_releases: tuple[ClientPackRelease, ...] = ()
     runtime_fault: AppRuntimeFault | None = None
     update_info: AppUpdateInfo | None = None
     update_status: AppUpdateStatus | None = None
@@ -450,6 +456,10 @@ class NodeAppEntry:
         supports_updates = payload.get("supports_updates", False)
         supports_sevendays_sandbox_options = payload.get("supports_sevendays_sandbox_options", False)
         client_pack_content_dirty = payload.get("client_pack_content_dirty", False)
+        client_pack_published_version = _optional_string(payload, "client_pack_published_version")
+        client_pack_next_version = _optional_string(payload, "client_pack_next_version")
+        client_pack_published_changelog = _optional_string(payload, "client_pack_published_changelog")
+        raw_client_pack_releases = payload.get("client_pack_releases", ())
         raw_runtime_fault = payload.get("runtime_fault")
         raw_update_info = payload.get("update_info")
         raw_update_status = payload.get("update_status")
@@ -510,6 +520,28 @@ class NodeAppEntry:
             raise ValueError("Node app entry supports_sevendays_sandbox_options is invalid.")
         if not isinstance(client_pack_content_dirty, bool):
             raise ValueError("Node app entry client_pack_content_dirty is invalid.")
+        if not isinstance(raw_client_pack_releases, list | tuple) or any(
+            not isinstance(release_payload, Mapping)
+            for release_payload in raw_client_pack_releases
+        ):
+            raise ValueError("Node app entry client_pack_releases is invalid.")
+        client_pack_releases = tuple(
+            ClientPackRelease.model_validate(release_payload)
+            for release_payload in raw_client_pack_releases
+        )
+        if not client_pack_releases and (
+            client_pack_published_version is not None
+            and client_pack_published_changelog is not None
+        ):
+            client_pack_releases = (
+                ClientPackRelease(
+                    version=client_pack_published_version,
+                    changelog=client_pack_published_changelog,
+                ),
+            )
+        release_versions = [release.version for release in client_pack_releases]
+        if len(release_versions) != len(set(release_versions)):
+            raise ValueError("Node app entry client pack release versions must be unique.")
         if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
             raise ValueError("Node app entry runtime_fault is invalid.")
         if raw_update_info is not None and not isinstance(raw_update_info, Mapping):
@@ -584,6 +616,10 @@ class NodeAppEntry:
             supports_updates=supports_updates,
             supports_sevendays_sandbox_options=supports_sevendays_sandbox_options,
             client_pack_content_dirty=client_pack_content_dirty,
+            client_pack_published_version=client_pack_published_version,
+            client_pack_next_version=client_pack_next_version,
+            client_pack_published_changelog=client_pack_published_changelog,
+            client_pack_releases=client_pack_releases,
             runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
             if raw_runtime_fault is not None
             else None,
@@ -646,6 +682,12 @@ class NodeAppEntry:
             "supports_updates": self.supports_updates,
             "supports_sevendays_sandbox_options": self.supports_sevendays_sandbox_options,
             "client_pack_content_dirty": self.client_pack_content_dirty,
+            "client_pack_published_version": self.client_pack_published_version,
+            "client_pack_next_version": self.client_pack_next_version,
+            "client_pack_published_changelog": self.client_pack_published_changelog,
+            "client_pack_releases": [
+                release.model_dump(mode="json") for release in self.client_pack_releases
+            ],
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
             "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
             "update_status": self.update_status.to_mapping() if self.update_status is not None else None,
@@ -982,11 +1024,6 @@ class NodeModEntry:
         raw_client_pack = payload.get("client_pack")
         if raw_client_pack is not None and not isinstance(raw_client_pack, Mapping):
             raise ValueError("Node mod client_pack is invalid.")
-        client_pack = (
-            ClientPackConfig()
-            if raw_client_pack is None
-            else ClientPackConfig.model_validate(dict(raw_client_pack))
-        )
         raw_metadata_overrides = payload.get("metadata_overrides")
         if raw_metadata_overrides is not None and not isinstance(raw_metadata_overrides, Mapping):
             raise ValueError("Node mod metadata overrides are invalid.")
@@ -1001,6 +1038,12 @@ class NodeModEntry:
             mod_type = ModType.COREMOD
         else:
             mod_type = ModType.REGULAR
+        client_pack_payload = {} if raw_client_pack is None else dict(raw_client_pack)
+        client_pack_payload.setdefault(
+            "included_in_client",
+            mod_type.included_in_client_by_default,
+        )
+        client_pack = ClientPackConfig.model_validate(client_pack_payload)
         raw_placement = _optional_string(payload, "placement")
         placement = (
             ModPlacement.SERVER_ENABLED if enabled else ModPlacement.SERVER_DISABLED
@@ -1016,9 +1059,10 @@ class NodeModEntry:
         if server_loadable is not placement.server_loadable:
             raise ValueError("Node mod server_loadable conflicts with placement.")
         raw_client_pack_eligible = payload.get("client_pack_eligible")
-        expected_client_pack_eligible = is_client_pack_candidate(placement, mod_type.side) and (
-            downloadable
-            or (client_pack.policy is ClientPackPolicy.REQUIRED and client_pack.bundled_required)
+        expected_client_pack_eligible = (
+            is_client_pack_candidate(placement, mod_type.side)
+            and client_pack.included_in_client
+            and downloadable
         )
         client_pack_eligible = (
             expected_client_pack_eligible
@@ -1139,6 +1183,17 @@ class NodeClientPackConfigUpdateRequest(BaseModel):
         if len(mod_names) != len(set(mod_names)):
             raise ValueError("client-pack configuration contains duplicate mod names")
         return self
+
+
+class NodeClientPackPublishRequest(BaseModel):
+    changelog: str = Field(min_length=1, max_length=CLIENT_PACK_CHANGELOG_MAX_LENGTH)
+
+    @field_validator("changelog", mode="before")
+    @classmethod
+    def validate_changelog(cls, value: object) -> str:
+        changelog = normalise_client_pack_changelog(value, required=True)
+        assert changelog is not None
+        return changelog
 
 
 @dataclass(frozen=True, slots=True)
@@ -3607,6 +3662,7 @@ class NodeDownloadRequest:
     pack_purpose: PackPurpose | None = None
     pack_format: PackFormat = PackFormat.GENERIC_ZIP
     publish_client_pack: bool = False
+    publish_changelog: str | None = None
 
     @property
     def resolved_pack_purpose(self) -> PackPurpose | None:
@@ -4847,6 +4903,7 @@ class NodeApiService:
         @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/client-pack-config/publish")
         async def _publish_client_pack_config(
             app_name: str,
+            payload: dict[str, object],
             request: Request,
             access_token: str | None = None,
         ) -> dict[str, object]:
@@ -4860,6 +4917,7 @@ class NodeApiService:
             )
             return await self.publish_client_pack_config(
                 app=self._resolve_app(app_name),
+                update=NodeClientPackPublishRequest.model_validate(payload),
                 actor_user_id=actor_user_id,
             )
 
@@ -5541,6 +5599,10 @@ class NodeApiService:
             supports_updates=update_info is not None,
             supports_sevendays_sandbox_options=bool(getattr(app, "supports_sevendays_sandbox_options", False)),
             client_pack_content_dirty=app.cfg.client_pack_content_dirty,
+            client_pack_published_version=app.cfg.client_pack_published_version,
+            client_pack_next_version=app.next_client_pack_version,
+            client_pack_published_changelog=app.cfg.client_pack_published_changelog,
+            client_pack_releases=app.client_pack_releases,
             runtime_fault=getattr(app, "runtime_fault", None),
             update_info=update_info,
             update_status=update_status,
@@ -7975,6 +8037,13 @@ class NodeApiService:
         if pack_purpose is PackPurpose.CLIENT:
             if not capabilities.supports_client_pack:
                 raise _http_exception(400, f"{app.friendly} does not support client pack generation.")
+            if app.cfg.client_pack_content_dirty and not request.publish_client_pack:
+                raise _http_exception(409, "Client pack configuration has unpublished changes.")
+            if request.publish_client_pack and not (request.publish_changelog or "").strip():
+                raise _http_exception(
+                    400,
+                    "Client pack publication requires a changelog.",
+                )
             if request.pack_format is not PackFormat.GENERIC_ZIP and not capabilities.supports_launcher_formats:
                 raise _http_exception(400, f"{app.friendly} does not support launcher pack formats.")
         elif pack_purpose is None and not capabilities.supports_raw_download:
@@ -8043,11 +8112,17 @@ class NodeApiService:
             if app.cfg.client_pack_current_hash != current_hash:
                 app.record_client_pack_content_hash(current_hash)
             if request.publish_client_pack:
-                generated_pack_version = str(app.publish_client_pack(current_hash))
+                generated_pack_version = app.publish_client_pack(
+                    current_hash,
+                    changelog=request.publish_changelog or "",
+                )
+                self._invalidate_state_caches(app_name=app.name)
             elif app.cfg.client_pack_published_hash != current_hash:
                 raise _http_exception(409, "Client pack content has changed; publish or regenerate it before download.")
+            elif app.cfg.client_pack_published_version is None:
+                raise _http_exception(409, "Client pack version metadata is missing; publish the client pack again.")
             else:
-                generated_pack_version = str(app.cfg.client_pack_published_version)
+                generated_pack_version = app.cfg.client_pack_published_version
 
         archive_name = self._archive_name(app=app, entries=entries, request=request)
         if pack_purpose is not None:
@@ -8165,8 +8240,12 @@ class NodeApiService:
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
         traffic_log.info("Node API wrote config file: node=%s app=%s config=%s", self.node_name, app.name, config_id)
-        app.invalidate_client_pack_content()
+        self._invalidate_client_pack_content(app)
         return self._config_content(app=app, content=updated)
+
+    def _invalidate_client_pack_content(self, app: App) -> None:
+        app.invalidate_client_pack_content()
+        self._invalidate_state_caches(app_name=app.name)
 
     async def build_config_root_download_response(
         self,
@@ -8226,6 +8305,12 @@ class NodeApiService:
         saves: tuple[AppSaveEntry, ...] = await app.list_save_files_async()
         save_can_delete: bool = bool(getattr(app, "supports_save_delete", False))
         traffic_log.info("Node API built save list: node=%s app=%s saves=%s", self.node_name, app.name, len(saves))
+        return replace(
+            self.build_empty_save_list(app),
+            saves=tuple[NodeSaveEntry, ...](self._save_entry(save, can_delete=save_can_delete) for save in saves),
+        )
+
+    def build_empty_save_list(self, app: App) -> NodeSaveList:
         return NodeSaveList(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -8233,7 +8318,7 @@ class NodeApiService:
             roots=tuple[NodeSaveRootEntry, ...](
                 NodeSaveRootEntry(id=root.id, label=root.label) for root in app.save_file_roots
             ),
-            saves=tuple[NodeSaveEntry, ...](self._save_entry(save, can_delete=save_can_delete) for save in saves),
+            saves=(),
         )
 
     async def build_save_download_response(self, *, app: App, save_id: str) -> Response:
@@ -8471,7 +8556,7 @@ class NodeApiService:
             actor_user_id,
         )
         mod_entries: tuple[NodeModEntry, ...] = tuple(self._mod_entry(uploaded_mod) for uploaded_mod in uploaded_mods)
-        app.invalidate_client_pack_content()
+        self._invalidate_client_pack_content(app)
         self._invalidate_mod_inventory(app.name)
         return NodeModUploadBatchResult(
             app_name=app.name,
@@ -8592,13 +8677,21 @@ class NodeApiService:
             app.name,
             len(blueprints),
         )
+        return replace(
+            self.build_empty_blueprint_list(app),
+            blueprints=tuple[NodeBlueprintEntry, ...](
+                self._blueprint_entry(blueprint_file, actor_user_id=actor_user_id) for blueprint_file in blueprints
+            ),
+        )
+
+    def build_empty_blueprint_list(self, app: App) -> NodeBlueprintList:
+        if not app.supports_blueprints:
+            raise _http_exception(409, f"{app.friendly} does not support blueprint files.")
         return NodeBlueprintList(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
-            blueprints=tuple[NodeBlueprintEntry, ...](
-                self._blueprint_entry(blueprint_file, actor_user_id=actor_user_id) for blueprint_file in blueprints
-            ),
+            blueprints=(),
             default_session_name=app.default_blueprint_session_name,
         )
 
@@ -8998,7 +9091,7 @@ class NodeApiService:
                 result_mod_entry = self._mod_entry(updated_mod)
             elif action is NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
                 reason: ModDownloadBlockReason | None = (
-                    ModDownloadBlockReason.SERVER_ONLY if mod.downloadable else mod.default_download_block_reason()
+                    ModDownloadBlockReason.OTHER if mod.downloadable else mod.default_download_block_reason()
                 )
                 updated_mod = await manager.set_download_block_reason(mod, reason)
                 blocked_text: Literal["blocked from download", "download-enabled"] = (
@@ -9027,7 +9120,7 @@ class NodeApiService:
             action.value,
             actor_user_id,
         )
-        app.invalidate_client_pack_content()
+        self._invalidate_client_pack_content(app)
         self._invalidate_mod_inventory(app.name)
         return NodeModMutationResult(
             app_name=app.name,
@@ -9080,7 +9173,7 @@ class NodeApiService:
             mod.name,
             actor_user_id,
         )
-        app.invalidate_client_pack_content()
+        self._invalidate_client_pack_content(app)
         self._invalidate_mod_inventory(app.name)
         return NodeModMutationResult(
             app_name=app.name,
@@ -9116,7 +9209,8 @@ class NodeApiService:
             len(updated_mods),
             actor_user_id,
         )
-        app.invalidate_client_pack_content()
+        self._invalidate_client_pack_content(app)
+        app.persist_instance_config_overrides()
         self._invalidate_mod_inventory(app.name)
         return {
             "app_name": app.name,
@@ -9124,7 +9218,13 @@ class NodeApiService:
             "message": f"Updated client-pack configuration for {len(updated_mods)} mods.",
         }
 
-    async def publish_client_pack_config(self, *, app: App, actor_user_id: int) -> dict[str, object]:
+    async def publish_client_pack_config(
+        self,
+        *,
+        app: App,
+        update: NodeClientPackPublishRequest,
+        actor_user_id: int,
+    ) -> dict[str, object]:
         await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
@@ -9150,11 +9250,12 @@ class NodeApiService:
             )
             raise _http_exception(409, "The default client pack contains no mods.")
         content_hash = await self._client_pack_content_hash(app=app, entries=entries)
-        version = app.publish_client_pack(content_hash)
+        version = app.publish_client_pack(content_hash, changelog=update.changelog)
+        self._invalidate_state_caches(app_name=app.name)
         return {
             "app_name": app.name,
             "published_version": version,
-            "message": f"Saved client-pack configuration as version {version}.",
+            "message": f"Published client pack version {version}.",
         }
 
     def _resolve_console_action(self, app: App, action_key: str) -> ConsoleAction:

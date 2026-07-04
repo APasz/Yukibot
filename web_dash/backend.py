@@ -4,7 +4,11 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from pathlib import Path
 
+import config
+
+from .client_pack_drafts import ClientPackDraftStore
 from .constants import log
 from .nicegui_protocols import ModWebFastApiApp, WebChatRelayPublisher
 from .runtime_imports import (
@@ -50,11 +54,21 @@ class ModWebDashboardBackend:
         *,
         auth: ModWebAuthService | None = None,
         node_api: NodeApiService | None = None,
+        client_pack_drafts: ClientPackDraftStore | None = None,
     ) -> None:
         self._manager: App_Manager | None = None
         self._acl: Access_Control | None = None
         self._auth: ModWebAuthService = auth or ModWebAuthService()
         self._node_api: NodeApiService = node_api or NodeApiService()
+        session_cache_directory: Path | None = config.MOD_WEB_AUTH.session_cache_directory
+        draft_cache_directory = (
+            None
+            if session_cache_directory is None
+            else session_cache_directory / "client_pack_drafts"
+        )
+        self._client_pack_drafts = client_pack_drafts or ClientPackDraftStore(
+            draft_cache_directory
+        )
         self._chat_relay: WebChatRelayPublisher | None = None
         self._transfer_lock = threading.Lock()
         self._transfer_records: dict[int, _TransferRecord] = {}
@@ -128,6 +142,26 @@ class ModWebDashboardBackend:
     def begin_shutdown(self) -> None:
         self._node_api.begin_shutdown()
         self._auth.close()
+        self._client_pack_drafts.close()
+
+    def client_pack_changelog_draft(self, *, node_name: str, app_name: str) -> str | None:
+        return self._client_pack_drafts.get(node_name=node_name, app_name=app_name)
+
+    def set_client_pack_changelog_draft(
+        self,
+        *,
+        node_name: str,
+        app_name: str,
+        changelog: str,
+    ) -> None:
+        self._client_pack_drafts.set(
+            node_name=node_name,
+            app_name=app_name,
+            changelog=changelog,
+        )
+
+    def clear_client_pack_changelog_draft(self, *, node_name: str, app_name: str) -> None:
+        self._client_pack_drafts.clear(node_name=node_name, app_name=app_name)
 
     def resolve_app(self, app_name: str) -> ManagedApp:
         if self._manager is None:

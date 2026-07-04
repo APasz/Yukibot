@@ -839,6 +839,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_request_url_with_query_values"]) -> Callable[..., str]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_replace_browser_search_query"]) -> Callable[..., None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_running_value"]) -> Callable[..., str]: ...
 
     @overload

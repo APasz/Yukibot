@@ -14,6 +14,7 @@ from pydantic import SecretStr
 
 import config
 from apps._config import (
+    CurseForgeFileReference,
     CurseForgeModMetadata,
     LauncherProviderUrls,
     ModPlatformMetadata,
@@ -108,9 +109,22 @@ async def _resolve_modrinth(
     )
 
 
-def _modmux_credentials() -> list[CurseforgeCreds]:
+def _curseforge_api_key() -> str | None:
     value = (config.env_opt("CURSEFORGE_API_KEY") or "").strip()
-    return [] if not value else [CurseforgeCreds(api_key=SecretStr(value))]
+    return value or None
+
+
+def has_curseforge_api_key() -> bool:
+    return _curseforge_api_key() is not None
+
+
+def _modmux_credentials() -> list[CurseforgeCreds]:
+    api_key = _curseforge_api_key()
+    return [] if api_key is None else [CurseforgeCreds(api_key=SecretStr(api_key))]
+
+
+def _curseforge_metadata_from_reference(reference: CurseForgeFileReference) -> CurseForgeModMetadata:
+    return CurseForgeModMetadata(project_id=reference.project_id, file_id=reference.file_id)
 
 
 async def _resolve_curseforge(
@@ -140,6 +154,18 @@ async def _resolve_curseforge(
     )
 
 
+async def _resolve_curseforge_source(
+    urls: LauncherProviderUrls,
+    *,
+    http: httpx.AsyncClient,
+) -> CurseForgeModMetadata | None:
+    if urls.curseforge_reference is not None:
+        return _curseforge_metadata_from_reference(urls.curseforge_reference)
+    if urls.curseforge is None:
+        return None
+    return await _resolve_curseforge(urls.curseforge, http=http)
+
+
 async def resolve_launcher_metadata(
     *,
     scope: str,
@@ -149,12 +175,15 @@ async def resolve_launcher_metadata(
 ) -> ModPlatformMetadata:
     capabilities = mod_capabilities_for_scope(scope)
     supported = frozenset(capabilities.launcher_metadata_providers)
-    supplied = {
+    supplied_urls = {
         provider: page_url
         for provider in (Provider.MODRINTH, Provider.CURSEFORGE)
         if (page_url := urls.for_provider(provider)) is not None
     }
-    unsupported = tuple(provider for provider in supplied if provider not in supported)
+    supplied_providers = {
+        provider for provider in (Provider.MODRINTH, Provider.CURSEFORGE) if urls.has_provider(provider)
+    }
+    unsupported = tuple(provider for provider in supplied_providers if provider not in supported)
     if unsupported:
         names = ", ".join(launcher_provider_label(provider) for provider in unsupported)
         raise ValueError(f"{scope} does not support launcher metadata from: {names}.")
@@ -164,15 +193,13 @@ async def resolve_launcher_metadata(
     try:
         try:
             modrinth = (
-                await _resolve_modrinth(supplied[Provider.MODRINTH], local_filename=local_filename, http=client)
-                if Provider.MODRINTH in supplied
+                await _resolve_modrinth(
+                    supplied_urls[Provider.MODRINTH], local_filename=local_filename, http=client
+                )
+                if Provider.MODRINTH in supplied_urls
                 else None
             )
-            curseforge = (
-                await _resolve_curseforge(supplied[Provider.CURSEFORGE], http=client)
-                if Provider.CURSEFORGE in supplied
-                else None
-            )
+            curseforge = await _resolve_curseforge_source(urls, http=client)
         except httpx.HTTPError as xcp:
             raise ValueError(f"Launcher metadata lookup failed: {xcp}") from xcp
         return ModPlatformMetadata(modrinth=modrinth, curseforge=curseforge)

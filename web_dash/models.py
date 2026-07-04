@@ -45,6 +45,7 @@ from .runtime_imports import (
     BotMetadataSnapshot,
     Card,
     Callable,
+    ClientPackRelease,
     Iterable,
     Label,
     Literal,
@@ -580,7 +581,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     error=xcp,
                     load_warnings=load_warnings,
                 )
-                saves = None
+                saves = self._node_api.build_empty_save_list(app)
         else:
             saves = None
         if app_entry.supports_blueprints and can_manage_app:
@@ -593,7 +594,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     error=xcp,
                     load_warnings=load_warnings,
                 )
-                blueprints = None
+                blueprints = self._node_api.build_empty_blueprint_list(app)
         else:
             blueprints = None
         if app_entry.supports_settings and can_manage_app:
@@ -688,6 +689,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
             supports_chat=page_data.app_entry.supports_chat,
             supports_updates=page_data.app_entry.supports_updates,
             client_pack_content_dirty=page_data.app_entry.client_pack_content_dirty,
+            client_pack_published_version=page_data.app_entry.client_pack_published_version,
+            client_pack_next_version=page_data.app_entry.client_pack_next_version,
+            client_pack_published_changelog=page_data.app_entry.client_pack_published_changelog,
+            client_pack_releases=page_data.app_entry.client_pack_releases,
             chat_url=(self.app_chat_path(page_data.app_entry.name) if page_data.app_entry.supports_chat else None),
             update_info=page_data.app_entry.update_info,
             update_status=page_data.app_entry.update_status,
@@ -806,6 +811,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
         supports_chat: bool,
         supports_updates: bool,
         client_pack_content_dirty: bool = False,
+        client_pack_published_version: str | None = None,
+        client_pack_next_version: str | None = None,
+        client_pack_published_changelog: str | None = None,
+        client_pack_releases: tuple[ClientPackRelease, ...] = (),
         chat_url: str | None,
         update_info: AppUpdateInfo | None,
         update_status: AppUpdateStatus | None,
@@ -832,6 +841,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
         sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None,
     ) -> ModWebPageModel:
         app_api_url: str = self._node_app_api_url(node, mods.app_name)
+        shared_changelog_draft = self._backend.client_pack_changelog_draft(
+            node_name=node.node_name,
+            app_name=mods.app_name,
+        )
         return cast(
             ModWebPageModel,
             self._page_model_with_tabs(
@@ -861,6 +874,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     supports_chat=supports_chat,
                     supports_updates=supports_updates,
                     client_pack_content_dirty=client_pack_content_dirty,
+                    client_pack_published_version=client_pack_published_version,
+                    client_pack_next_version=client_pack_next_version,
+                    client_pack_changelog=shared_changelog_draft,
+                    client_pack_published_changelog=client_pack_published_changelog,
+                    client_pack_releases=client_pack_releases,
                     chat_url=chat_url,
                     update_info=update_info,
                     update_status=update_status,

@@ -30,6 +30,7 @@ from apps._config import (
     AppVersion,
     ClientPackConfig,
     ClientPackPolicy,
+    ClientPackRelease,
     LauncherProviderUrls,
     Mod_Config,
     ModClassificationOverride,
@@ -94,6 +95,7 @@ from node_api import (
     NodeChatStreamEventKind,
     NodeClientPackConfigUpdateRequest,
     NodeClientPackModConfigUpdate,
+    NodeClientPackPublishRequest,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
@@ -703,7 +705,6 @@ class NodeApiTests(unittest.TestCase):
             acl.perm_check = AsyncMock()
             service = NodeApiService()
             service.set_acl(cast(Any, acl))
-
             result: NodeConsoleStdoutSnapshot = asyncio.run(
                 service.read_console_stdout(app=app, actor_user_id=42, max_lines=2)
             )
@@ -2594,6 +2595,7 @@ class NodeApiTests(unittest.TestCase):
         app.cfg.lifecycle_notice_stopped = True
         app.cfg.lifecycle_notice_crashed = False
         app.cfg.client_pack_content_dirty = True
+        app.cfg.client_pack_published_changelog = "Added client performance fixes."
         app.cfg.join_host = "play.example.test"
         app.cfg.join_port = 25565
         app.cfg.resource_points = SimpleNamespace(
@@ -2632,6 +2634,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(entry.lifecycle_notice_stopped)
         self.assertFalse(entry.lifecycle_notice_crashed)
         self.assertTrue(entry.client_pack_content_dirty)
+        self.assertEqual(entry.client_pack_published_changelog, "Added client performance fixes.")
         self.assertIsNone(entry.relay_notice_player_session)
         self.assertIsNone(entry.relay_notice_player_death)
         self.assertIsNone(entry.relay_notice_progress)
@@ -3279,7 +3282,6 @@ class NodeApiTests(unittest.TestCase):
             acl.perm_check = AsyncMock()
             service = NodeApiService()
             service.set_acl(cast(Any, acl))
-
             result = asyncio.run(
                 service.mutate_mod(
                     app=app,
@@ -3495,10 +3497,18 @@ class NodeApiTests(unittest.TestCase):
             manager.reload_mods = AsyncMock()
             manager.update_client_pack_configs = AsyncMock(return_value=(alpha, beta))
             app = _build_app(manager)
+            app.cfg.client_pack_current_hash = "a" * 64
+            app.cfg.client_pack_published_hash = "a" * 64
+            app.cfg.client_pack_published_version = "2026-07-03"
             acl = Mock()
             acl.perm_check = AsyncMock()
             service = NodeApiService()
             service.set_acl(cast(Any, acl))
+            service._app_entries_cache = cast(Any, object())
+            persisted_overrides: list[dict[str, object]] = []
+            app.set_instance_config_change_handler(
+                lambda changed_app: persisted_overrides.append(dict(changed_app.instance_config_overrides))
+            )
 
             result = asyncio.run(
                 service.update_client_pack_config(
@@ -3518,6 +3528,26 @@ class NodeApiTests(unittest.TestCase):
             {alpha.name: alpha_config, beta.name: beta_config}
         )
         self.assertEqual(result["updated_count"], 2)
+        self.assertTrue(app.cfg.client_pack_content_dirty)
+        self.assertEqual(app.cfg.client_pack_published_version, "2026-07-03")
+        self.assertTrue(persisted_overrides[-1]["client_pack_content_dirty"])
+        self.assertIsNone(service._app_entries_cache)
+
+    def test_client_pack_changes_are_dirty_before_first_publication(self) -> None:
+        app = _build_app(Mock())
+        persisted_overrides: list[dict[str, object]] = []
+        app.set_instance_config_change_handler(
+            lambda changed_app: persisted_overrides.append(dict(changed_app.instance_config_overrides))
+        )
+
+        app.invalidate_client_pack_content()
+
+        self.assertTrue(app.cfg.client_pack_content_dirty)
+        self.assertTrue(persisted_overrides[-1]["client_pack_content_dirty"])
+
+    def test_publish_client_pack_requires_changelog(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires a changelog"):
+            NodeClientPackPublishRequest(changelog="   ")
 
     def test_publish_client_pack_config_saves_default_pack_without_downloading(self) -> None:
         manager = Mock()
@@ -3537,13 +3567,93 @@ class NodeApiTests(unittest.TestCase):
                     "_client_pack_content_hash",
                     new=AsyncMock(return_value="a" * 64),
                 ),
+                patch("apps._app.next_client_pack_version", return_value="2026-07-04"),
             ):
-                result = asyncio.run(service.publish_client_pack_config(app=app, actor_user_id=42))
+                result = asyncio.run(
+                    service.publish_client_pack_config(
+                        app=app,
+                        update=NodeClientPackPublishRequest(changelog="Initial release."),
+                        actor_user_id=42,
+                    )
+                )
 
         acl.perm_check.assert_awaited_once_with(42, Power_Level.admin)
-        self.assertEqual(result["published_version"], 1)
+        self.assertEqual(result["published_version"], "2026-07-04")
         self.assertEqual(app.cfg.client_pack_published_hash, "a" * 64)
+        self.assertEqual(app.cfg.client_pack_published_changelog, "Initial release.")
+        self.assertEqual(
+            app.cfg.client_pack_releases,
+            (ClientPackRelease(version="2026-07-04", changelog="Initial release."),),
+        )
         self.assertFalse(app.cfg.client_pack_content_dirty)
+
+    def test_publish_client_pack_keeps_version_when_content_hash_is_unchanged(self) -> None:
+        app = _build_app(Mock())
+        app.cfg.client_pack_published_hash = "a" * 64
+        app.cfg.client_pack_published_version = "2026-07-04"
+        app.cfg.client_pack_content_dirty = True
+
+        with patch("apps._app.next_client_pack_version") as next_version:
+            published_version = app.publish_client_pack(
+                "a" * 64,
+                changelog="Clarified release notes.",
+            )
+
+        next_version.assert_not_called()
+        self.assertEqual(published_version, "2026-07-04")
+        self.assertEqual(app.cfg.client_pack_published_changelog, "Clarified release notes.")
+        self.assertEqual(
+            app.cfg.client_pack_releases,
+            (ClientPackRelease(version="2026-07-04", changelog="Clarified release notes."),),
+        )
+        self.assertFalse(app.cfg.client_pack_content_dirty)
+
+    def test_publish_client_pack_retains_previous_release_changelogs(self) -> None:
+        app = _build_app(Mock())
+        app.cfg.client_pack_published_hash = "a" * 64
+        app.cfg.client_pack_published_version = "2026-07-03"
+        app.cfg.client_pack_published_changelog = "Initial release."
+
+        with patch("apps._app.next_client_pack_version", return_value="2026-07-04"):
+            app.publish_client_pack("b" * 64, changelog="Added renderer options.")
+
+        self.assertEqual(
+            app.cfg.client_pack_releases,
+            (
+                ClientPackRelease(version="2026-07-03", changelog="Initial release."),
+                ClientPackRelease(version="2026-07-04", changelog="Added renderer options."),
+            ),
+        )
+        self.assertEqual(
+            app.instance_config_overrides["client_pack_releases"],
+            [
+                {"version": "2026-07-03", "changelog": "Initial release."},
+                {"version": "2026-07-04", "changelog": "Added renderer options."},
+            ],
+        )
+
+    def test_client_pack_releases_reconciles_current_release_into_incomplete_history(self) -> None:
+        app = _build_app(Mock())
+        app.cfg.client_pack_published_version = "2026-07-04.3"
+        app.cfg.client_pack_published_changelog = "Current changes."
+        app.cfg.client_pack_releases = (
+            ClientPackRelease(version="2026-07-04", changelog="Initial release."),
+        )
+
+        self.assertEqual(
+            app.client_pack_releases,
+            (
+                ClientPackRelease(version="2026-07-04", changelog="Initial release."),
+                ClientPackRelease(version="2026-07-04.3", changelog="Current changes."),
+            ),
+        )
+        self.assertEqual(
+            app.instance_config_overrides["client_pack_releases"],
+            [
+                {"version": "2026-07-04", "changelog": "Initial release."},
+                {"version": "2026-07-04.3", "changelog": "Current changes."},
+            ],
+        )
 
     def test_missing_client_overrides_directory_creates_logged_yukibot_fallback(self) -> None:
         app = _build_app(Mock())
@@ -5547,7 +5657,11 @@ class NodeApiTests(unittest.TestCase):
                 response = asyncio.run(
                     NodeApiService().build_mod_download_response(
                         app=app,
-                        request=NodeDownloadRequest(client_pack=True, publish_client_pack=True),
+                        request=NodeDownloadRequest(
+                            client_pack=True,
+                            publish_client_pack=True,
+                            publish_changelog="Initial client pack.",
+                        ),
                     )
                 )
                 with zipfile.ZipFile(Path(response.path)) as archive:
@@ -5597,7 +5711,11 @@ class NodeApiTests(unittest.TestCase):
                 response = asyncio.run(
                     NodeApiService().build_mod_download_response(
                         app=app,
-                        request=NodeDownloadRequest(client_pack=True, publish_client_pack=True),
+                        request=NodeDownloadRequest(
+                            client_pack=True,
+                            publish_client_pack=True,
+                            publish_changelog="Include client overrides.",
+                        ),
                     )
                 )
                 with zipfile.ZipFile(Path(response.path)) as archive:
@@ -5636,6 +5754,7 @@ class NodeApiTests(unittest.TestCase):
                             client_pack=True,
                             pack_format=PackFormat.MODRINTH,
                             publish_client_pack=True,
+                            publish_changelog="Publish Modrinth pack.",
                         ),
                     )
                 )
@@ -5646,7 +5765,7 @@ class NodeApiTests(unittest.TestCase):
                         {"modrinth.index.json", "overrides/mods/client.jar"},
                     )
                     index = json.loads(archive.read("modrinth.index.json"))
-                    self.assertEqual(index["versionId"], "1")
+                    self.assertRegex(index["versionId"], r"^\d{4}-\d{2}-\d{2}(?:\.\d+)?$")
 
     def test_client_pack_download_blocks_after_published_content_changes(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -5667,7 +5786,11 @@ class NodeApiTests(unittest.TestCase):
                 asyncio.run(
                     service.build_mod_download_response(
                         app=app,
-                        request=NodeDownloadRequest(client_pack=True, publish_client_pack=True),
+                        request=NodeDownloadRequest(
+                            client_pack=True,
+                            publish_client_pack=True,
+                            publish_changelog="Publish client pack.",
+                        ),
                     )
                 )
                 mod_path.write_bytes(b"changed")
@@ -5680,6 +5803,25 @@ class NodeApiTests(unittest.TestCase):
                     )
 
             self.assertEqual(raised.exception.status_code, 409)
+
+    def test_client_pack_download_blocks_while_configuration_is_dirty_even_when_hash_matches(self) -> None:
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        app = _build_app(manager)
+        app.cfg.client_pack_current_hash = "a" * 64
+        app.cfg.client_pack_published_hash = "a" * 64
+        app.cfg.client_pack_published_version = "2026-07-04"
+        app.cfg.client_pack_content_dirty = True
+
+        with self.assertRaisesRegex(HTTPException, "unpublished changes") as raised:
+            asyncio.run(
+                NodeApiService().build_mod_download_response(
+                    app=app,
+                    request=NodeDownloadRequest(client_pack=True),
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 409)
 
     def test_factorio_rejects_client_pack_generation(self) -> None:
         mod_manager = Mock()
@@ -5754,7 +5896,7 @@ class NodeApiTests(unittest.TestCase):
                 )
 
             self.assertEqual(raised.exception.status_code, 400)
-            self.assertIn("downloadable or explicitly bundled", str(raised.exception.detail))
+            self.assertIn("must be downloadable", str(raised.exception.detail))
 
     def test_empty_selected_mod_download_returns_404(self) -> None:
         mod_manager = Mock()

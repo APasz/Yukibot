@@ -188,9 +188,35 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-details-notes", css)
         self.assertIn(".mod-app-details-toggle", css)
         self.assertIn(".mod-client-pack-dialog-card", css)
+        self.assertRegex(css, r"(?s)\.mod-section-layout \{.*?gap: 0\.35rem;")
+        self.assertIn(".mod-client-pack-body::-webkit-scrollbar-thumb", css)
+        self.assertIn("scrollbar-color:", css)
         self.assertIn(".mod-client-pack-checkbox .q-checkbox__inner--truthy", css)
         self.assertIn(".mod-client-pack-select", css)
         self.assertIn(".mod-client-pack-select .q-field__native", css)
+        self.assertIn(".mod-client-pack-changelog textarea", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-client-pack-release-section \{.*?gap: 0\.65rem;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-client-pack-changelog-block \{.*?gap: 0\.4rem;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-client-pack-changelog-hint \{.*?margin-top: 0;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-client-pack-changelog textarea.*?color: var\(--mod-text\) !important;",
+        )
+        self.assertNotIn("padding-top: 1.8rem !important;", css)
+        self.assertIn(".mod-client-pack-changelog-content", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-client-pack-changelog-content \{.*?white-space: pre-wrap;",
+        )
         self.assertIn(".mod-client-pack-config-search", css)
         self.assertIn(".mod-client-pack-config-option", css)
         self.assertIn(".mod-client-pack-config-control", css)

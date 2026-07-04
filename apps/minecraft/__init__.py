@@ -46,7 +46,7 @@ from apps._app import (
     AppRuntimeFaultKind,
     RelayAdvancementTerms,
 )
-from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType, normalise_app_version
+from apps._config import App_Config, AppVersion, Mod_Config, ModType, normalise_app_version
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod, humanise_mod_identifier
@@ -2283,8 +2283,6 @@ class Mod_MC(Mod):
         super().sync_metadata()
         if _is_squaremap_mod_name(self.name) and self.cfg.classification_override is None:
             self.cfg.mod_type = ModType.SERVER
-            if self.cfg.download_block_reason is None:
-                self.cfg.download_block_reason = ModDownloadBlockReason.SERVER_ONLY
 
     def default_mod_type(self) -> ModType:
         if _is_squaremap_mod_name(self.name):

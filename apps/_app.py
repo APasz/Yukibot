@@ -28,9 +28,12 @@ from apps._config import (
     App_Config,
     AppModCapabilities,
     AppVersion,
+    CLIENT_PACK_CHANGELOG_MAX_LENGTH,
+    ClientPackRelease,
     Mod_Config,
     RelayChannelSource,
     mod_capabilities_for_scope,
+    next_client_pack_version,
     normalise_app_version,
 )
 from apps._config_files import (
@@ -406,9 +409,15 @@ class App(Generic[ConfigT], ABC):
         if self.cfg.client_pack_published_hash is not None:
             overrides["client_pack_published_hash"] = self.cfg.client_pack_published_hash
             overrides["client_pack_published_version"] = self.cfg.client_pack_published_version
+            overrides["client_pack_published_changelog"] = self.cfg.client_pack_published_changelog
+        client_pack_releases = self.client_pack_releases
+        if client_pack_releases:
+            overrides["client_pack_releases"] = [
+                release.model_dump(mode="json") for release in client_pack_releases
+            ]
         if self.cfg.client_pack_verified_hash is not None:
             overrides["client_pack_verified_hash"] = self.cfg.client_pack_verified_hash
-        if self.cfg.client_pack_published_hash is not None:
+        if self.cfg.client_pack_published_hash is not None or self.cfg.client_pack_content_dirty:
             overrides["client_pack_content_dirty"] = self.cfg.client_pack_content_dirty
         if self.cfg.steam_update is not None:
             overrides["steam_update"] = self.cfg.steam_update.model_dump(mode="json", exclude_none=True)
@@ -456,14 +465,57 @@ class App(Generic[ConfigT], ABC):
             return
         self._instance_config_change_handler(self)
 
-    def publish_client_pack(self, content_hash: str) -> int:
+    def publish_client_pack(self, content_hash: str, *, changelog: str) -> str:
+        normalised_changelog = changelog.strip()
+        if not normalised_changelog:
+            raise ValueError("Client pack publication requires a changelog.")
+        if len(normalised_changelog) > CLIENT_PACK_CHANGELOG_MAX_LENGTH:
+            raise ValueError(
+                f"Client pack changelog must be at most {CLIENT_PACK_CHANGELOG_MAX_LENGTH} characters."
+            )
+        releases = list(self.client_pack_releases)
         self.cfg.client_pack_current_hash = content_hash
-        if self.cfg.client_pack_published_hash != content_hash:
-            self.cfg.client_pack_published_version += 1
+        published_version = self.cfg.client_pack_published_version
+        if published_version is None or self.cfg.client_pack_published_hash != content_hash:
+            published_version = next_client_pack_version(published_version)
+            self.cfg.client_pack_published_version = published_version
         self.cfg.client_pack_published_hash = content_hash
+        self.cfg.client_pack_published_changelog = normalised_changelog
+        release = ClientPackRelease(version=published_version, changelog=normalised_changelog)
+        for index, existing_release in enumerate(releases):
+            if existing_release.version == published_version:
+                releases[index] = release
+                break
+        else:
+            releases.append(release)
+        self.cfg.client_pack_releases = tuple(releases)
         self.cfg.client_pack_content_dirty = False
         self.persist_instance_config_overrides()
-        return self.cfg.client_pack_published_version
+        return published_version
+
+    @property
+    def next_client_pack_version(self) -> str:
+        return next_client_pack_version(self.cfg.client_pack_published_version)
+
+    @property
+    def client_pack_releases(self) -> tuple[ClientPackRelease, ...]:
+        if (
+            self.cfg.client_pack_published_version is None
+            or self.cfg.client_pack_published_changelog is None
+        ):
+            return self.cfg.client_pack_releases
+        current_release = ClientPackRelease(
+            version=self.cfg.client_pack_published_version,
+            changelog=self.cfg.client_pack_published_changelog,
+        )
+        releases = list(self.cfg.client_pack_releases)
+        for index, release in enumerate(releases):
+            if release.version == current_release.version:
+                releases[index] = current_release
+                break
+        else:
+            releases.append(current_release)
+        return tuple(releases)
 
     def record_client_pack_content_hash(self, content_hash: str) -> None:
         self.cfg.client_pack_current_hash = content_hash
@@ -471,7 +523,7 @@ class App(Generic[ConfigT], ABC):
         self.persist_instance_config_overrides()
 
     def invalidate_client_pack_content(self) -> None:
-        if self.cfg.client_pack_published_hash is None or self.cfg.client_pack_content_dirty:
+        if self.cfg.client_pack_content_dirty:
             return
         self.cfg.client_pack_content_dirty = True
         self.persist_instance_config_overrides()

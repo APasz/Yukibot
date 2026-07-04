@@ -121,7 +121,7 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
             purpose=PackPurpose.CLIENT,
             format=format,
             name="Example Pack",
-            version_id="1.0.0",
+            version_id="2026-07-04",
             minecraft_version="1.21.1",
             loader="fabric",
             loader_version="0.16.10",
@@ -181,6 +181,7 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
                 "modLoaders": [{"id": "fabric-0.16.10", "primary": True}],
             },
         )
+        self.assertEqual(manifest["version"], "2026-07-04")
         self.assertEqual(
             manifest["files"],
             [

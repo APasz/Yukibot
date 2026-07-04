@@ -148,6 +148,25 @@ class MaintenanceServiceTests(unittest.TestCase):
                     datetime.fromisoformat("2026-05-27T11:01:00+10:00"),
                 )
 
+    def test_future_anchor_defines_interval_phase_without_delaying_shorter_schedule(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "configuration.json"
+            with patch.object(MaintenanceService, "_BOT_CONFIGURATION_PATH", config_path):
+                service = MaintenanceService()
+                monday_anchor = _timestamp("2026-07-06T04:08:00+00:00")
+                service.update_restart_intervals(
+                    {RestartTarget.BOT: 24 * 60},
+                    anchor_timestamp=monday_anchor,
+                    saved_at_timestamp=_timestamp("2026-07-04T12:00:00+00:00"),
+                )
+
+                schedule = service.schedule_for(RestartTarget.BOT)
+                self.assertEqual(schedule.anchor_timestamp, monday_anchor)
+                self.assertEqual(
+                    service.next_restart_at(RestartTarget.BOT),
+                    datetime.fromisoformat("2026-07-05T04:08:00+00:00"),
+                )
+
     def test_recurring_interval_becomes_due_with_minute_precision(self) -> None:
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "configuration.json"

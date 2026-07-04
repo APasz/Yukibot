@@ -962,6 +962,9 @@ class ModWebTheme:
                     gap: 0.5rem;
                     flex-wrap: wrap;
                 }}
+                .mod-section-layout {{
+                    gap: 0.35rem;
+                }}
                 .mod-tab-empty-detail {{
                     max-width: min(56rem, 100%);
                 }}
@@ -1008,9 +1011,11 @@ class ModWebTheme:
                     flex: 999 1 24rem;
                     min-width: 0;
                 }}
-                .mod-mods-toolbar .mod-mods-toolbar-sort {{
-                    flex: 0 0 12rem;
-                    min-width: 12rem;
+                .mod-config-select.mod-mods-toolbar-sort {{
+                    flex: 0 0 9rem;
+                    width: 9rem;
+                    min-width: 9rem;
+                    max-width: 100%;
                 }}
                 .mod-mods-toolbar-result-count {{
                     flex: 0 0 auto;
@@ -3446,6 +3451,21 @@ class ModWebTheme:
                     padding: 1.2rem 1.25rem 1rem;
                     max-height: min(48rem, calc(100vh - 2rem));
                     overflow-y: auto;
+                    scrollbar-width: thin;
+                    scrollbar-color: rgba(161, 161, 170, 0.28) transparent;
+                }}
+                .mod-client-pack-body::-webkit-scrollbar {{
+                    width: 0.35rem;
+                }}
+                .mod-client-pack-body::-webkit-scrollbar-track {{
+                    background: transparent;
+                }}
+                .mod-client-pack-body::-webkit-scrollbar-thumb {{
+                    border-radius: 999px;
+                    background: rgba(161, 161, 170, 0.24);
+                }}
+                .mod-client-pack-body::-webkit-scrollbar-thumb:hover {{
+                    background: rgba(161, 161, 170, 0.4);
                 }}
                 .mod-client-pack-header {{
                     gap: 0.18rem;
@@ -3460,6 +3480,21 @@ class ModWebTheme:
                     margin-top: -0.2rem;
                     font-size: 0.78rem;
                     line-height: 1.35;
+                }}
+                .mod-client-pack-release-section {{
+                    gap: 0.65rem;
+                }}
+                .mod-client-pack-release-versions {{
+                    gap: 1.5rem;
+                }}
+                .mod-client-pack-release-version {{
+                    gap: 0.15rem;
+                }}
+                .mod-client-pack-changelog-block {{
+                    gap: 0.4rem;
+                }}
+                .mod-client-pack-changelog-hint {{
+                    margin-top: 0;
                 }}
                 .mod-client-pack-option-list,
                 .mod-client-pack-choice-list {{
@@ -3572,6 +3607,33 @@ class ModWebTheme:
                 .mod-client-pack-select .q-field__marginal,
                 .mod-client-pack-select .q-icon {{
                     color: var(--mod-text) !important;
+                }}
+                .mod-client-pack-changelog .q-field__control {{
+                    background: rgba(9, 9, 13, 0.96) !important;
+                    border: 1px solid rgba(82, 82, 91, 0.72) !important;
+                }}
+                .mod-client-pack-changelog .q-field__native,
+                .mod-client-pack-changelog .q-field__input,
+                .mod-client-pack-changelog textarea,
+                .mod-client-pack-changelog .q-field__label,
+                .mod-client-pack-changelog .q-field__marginal,
+                .mod-client-pack-changelog .q-icon {{
+                    color: var(--mod-text) !important;
+                    caret-color: var(--mod-purple) !important;
+                }}
+                .mod-client-pack-changelog .q-field__native::placeholder,
+                .mod-client-pack-changelog .q-field__input::placeholder,
+                .mod-client-pack-changelog textarea::placeholder {{
+                    color: var(--mod-muted) !important;
+                    opacity: 1;
+                }}
+                .mod-client-pack-changelog-content {{
+                    width: 100%;
+                    color: var(--mod-text) !important;
+                    font-size: 0.88rem;
+                    line-height: 1.5;
+                    white-space: pre-wrap;
+                    overflow-wrap: anywhere;
                 }}
                 .mod-client-pack-actions {{
                     justify-content: flex-end;
@@ -4658,7 +4720,7 @@ class ModWebTheme:
                         grid-column: 1 / -1;
                         width: 100%;
                     }}
-                    .mod-mods-toolbar .mod-mods-toolbar-sort {{
+                    .mod-config-select.mod-mods-toolbar-sort {{
                         grid-column: 1;
                         width: 100%;
                         min-width: 0;

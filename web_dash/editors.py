@@ -13,15 +13,12 @@ from .constants import (
     _HIDDEN_SETTING_CYCLE_VARIANT_COUNT,
     _HIDDEN_SETTING_GLYPHS,
     _SAME_ORIGIN_NODE_PROXY_BASE,
-    _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
     log,
 )
 from .nicegui_protocols import (
-    ModWebEventArgumentsContainer,
     ModWebNotificationType,
     ModWebUi,
     ModWebValueContainer,
-    _event_args_as_text,
     _value_as_object,
     _value_as_text,
 )
@@ -75,6 +72,7 @@ from .runtime_imports import (
     Select,
     Textarea,
     Timer,
+    TypeVar,
     Upload,
     asyncio,
     cached_member_role_color,
@@ -94,6 +92,7 @@ from .types import (
     ModWebConfigEditorLayout,
     ModWebConfigEditorShape,
     ModWebDirectUploadTarget,
+    ModWebFileSortOrder,
     ModWebNodeLink,
     ModWebModSortOrder,
     ModWebPageModel,
@@ -102,6 +101,8 @@ from .types import (
     _ModWebBadgeSpec,
     _SettingSecretConfig,
 )
+
+_SortableFileEntry = TypeVar("_SortableFileEntry", NodeSaveEntry, NodeBlueprintEntry)
 
 if TYPE_CHECKING:
     from nicegui.elements.codemirror.codemirror import SUPPORTED_LANGUAGES
@@ -781,9 +782,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         selected_root_id: str | None = saves.roots[0].id if saves.roots else None
         can_write: bool = self._user_has_level(user, model.save_write_level)
         show_search: bool = len(save_options) > 1
+        show_sort: bool = len(save_options) > 1
         show_root_selector: bool = model.supports_save_uploads and len(saves.roots) > 1
         show_upload_action: bool = model.supports_save_uploads and can_write and selected_root_id is not None
         show_write_lock_note: bool = (model.supports_save_uploads or model.supports_save_rename) and not can_write
+        current_search_query: str = model.search_query
+        current_sort_order: ModWebFileSortOrder = ModWebFileSortOrder.LATEST_MODIFIED
 
         root_select: Select | None = None
         save_upload_control: Upload | None = None
@@ -932,6 +936,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         options=save_options,
                         search_query=search_query,
                     )
+                    filtered_saves = self._sort_file_entries(filtered_saves, current_sort_order)
                     if not filtered_saves:
                         with ui.card().classes("mod-setting-card locked w-full"):
                             ui.label("No saves match that search.").classes("mod-subtitle text-sm")
@@ -947,21 +952,34 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                 can_write=can_write,
                             )
 
-                if show_search or show_upload_action:
+                if show_search or show_sort or show_upload_action:
                     with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
                         if show_search:
                             search_input: Input = (
-                                ui.input(placeholder="Search saves")
-                                .props(
-                                    "filled square dense clearable hide-bottom-space color=accent "
-                                    f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
-                                )
+                                ui.input(placeholder="Search saves", value=current_search_query)
+                                .props("filled square dense clearable hide-bottom-space color=accent")
                                 .classes("mod-config-search mod-settings-search")
                             )
-                            def _refresh_save_tiles(event: ModWebEventArgumentsContainer) -> None:
-                                _save_tile_grid.refresh(_event_args_as_text(event))
 
-                            search_input.on("update:model-value", _refresh_save_tiles)
+                            def _submit_save_search() -> None:
+                                nonlocal current_search_query
+                                current_search_query = _value_as_text(search_input)
+                                self._replace_browser_search_query(ui=ui, search_query=current_search_query)
+                                _save_tile_grid.refresh(current_search_query)
+
+                            search_input.on("keydown.enter", _submit_save_search)
+                        if show_sort:
+
+                            def _sort_save_tiles(event: ModWebValueContainer) -> None:
+                                nonlocal current_sort_order
+                                current_sort_order = ModWebFileSortOrder(_value_as_text(event))
+                                _save_tile_grid.refresh(current_search_query)
+
+                            self._render_file_sort_select(
+                                ui=ui,
+                                default_order=ModWebFileSortOrder.LATEST_MODIFIED,
+                                on_sort=_sort_save_tiles,
+                            )
                         with ui.row().classes("mod-tab-toolbar-actions"):
                             if show_upload_action:
                                 ui.button("Upload Save", on_click=upload_dialog.open).classes("mod-list-button")
@@ -975,7 +993,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             f"{model.save_write_level.name.title()} access is required to manage saves for this app."
                         ).classes("mod-subtitle text-sm mod-tab-empty-detail")
                     return
-                _save_tile_grid("")
+                _save_tile_grid(current_search_query)
 
     def _render_blueprints_editor(self, *, ui: ModWebUi, model: ModWebBasePageModel, user: ModWebUser) -> None:
         blueprints: NodeBlueprintList | None = model.blueprints
@@ -990,8 +1008,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
         blueprint_options: tuple[ModWebSearchOption, ...] = self._blueprint_options(blueprints.blueprints)
         show_search: bool = len(blueprint_options) > 1
+        show_sort: bool = len(blueprint_options) > 1
         target_session_name: str | None = blueprints.default_session_name
         can_upload_blueprints: bool = target_session_name is not None
+        current_search_query: str = model.search_query
+        current_sort_order: ModWebFileSortOrder = ModWebFileSortOrder.NAME_ASCENDING
 
         async def upload_blueprints(event: "MultiUploadEventArguments") -> None:
             if target_session_name is None:
@@ -1058,6 +1079,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         options=blueprint_options,
                         search_query=search_query,
                     )
+                    filtered_blueprints = self._sort_file_entries(filtered_blueprints, current_sort_order)
                     if not filtered_blueprints:
                         with ui.card().classes("mod-setting-card locked w-full"):
                             ui.label("No blueprint files match that search.").classes("mod-subtitle text-sm")
@@ -1069,18 +1091,30 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
                     if show_search:
                         search_input: Input = (
-                            ui.input(placeholder="Search blueprints")
-                            .props(
-                                "filled square dense clearable hide-bottom-space color=accent "
-                                f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
-                            )
+                            ui.input(placeholder="Search blueprints", value=current_search_query)
+                            .props("filled square dense clearable hide-bottom-space color=accent")
                             .classes("mod-config-search mod-settings-search")
                         )
 
-                        def _refresh_blueprint_tiles(event: ModWebEventArgumentsContainer) -> None:
-                            _blueprint_tile_grid.refresh(_event_args_as_text(event))
+                        def _submit_blueprint_search() -> None:
+                            nonlocal current_search_query
+                            current_search_query = _value_as_text(search_input)
+                            self._replace_browser_search_query(ui=ui, search_query=current_search_query)
+                            _blueprint_tile_grid.refresh(current_search_query)
 
-                        search_input.on("update:model-value", _refresh_blueprint_tiles)
+                        search_input.on("keydown.enter", _submit_blueprint_search)
+                    if show_sort:
+
+                        def _sort_blueprint_tiles(event: ModWebValueContainer) -> None:
+                            nonlocal current_sort_order
+                            current_sort_order = ModWebFileSortOrder(_value_as_text(event))
+                            _blueprint_tile_grid.refresh(current_search_query)
+
+                        self._render_file_sort_select(
+                            ui=ui,
+                            default_order=ModWebFileSortOrder.NAME_ASCENDING,
+                            on_sort=_sort_blueprint_tiles,
+                        )
                     with ui.row().classes("mod-tab-toolbar-actions"):
                         upload_button = ui.button("Upload Blueprint", on_click=upload_dialog.open).classes(
                             "mod-list-button"
@@ -1101,7 +1135,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             "mod-subtitle text-sm mod-tab-empty-detail"
                         )
                     return
-                _blueprint_tile_grid("")
+                _blueprint_tile_grid(current_search_query)
 
     def _render_blueprint_tile(
         self,
@@ -1383,7 +1417,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         invalid_setting_keys: set[str] = set[str]()
         save_button: Button | None = None
         reload_button: Button | None = None
-        search_query_text: str = ""
+        search_query_text: str = model.search_query
         required_save_level: Power_Level = (
             Access_Control.parse_level(settings.required_save_level_name) or Power_Level.user
         )
@@ -1518,26 +1552,25 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 )
                 with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
                     search_input = (
-                        ui.input(placeholder="Search settings")
-                        .props(
-                            "filled square dense clearable hide-bottom-space color=accent "
-                            f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
-                        )
+                        ui.input(placeholder="Search settings", value=search_query_text)
+                        .props("filled square dense clearable hide-bottom-space color=accent")
                         .classes("mod-config-search mod-settings-search")
                     )
-                    def _refresh_setting_cards(event: ModWebEventArgumentsContainer) -> None:
+
+                    def _submit_setting_search() -> None:
                         nonlocal search_query_text
-                        search_query_text = _event_args_as_text(event)
+                        search_query_text = _value_as_text(search_input)
+                        self._replace_browser_search_query(ui=ui, search_query=search_query_text)
                         _setting_card_list.refresh(search_query_text)
 
-                    search_input.on("update:model-value", _refresh_setting_cards)
+                    search_input.on("keydown.enter", _submit_setting_search)
                     with ui.row().classes("mod-tab-toolbar-actions"):
                         reload_button = ui.button("Reload", on_click=reload_settings).classes(
                             "mod-list-button secondary"
                         )
                         save_button = ui.button("Save", on_click=save_settings).classes("mod-list-button")
                         save_button.disable()
-                _setting_card_list("")
+                _setting_card_list(search_query_text)
                 refresh_save_button()
 
     def _render_setting_card(
@@ -2845,6 +2878,46 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return ()
         return tuple[NodeBlueprintEntry, ...](
             blueprint for blueprint in blueprints if blueprint.id in matching_ids or not matching_ids
+        )
+
+    @staticmethod
+    def _sort_file_entries(
+        entries: tuple[_SortableFileEntry, ...],
+        order: ModWebFileSortOrder,
+    ) -> tuple[_SortableFileEntry, ...]:
+        alphabetic: list[_SortableFileEntry] = sorted(
+            entries,
+            key=lambda entry: (entry.label.casefold(), entry.relative_path.casefold()),
+        )
+        if order is ModWebFileSortOrder.NAME_ASCENDING:
+            return tuple(alphabetic)
+        if order is ModWebFileSortOrder.NAME_DESCENDING:
+            return tuple(reversed(alphabetic))
+        if order is ModWebFileSortOrder.LATEST_MODIFIED:
+            return tuple(sorted(alphabetic, key=lambda entry: entry.modified_at, reverse=True))
+        if order is ModWebFileSortOrder.OLDEST_MODIFIED:
+            return tuple(sorted(alphabetic, key=lambda entry: entry.modified_at))
+        if order is ModWebFileSortOrder.SIZE_DESCENDING:
+            return tuple(sorted(alphabetic, key=lambda entry: entry.size_bytes, reverse=True))
+        if order is ModWebFileSortOrder.SIZE_ASCENDING:
+            return tuple(sorted(alphabetic, key=lambda entry: entry.size_bytes))
+        raise ValueError(f"Unsupported file sort order: {order!r}")
+
+    @staticmethod
+    def _render_file_sort_select(
+        *,
+        ui: ModWebUi,
+        default_order: ModWebFileSortOrder,
+        on_sort: Callable[[ModWebValueContainer], None],
+    ) -> Select:
+        return (
+            ui.select(
+                {order.value: order.label for order in ModWebFileSortOrder},
+                value=default_order.value,
+                on_change=on_sort,
+            )
+            .props("filled square dense hide-bottom-space color=accent options-dark")
+            .classes("mod-config-select mod-mods-toolbar-sort")
         )
 
     @classmethod

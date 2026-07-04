@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
+    CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     ModDistributionMode,
     app_title_font_default_label,
     app_title_font_options,
@@ -33,6 +34,7 @@ from .app_page_updates import ModWebAppPageUpdateMixin
 from .constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
+    _APP_SEARCH_QUERY_PARAM,
     _APP_SECTION_QUERY_PARAM,
     _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
@@ -83,6 +85,7 @@ from .runtime_imports import (
     PackPurpose,
     Power_Level,
     Select,
+    Textarea,
     Timer,
     Upload,
     assert_never,
@@ -1129,7 +1132,10 @@ class ModWebAppPageMixin(
             case ModWebAppSectionKind.MODS:
                 if not isinstance(model, ModWebPageModel):
                     raise TypeError("The Mods section requires a full mod page model.")
-                return self._mods_header_badges(model.mods.summary)
+                return self._mods_header_badges(
+                    model.mods.summary,
+                    client_pack_version=model.client_pack_published_version,
+                )
             case ModWebAppSectionKind.CONFIGS:
                 return self._config_section_badges(model=model, user=user)
             case ModWebAppSectionKind.SETTINGS:
@@ -3228,12 +3234,49 @@ class ModWebAppPageMixin(
         return tabs[0].tab_id
 
     @staticmethod
+    def _initial_page_search_query(current_url: str) -> str:
+        query_by_key: dict[str, str] = {
+            key: value for key, value in parse_qsl(urlsplit(current_url).query, keep_blank_values=True)
+        }
+        return query_by_key.get(_APP_SEARCH_QUERY_PARAM, "").strip()
+
+    @staticmethod
+    def _replace_browser_search_query(*, ui: ModWebUi, search_query: str) -> None:
+        encoded_query: str = json.dumps(search_query.strip())
+        encoded_param: str = json.dumps(_APP_SEARCH_QUERY_PARAM)
+        ui.run_javascript(
+            f"""
+            (() => {{
+              const url = new URL(window.location.href);
+              const query = {encoded_query};
+              if (query) {{
+                url.searchParams.set({encoded_param}, query);
+              }} else {{
+                url.searchParams.delete({encoded_param});
+              }}
+              window.history.replaceState(window.history.state, '', `${{url.pathname}}${{url.search}}${{url.hash}}`);
+            }})();
+            """
+        )
+
+    @staticmethod
     def _page_tab_url(current_url: str, *, tab_id: str) -> str:
-        return ModWebUiHelpersMixin._request_url_with_query_values(
+        query_by_key: dict[str, str] = {
+            key: value for key, value in parse_qsl(urlsplit(current_url).query, keep_blank_values=True)
+        }
+        updated_url: str = ModWebUiHelpersMixin._request_url_with_query_values(
             current_url,
             param_name=_APP_SECTION_QUERY_PARAM,
             values=(tab_id,),
         )
+        current_tab_id: str = query_by_key.get(_APP_SECTION_QUERY_PARAM, "").strip().casefold()
+        if current_tab_id and current_tab_id != tab_id.casefold():
+            return ModWebUiHelpersMixin._request_url_with_query_values(
+                updated_url,
+                param_name=_APP_SEARCH_QUERY_PARAM,
+                values=(),
+            )
+        return updated_url
 
     @staticmethod
     def _replace_browser_url(*, ui: ModWebUi, target_url: str) -> None:
@@ -3256,6 +3299,10 @@ class ModWebAppPageMixin(
 
         initial_tab_id: str = self._initial_page_tab_id(current_url=current_url, tabs=tabs)
         current_section_url: str = self._page_tab_url(current_url, tab_id=initial_tab_id)
+        section_model: ModWebBasePageModel = replace(
+            model,
+            search_query=self._initial_page_search_query(current_url),
+        )
         tab_by_id: dict[str, Tab] = {}
         section_chrome_by_tab_id: dict[str, "Element"] = {}
         section_runtime_appliers: list[Callable[[ModWebBasePageModel], None]] = []
@@ -3278,7 +3325,7 @@ class ModWebAppPageMixin(
             current_section_url = self._page_tab_url(current_section_url, tab_id=next_tab_id)
             ui.navigate.to(current_section_url)
 
-        with ui.column().classes("w-full gap-3"):
+        with ui.column().classes("mod-section-layout w-full"):
             with ui.row().classes("mod-section-strip w-full items-start justify-between gap-3 flex-wrap"):
                 with ui.element("div").classes("mod-section-tabs-shell"):
                     with ui.tabs(value=initial_tab_id, on_change=sync_section_url).classes("mod-section-tabs") as section_tabs:
@@ -3374,7 +3421,7 @@ class ModWebAppPageMixin(
                             continue
                         section_runtime_model = self._render_page_section(
                             ui=ui,
-                            model=model,
+                            model=section_model,
                             user=user,
                             tab=tab,
                             chat_surface=chat_surface,
@@ -3515,7 +3562,7 @@ class ModWebAppPageMixin(
 
     @staticmethod
     def _client_pack_format_options(app_scope: str | None) -> dict[str, str]:
-        options: dict[str, str] = {PackFormat.GENERIC_ZIP.value: "Generic ZIP"}
+        options: dict[str, str] = {}
         if mod_capabilities_for_scope(app_scope).supports_launcher_formats:
             options.update(
                 {
@@ -3523,7 +3570,27 @@ class ModWebAppPageMixin(
                     PackFormat.CURSEFORGE.value: "CurseForge ZIP",
                 }
             )
+        options[PackFormat.GENERIC_ZIP.value] = "Generic ZIP"
         return options
+
+    @staticmethod
+    def _default_client_pack_format(app_scope: str | None) -> PackFormat:
+        if mod_capabilities_for_scope(app_scope).supports_launcher_formats:
+            return PackFormat.MODRINTH
+        return PackFormat.GENERIC_ZIP
+
+    @staticmethod
+    def _default_mod_download_names(
+        mods: tuple[NodeModEntry, ...],
+        distribution_mode: ModDistributionMode,
+    ) -> frozenset[str]:
+        return frozenset(
+            entry.name
+            for entry in mods
+            if entry.downloadable
+            and entry.mod_type is not ModType.BUILTIN
+            and (distribution_mode is not ModDistributionMode.RAW_ENABLED or entry.enabled)
+        )
 
     def _render_mods_section(
         self,
@@ -3537,18 +3604,14 @@ class ModWebAppPageMixin(
         mod_options = self._mod_options(model.mods.mods)
         show_search: bool = len(mod_options) > 1
         show_sort: bool = len(mod_options) > 1
-        current_search_query: str = ""
+        current_search_query: str = model.search_query
         current_sort_order: ModWebModSortOrder = ModWebModSortOrder.NEWEST
         downloadable_names: tuple[str, ...] = tuple[str, ...](
             entry.name for entry in model.mods.mods if entry.downloadable
         )
-        selected_mod_names: set[str] = {
-            entry.name
-            for entry in model.mods.mods
-            if entry.downloadable
-            and entry.mod_type not in {ModType.BUILTIN, ModType.SERVER}
-            and (capabilities.mode is not ModDistributionMode.RAW_ENABLED or entry.enabled)
-        }
+        selected_mod_names: set[str] = set(
+            self._default_mod_download_names(model.mods.mods, capabilities.mode)
+        )
         optional_client_entries: tuple[NodeModEntry, ...] = tuple(
             entry
             for entry in model.mods.mods
@@ -3841,7 +3904,7 @@ class ModWebAppPageMixin(
 
         def selected_client_pack_format() -> PackFormat:
             return (
-                PackFormat.GENERIC_ZIP
+                self._default_client_pack_format(model.app_scope)
                 if client_pack_format_select is None
                 else PackFormat(_value_as_text(client_pack_format_select))
             )
@@ -3850,6 +3913,12 @@ class ModWebAppPageMixin(
             *,
             mod_names: tuple[str, ...],
         ) -> None:
+            if model.client_pack_content_dirty:
+                ui.notify(
+                    "Publish the client-pack configuration before downloading it.",
+                    type="warning",
+                )
+                return
             pack_format = selected_client_pack_format()
             client_pack_dialog.close()
             query: str = urlencode(
@@ -3911,6 +3980,8 @@ class ModWebAppPageMixin(
         }
         config_default_selects: dict[str, Select] = {}
         config_rows: dict[str, Element] = {}
+        client_pack_changelog_draft: str = model.client_pack_changelog or ""
+        client_pack_changelog_input: Textarea | None = None
         config_default_names: dict[str, str] = {
             entry.client_pack.choice_group: entry.name
             for entry in configurable_client_entries
@@ -3941,72 +4012,79 @@ class ModWebAppPageMixin(
                     all(token in search_text for token in query_tokens)
                 )
 
-        async def save_client_pack_configuration() -> None:
+        def update_client_pack_changelog_draft(
+            event: ModWebValueContainer,
+        ) -> None:
+            nonlocal client_pack_changelog_draft
+            client_pack_changelog_draft = _value_as_text(event)
+
+        def client_pack_configuration_updates() -> tuple[tuple[NodeModEntry, ClientPackConfig], ...]:
             choice_groups = configured_choice_groups()
+            for group_name, entries in choice_groups.items():
+                if len(entries) < 2:
+                    raise ValueError(f"Choice group {group_name!r} requires at least two mods.")
+                selected_default = _value_as_text(config_default_selects[group_name])
+                config_default_names[group_name] = selected_default
+
+            updates: list[tuple[NodeModEntry, ClientPackConfig]] = []
+            for entry in configurable_client_entries:
+                policy = ClientPackPolicy(_value_as_text(config_policy_selects[entry.name]))
+                if policy is ClientPackPolicy.REQUIRED:
+                    client_pack = ClientPackConfig(
+                        included_in_client=entry.client_pack.included_in_client,
+                        policy=policy,
+                    )
+                elif policy is ClientPackPolicy.OPTIONAL:
+                    client_pack = ClientPackConfig(
+                        included_in_client=entry.client_pack.included_in_client,
+                        policy=policy,
+                        default_selected=(
+                            entry.client_pack.default_selected
+                            if entry.client_pack.policy is ClientPackPolicy.OPTIONAL
+                            else True
+                        ),
+                    )
+                else:
+                    group_name = config_group_names[entry.name]
+                    if not group_name:
+                        raise ValueError(f"{entry.friendly} requires an alternative group ID.")
+                    client_pack = ClientPackConfig(
+                        included_in_client=entry.client_pack.included_in_client,
+                        policy=policy,
+                        choice_group=group_name,
+                        default_choice=config_default_names.get(group_name) == entry.name,
+                    )
+                updates.append((entry, client_pack))
+            return tuple(updates)
+
+        async def persist_client_pack_configuration() -> None:
+            updates = client_pack_configuration_updates()
+            await self._remote_json_async(
+                node=self._remote_node_link(model.node_name),
+                app_name=model.app_name,
+                path=f"/apps/{quote(model.app_name, safe='')}/mods/client-pack-config",
+                scopes=(NodeApiScope.MODS_WRITE,),
+                user=user,
+                method="PUT",
+                json_payload={
+                    "mods": [
+                        {
+                            "mod_name": entry.name,
+                            "client_pack": client_pack.model_dump(mode="json"),
+                        }
+                        for entry, client_pack in updates
+                    ],
+                },
+            )
+            self._backend.set_client_pack_changelog_draft(
+                node_name=model.node_name,
+                app_name=model.app_name,
+                changelog=client_pack_changelog_draft,
+            )
+
+        async def save_client_pack_configuration() -> None:
             try:
-                for group_name, entries in choice_groups.items():
-                    if len(entries) < 2:
-                        raise ValueError(f"Choice group {group_name!r} requires at least two mods.")
-                    selected_default = _value_as_text(config_default_selects[group_name])
-                    config_default_names[group_name] = selected_default
-
-                updates: list[tuple[NodeModEntry, ClientPackConfig]] = []
-                for entry in configurable_client_entries:
-                    policy = ClientPackPolicy(_value_as_text(config_policy_selects[entry.name]))
-                    if policy is ClientPackPolicy.REQUIRED:
-                        client_pack = ClientPackConfig(
-                            policy=policy,
-                            bundled_required=(
-                                entry.client_pack.bundled_required
-                                if entry.client_pack.policy is ClientPackPolicy.REQUIRED
-                                else False
-                            ),
-                        )
-                    elif policy is ClientPackPolicy.OPTIONAL:
-                        client_pack = ClientPackConfig(
-                            policy=policy,
-                            default_selected=(
-                                entry.client_pack.default_selected
-                                if entry.client_pack.policy is ClientPackPolicy.OPTIONAL
-                                else True
-                            ),
-                        )
-                    else:
-                        group_name = config_group_names[entry.name]
-                        if not group_name:
-                            raise ValueError(f"{entry.friendly} requires an alternative group ID.")
-                        client_pack = ClientPackConfig(
-                            policy=policy,
-                            choice_group=group_name,
-                            default_choice=config_default_names.get(group_name) == entry.name,
-                        )
-                    updates.append((entry, client_pack))
-
-                await self._remote_json_async(
-                    node=self._remote_node_link(model.node_name),
-                    app_name=model.app_name,
-                    path=f"/apps/{quote(model.app_name, safe='')}/mods/client-pack-config",
-                    scopes=(NodeApiScope.MODS_WRITE,),
-                    user=user,
-                    method="PUT",
-                    json_payload={
-                        "mods": [
-                            {
-                                "mod_name": entry.name,
-                                "client_pack": client_pack.model_dump(mode="json"),
-                            }
-                            for entry, client_pack in updates
-                        ],
-                    },
-                )
-                await self._remote_json_async(
-                    node=self._remote_node_link(model.node_name),
-                    app_name=model.app_name,
-                    path=f"/apps/{quote(model.app_name, safe='')}/mods/client-pack-config/publish",
-                    scopes=(NodeApiScope.MODS_WRITE,),
-                    user=user,
-                    method="POST",
-                )
+                await persist_client_pack_configuration()
             except Exception as xcp:
                 log.warning("Client-pack configuration update failed for %s: %s", model.app_name, xcp)
                 ui.notify(f"Client-pack configuration failed: {xcp}", type="negative", multi_line=True)
@@ -4014,6 +4092,35 @@ class ModWebAppPageMixin(
 
             client_pack_config_dialog.close()
             ui.notify("Saved client-pack configuration.", type="positive")
+            ui.navigate.reload()
+
+        async def publish_client_pack_configuration() -> None:
+            changelog = client_pack_changelog_draft.strip()
+            if not changelog:
+                ui.notify("Add a changelog before publishing the client pack.", type="warning")
+                return
+            try:
+                await persist_client_pack_configuration()
+                result = await self._remote_json_async(
+                    node=self._remote_node_link(model.node_name),
+                    app_name=model.app_name,
+                    path=f"/apps/{quote(model.app_name, safe='')}/mods/client-pack-config/publish",
+                    scopes=(NodeApiScope.MODS_WRITE,),
+                    user=user,
+                    method="POST",
+                    json_payload={"changelog": changelog},
+                )
+            except Exception as xcp:
+                log.warning("Client-pack publication failed for %s: %s", model.app_name, xcp)
+                ui.notify(f"Client-pack publication failed: {xcp}", type="negative", multi_line=True)
+                return
+
+            client_pack_config_dialog.close()
+            self._backend.clear_client_pack_changelog_draft(
+                node_name=model.node_name,
+                app_name=model.app_name,
+            )
+            ui.notify(str(result.get("message") or "Published client pack."), type="positive")
             ui.navigate.reload()
 
         client_pack_config_dialog = ui.dialog()
@@ -4026,7 +4133,7 @@ class ModWebAppPageMixin(
                                 "text-xl font-black mod-title-small"
                             )
                             ui.label(
-                                "Set each eligible mod's pack policy and publish the default pack."
+                                "Save policy changes independently, then publish them with release notes."
                             ).classes("mod-subtitle text-sm")
                         (
                             ui.input(placeholder="Search pack mods")
@@ -4143,6 +4250,43 @@ class ModWebAppPageMixin(
                                 entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
                             )
                         render_config_default_choices()
+                        with ui.column().classes(
+                            "mod-client-pack-section mod-client-pack-release-section w-full"
+                        ):
+                            ui.label("Release").classes("mod-stat-label")
+                            with ui.row().classes(
+                                "mod-client-pack-release-versions w-full flex-wrap"
+                            ):
+                                with ui.column().classes("mod-client-pack-release-version"):
+                                    ui.label("Current version").classes("mod-subtitle text-xs")
+                                    ui.label(
+                                        model.client_pack_published_version or "Unpublished"
+                                    ).classes("mod-stat-value")
+                                with ui.column().classes("mod-client-pack-release-version"):
+                                    ui.label("Proposed next version").classes("mod-subtitle text-xs")
+                                    ui.label(
+                                        model.client_pack_next_version or "Unavailable"
+                                    ).classes("mod-stat-value")
+                            with ui.column().classes("mod-client-pack-changelog-block w-full"):
+                                client_pack_changelog_input = (
+                                    ui.textarea(
+                                        "Changelog",
+                                        value=client_pack_changelog_draft,
+                                        placeholder="Describe client-pack changes in this release…",
+                                        on_change=update_client_pack_changelog_draft,
+                                    )
+                                    .props(
+                                        "filled square stack-label hide-bottom-space color=accent rows=3 "
+                                        f"maxlength={CLIENT_PACK_CHANGELOG_MAX_LENGTH}"
+                                    )
+                                    .classes("w-full mod-config-input mod-client-pack-changelog")
+                                )
+                                ui.label(
+                                    "Draft notes are shared when this configuration is saved."
+                                ).classes(
+                                    "mod-client-pack-section-hint mod-client-pack-changelog-hint "
+                                    "mod-subtitle text-xs"
+                                )
                         with ui.row().classes("mod-client-pack-actions w-full"):
                             ui.button("Cancel", on_click=client_pack_config_dialog.close).classes(
                                 "mod-list-button secondary"
@@ -4150,7 +4294,59 @@ class ModWebAppPageMixin(
                             ui.button(
                                 "Save",
                                 on_click=save_client_pack_configuration,
+                            ).classes("mod-list-button secondary")
+                            ui.button(
+                                "Publish",
+                                on_click=publish_client_pack_configuration,
                             ).classes("mod-list-button")
+
+        def open_client_pack_configuration() -> None:
+            nonlocal client_pack_changelog_draft
+            shared_draft = self._backend.client_pack_changelog_draft(
+                node_name=model.node_name,
+                app_name=model.app_name,
+            )
+            if shared_draft is not None:
+                client_pack_changelog_draft = shared_draft
+                if client_pack_changelog_input is not None:
+                    client_pack_changelog_input.set_value(shared_draft)
+            client_pack_config_dialog.open()
+
+        client_pack_release_changes: tuple[tuple[str, str], ...] = tuple(
+            (release.version, release.changelog) for release in model.client_pack_releases
+        )
+        if not client_pack_release_changes and (
+            model.client_pack_published_version is not None
+            and model.client_pack_published_changelog is not None
+        ):
+            client_pack_release_changes = (
+                (
+                    model.client_pack_published_version,
+                    model.client_pack_published_changelog,
+                ),
+            )
+
+        client_pack_changes_dialog = ui.dialog()
+        if supports_client_pack:
+            with client_pack_changes_dialog:
+                with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
+                    with ui.column().classes("mod-client-pack-body w-full"):
+                        with ui.column().classes("mod-client-pack-header w-full"):
+                            ui.label("Client Pack Changes").classes("text-xl font-black mod-title-small")
+                            ui.label("Published versions, newest first.").classes("mod-subtitle text-sm")
+                        if client_pack_release_changes:
+                            for version, changelog in reversed(client_pack_release_changes):
+                                with ui.column().classes("mod-client-pack-section w-full"):
+                                    ui.label(version).classes("mod-stat-label")
+                                    ui.label(changelog).classes("mod-client-pack-changelog-content")
+                        else:
+                            ui.label("No changelog is available.").classes(
+                                "mod-client-pack-changelog-content"
+                            )
+                        with ui.row().classes("mod-client-pack-actions w-full"):
+                            ui.button("Close", on_click=client_pack_changes_dialog.close).classes(
+                                "mod-list-button secondary"
+                            )
 
         client_pack_dialog = ui.dialog()
         if supports_client_pack:
@@ -4167,7 +4363,7 @@ class ModWebAppPageMixin(
                                 ui.label("Pack format").classes("mod-stat-label")
                                 client_pack_format_select = ui.select(
                                     self._client_pack_format_options(model.app_scope),
-                                    value=PackFormat.GENERIC_ZIP.value,
+                                    value=self._default_client_pack_format(model.app_scope).value,
                                 ).props("filled square dense hide-bottom-space color=accent options-dark").classes(
                                     "mod-config-select mod-client-pack-select w-full"
                                 )
@@ -4215,6 +4411,20 @@ class ModWebAppPageMixin(
                                                 )
                                                 .classes("mod-config-select mod-client-pack-select w-full")
                                             )
+                        with ui.row().classes("mod-client-pack-actions w-full"):
+                            ui.button("Cancel", on_click=client_pack_dialog.close).classes("mod-list-button secondary")
+                            ui.button("Changes", on_click=client_pack_changes_dialog.open).classes(
+                                "mod-list-button secondary"
+                            )
+                            client_pack_download_button = ui.button(
+                                "Download",
+                                on_click=download_configured_client_pack,
+                            ).classes("mod-list-button")
+                            client_pack_download_button.set_enabled(not model.client_pack_content_dirty)
+                        if model.client_pack_content_dirty:
+                            ui.label(
+                                "This client pack has unpublished changes. Publish them before downloading."
+                            ).classes("mod-client-pack-section-hint mod-subtitle text-sm")
                         if required_entries:
                             with ui.column().classes("mod-client-pack-section w-full"):
                                 ui.label("Required").classes("mod-stat-label")
@@ -4225,10 +4435,6 @@ class ModWebAppPageMixin(
                                     for entry in required_entries:
                                         with ui.row().classes("mod-client-pack-option w-full items-center"):
                                             ui.label(entry.friendly).classes("mod-client-pack-option-label")
-                                            ui.label("Required").classes("mod-pill enabled")
-                        with ui.row().classes("mod-client-pack-actions w-full"):
-                            ui.button("Cancel", on_click=client_pack_dialog.close).classes("mod-list-button secondary")
-                            ui.button("Download", on_click=download_configured_client_pack).classes("mod-list-button")
 
         with ui.dialog() as delete_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -4302,9 +4508,10 @@ class ModWebAppPageMixin(
                                 checkboxes[entry.name] = checkbox
                                 checkbox.set_value(entry.name in selected_mod_names)
 
-                def _refresh_mod_rows(event: ModWebEventArgumentsContainer) -> None:
+                def _submit_mod_search(search_input: ModWebValueContainer) -> None:
                     nonlocal current_search_query
-                    current_search_query = _event_args_as_text(event)
+                    current_search_query = _value_as_text(search_input)
+                    self._replace_browser_search_query(ui=ui, search_query=current_search_query)
                     _mod_download_rows.refresh(current_search_query)
 
                 def _sort_mod_rows(event: ModWebValueContainer) -> None:
@@ -4320,14 +4527,15 @@ class ModWebAppPageMixin(
                     download_selected=download_selected if capabilities.supports_raw_download else None,
                     open_client_pack=client_pack_dialog.open if supports_client_pack else None,
                     open_client_pack_config=(
-                        client_pack_config_dialog.open
+                        open_client_pack_configuration
                         if supports_client_pack and self._user_has_level(user, Power_Level.admin)
                         else None
                     ),
                     delete_selected=delete_dialog.open,
                     upload_mod=upload_picker_action,
                     show_search=show_search,
-                    on_search=_refresh_mod_rows if show_search else None,
+                    search_query=current_search_query,
+                    on_search=_submit_mod_search if show_search else None,
                     show_sort=show_sort,
                     on_sort=_sort_mod_rows if show_sort else None,
                 )
@@ -4359,11 +4567,11 @@ class ModWebAppPageMixin(
                     self._register_client_cleanup(ui=ui, cleanup=interrupt_direct_upload_transfer)
                     with inline_upload_control.add_slot("list"):
                         with ui.element("div").classes("mod-mod-list-drop-shell w-full"):
-                            _mod_download_rows("")
+                            _mod_download_rows(current_search_query)
                             with ui.element("div").classes("mod-mod-list-drop-overlay"):
                                 ui.label("Drop mod files to upload").classes("text-sm")
                 else:
-                    _mod_download_rows("")
+                    _mod_download_rows(current_search_query)
         return
 
     def _render_global_app_toolbar(
@@ -4946,7 +5154,8 @@ class ModWebAppPageMixin(
         open_client_pack_config: Callable[[], None] | None = None,
         upload_mod: Callable[[], object] | None = None,
         show_search: bool = False,
-        on_search: Callable[[ModWebEventArgumentsContainer], None] | None = None,
+        search_query: str = "",
+        on_search: Callable[[ModWebValueContainer], None] | None = None,
         show_sort: bool = False,
         on_sort: Callable[[ModWebValueContainer], None] | None = None,
     ) -> _ModWebModToolbarBindings:
@@ -4974,14 +5183,15 @@ class ModWebAppPageMixin(
                     if on_search is None:
                         raise ValueError("Mod search handler is not available.")
                     search_input: Input = (
-                        ui.input(placeholder="Search mods")
-                        .props(
-                            "filled square dense clearable hide-bottom-space color=accent "
-                            f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
-                        )
+                        ui.input(placeholder="Search mods", value=search_query)
+                        .props("filled square dense clearable hide-bottom-space color=accent")
                         .classes("mod-config-search mod-settings-search mod-mods-toolbar-search")
                     )
-                    search_input.on("update:model-value", on_search)
+
+                    def _submit_search() -> None:
+                        on_search(search_input)
+
+                    search_input.on("keydown.enter", _submit_search)
                 if show_sort:
                     if on_sort is None:
                         raise ValueError("Mod sort handler is not available.")
@@ -4989,7 +5199,6 @@ class ModWebAppPageMixin(
                         ui.select(
                             {order.value: order.label for order in ModWebModSortOrder},
                             value=ModWebModSortOrder.NEWEST.value,
-                            label="Sort",
                             on_change=on_sort,
                         )
                         .props("filled square dense hide-bottom-space color=accent options-dark")
@@ -5100,10 +5309,16 @@ class ModWebAppPageMixin(
         return None
 
     @staticmethod
-    def _mods_header_badges(summary: NodeModSummary) -> tuple[_ModWebBadgeSpec, ...]:
+    def _mods_header_badges(
+        summary: NodeModSummary,
+        *,
+        client_pack_version: str | None = None,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
         mod_label = "mod" if summary.total_count == 1 else "mods"
         coremod_label = "coremod" if summary.coremod_count == 1 else "coremods"
         badges: list[_ModWebBadgeSpec] = [_ModWebBadgeSpec(text=f"{summary.total_count} {mod_label}", tone="black")]
+        if client_pack_version is not None:
+            badges.append(_ModWebBadgeSpec(text=f"pack {client_pack_version}", tone="grey"))
         if summary.non_downloadable_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{summary.non_downloadable_count} blocked", tone="warn"))
         if summary.downloadable_count > 0:
