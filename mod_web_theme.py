@@ -3864,17 +3864,6 @@ class ModWebTheme:
                     padding-top: 0.9rem;
                     border-top: 1px solid rgba(127, 29, 29, 0.52);
                 }}
-                @keyframes mod-dialog-accent-arrive {{
-                    0% {{
-                        opacity: 0;
-                        background-position: 100% 0;
-                    }}
-                    35% {{ opacity: 1; }}
-                    100% {{
-                        opacity: 0.78;
-                        background-position: 0 0;
-                    }}
-                }}
                 .mod-dialog-card {{
                     width: min(30rem, calc(100vw - 2rem)) !important;
                     max-width: none !important;
@@ -3898,33 +3887,6 @@ class ModWebTheme:
                     width: 100%;
                     min-width: 0;
                     max-width: 100%;
-                }}
-                .mod-dialog-card::before {{
-                    content: "";
-                    position: absolute;
-                    z-index: 5;
-                    top: 0;
-                    left: 0;
-                    width: 100%;
-                    height: 2px;
-                    pointer-events: none;
-                    background:
-                        linear-gradient(
-                            90deg,
-                            transparent 0%,
-                            rgba(139, 92, 246, 0.28) 22%,
-                            #c4b5fd 50%,
-                            rgba(139, 92, 246, 0.28) 78%,
-                            transparent 100%
-                        ) 100% 0 / 220% 100% no-repeat;
-                    animation: mod-dialog-accent-arrive 680ms cubic-bezier(0.22, 1, 0.36, 1) both;
-                }}
-                @media (prefers-reduced-motion: reduce) {{
-                    .mod-dialog-card::before {{
-                        animation: none !important;
-                        opacity: 0.55;
-                        background-position: 50% 0;
-                    }}
                 }}
                 @media (max-width: 36rem) {{
                     .mod-dialog-card {{
@@ -4152,6 +4114,67 @@ class ModWebTheme:
                 .mod-app-details-dialog-card {{
                     width: min(44rem, calc(100vw - 1.5rem)) !important;
                 }}
+                .mod-metadata-review-card {{
+                    width: min(34rem, calc(100vw - 1.5rem)) !important;
+                }}
+                .mod-metadata-review-summary {{
+                    gap: 0.2rem;
+                    padding: 0.75rem 0.85rem;
+                    border: 1px solid rgba(82, 82, 91, 0.7);
+                    background: rgba(15, 15, 20, 0.92) !important;
+                }}
+                .mod-metadata-review-suggestion {{
+                    color: var(--mod-text) !important;
+                    font-size: 1rem;
+                    font-weight: 850;
+                    line-height: 1.25;
+                }}
+                .mod-metadata-review-providers {{
+                    gap: 0.65rem;
+                }}
+                .mod-metadata-review-provider {{
+                    gap: 0.28rem;
+                    padding: 0.8rem 0.85rem;
+                    border: 1px solid rgba(63, 63, 70, 0.82);
+                    background: rgba(10, 10, 14, 0.72) !important;
+                }}
+                .mod-metadata-review-provider-title {{
+                    margin-bottom: 0.2rem;
+                    color: var(--mod-text) !important;
+                    font-size: 0.9rem;
+                    font-weight: 900;
+                    line-height: 1.25;
+                }}
+                .mod-metadata-review-field-label {{
+                    color: var(--mod-muted) !important;
+                    font-size: 0.68rem;
+                    font-weight: 850;
+                    letter-spacing: 0.07em;
+                    line-height: 1.2;
+                    text-transform: uppercase;
+                }}
+                .mod-metadata-review-link {{
+                    min-width: 0;
+                    color: #d8b4fe !important;
+                    font-size: 0.78rem;
+                    line-height: 1.35;
+                    overflow-wrap: anywhere;
+                    text-decoration-color: rgba(216, 180, 254, 0.42) !important;
+                    text-underline-offset: 0.18rem;
+                }}
+                .mod-metadata-review-link:hover {{
+                    color: #f3e8ff !important;
+                    text-decoration-color: rgba(243, 232, 255, 0.8) !important;
+                }}
+                .mod-metadata-review-reference {{
+                    color: var(--mod-text) !important;
+                    font-size: 0.8rem;
+                    line-height: 1.35;
+                }}
+                .mod-metadata-review-actions {{
+                    padding-top: 0.8rem;
+                    border-top: 1px solid rgba(63, 63, 70, 0.72);
+                }}
                 .mod-app-details-layout {{
                     gap: 1rem;
                 }}
@@ -4362,9 +4385,7 @@ class ModWebTheme:
                     z-index: 3;
                     padding: 1.05rem 1.25rem 0.95rem;
                     border-bottom: 1px solid rgba(113, 113, 122, 0.64);
-                    background:
-                        linear-gradient(100deg, rgba(88, 28, 135, 0.26), transparent 58%),
-                        rgba(7, 7, 11, 0.98);
+                    background: rgba(7, 7, 11, 0.98) !important;
                     box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
                     backdrop-filter: blur(14px);
                 }}
@@ -4386,8 +4407,8 @@ class ModWebTheme:
                     box-sizing: border-box;
                     margin: 0 1.25rem;
                     padding: 0.75rem 0.85rem;
-                    border: 1px solid rgba(109, 40, 217, 0.42);
-                    background: rgba(46, 22, 72, 0.22);
+                    border: 1px solid rgba(63, 63, 70, 0.78);
+                    background: rgba(10, 10, 14, 0.72) !important;
                 }}
                 .mod-mod-details-editor {{
                     width: calc(100% - 2.5rem) !important;
@@ -4397,6 +4418,8 @@ class ModWebTheme:
                     box-sizing: border-box;
                     margin: 1rem 1.25rem;
                     padding: 1rem;
+                    background: rgba(10, 10, 14, 0.78) !important;
+                    box-shadow: none !important;
                 }}
                 .mod-mod-details-dialog-card .mod-app-details-field .q-field__control {{
                     min-height: 3.35rem;
@@ -4427,7 +4450,12 @@ class ModWebTheme:
                 .mod-mod-details-classification {{
                     padding-bottom: 0.15rem;
                 }}
-                .mod-mod-details-subsection,
+                .mod-mod-details-subsection {{
+                    gap: 0.55rem !important;
+                    padding: 0.8rem 0.85rem;
+                    border: 1px solid rgba(63, 63, 70, 0.76);
+                    background: rgba(7, 7, 11, 0.58) !important;
+                }}
                 .mod-mod-details-metadata-label {{
                     padding-top: 0.9rem;
                     border-top: 1px solid rgba(82, 82, 91, 0.62);

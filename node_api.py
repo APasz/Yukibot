@@ -1192,6 +1192,13 @@ class NodeModMutationAction(StrEnum):
     DELETE = "delete"
 
 
+def _get_mod_or_404(manager: Mod_Manager, mod_name: str) -> Mod:
+    try:
+        return manager.get(mod_name)
+    except ModuleNotFoundError as xcp:
+        raise _http_exception(404, str(xcp)) from xcp
+
+
 def required_mod_mutation_level(
     action: NodeModMutationAction,
     *,
@@ -9276,7 +9283,7 @@ class NodeApiService:
         try:
             manager: Mod_Manager = app.has_mod_manager
             await manager.reload_mods()
-            mod: Mod = manager.get(mod_name)
+            mod: Mod = _get_mod_or_404(manager, mod_name)
             override_protected_mod: bool = mod.is_protected and action in {
                 NodeModMutationAction.ENABLE,
                 NodeModMutationAction.DISABLE,
@@ -9373,7 +9380,7 @@ class NodeApiService:
     ) -> ModPageDiscovery:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
-        mod: Mod = manager.get(mod_name)
+        mod: Mod = _get_mod_or_404(manager, mod_name)
         await self._require_acl().perm_check(
             actor_user_id,
             required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
@@ -9402,7 +9409,7 @@ class NodeApiService:
     ) -> LauncherMetadataDiscovery:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
-        mod: Mod = manager.get(mod_name)
+        mod: Mod = _get_mod_or_404(manager, mod_name)
         await self._require_acl().perm_check(
             actor_user_id,
             required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
@@ -9430,7 +9437,7 @@ class NodeApiService:
     ) -> LauncherMetadataResolution:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
-        mod: Mod = manager.get(mod_name)
+        mod: Mod = _get_mod_or_404(manager, mod_name)
         await self._require_acl().perm_check(
             actor_user_id,
             required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
@@ -9455,7 +9462,7 @@ class NodeApiService:
     ) -> NodeModMutationResult:
         manager: Mod_Manager = app.has_mod_manager
         await manager.reload_mods()
-        mod: Mod = manager.get(mod_name)
+        mod: Mod = _get_mod_or_404(manager, mod_name)
         await self._require_acl().perm_check(
             actor_user_id,
             required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),

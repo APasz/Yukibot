@@ -3608,6 +3608,33 @@ class NodeApiTests(unittest.TestCase):
         )
         manager.update_properties.assert_not_called()
 
+    def test_fetch_mod_launcher_metadata_returns_404_when_mod_disappears(self) -> None:
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        manager.get.side_effect = ModuleNotFoundError("No such Mod: removed.jar")
+        app = _build_app(manager)
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        with self.assertRaises(Exception) as raised:
+            asyncio.run(
+                service.fetch_mod_launcher_metadata(
+                    app=app,
+                    mod_name="removed.jar",
+                    fetch_request=NodeModMetadataFetchRequest(
+                        launcher_urls=LauncherProviderUrls()
+                    ),
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code"), 404)
+        self.assertEqual(getattr(raised.exception, "detail"), "No such Mod: removed.jar")
+        manager.reload_mods.assert_awaited_once_with()
+        acl.perm_check.assert_not_awaited()
+
     def test_resolve_mod_launcher_metadata_uses_effective_pages_without_mutating_mod(self) -> None:
         with TemporaryDirectory() as temp_dir:
             mod_path = Path(temp_dir) / "example.jar"

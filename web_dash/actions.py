@@ -8,7 +8,9 @@ from modmux.models import Provider
 from apps._config import (
     CurseForgeFileReference,
     KnownModPageProvider,
+    LauncherMetadataMatchReason,
     LauncherProviderUrls,
+    ModPageMatchConfidence,
     known_mod_page_provider_for_url,
     launcher_provider_label,
     mod_capabilities_for_scope,
@@ -27,6 +29,7 @@ from .nicegui_protocols import ModWebUi, _value_as_object, _value_as_text
 from .runtime_imports import (
     Awaitable,
     BadgeTone,
+    Button,
     Callable,
     Checkbox,
     ClientPackConfig,
@@ -98,6 +101,87 @@ class _ModPageEditorRow:
 
 class ModWebActionsMixin(ModWebServiceSupport):
     @staticmethod
+    async def _run_with_loading_button(
+        *,
+        button: Button,
+        action: Callable[[], Awaitable[None]],
+    ) -> None:
+        button.props("loading")
+        try:
+            await action()
+        finally:
+            button.props(remove="loading")
+
+    @staticmethod
+    def _automatic_mod_pages(discovery: ModPageDiscovery) -> tuple[ModPageLink, ...] | None:
+        selected_pages: list[ModPageLink] = []
+        for provider_result in discovery.providers:
+            if not provider_result.candidates:
+                continue
+            confident_candidates = tuple(
+                candidate
+                for candidate in provider_result.candidates
+                if candidate.confidence is not ModPageMatchConfidence.POSSIBLE
+            )
+            if len(confident_candidates) != 1:
+                return None
+            selected_pages.append(confident_candidates[0].page)
+        return tuple(selected_pages)
+
+    @staticmethod
+    def _automatic_launcher_urls(
+        discovery: LauncherMetadataDiscovery,
+    ) -> dict[Provider, str] | None:
+        selected_urls: dict[Provider, str] = {}
+        for provider_result in discovery.providers:
+            if not provider_result.candidates:
+                continue
+            if len(provider_result.candidates) != 1:
+                return None
+            candidate = provider_result.candidates[0]
+            if candidate.match_reasons == (LauncherMetadataMatchReason.FILENAME,):
+                return None
+            selected_urls[provider_result.provider] = candidate.file_page_url
+        return selected_urls
+
+    @staticmethod
+    def _launcher_providers_missing_mod_pages(
+        *,
+        providers: tuple[Provider, ...],
+        launcher_urls: LauncherProviderUrls,
+        mod_pages: tuple[ModPageLink, ...],
+    ) -> frozenset[Provider]:
+        known_provider_by_launcher = {
+            Provider.MODRINTH: KnownModPageProvider.MODRINTH,
+            Provider.CURSEFORGE: KnownModPageProvider.CURSEFORGE,
+        }
+        existing_page_providers = {
+            page_provider
+            for page in mod_pages
+            if (page_provider := known_mod_page_provider_for_url(page.url)) is not None
+        }
+        return frozenset(
+            provider
+            for provider in providers
+            if not launcher_urls.has_provider(provider)
+            and known_provider_by_launcher[provider] not in existing_page_providers
+        )
+
+    @staticmethod
+    def _client_pack_default_selected_after_policy_change(
+        *,
+        previous_policy: ClientPackPolicy,
+        selected_policy: ClientPackPolicy,
+        current_value: bool,
+    ) -> bool:
+        if (
+            selected_policy is ClientPackPolicy.OPTIONAL
+            and previous_policy is not ClientPackPolicy.OPTIONAL
+        ):
+            return True
+        return current_value
+
+    @staticmethod
     def _mod_type_badge_tone(mod_type: ModType) -> BadgeTone:
         match mod_type:
             case ModType.REGULAR:
@@ -120,16 +204,18 @@ class ModWebActionsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _mod_client_pack_summary(entry: NodeModEntry) -> str:
-        if entry.mod_type in {ModType.SERVER, ModType.BUILTIN}:
-            return "Unavailable — Server-only"
+        if entry.mod_type is ModType.SERVER:
+            return "Excluded — Server-only"
+        if entry.mod_type is ModType.BUILTIN:
+            return "Excluded — Built-in"
         if entry.placement is ModPlacement.SERVER_DISABLED:
-            return "Unavailable — Server disabled"
+            return "Excluded — Server disabled"
         if not entry.downloadable:
-            return "Unavailable — Download blocked"
+            return "Excluded — File download blocked"
         if not entry.client_pack.included_in_client:
             return "Not included"
         if not entry.client_pack_eligible:
-            return "Unavailable"
+            return "Excluded — Ineligible"
 
         match entry.client_pack.policy:
             case ClientPackPolicy.REQUIRED:
@@ -1000,15 +1086,25 @@ class ModWebActionsMixin(ModWebServiceSupport):
         curseforge_project_id_input: Input | None = None
         curseforge_file_id_input: Input | None = None
         metadata_suggestion_label: Label | None = None
+        detect_metadata_status_label: Label | None = None
+        find_mod_pages_button: Button | None = None
+        resolve_launcher_metadata_button: Button | None = None
+        fetch_launcher_metadata_button: Button | None = None
+        detect_metadata_button: Button | None = None
+        metadata_detection_save_button: Button | None = None
+        save_properties_button: Button | None = None
         mod_page_rows: list[_ModPageEditorRow] = []
         mod_pages_container: Column | None = None
         mod_page_resolution_dialog: Dialog
         mod_page_resolution_selects: dict[Provider, Select] = {}
         mod_page_resolution_single_urls: dict[Provider, str] = {}
         mod_page_resolution_pages: dict[str, ModPageLink] = {}
+        mod_page_resolution_on_confirm: Callable[[], Awaitable[None]] | None = None
         launcher_resolution_dialog: Dialog
         launcher_resolution_selects: dict[Provider, Select] = {}
         launcher_resolution_single_urls: dict[Provider, str] = {}
+        launcher_resolution_on_confirm: Callable[[], Awaitable[None]] | None = None
+        metadata_detection_review_dialog: Dialog
         curseforge_metadata = entry.platforms.curseforge
         use_curseforge_reference_inputs = Provider.CURSEFORGE in launcher_metadata_providers and (
             not has_curseforge_api_key()
@@ -1153,6 +1249,16 @@ class ModWebActionsMixin(ModWebServiceSupport):
             url_input.on("keydown.enter", lambda: refresh_mod_page_row(editor_row))
             refresh_mod_page_row(editor_row)
 
+        def add_mod_page_row_if_missing(page: ModPageLink) -> None:
+            for editor_row in mod_page_rows:
+                try:
+                    existing_url = normalise_mod_page_url(_value_as_text(editor_row.url_input))
+                except (TypeError, ValueError):
+                    continue
+                if existing_url == page.url:
+                    return
+            add_mod_page_row(page)
+
         def mod_pages_from_inputs() -> tuple[ModPageLink, ...]:
             pages: list[ModPageLink] = []
             for row_number, editor_row in enumerate(mod_page_rows, start=1):
@@ -1180,11 +1286,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 page = mod_page_resolution_pages.get(selected_url)
                 if page is None:
                     raise RuntimeError("Selected mod page candidate is unavailable.")
-                add_mod_page_row(page)
+                add_mod_page_row_if_missing(page)
             mod_page_resolution_dialog.close()
+            if mod_page_resolution_on_confirm is not None:
+                await mod_page_resolution_on_confirm()
+                return
             ui.notify("Mod pages added. Save the mod properties to persist them.", type="positive")
 
-        def present_mod_page_resolution(discovery: ModPageDiscovery) -> None:
+        def present_mod_page_resolution(
+            discovery: ModPageDiscovery,
+            *,
+            on_confirm: Callable[[], Awaitable[None]] | None = None,
+        ) -> None:
+            nonlocal mod_page_resolution_on_confirm
+            mod_page_resolution_on_confirm = on_confirm
             mod_page_resolution_dialog.clear()
             mod_page_resolution_selects.clear()
             mod_page_resolution_single_urls.clear()
@@ -1199,38 +1314,46 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     with ui.column().classes("w-full gap-3"):
                         for provider_result in discovery.providers:
                             provider_label = launcher_provider_label(provider_result.provider)
-                            if provider_result.error is not None:
-                                ui.label(f"{provider_label}: {provider_result.error}").classes(
-                                    "mod-subtitle text-xs text-negative"
+                            with ui.column().classes("w-full mod-metadata-review-provider"):
+                                ui.label(provider_label).classes(
+                                    "mod-metadata-review-provider-title"
                                 )
-                                continue
-                            if not provider_result.candidates:
-                                ui.label(f"{provider_label}: no matching projects found.").classes(
-                                    "mod-subtitle text-xs"
+                                if provider_result.error is not None:
+                                    ui.label(provider_result.error).classes(
+                                        "mod-subtitle text-xs text-negative"
+                                    )
+                                    continue
+                                if not provider_result.candidates:
+                                    ui.label("No matching projects found.").classes(
+                                        "mod-subtitle text-xs"
+                                    )
+                                    continue
+                                options = {
+                                    candidate.page.url: candidate.selection_label
+                                    for candidate in provider_result.candidates
+                                }
+                                for candidate in provider_result.candidates:
+                                    mod_page_resolution_pages[candidate.page.url] = candidate.page
+                                first_url = provider_result.candidates[0].page.url
+                                if len(provider_result.candidates) == 1:
+                                    mod_page_resolution_single_urls[
+                                        provider_result.provider
+                                    ] = first_url
+                                    ui.label(
+                                        provider_result.candidates[0].selection_label
+                                    ).classes("mod-subtitle text-xs")
+                                    continue
+                                mod_page_resolution_selects[provider_result.provider] = (
+                                    ui.select(
+                                        options,
+                                        value=first_url,
+                                        label="Project page",
+                                    )
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent options-dark"
+                                    )
+                                    .classes("w-full mod-app-details-field")
                                 )
-                                continue
-                            options = {
-                                candidate.page.url: candidate.selection_label
-                                for candidate in provider_result.candidates
-                            }
-                            for candidate in provider_result.candidates:
-                                mod_page_resolution_pages[candidate.page.url] = candidate.page
-                            first_url = provider_result.candidates[0].page.url
-                            if len(provider_result.candidates) == 1:
-                                mod_page_resolution_single_urls[provider_result.provider] = first_url
-                                ui.label(
-                                    f"{provider_label}: {provider_result.candidates[0].selection_label}"
-                                ).classes("mod-subtitle text-xs")
-                                continue
-                            mod_page_resolution_selects[provider_result.provider] = (
-                                ui.select(
-                                    options,
-                                    value=first_url,
-                                    label=f"{provider_label} project page",
-                                )
-                                .props("filled square dense hide-bottom-space color=accent options-dark")
-                                .classes("w-full mod-app-details-field")
-                            )
                     with ui.row().classes("w-full justify-end gap-2"):
                         ui.button("Cancel", on_click=mod_page_resolution_dialog.close).classes(
                             "mod-list-button secondary"
@@ -1240,7 +1363,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         )
             mod_page_resolution_dialog.open()
 
-        async def find_mod_pages_from_local_data() -> None:
+        async def _find_mod_pages_from_local_data() -> None:
             try:
                 discovery = await self._find_mod_pages(
                     model=model,
@@ -1275,6 +1398,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return
             present_mod_page_resolution(discovery)
 
+        async def find_mod_pages_from_local_data() -> None:
+            if find_mod_pages_button is None:
+                raise RuntimeError("Find Mod Pages button was not rendered.")
+            await self._run_with_loading_button(
+                button=find_mod_pages_button,
+                action=_find_mod_pages_from_local_data,
+            )
+
         def ensure_launcher_mod_page_rows(launcher_urls: LauncherProviderUrls) -> None:
             existing_providers = {
                 provider
@@ -1298,7 +1429,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     project_page_url = launcher_project_page_url(page_url, launcher_provider)
                 except ValueError:
                     continue
-                add_mod_page_row(
+                add_mod_page_row_if_missing(
                     ModPageLink(
                         name=page_provider.value,
                         url=project_page_url,
@@ -1306,7 +1437,21 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 )
                 existing_providers.add(page_provider)
 
-        async def fetch_launcher_metadata() -> None:
+        def apply_launcher_metadata_resolution(resolution: LauncherMetadataResolution) -> None:
+            if metadata_suggestion_label is None:
+                raise RuntimeError("Metadata suggestion label was not rendered.")
+            if resolution.suggested_mod_type is None:
+                metadata_suggestion_label.set_text(
+                    "Suggested type: unavailable from the supplied provider metadata."
+                )
+            else:
+                assert resolution.suggestion_provider is not None
+                metadata_suggestion_label.set_text(
+                    f"Suggested type: {resolution.suggested_mod_type.label} "
+                    f"({launcher_provider_label(resolution.suggestion_provider)})"
+                )
+
+        async def _fetch_launcher_metadata() -> None:
             try:
                 launcher_urls = launcher_urls_from_inputs()
                 ensure_launcher_mod_page_rows(launcher_urls)
@@ -1326,19 +1471,16 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 )
                 ui.notify(f"Metadata fetch failed: {xcp}", type="negative")
                 return
-            if metadata_suggestion_label is None:
-                raise RuntimeError("Metadata suggestion label was not rendered.")
-            if resolution.suggested_mod_type is None:
-                metadata_suggestion_label.set_text(
-                    "Suggested type: unavailable from the supplied provider metadata."
-                )
-            else:
-                assert resolution.suggestion_provider is not None
-                metadata_suggestion_label.set_text(
-                    f"Suggested type: {resolution.suggested_mod_type.label} "
-                    f"({launcher_provider_label(resolution.suggestion_provider)})"
-                )
+            apply_launcher_metadata_resolution(resolution)
             ui.notify("Launcher metadata fetched.", type="positive")
+
+        async def fetch_launcher_metadata() -> None:
+            if fetch_launcher_metadata_button is None:
+                raise RuntimeError("Fetch Metadata button was not rendered.")
+            await self._run_with_loading_button(
+                button=fetch_launcher_metadata_button,
+                action=_fetch_launcher_metadata,
+            )
 
         async def confirm_launcher_resolution() -> None:
             selected_urls = dict(launcher_resolution_single_urls)
@@ -1360,9 +1502,18 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     )
                 launcher_input.set_value(selected_url)
             launcher_resolution_dialog.close()
+            if launcher_resolution_on_confirm is not None:
+                await launcher_resolution_on_confirm()
+                return
             await fetch_launcher_metadata()
 
-        def present_launcher_resolution(discovery: LauncherMetadataDiscovery) -> None:
+        def present_launcher_resolution(
+            discovery: LauncherMetadataDiscovery,
+            *,
+            on_confirm: Callable[[], Awaitable[None]] | None = None,
+        ) -> None:
+            nonlocal launcher_resolution_on_confirm
+            launcher_resolution_on_confirm = on_confirm
             launcher_resolution_dialog.clear()
             launcher_resolution_selects.clear()
             launcher_resolution_single_urls.clear()
@@ -1376,36 +1527,44 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     with ui.column().classes("w-full gap-3"):
                         for provider_result in discovery.providers:
                             provider_label = launcher_provider_label(provider_result.provider)
-                            if provider_result.error is not None:
-                                ui.label(f"{provider_label}: {provider_result.error}").classes(
-                                    "mod-subtitle text-xs text-negative"
+                            with ui.column().classes("w-full mod-metadata-review-provider"):
+                                ui.label(provider_label).classes(
+                                    "mod-metadata-review-provider-title"
                                 )
-                                continue
-                            if not provider_result.candidates:
-                                ui.label(f"{provider_label}: no matching files found.").classes(
-                                    "mod-subtitle text-xs"
+                                if provider_result.error is not None:
+                                    ui.label(provider_result.error).classes(
+                                        "mod-subtitle text-xs text-negative"
+                                    )
+                                    continue
+                                if not provider_result.candidates:
+                                    ui.label("No matching files found.").classes(
+                                        "mod-subtitle text-xs"
+                                    )
+                                    continue
+                                options = {
+                                    candidate.file_page_url: candidate.selection_label
+                                    for candidate in provider_result.candidates
+                                }
+                                first_url = provider_result.candidates[0].file_page_url
+                                if len(provider_result.candidates) == 1:
+                                    launcher_resolution_single_urls[
+                                        provider_result.provider
+                                    ] = first_url
+                                    ui.label(
+                                        provider_result.candidates[0].selection_label
+                                    ).classes("mod-subtitle text-xs")
+                                    continue
+                                launcher_resolution_selects[provider_result.provider] = (
+                                    ui.select(
+                                        options,
+                                        value=first_url,
+                                        label="File page",
+                                    )
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent options-dark"
+                                    )
+                                    .classes("w-full mod-app-details-field")
                                 )
-                                continue
-                            options = {
-                                candidate.file_page_url: candidate.selection_label
-                                for candidate in provider_result.candidates
-                            }
-                            first_url = provider_result.candidates[0].file_page_url
-                            if len(provider_result.candidates) == 1:
-                                launcher_resolution_single_urls[provider_result.provider] = first_url
-                                ui.label(
-                                    f"{provider_label}: {provider_result.candidates[0].selection_label}"
-                                ).classes("mod-subtitle text-xs")
-                                continue
-                            launcher_resolution_selects[provider_result.provider] = (
-                                ui.select(
-                                    options,
-                                    value=first_url,
-                                    label=f"{provider_label} file page",
-                                )
-                                .props("filled square dense hide-bottom-space color=accent options-dark")
-                                .classes("w-full mod-app-details-field")
-                            )
                     with ui.row().classes("w-full justify-end gap-2"):
                         ui.button("Cancel", on_click=launcher_resolution_dialog.close).classes(
                             "mod-list-button secondary"
@@ -1415,7 +1574,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         )
             launcher_resolution_dialog.open()
 
-        async def resolve_launcher_metadata_from_mod_pages() -> None:
+        async def _resolve_launcher_metadata_from_mod_pages() -> None:
             try:
                 discovery = await self._resolve_mod_launcher_metadata(
                     model=model,
@@ -1451,7 +1610,250 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return
             present_launcher_resolution(discovery)
 
-        async def save_properties() -> None:
+        async def resolve_launcher_metadata_from_mod_pages() -> None:
+            if resolve_launcher_metadata_button is None:
+                raise RuntimeError("Resolve from Mod Pages button was not rendered.")
+            await self._run_with_loading_button(
+                button=resolve_launcher_metadata_button,
+                action=_resolve_launcher_metadata_from_mod_pages,
+            )
+
+        def set_detection_status(message: str) -> None:
+            if detect_metadata_status_label is None:
+                raise RuntimeError("Metadata detection status was not rendered.")
+            detect_metadata_status_label.set_text(message)
+
+        def apply_launcher_urls(selected_urls: dict[Provider, str]) -> None:
+            for provider, selected_url in selected_urls.items():
+                launcher_input = launcher_url_inputs.get(provider)
+                if launcher_input is None:
+                    raise RuntimeError(
+                        f"{launcher_provider_label(provider)} file-page input was not rendered."
+                    )
+                launcher_input.set_value(selected_url)
+
+        def present_metadata_detection_review(resolution: LauncherMetadataResolution) -> None:
+            nonlocal metadata_detection_save_button
+            metadata_detection_review_dialog.clear()
+            pages = mod_pages_from_inputs()
+            launcher_urls = launcher_urls_from_inputs()
+            known_provider_by_launcher = {
+                Provider.MODRINTH: KnownModPageProvider.MODRINTH,
+                Provider.CURSEFORGE: KnownModPageProvider.CURSEFORGE,
+            }
+            with metadata_detection_review_dialog:
+                with ui.card().classes(
+                    "mod-card mod-dialog-card mod-app-details-card mod-metadata-review-card"
+                ):
+                    ui.label("Metadata detected").classes("mod-card-title")
+                    ui.label(
+                        "Review the detected values below. Nothing is persisted until you save the mod properties."
+                    ).classes("mod-subtitle text-xs")
+                    with ui.column().classes("w-full mod-metadata-review-summary"):
+                        ui.label("Suggested type").classes("mod-metadata-review-field-label")
+                        suggestion = (
+                            "Unavailable"
+                            if resolution.suggested_mod_type is None
+                            else resolution.suggested_mod_type.label
+                        )
+                        ui.label(suggestion).classes("mod-metadata-review-suggestion")
+                    with ui.column().classes("w-full mod-metadata-review-providers"):
+                        for provider in launcher_metadata_providers:
+                            known_provider = known_provider_by_launcher[provider]
+                            project_page = next(
+                                (
+                                    page
+                                    for page in pages
+                                    if known_mod_page_provider_for_url(page.url) is known_provider
+                                ),
+                                None,
+                            )
+                            file_page_url = launcher_urls.for_provider(provider)
+                            reference = (
+                                launcher_urls.curseforge_reference
+                                if provider is Provider.CURSEFORGE
+                                else None
+                            )
+                            if project_page is None and file_page_url is None and reference is None:
+                                continue
+                            with ui.column().classes("w-full mod-metadata-review-provider"):
+                                ui.label(launcher_provider_label(provider)).classes(
+                                    "mod-metadata-review-provider-title"
+                                )
+                                if project_page is not None:
+                                    ui.label("Project page").classes(
+                                        "mod-metadata-review-field-label"
+                                    )
+                                    ui.link(
+                                        project_page.url,
+                                        project_page.url,
+                                        new_tab=True,
+                                    ).props('rel="noopener noreferrer"').classes(
+                                        "mod-metadata-review-link"
+                                    )
+                                if file_page_url is not None:
+                                    ui.label("File page").classes(
+                                        "mod-metadata-review-field-label"
+                                    )
+                                    ui.link(
+                                        file_page_url,
+                                        file_page_url,
+                                        new_tab=True,
+                                    ).props('rel="noopener noreferrer"').classes(
+                                        "mod-metadata-review-link"
+                                    )
+                                if reference is not None:
+                                    ui.label("File reference").classes(
+                                        "mod-metadata-review-field-label"
+                                    )
+                                    ui.label(
+                                        f"Project {reference.project_id} · File {reference.file_id}"
+                                    ).classes("mod-metadata-review-reference")
+                    with ui.row().classes(
+                        "w-full justify-end gap-2 mod-metadata-review-actions"
+                    ):
+                        ui.button(
+                            "Continue Editing",
+                            on_click=metadata_detection_review_dialog.close,
+                        ).classes("mod-list-button secondary")
+                        metadata_detection_save_button = ui.button(
+                            "Save Changes",
+                            on_click=save_detected_metadata,
+                        ).classes("mod-list-button")
+            metadata_detection_review_dialog.open()
+
+        async def finish_metadata_detection() -> None:
+            set_detection_status("Fetching provider metadata…")
+            launcher_urls = launcher_urls_from_inputs()
+            ensure_launcher_mod_page_rows(launcher_urls)
+            resolution = await self._fetch_mod_launcher_metadata(
+                model=model,
+                entry=entry,
+                launcher_urls=launcher_urls,
+                user=user,
+            )
+            apply_launcher_metadata_resolution(resolution)
+            set_detection_status("Detection complete. Review the detected values.")
+            present_metadata_detection_review(resolution)
+
+        async def resolve_launcher_metadata_for_detection() -> None:
+            set_detection_status("Resolving matching launcher files…")
+            discovery = await self._resolve_mod_launcher_metadata(
+                model=model,
+                entry=entry,
+                mod_pages=mod_pages_from_inputs(),
+                existing_launcher_urls=launcher_urls_from_inputs(),
+                user=user,
+            )
+            if not discovery.candidates:
+                if any(
+                    launcher_urls_from_inputs().has_provider(provider)
+                    for provider in launcher_metadata_providers
+                ):
+                    await finish_metadata_detection()
+                    return
+                raise ValueError("No matching launcher files were found for the detected mod pages.")
+            selected_urls = self._automatic_launcher_urls(discovery)
+            if selected_urls is None:
+                set_detection_status("Choose the matching launcher files to continue.")
+                present_launcher_resolution(
+                    discovery,
+                    on_confirm=resume_detection_after_launcher_selection,
+                )
+                return
+            apply_launcher_urls(selected_urls)
+            await finish_metadata_detection()
+
+        async def discover_mod_pages_for_detection() -> None:
+            set_detection_status("Finding matching project pages…")
+            discovery = await self._find_mod_pages(
+                model=model,
+                entry=entry,
+                mod_pages=mod_pages_from_inputs(),
+                user=user,
+            )
+            if not discovery.candidates:
+                if any(
+                    launcher_urls_from_inputs().has_provider(provider)
+                    for provider in launcher_metadata_providers
+                ):
+                    await finish_metadata_detection()
+                    return
+                raise ValueError("No matching project pages were found for the local mod.")
+            selected_pages = self._automatic_mod_pages(discovery)
+            if selected_pages is None:
+                set_detection_status("Choose the matching project pages to continue.")
+                present_mod_page_resolution(
+                    discovery,
+                    on_confirm=resume_detection_after_mod_page_selection,
+                )
+                return
+            for page in selected_pages:
+                add_mod_page_row_if_missing(page)
+            await resolve_launcher_metadata_for_detection()
+
+        async def run_metadata_detection_action(
+            action: Callable[[], Awaitable[None]],
+        ) -> None:
+            if detect_metadata_button is None:
+                raise RuntimeError("Detect Metadata button was not rendered.")
+
+            async def guarded_action() -> None:
+                try:
+                    await action()
+                except Exception as xcp:
+                    log.warning(
+                        "Automatic mod metadata detection failed: node=%s app=%s mod=%s error=%s",
+                        model.node_name,
+                        model.app_name,
+                        entry.name,
+                        xcp,
+                    )
+                    set_detection_status("Detection failed. Use Advanced Actions for manual recovery.")
+                    ui.notify(f"Metadata detection failed: {xcp}", type="negative")
+
+            await self._run_with_loading_button(
+                button=detect_metadata_button,
+                action=guarded_action,
+            )
+
+        async def detect_metadata() -> None:
+            async def start_detection() -> None:
+                launcher_urls = launcher_urls_from_inputs()
+                mod_pages = mod_pages_from_inputs()
+                providers_missing_pages = self._launcher_providers_missing_mod_pages(
+                    providers=launcher_metadata_providers,
+                    launcher_urls=launcher_urls,
+                    mod_pages=mod_pages,
+                )
+                if providers_missing_pages:
+                    await discover_mod_pages_for_detection()
+                    return
+                if any(
+                    not launcher_urls.has_provider(provider)
+                    for provider in launcher_metadata_providers
+                ):
+                    await resolve_launcher_metadata_for_detection()
+                    return
+                await finish_metadata_detection()
+
+            await run_metadata_detection_action(start_detection)
+
+        async def resume_detection_after_mod_page_selection() -> None:
+            await run_metadata_detection_action(resolve_launcher_metadata_for_detection)
+
+        async def resume_detection_after_launcher_selection() -> None:
+            await run_metadata_detection_action(finish_metadata_detection)
+
+        async def save_detected_metadata() -> None:
+            if metadata_detection_save_button is None:
+                raise RuntimeError("Metadata detection Save Changes button was not rendered.")
+            await self._run_with_loading_button(
+                button=metadata_detection_save_button,
+                action=_save_properties,
+            )
+
+        async def _save_properties() -> None:
             try:
                 selected_mod_type = ModType(str(mod_type_select.value))
                 selected_block_reason_text = str(download_block_reason_select.value or "").strip()
@@ -1519,6 +1921,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
+        async def save_properties() -> None:
+            if save_properties_button is None:
+                raise RuntimeError("Save button was not rendered.")
+            await self._run_with_loading_button(
+                button=save_properties_button,
+                action=_save_properties,
+            )
+
         async def run_mod_action(action: NodeModMutationAction) -> None:
             try:
                 result: NodeModMutationResult = await self._mutate_mod(
@@ -1553,6 +1963,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
 
         mod_page_resolution_dialog = ui.dialog()
         launcher_resolution_dialog = ui.dialog()
+        metadata_detection_review_dialog = ui.dialog()
 
         with ui.dialog() as delete_confirm_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -1578,7 +1989,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         self._render_mod_detail_item(ui=ui, label="Size", value=entry.size_text)
                         self._render_mod_detail_item(ui=ui, label="Origin", value=entry.origin)
                         self._render_mod_detail_item(ui=ui, label="Added", value=entry.added)
-                        self._render_mod_detail_item(ui=ui, label="Download", value=download_text)
+                        self._render_mod_detail_item(ui=ui, label="File download", value=download_text)
                         if supports_client_pack:
                             self._render_mod_detail_item(
                                 ui=ui,
@@ -1655,11 +2066,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         "Add mod page",
                                         on_click=lambda: add_mod_page_row(),
                                     ).classes("mod-list-button secondary")
-                                    find_mod_pages_button = ui.button(
-                                        "Find Mod Pages",
-                                        on_click=find_mod_pages_from_local_data,
-                                    ).classes("mod-list-button mod-mod-details-discovery-button")
-                                    find_mod_pages_button.set_visibility(bool(launcher_metadata_providers))
                             if supports_client_pack:
                                 with ui.column().classes("w-full gap-2 mod-mod-details-subsection"):
                                     ui.label("Client pack").classes("mod-stat-label")
@@ -1701,21 +2107,55 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                             .props("filled square dense clearable hide-bottom-space color=accent")
                                             .classes("mod-app-details-field")
                                         )
-                                    def refresh_client_pack_policy_controls() -> None:
+                                    previous_client_pack_policy = entry.client_pack.policy
+
+                                    def refresh_client_pack_policy_controls(
+                                        *,
+                                        apply_transition_default: bool = False,
+                                    ) -> None:
+                                        nonlocal previous_client_pack_policy
                                         selected_policy = ClientPackPolicy(_value_as_text(client_pack_policy_select))
+                                        if apply_transition_default:
+                                            client_pack_default_selected_checkbox.set_value(
+                                                self._client_pack_default_selected_after_policy_change(
+                                                    previous_policy=previous_client_pack_policy,
+                                                    selected_policy=selected_policy,
+                                                    current_value=bool(
+                                                        _value_as_object(
+                                                            client_pack_default_selected_checkbox
+                                                        )
+                                                    ),
+                                                )
+                                            )
                                         optional_client_pack_controls.set_visibility(
                                             selected_policy is ClientPackPolicy.OPTIONAL
                                         )
                                         alternative_client_pack_controls.set_visibility(
                                             selected_policy is ClientPackPolicy.ALTERNATIVE
                                         )
+                                        previous_client_pack_policy = selected_policy
 
                                     client_pack_policy_select.on(
                                         "update:model-value",
-                                        lambda _: refresh_client_pack_policy_controls(),
+                                        lambda _: refresh_client_pack_policy_controls(
+                                            apply_transition_default=True
+                                        ),
                                     )
                                     refresh_client_pack_policy_controls()
                             ui.label("Metadata").classes("mod-stat-label mod-mod-details-metadata-label")
+                            with ui.row().classes(
+                                "w-full gap-2 items-center flex-wrap"
+                            ) as metadata_detection_controls:
+                                detect_metadata_button = ui.button(
+                                    "Detect Metadata",
+                                    on_click=detect_metadata,
+                                ).classes("mod-list-button mod-mod-details-discovery-button")
+                                detect_metadata_status_label = ui.label(
+                                    "Detect project pages, launcher files, and a classification suggestion in one workflow."
+                                ).classes("mod-subtitle text-xs grow")
+                            metadata_detection_controls.set_visibility(
+                                bool(launcher_metadata_providers)
+                            )
                             with ui.row().classes(
                                 "w-full gap-2 mod-details-tab-row mod-mod-details-metadata-tabs"
                             ):
@@ -1786,6 +2226,19 @@ class ModWebActionsMixin(ModWebServiceSupport):
                             ) as launcher_metadata_section:
                                 ui.label("Launcher Metadata").classes("mod-stat-label")
                                 ui.label(launcher_metadata_description).classes("mod-subtitle text-xs")
+                                with ui.row().classes("w-full gap-2 flex-wrap"):
+                                    find_mod_pages_button = ui.button(
+                                        "Find Mod Pages",
+                                        on_click=find_mod_pages_from_local_data,
+                                    ).classes("mod-list-button secondary")
+                                    resolve_launcher_metadata_button = ui.button(
+                                        "Resolve from Mod Pages",
+                                        on_click=resolve_launcher_metadata_from_mod_pages,
+                                    ).classes("mod-list-button")
+                                    fetch_launcher_metadata_button = ui.button(
+                                        "Fetch Metadata",
+                                        on_click=fetch_launcher_metadata,
+                                    ).classes("mod-list-button secondary")
                                 with ui.column().classes("w-full gap-2"):
                                     for provider in launcher_metadata_providers:
                                         if provider is Provider.CURSEFORGE and use_curseforge_reference_inputs:
@@ -1846,15 +2299,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     "Resolve from Mod Pages searches saved and currently edited project links "
                                     "for providers whose file page is blank."
                                 ).classes("mod-subtitle text-xs")
-                                with ui.row().classes("w-full justify-end gap-2 flex-wrap"):
-                                    ui.button(
-                                        "Resolve from Mod Pages",
-                                        on_click=resolve_launcher_metadata_from_mod_pages,
-                                    ).classes("mod-list-button")
-                                    ui.button(
-                                        "Fetch Metadata",
-                                        on_click=fetch_launcher_metadata,
-                                    ).classes("mod-list-button secondary")
                             launcher_metadata_section.set_visibility(False)
                     if available_actions:
                         with ui.column().classes("gap-2 mod-mod-details-danger-zone"):
@@ -1873,7 +2317,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     with ui.row().classes("w-full justify-end gap-2 mod-mod-details-footer"):
                         ui.button("Close", on_click=dialog.close).classes("mod-list-button secondary")
                         if can_edit_properties:
-                            ui.button("Save", on_click=save_properties).classes("mod-list-button")
+                            save_properties_button = ui.button(
+                                "Save",
+                                on_click=save_properties,
+                            ).classes("mod-list-button")
         return dialog
 
     @staticmethod

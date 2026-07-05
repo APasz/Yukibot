@@ -32,14 +32,21 @@ from apps._config import (
     ClientPackMetadataConfig,
     ClientPackPolicy,
     ClientPackRelease,
+    LauncherMetadataCandidate,
     LauncherMetadataDiscovery,
+    LauncherMetadataMatchReason,
+    LauncherMetadataProviderCandidates,
     LauncherMetadataResolution,
     LauncherProviderUrls,
     ModDistributionMode,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPageCandidate,
     ModPageLink,
     ModPageDiscovery,
+    ModPageMatchConfidence,
+    ModPageMatchReason,
+    ModPageProviderCandidates,
     ModPlacement,
     ModType,
     is_client_pack_candidate,
@@ -340,6 +347,204 @@ class _FakeCleanupTimer:
 
 
 class ModWebTests(unittest.TestCase):
+    def test_loading_button_wraps_action_and_clears_after_success(self) -> None:
+        button = Mock()
+
+        async def action() -> None:
+            button.props.assert_called_once_with("loading")
+
+        asyncio.run(
+            ModWebService._run_with_loading_button(
+                button=cast(Any, button),
+                action=action,
+            )
+        )
+
+        button.props.assert_has_calls([call("loading"), call(remove="loading")])
+
+    def test_loading_button_clears_after_failure(self) -> None:
+        button = Mock()
+
+        async def action() -> None:
+            raise RuntimeError("fetch failed")
+
+        with self.assertRaisesRegex(RuntimeError, "fetch failed"):
+            asyncio.run(
+                ModWebService._run_with_loading_button(
+                    button=cast(Any, button),
+                    action=action,
+                )
+            )
+
+        button.props.assert_has_calls([call("loading"), call(remove="loading")])
+
+    def test_metadata_detection_automatically_accepts_one_exact_mod_page(self) -> None:
+        page = ModPageLink(name="Modrinth", url="https://modrinth.com/mod/example")
+        candidate = ModPageCandidate(
+            provider=Provider.MODRINTH,
+            page=page,
+            project_id="example",
+            title="Example",
+            confidence=ModPageMatchConfidence.EXACT,
+            match_reasons=(ModPageMatchReason.FILE_HASH,),
+        )
+        possible_candidate = candidate.model_copy(
+            update={
+                "page": ModPageLink(
+                    name="Modrinth",
+                    url="https://modrinth.com/mod/similar-example",
+                ),
+                "project_id": "similar-example",
+                "confidence": ModPageMatchConfidence.POSSIBLE,
+                "match_reasons": (ModPageMatchReason.NAME,),
+            }
+        )
+        discovery = ModPageDiscovery(
+            providers=(
+                ModPageProviderCandidates(
+                    provider=Provider.MODRINTH,
+                    candidates=(candidate, possible_candidate),
+                ),
+            )
+        )
+
+        self.assertEqual(ModWebService._automatic_mod_pages(discovery), (page,))
+
+    def test_metadata_detection_requires_confirmation_for_possible_mod_page(self) -> None:
+        candidate = ModPageCandidate(
+            provider=Provider.MODRINTH,
+            page=ModPageLink(name="Modrinth", url="https://modrinth.com/mod/example"),
+            project_id="example",
+            title="Example",
+            confidence=ModPageMatchConfidence.POSSIBLE,
+            match_reasons=(ModPageMatchReason.NAME,),
+        )
+        discovery = ModPageDiscovery(
+            providers=(
+                ModPageProviderCandidates(
+                    provider=Provider.MODRINTH,
+                    candidates=(candidate,),
+                ),
+            )
+        )
+
+        self.assertIsNone(ModWebService._automatic_mod_pages(discovery))
+
+    def test_metadata_detection_automatically_accepts_one_launcher_file(self) -> None:
+        candidate = LauncherMetadataCandidate(
+            provider=Provider.MODRINTH,
+            project_page_url="https://modrinth.com/mod/example",
+            file_page_url="https://modrinth.com/mod/example/version/1.0.0",
+            version="1.0.0",
+            filename="example.jar",
+            match_reasons=(LauncherMetadataMatchReason.SHA1,),
+        )
+        discovery = LauncherMetadataDiscovery(
+            providers=(
+                LauncherMetadataProviderCandidates(
+                    provider=Provider.MODRINTH,
+                    project_page_url=candidate.project_page_url,
+                    candidates=(candidate,),
+                ),
+            )
+        )
+
+        self.assertEqual(
+            ModWebService._automatic_launcher_urls(discovery),
+            {Provider.MODRINTH: candidate.file_page_url},
+        )
+
+    def test_metadata_detection_requires_confirmation_for_multiple_launcher_files(self) -> None:
+        first_candidate = LauncherMetadataCandidate(
+            provider=Provider.MODRINTH,
+            project_page_url="https://modrinth.com/mod/example",
+            file_page_url="https://modrinth.com/mod/example/version/1.0.0",
+            version="1.0.0",
+            filename="example.jar",
+            match_reasons=(LauncherMetadataMatchReason.FILENAME,),
+        )
+        second_candidate = first_candidate.model_copy(
+            update={
+                "file_page_url": "https://modrinth.com/mod/example/version/1.0.1",
+                "version": "1.0.1",
+            }
+        )
+        discovery = LauncherMetadataDiscovery(
+            providers=(
+                LauncherMetadataProviderCandidates(
+                    provider=Provider.MODRINTH,
+                    project_page_url=first_candidate.project_page_url,
+                    candidates=(first_candidate, second_candidate),
+                ),
+            )
+        )
+
+        self.assertIsNone(ModWebService._automatic_launcher_urls(discovery))
+
+    def test_metadata_detection_requires_confirmation_for_filename_only_match(self) -> None:
+        candidate = LauncherMetadataCandidate(
+            provider=Provider.MODRINTH,
+            project_page_url="https://modrinth.com/mod/example",
+            file_page_url="https://modrinth.com/mod/example/version/1.0.0",
+            version="1.0.0",
+            filename="example.jar",
+            match_reasons=(LauncherMetadataMatchReason.FILENAME,),
+        )
+        discovery = LauncherMetadataDiscovery(
+            providers=(
+                LauncherMetadataProviderCandidates(
+                    provider=Provider.MODRINTH,
+                    project_page_url=candidate.project_page_url,
+                    candidates=(candidate,),
+                ),
+            )
+        )
+
+        self.assertIsNone(ModWebService._automatic_launcher_urls(discovery))
+
+    def test_metadata_detection_still_discovers_modrinth_when_curseforge_is_present(self) -> None:
+        launcher_urls = LauncherProviderUrls(
+            curseforge=(
+                "https://www.curseforge.com/minecraft/mc-mods/"
+                "yungs-better-dungeons/files/12345"
+            )
+        )
+        mod_pages = (
+            ModPageLink(
+                name="CurseForge",
+                url=(
+                    "https://www.curseforge.com/minecraft/mc-mods/"
+                    "yungs-better-dungeons"
+                ),
+            ),
+        )
+
+        missing_providers = ModWebService._launcher_providers_missing_mod_pages(
+            providers=(Provider.MODRINTH, Provider.CURSEFORGE),
+            launcher_urls=launcher_urls,
+            mod_pages=mod_pages,
+        )
+
+        self.assertEqual(missing_providers, frozenset({Provider.MODRINTH}))
+
+    def test_optional_client_pack_policy_defaults_to_selected_on_transition(self) -> None:
+        self.assertTrue(
+            ModWebService._client_pack_default_selected_after_policy_change(
+                previous_policy=ClientPackPolicy.REQUIRED,
+                selected_policy=ClientPackPolicy.OPTIONAL,
+                current_value=False,
+            )
+        )
+
+    def test_optional_client_pack_policy_preserves_saved_selection(self) -> None:
+        self.assertFalse(
+            ModWebService._client_pack_default_selected_after_policy_change(
+                previous_policy=ClientPackPolicy.OPTIONAL,
+                selected_policy=ClientPackPolicy.OPTIONAL,
+                current_value=False,
+            )
+        )
+
     def test_cacheable_text_asset_selects_best_supported_encoding(self) -> None:
         asset = CacheableTextAsset.build(text="repeated content " * 20, media_type="text/plain")
 
@@ -12093,7 +12298,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ModWebService._mod_download_summary(blocked), "Blocked — Artifact")
         self.assertEqual(
             ModWebService._mod_client_pack_summary(blocked),
-            "Unavailable — Download blocked",
+            "Excluded — File download blocked",
         )
 
         optional = replace(
@@ -12135,7 +12340,18 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(
             ModWebService._mod_client_pack_summary(server_only),
-            "Unavailable — Server-only",
+            "Excluded — Server-only",
+        )
+
+        builtin = replace(
+            entry,
+            mod_type=ModType.BUILTIN,
+            downloadable=False,
+            client_pack_eligible=False,
+        )
+        self.assertEqual(
+            ModWebService._mod_client_pack_summary(builtin),
+            "Excluded — Built-in",
         )
 
     def test_selection_toggle_label_switches_between_select_all_and_clear(self) -> None:

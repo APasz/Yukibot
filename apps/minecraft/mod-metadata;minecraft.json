@@ -407,60 +407,6 @@
         {
           "kind": "provider",
           "namespace": "CURSEFORGE",
-          "value": "better-advancements"
-        },
-        {
-          "kind": "native",
-          "namespace": "minecraft",
-          "value": "betteradvancements"
-        },
-        {
-          "kind": "filename",
-          "namespace": "minecraft",
-          "value": "betteradvancements"
-        }
-      ],
-      "friendly_name": null,
-      "classification_override": null,
-      "mod_pages": [
-        {
-          "name": "CurseForge",
-          "url": "https://www.curseforge.com/minecraft/mc-mods/better-advancements"
-        }
-      ]
-    },
-    {
-      "identities": [
-        {
-          "kind": "provider",
-          "namespace": "CURSEFORGE",
-          "value": "better-village-forge"
-        },
-        {
-          "kind": "native",
-          "namespace": "minecraft",
-          "value": "bettervillage"
-        },
-        {
-          "kind": "filename",
-          "namespace": "minecraft",
-          "value": "bettervillage-forge-1.20.1-3.3.1-all"
-        }
-      ],
-      "friendly_name": null,
-      "classification_override": null,
-      "mod_pages": [
-        {
-          "name": "CurseForge",
-          "url": "https://www.curseforge.com/minecraft/mc-mods/better-village-forge"
-        }
-      ]
-    },
-    {
-      "identities": [
-        {
-          "kind": "provider",
-          "namespace": "CURSEFORGE",
           "value": "bookshelf"
         },
         {
@@ -2974,6 +2920,104 @@
         {
           "name": "CurseForge",
           "url": "https://www.curseforge.com/minecraft/mc-mods/yungs-better-witch-huts"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "better-village-forge"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "bettervillage"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "bettervillage-forge-1.20.1-3.3.1-all"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "615352"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "dGVX5JbJ"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "better-village"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "server",
+        "download_block_reason": null
+      },
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/better-village-forge"
+        },
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/better-village"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "better-advancements"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "betteradvancements"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "betteradvancements"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "Q2OqKxDG"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "272515"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "better-advancements"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "client",
+        "download_block_reason": null
+      },
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/better-advancements"
+        },
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/better-advancements"
         }
       ]
     }

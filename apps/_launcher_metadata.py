@@ -719,6 +719,24 @@ def _project_search_terms(
         if token is None or not token.strip():
             continue
         cleaned_stem = re.sub(re.escape(token), " ", cleaned_stem, flags=re.IGNORECASE)
+    cleaned_stem = re.sub(
+        r"(?<![A-Za-z0-9])v?\d+(?:[._-]\d+)+(?![A-Za-z0-9])",
+        " ",
+        cleaned_stem,
+        flags=re.IGNORECASE,
+    )
+    cleaned_stem = re.sub(
+        r"(?<![A-Za-z0-9])(?:fabric|forge|neoforge|quilt)(?![A-Za-z0-9])",
+        " ",
+        cleaned_stem,
+        flags=re.IGNORECASE,
+    )
+    cleaned_stem = re.sub(
+        r"(?<![A-Za-z0-9])(?:all|release)(?![A-Za-z0-9])",
+        " ",
+        cleaned_stem,
+        flags=re.IGNORECASE,
+    )
     cleaned_stem = re.sub(r"[-_.+]+", " ", cleaned_stem).strip()
     terms: list[str] = []
     seen: set[str] = set()
@@ -837,7 +855,7 @@ async def _search_modrinth_projects(
     http: httpx.AsyncClient,
 ) -> tuple[ModPageCandidate, ...]:
     facets: list[list[str]] = [["project_type:mod"]]
-    raw_hits: list[object] = []
+    raw_hits: dict[str, object] = {}
     for search_term in search_terms:
         response = await http.get(
             "https://api.modrinth.com/v2/search",
@@ -854,11 +872,21 @@ async def _search_modrinth_projects(
         raw_results = payload.get("hits")
         if not isinstance(raw_results, list):
             raise ValueError("Modrinth returned invalid project search results.")
-        raw_hits = cast(list[object], raw_results)
-        if raw_hits:
+        exact_name_found = False
+        for raw_hit in cast(list[object], raw_results):
+            hit = _required_mapping(raw_hit, label="Modrinth search result")
+            project_id = _required_text(hit, "project_id", label="Modrinth search result")
+            raw_hits.setdefault(project_id, raw_hit)
+            candidate_names = {
+                _normalised_project_name(_required_text(hit, "title", label="Modrinth search result")),
+                _normalised_project_name(_required_text(hit, "slug", label="Modrinth search result")),
+            }
+            if _normalised_project_name(search_term) in candidate_names:
+                exact_name_found = True
+        if exact_name_found:
             break
     candidates: list[ModPageCandidate] = []
-    for raw_hit in raw_hits:
+    for raw_hit in raw_hits.values():
         hit = _required_mapping(raw_hit, label="Modrinth search result")
         title = _required_text(hit, "title", label="Modrinth search result")
         slug = _required_text(hit, "slug", label="Modrinth search result")

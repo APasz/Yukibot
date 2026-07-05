@@ -242,6 +242,73 @@ class LauncherMetadataTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_modrinth_search_simplifies_versioned_filename_after_approximate_results(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            local_path = Path(temp_dir) / "bettervillage-forge-1.20.1-3.2.0.jar"
+            local_path.write_bytes(b"locally-repacked")
+            search_queries: list[str] = []
+
+            async def handle_request(request: httpx.Request) -> httpx.Response:
+                if request.url.path.startswith("/v2/version_file/"):
+                    return httpx.Response(404, request=request)
+                if request.url.path != "/v2/search":
+                    return httpx.Response(404, request=request)
+                search_query = request.url.params["query"]
+                search_queries.append(search_query)
+                if search_query == "Better village 3.2.0":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "hits": [
+                                {
+                                    "project_id": "unrelated-id",
+                                    "slug": "village-improvements",
+                                    "title": "Village Improvements",
+                                    "project_type": "mod",
+                                    "versions": ["1.20.1"],
+                                    "categories": ["forge"],
+                                }
+                            ]
+                        },
+                    )
+                self.assertEqual(search_query, "bettervillage")
+                return httpx.Response(
+                    200,
+                    json={
+                        "hits": [
+                            {
+                                "project_id": "dGVX5JbJ",
+                                "slug": "better-village",
+                                "title": "Better Villages",
+                                "project_type": "mod",
+                                "versions": ["1.20.1"],
+                                "categories": ["forge"],
+                            }
+                        ]
+                    },
+                )
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http:
+                discovery = await discover_mod_pages(
+                    scope="minecraft",
+                    existing_mod_pages=(
+                        ModPageLink(
+                            name="CurseForge",
+                            url="https://www.curseforge.com/minecraft/mc-mods/better-village",
+                        ),
+                    ),
+                    local_path=local_path,
+                    friendly_name="Better village 3.2.0",
+                    game_version="1.20.1",
+                    loader="forge",
+                    http=http,
+                )
+
+        self.assertEqual(search_queries, ["Better village 3.2.0", "bettervillage"])
+        candidate = discovery.providers[0].candidates[0]
+        self.assertEqual(candidate.page.url, "https://modrinth.com/mod/better-village")
+        self.assertIs(candidate.confidence, ModPageMatchConfidence.STRONG)
+
     async def test_discovers_curseforge_project_from_exact_fingerprint(self) -> None:
         with TemporaryDirectory() as temp_dir:
             local_path = Path(temp_dir) / "example.jar"

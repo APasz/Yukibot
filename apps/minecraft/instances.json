@@ -78,7 +78,7 @@
         "client_pack_current_hash": "0acd30877188cfac5d34e1c064db5e156018eacfd612584547f49f572626736f",
         "client_pack_published_hash": "0acd30877188cfac5d34e1c064db5e156018eacfd612584547f49f572626736f",
         "client_pack_published_version": "2026-07-05",
-        "client_pack_content_dirty": false,
+        "client_pack_content_dirty": true,
         "client_pack_published_changelog": "woa",
         "client_pack_releases": [
             {
