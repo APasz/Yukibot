@@ -985,9 +985,9 @@ class ModWebTests(unittest.TestCase):
             [(metric.label, metric.icon, metric.value, metric.tone) for metric in node_stats[0].metrics],
             [
                 ("CPU", "speed", "22%", "grey"),
-                ("RAM", "memory", "44% · 8.0GiB / 16.0GiB", "purple"),
-                ("Storage", "storage", "55% · 100.0GiB / 200.0GiB", "purple"),
-                ("Uptime", "schedule", "2h 0m | 1d 0h 0m", "black"),
+                ("RAM", "memory", "44%", "purple"),
+                ("Disk", "storage", "55%", "purple"),
+                ("Bot Uptime", "smart_toy", "2h 0m", "black"),
             ],
         )
         self.assertIsNone(node_stats[0].node_subtitle)
@@ -998,7 +998,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(node_stats[1].card_tone, "black")
         self.assertEqual(node_stats[1].running_text, "Nothin Running")
         self.assertEqual(node_stats[1].running_tone, "grey")
-        self.assertEqual(node_stats[1].metrics[2].value, "99% · 1.0GiB / 78.6GiB")
+        self.assertEqual(node_stats[1].metrics[2].value, "99%")
         self.assertEqual(node_stats[1].metrics[2].tone, "red")
         self.assertEqual(node_stats[1].metrics[3].value, "<1m")
 
@@ -1162,7 +1162,7 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("connectionsByNode", script)
         self.assertIn("pendingSamples", script)
 
-    def test_node_capability_badges_use_icon_app_count_badge(self) -> None:
+    def test_node_capability_badges_report_supported_features(self) -> None:
         badges = ModWebService._node_capability_badges(
             app_links=(
                 ModWebAppLink(
@@ -1203,7 +1203,6 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             badges,
             (
-                _ModWebBadgeSpec(text="2", tone="black", icon="apps", tooltip_text="Apps"),
                 _ModWebBadgeSpec(text="1 Modly", tone="purple"),
                 _ModWebBadgeSpec(text="1 Savely", tone="black"),
                 _ModWebBadgeSpec(text="1 Configy", tone="black"),
@@ -1991,8 +1990,16 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(len(updated.samples), 2)
         markup = ModWebService._node_system_history_svg(updated)
         self.assertIn('aria-label="CPU, RAM, and storage usage over the last hour"', markup)
+        self.assertIn('class="mod-system-chart-line" pathLength="1"', markup)
+        self.assertNotIn("mod-system-chart-line-enter", markup)
         self.assertIn("#a78bfa", markup)
         self.assertIn("#38bdf8", markup)
+
+        animated_markup = ModWebService._node_system_history_svg(updated, animate=True)
+        self.assertIn(
+            'class="mod-system-chart-line mod-system-chart-line-enter" pathLength="1"',
+            animated_markup,
+        )
 
     def test_render_node_system_page_requires_sudo_and_builds_live_page(self) -> None:
         async def exercise() -> None:
@@ -4509,8 +4516,16 @@ class ModWebTests(unittest.TestCase):
                 del exc_type, exc, traceback
                 return False
 
-            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeLabel":
-                self.class_value = replace if replace is not None else value
+            def classes(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+                replace: str | None = None,
+            ) -> "FakeLabel":
+                del remove
+                self.class_value = replace if replace is not None else add if add is not None else value
                 return self
 
             def set_text(self, text: str) -> None:
@@ -5086,6 +5101,33 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(service._chat_event_content(event), "Yoko joined Minecraft Alpha")
+
+    def test_chat_event_content_includes_client_pack_details_for_web_chat(self) -> None:
+        service = ModWebService()
+        service.set_manager(
+            _manager_stub(
+                apps={
+                    "minecraft_alpha": SimpleNamespace(name="minecraft_alpha", friendly="Minecraft Alpha"),
+                }
+            )
+        )
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="Yoko joined Minecraft Alpha",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+                pack_version="2026-07-04",
+                has_unpublished_pack_changes=True,
+            ),
+        )
+
+        self.assertEqual(
+            service._chat_event_content(event),
+            "Yoko joined Minecraft Alpha (Pack: 2026-07-04 [Unpublished Changes])",
+        )
 
     def test_chat_event_content_prefers_embed_description_for_web_chat(self) -> None:
         service = ModWebService()
@@ -6247,6 +6289,28 @@ class ModWebTests(unittest.TestCase):
         )
 
         self.assertEqual(ModWebService._chat_event_badges(event), (_ModWebBadgeSpec(text="Joined", tone="purple"),))
+
+    def test_chat_event_badges_include_client_pack_badge_for_join_notice(self) -> None:
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(kind=ChatAuthorKind.GAME_PLAYER, display_name="Yoko"),
+            content="Yoko joined Minecraft Alpha",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+                pack_version="2026-07-04",
+                has_unpublished_pack_changes=True,
+            ),
+        )
+
+        self.assertEqual(
+            ModWebService._chat_event_badges(event),
+            (
+                _ModWebBadgeSpec(text="Joined", tone="purple"),
+                _ModWebBadgeSpec(text="Pack: 2026-07-04 [Unpublished Changes]", tone="warn"),
+            ),
+        )
 
     def test_chat_event_badges_prefer_typed_notice_over_embed_title(self) -> None:
         event = ChatEvent(
@@ -8201,6 +8265,8 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("jumpStateByTimeline", script)
         self.assertIn("clearScheduledJump", script)
         self.assertIn("hiddenMessageCount", script)
+        self.assertIn("mod-chat-entry-live", script)
+        self.assertIn("mod-chat-unread-live", script)
         self.assertIn("modChatWasPinned", script)
         self.assertIn("modChatHiddenCount", script)
         self.assertIn("autoScrollHiddenMessageLimit = 3", script)

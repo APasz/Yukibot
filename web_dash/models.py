@@ -2247,12 +2247,32 @@ class ModWebModelsMixin(ModWebServiceSupport):
         return (cls._running_value(running_names), cls._running_tone(len(running_names), app_count))
 
     @classmethod
-    def _system_cpu_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+    def _system_percent_entry(
+        cls,
+        *,
+        system_summary: NodeSystemSummary | None,
+        percent: int | None,
+    ) -> tuple[str, BadgeTone]:
         if system_summary is None:
             return ("Unavailable", "red")
-        if system_summary.cpu_percent is None:
+        if percent is None:
             return ("Unavailable", "grey")
-        return (f"{system_summary.cpu_percent}%", cls._percent_tone(system_summary.cpu_percent))
+        return (f"{percent}%", cls._percent_tone(percent))
+
+    @classmethod
+    def _system_cpu_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+        percent: int | None = None if system_summary is None else system_summary.cpu_percent
+        return cls._system_percent_entry(system_summary=system_summary, percent=percent)
+
+    @classmethod
+    def _system_ram_percent_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+        percent: int | None = None if system_summary is None else system_summary.ram_percent
+        return cls._system_percent_entry(system_summary=system_summary, percent=percent)
+
+    @classmethod
+    def _system_storage_percent_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+        percent: int | None = None if system_summary is None else system_summary.storage_percent
+        return cls._system_percent_entry(system_summary=system_summary, percent=percent)
 
     @classmethod
     def _system_ram_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
@@ -2291,6 +2311,15 @@ class ModWebModelsMixin(ModWebServiceSupport):
             ),
             cls._percent_tone(system_summary.storage_percent),
         )
+
+    @classmethod
+    def _system_bot_uptime_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
+        if system_summary is None:
+            return ("Unavailable", "red")
+        bot_uptime_seconds: int | None = system_summary.bot_uptime_seconds
+        if bot_uptime_seconds is None:
+            return ("Unavailable", "grey")
+        return (cls._format_uptime_seconds(bot_uptime_seconds), "black")
 
     @classmethod
     def _system_uptime_entry(cls, system_summary: NodeSystemSummary | None) -> tuple[str, BadgeTone]:
@@ -2650,6 +2679,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 value_label = rendered_value_labels[index]
                 if value_label is not None and previous_stat.value != next_stat.value:
                     value_label.set_text(next_stat.value)
+                    self._pulse_live_value(value_label)
                 for line_index, (previous_line, next_line) in enumerate(
                     zip(previous_stat.lines, next_stat.lines, strict=True)
                 ):
@@ -2666,7 +2696,9 @@ class ModWebModelsMixin(ModWebServiceSupport):
                             replace=f"{base_classes}{tone_class}"
                         )
                     if previous_line.value != next_line.value:
-                        rendered_line_value_labels[index][line_index].set_text(next_line.value)
+                        line_value_label = rendered_line_value_labels[index][line_index]
+                        line_value_label.set_text(next_line.value)
+                        self._pulse_live_value(line_value_label)
             current_stats = stats
 
         _render_stats(initial_stats)

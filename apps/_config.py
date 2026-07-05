@@ -947,6 +947,11 @@ class KnownModPageProvider(enum.StrEnum):
     SPIGOT_MC = "SpigotMC"
     HANGAR = "Hangar"
     BUKKIT = "Bukkit"
+    DISCORD = "Discord"
+    REDDIT = "Reddit"
+    YOUTUBE = "YouTube"
+    PATREON = "Patreon"
+    KO_FI = "Ko-fi"
     GITHUB = "GitHub"
     GITLAB = "GitLab"
 
@@ -979,6 +984,16 @@ class KnownModPageProvider(enum.StrEnum):
                 return ("hangar.papermc.io",)
             case KnownModPageProvider.BUKKIT:
                 return ("dev.bukkit.org",)
+            case KnownModPageProvider.DISCORD:
+                return ("discord.com", "discord.gg")
+            case KnownModPageProvider.REDDIT:
+                return ("reddit.com",)
+            case KnownModPageProvider.YOUTUBE:
+                return ("youtube.com", "youtu.be")
+            case KnownModPageProvider.PATREON:
+                return ("patreon.com",)
+            case KnownModPageProvider.KO_FI:
+                return ("ko-fi.com",)
             case KnownModPageProvider.GITHUB:
                 return ("github.com",)
             case KnownModPageProvider.GITLAB:

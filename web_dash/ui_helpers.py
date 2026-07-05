@@ -38,6 +38,11 @@ from .types import _ModWebBadgeSpec, _ModWebNodePresenceBadgeSpec
 if TYPE_CHECKING:
     from nicegui.element import Element
 
+_LIVE_VALUE_PULSE_CLASSES: tuple[str, str] = (
+    "mod-live-value-pulse-a",
+    "mod-live-value-pulse-b",
+)
+
 def copy_text_to_clipboard(
     *,
     ui: ModWebUi,
@@ -102,6 +107,14 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         font_face_css_html = font_assets.font_face_css_html(base_path="/mod-web/assets/fonts")
         if font_face_css_html:
             ui.add_head_html(font_face_css_html)
+
+    @staticmethod
+    def _pulse_live_value(element: "Element") -> None:
+        current_variant: int = int(getattr(element, "_mod_live_value_pulse_variant", 0))
+        next_variant: int = (current_variant + 1) % len(_LIVE_VALUE_PULSE_CLASSES)
+        setattr(element, "_mod_live_value_pulse_variant", next_variant)
+        element.classes(remove=" ".join(_LIVE_VALUE_PULSE_CLASSES))
+        element.classes(add=_LIVE_VALUE_PULSE_CLASSES[next_variant])
 
     @staticmethod
     def _badge(

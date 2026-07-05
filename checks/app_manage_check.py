@@ -84,7 +84,7 @@ from cmd_app import (
     _state_value,
 )
 from cmd_dashboard import DashboardEditorService
-from relay_notices import MaintenanceNotice, MaintenanceStage, RelayNoticeSeverity, RelayNoticeSource
+from relay_notices import AppLifecycleNotice, MaintenanceNotice, MaintenanceStage, RelayNoticeSeverity, RelayNoticeSource
 from restart_targets import RestartTarget
 
 
@@ -1178,6 +1178,18 @@ class AppManageTests(unittest.TestCase):
                 "Dummy Started!\nJoin: `wakusei.apasz.com:25565 [203.0.113.10:25565]`",
             )
 
+    def test_started_message_includes_client_pack_details_for_supported_apps(self) -> None:
+        app = _build_dummy_app(join_port=25565)
+        app.scope = "minecraft"
+        app.cfg.scope = "minecraft"
+        app.cfg.client_pack_published_version = "2026-07-05"
+        app.cfg.client_pack_content_dirty = True
+
+        self.assertEqual(
+            _app_started_response_text(app),
+            "Dummy Started!\nJoin: `play.example.com:25565`\nPack: 2026-07-05 [Unpublished Changes]",
+        )
+
     def test_app_lifecycle_embed_includes_join_address_for_start(self) -> None:
         app = _build_dummy_app(join_port=25565)
 
@@ -1185,6 +1197,22 @@ class AppManageTests(unittest.TestCase):
 
         self.assertEqual(embed.title, "Dummy Started")
         self.assertEqual(embed.description, "Join: `play.example.com:25565`")
+        self.assertEqual(embed.color, app.manage_embed_color)
+
+    def test_app_lifecycle_embed_includes_client_pack_details_for_start(self) -> None:
+        app = _build_dummy_app(join_port=25565)
+        app.scope = "minecraft"
+        app.cfg.scope = "minecraft"
+        app.cfg.client_pack_published_version = "2026-07-05"
+        app.cfg.client_pack_content_dirty = True
+
+        embed = build_app_lifecycle_embed(app, started=True)
+
+        self.assertEqual(embed.title, "Dummy Started")
+        self.assertEqual(
+            embed.description,
+            "Join: `play.example.com:25565`\nPack: 2026-07-05 [Unpublished Changes]",
+        )
         self.assertEqual(embed.color, app.manage_embed_color)
 
     def test_app_lifecycle_embed_includes_uptime_for_stop(self) -> None:
@@ -2437,6 +2465,35 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         assert relayed_message.relay_embed is not None
         self.assertEqual(relayed_message.relay_embed.title, "Dummy Started")
         self.assertEqual(relayed_message.relay_embed.description, "Join: `play.example.com:25565`")
+
+    async def test_launch_emits_lifecycle_start_embed_with_client_pack_details(self) -> None:
+        manager = object.__new__(App_Manager)
+        manager.current = None
+        manager.end = AsyncMock(return_value=set())
+        app = _build_dummy_app(join_port=25565)
+        app.scope = "minecraft"
+        app.cfg.scope = "minecraft"
+        app.cfg.client_pack_published_version = "2026-07-05"
+        app.cfg.client_pack_content_dirty = True
+        app.chat_channel = hikari.Snowflake(123)
+
+        with patch("_manager.DC_Relay.add") as add_mock:
+            await manager.launch(app)
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.content, "Started")
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(
+            relayed_message.relay_embed.description,
+            "Join: `play.example.com:25565`\nPack: 2026-07-05 [Unpublished Changes]",
+        )
+        self.assertIsInstance(relayed_message.notice, AppLifecycleNotice)
+        assert isinstance(relayed_message.notice, AppLifecycleNotice)
+        self.assertEqual(
+            relayed_message.notice.detail_lines,
+            ("Pack: 2026-07-05 [Unpublished Changes]",),
+        )
 
     async def test_launch_skips_lifecycle_start_embed_when_started_notice_disabled(self) -> None:
         manager = object.__new__(App_Manager)

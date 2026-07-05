@@ -85,7 +85,6 @@ from relay_notices import (
     GameProgressKind,
     GameProgressNotice,
     PlayerSessionAction,
-    PlayerSessionNotice,
     RelayNoticeSource,
     notice_embed_spec,
     render_notice_text,
@@ -2992,13 +2991,13 @@ class Minecraft(App[Minecraft_Config]):
         started: bool,
         uptime: timedelta | None = None,
     ) -> tuple[str, ...]:
-        del uptime
+        base_lines = super().lifecycle_relay_description_lines(started=started, uptime=uptime)
         if not started:
-            return ()
+            return base_lines
         squaremap_url = self._squaremap_public_url()
         if squaremap_url is None:
-            return ()
-        return (f"[Squaremap]({squaremap_url})",)
+            return base_lines
+        return (*base_lines, f"[Squaremap]({squaremap_url})")
 
     @property
     def public_map_url(self) -> str | None:
@@ -3925,7 +3924,7 @@ class Players:
         if self.app.relay_notice_player_joined_enabled is False:
             return
         relay_player_id = _resolve_minecraft_player_user_id(player, app=self.app)
-        notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=source)
+        notice = self.app.player_session_notice(action=PlayerSessionAction.JOINED, source=source)
         app_friendly = getattr(self.app, "friendly", self.app.name)
         DC_Relay.add(
             DC_Bound(
@@ -3945,7 +3944,7 @@ class Players:
         self._players.discard(player)
         if self.app.relay_notice_player_left_enabled is False:
             return
-        notice = PlayerSessionNotice(action=PlayerSessionAction.LEFT, source=source)
+        notice = self.app.player_session_notice(action=PlayerSessionAction.LEFT, source=source)
         app_friendly = getattr(self.app, "friendly", self.app.name)
         DC_Relay.add(
             DC_Bound(

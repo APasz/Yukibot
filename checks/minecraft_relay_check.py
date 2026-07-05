@@ -437,6 +437,36 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.player_id, 42)
         app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
 
+    async def test_note_join_includes_client_pack_details_when_published(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.name = "minecraft_demo"
+        app.friendly = "Minecraft Demo"
+        app.scope = "minecraft"
+        app.cfg = SimpleNamespace(
+            client_pack_published_version="2026-07-04",
+            client_pack_content_dirty=True,
+            relay_notice_player_session=True,
+        )
+        app.name_cache = SimpleNamespace(
+            resolve_name=Mock(return_value=config.NameResolutionResult(config.NameResolutionStatus.UNIQUE, 42))
+        )
+        players = Players(app)
+        app._players = players
+
+        with patch("apps.minecraft.DC_Relay.add") as add_mock:
+            players.note_join("Alice")
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(
+            relayed_message.content,
+            "Alice joined Minecraft Demo (Pack: 2026-07-04 [Unpublished Changes])",
+        )
+        self.assertIsInstance(relayed_message.notice, PlayerSessionNotice)
+        assert isinstance(relayed_message.notice, PlayerSessionNotice)
+        self.assertEqual(relayed_message.notice.pack_version, "2026-07-04")
+        self.assertTrue(relayed_message.notice.has_unpublished_pack_changes)
+
     async def test_note_leave_resolves_player_to_discord_mention_when_available(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
         app.name = "minecraft_demo"
@@ -457,6 +487,26 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.player, "Alice")
         self.assertEqual(relayed_message.player_id, 42)
         app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
+
+    def test_lifecycle_relay_description_lines_include_pack_and_squaremap(self) -> None:
+        app = cast(Any, object.__new__(Minecraft))
+        app.scope = "minecraft"
+        app.cfg = SimpleNamespace(
+            client_pack_published_version="2026-07-05",
+            client_pack_content_dirty=True,
+        )
+
+        with patch.object(app, "_squaremap_public_url", return_value="https://maps.example.com") as squaremap_url:
+            lines = app.lifecycle_relay_description_lines(started=True)
+
+        squaremap_url.assert_called_once_with()
+        self.assertEqual(
+            lines,
+            (
+                "Pack: 2026-07-05 [Unpublished Changes]",
+                "[Squaremap](https://maps.example.com)",
+            ),
+        )
 
     async def test_listplayers_logs_unrecognised_response_only_once_until_success(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
@@ -1670,6 +1720,55 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.title, "Minecraft Demo")
         self.assertEqual(embed.description, "Joined Alice")
         self.assertEqual(embed.color, 0x22C55E)
+
+    async def test_send_dc_synthesises_join_embed_with_client_pack_details(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay.bot = cast(Any, object())
+        setattr(relay, "names", _NamesStub())
+        relay._channel_objects = {}
+        relay.resolve_channel = AsyncMock()
+        relay._notify_resolution_failure = AsyncMock()
+
+        app = cast(Any, object.__new__(Minecraft))
+        app.name = "minecraft_demo"
+        app.friendly = "Minecraft Demo"
+        app.scope = "minecraft"
+        app.chat_channel = hikari.Snowflake(1)
+        app.manage_embed_color = 0x22C55E
+
+        send_mock = AsyncMock(return_value=SimpleNamespace(channel_id=hikari.Snowflake(1)))
+        channel = cast(
+            hikari.TextableChannel,
+            cast(
+                object,
+                SimpleNamespace(
+                    id=hikari.Snowflake(1),
+                    guild_id=None,
+                    send=send_mock,
+                ),
+            ),
+        )
+        relay._channel_objects[app.chat_channel] = channel
+
+        message = DC_Bound(
+            app,
+            "Alice joined Minecraft Demo",
+            "Alice",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+                pack_version="2026-07-04",
+                has_unpublished_pack_changes=True,
+            ),
+        )
+
+        await relay._send_dc(message)
+
+        await_args = send_mock.await_args
+        if await_args is None:
+            raise AssertionError("Expected relay send to be awaited.")
+        embed = await_args.kwargs["embeds"][0]
+        self.assertEqual(embed.description, "Joined Alice\nPack: 2026-07-04 [Unpublished Changes]")
 
     async def test_send_dc_queues_relay_tts_when_target_matches_channel(self) -> None:
         relay = object.__new__(DC_Relay)

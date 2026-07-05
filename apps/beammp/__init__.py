@@ -43,7 +43,6 @@ from apps._tailer import Tailer
 from config import Activity_Manager
 from relay_notices import (
     PlayerSessionAction,
-    PlayerSessionNotice,
     RelayNoticeSource,
     render_notice_text,
 )
@@ -455,10 +454,7 @@ class Matchers:
                 if self.app.relay_notice_player_left_enabled is False:
                     return
                 notice_action = PlayerSessionAction.LEFT
-            notice = PlayerSessionNotice(
-                action=notice_action,
-                source=RelayNoticeSource.APP_LOG,
-            )
+            notice = self.app.player_session_notice(action=notice_action, source=RelayNoticeSource.APP_LOG)
             app_friendly = getattr(self.app, "friendly", self.app.name)
             DC_Relay.add(
                 DC_Bound(

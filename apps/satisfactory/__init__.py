@@ -69,7 +69,7 @@ from apps._settings import (
 from apps._tailer import Tailer
 from apps._updater import SteamCmd_Update_Manager
 from config import Activity_Manager
-from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource, render_notice_text
+from relay_notices import PlayerSessionAction, RelayNoticeSource, render_notice_text
 
 log: Logger = logging.getLogger(__name__)
 
@@ -1791,7 +1791,7 @@ class SatisfactoryPlayerSessionMatcher:
                 return
         elif action is PlayerSessionAction.LEFT and self.app.relay_notice_player_left_enabled is False:
             return
-        notice = PlayerSessionNotice(action=action, source=RelayNoticeSource.APP_LOG)
+        notice = self.app.player_session_notice(action=action, source=RelayNoticeSource.APP_LOG)
         app_friendly: str = getattr(self.app, "friendly", self.app.name)
         DC_Relay.add(
             DC_Bound(

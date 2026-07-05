@@ -4,7 +4,12 @@ from collections.abc import Iterable
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from relay_notices import notice_badge_spec, notice_hides_body_content, relay_notice_badge_spec_from_label
+from relay_notices import (
+    notice_additional_badge_specs,
+    notice_badge_spec,
+    notice_hides_body_content,
+    relay_notice_badge_spec_from_label,
+)
 
 from .assets import extract_html_tag_contents
 from .constants import (
@@ -1308,9 +1313,15 @@ class ModWebChatMixin(ModWebServiceSupport):
                     return;
                   }}
                   const nextCount = Math.max(0, count);
+                  const wasVisible = unreadBar.style.display !== 'none';
                   timeline.dataset.modChatUnread = String(nextCount);
                   unreadCount.textContent = nextCount === 1 ? '1 new' : `${{nextCount}} new`;
                   unreadBar.style.display = nextCount > 0 ? 'flex' : 'none';
+                  if (nextCount > 0 && !wasVisible) {{
+                    unreadBar.classList.remove('mod-chat-unread-live');
+                    void unreadBar.offsetWidth;
+                    unreadBar.classList.add('mod-chat-unread-live');
+                  }}
                 }};
                 const sync = (timelineId, unreadBarId, unreadCountId) => {{
                   const timeline = scrollTargetFor(timelineId);
@@ -1622,6 +1633,12 @@ class ModWebChatMixin(ModWebServiceSupport):
                     previousEventIds = JSON.parse(timeline.dataset.modChatPreviousEventIds || '[]');
                   }} catch (_error) {{
                     previousEventIds = [];
+                  }}
+                  const previousEventIdSet = new Set(previousEventIds);
+                  for (const entry of timeline.querySelectorAll('[data-mod-chat-event-id]')) {{
+                    if (!previousEventIdSet.has(entry.dataset.modChatEventId)) {{
+                      entry.classList.add('mod-chat-entry-live');
+                    }}
                   }}
                   const hiddenCount = hiddenMessageCount(previousEventIds, timelineEventIds(timeline));
                   timeline.dataset.modChatHiddenCount = String(hiddenCount);
@@ -2644,10 +2661,13 @@ class ModWebChatMixin(ModWebServiceSupport):
     def _chat_event_badges(cls, event: ChatEvent) -> tuple[_ModWebBadgeSpec, ...]:
         notice = event.resolved_notice()
         if notice is not None:
+            badges: list[_ModWebBadgeSpec] = []
             notice_badge = notice_badge_spec(notice)
-            if notice_badge is None:
-                return ()
-            return (_ModWebBadgeSpec(text=notice_badge.text, tone=notice_badge.tone),)
+            if notice_badge is not None:
+                badges.append(_ModWebBadgeSpec(text=notice_badge.text, tone=notice_badge.tone))
+            for extra_badge in notice_additional_badge_specs(notice):
+                badges.append(_ModWebBadgeSpec(text=extra_badge.text, tone=extra_badge.tone))
+            return tuple(badges)
         embed: ChatEmbed | None = event.embed
         if embed is None:
             return ()

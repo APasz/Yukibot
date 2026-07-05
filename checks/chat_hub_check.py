@@ -258,6 +258,8 @@ class ChatHubTests(unittest.TestCase):
             notice=PlayerSessionNotice(
                 action=PlayerSessionAction.JOINED,
                 source=RelayNoticeSource.APP_LOG,
+                pack_version="2026-07-04",
+                has_unpublished_pack_changes=True,
             ),
             embed=ChatEmbed(title="Relay", description="Forwarded", color=0x336699),
             source_guild_id=789,

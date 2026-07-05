@@ -1266,6 +1266,30 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embeds[0].description, "Joined Yoko")
         self.assertEqual(embeds[0].color, 0x22C55E)
 
+    async def test_discord_text_and_embeds_include_client_pack_details_for_join_notice(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay)._chat_apps = {
+            "minecraft_alpha": SimpleNamespace(friendly="Minecraft Alpha", manage_embed_color=0x22C55E),
+        }
+
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="Yoko joined Minecraft Alpha",
+            notice=PlayerSessionNotice(
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_LOG,
+                pack_version="2026-07-04",
+                has_unpublished_pack_changes=True,
+            ),
+        )
+
+        embeds = DC_Relay._embedify_event(event, app=cast(Any, relay)._chat_apps["minecraft_alpha"])
+
+        self.assertEqual(len(embeds), 1)
+        self.assertEqual(embeds[0].description, "Joined Yoko\nPack: 2026-07-04 [Unpublished Changes]")
+
     async def test_discord_text_and_embeds_synthesise_death_embed_without_duplicate_player_name(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay)._chat_apps = {

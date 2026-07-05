@@ -31,6 +31,8 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("--mod-purple: #8b5cf6", css)
         self.assertIn("--mod-red: #dc2626", css)
         self.assertIn("--mod-warning: #f59e0b", css)
+        self.assertIn("--mod-motion-medium: 260ms", css)
+        self.assertIn("--mod-motion-ease: cubic-bezier(0.22, 1, 0.36, 1)", css)
         self.assertIn(".mod-card", css)
         self.assertIn(".q-notification.bg-warning", css)
         self.assertIn(".q-notification.bg-negative", css)
@@ -85,6 +87,26 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-home-section-grid", css)
         self.assertIn(".mod-home-section", css)
         self.assertIn(".mod-home-section-avatar", css)
+        self.assertIn("container-name: mod-home-section", css)
+        self.assertIn("container-name: mod-app-card", css)
+        self.assertIn(".mod-home-app-count-badge", css)
+        self.assertIn(".mod-home-node-badge-list", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-home-edge-badge-row \{.*?display: grid !important;.*?"
+            r"grid-template-columns: max-content minmax\(0, 1fr\);",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-home-node-badge-list \{.*?column-gap: 0\.5rem;.*?row-gap: 0;",
+        )
+        self.assertIn(".mod-home-hero-header", css)
+        self.assertIn(".mod-home-hero-title", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-home-node-grid \{.*?display: grid !important;.*?"
+            r"repeat\(auto-fit, minmax\(min\(19rem, 100%\), 1fr\)\);",
+        )
         self.assertIn(".mod-stat-section", css)
         self.assertIn(".mod-stat-section-label", css)
         self.assertIn(".mod-stat-tone-purple", css)
@@ -118,22 +140,80 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertIn("@container mod-app-hero (max-width: 52rem)", css)
         self.assertIn("@container mod-app-hero (max-width: 34rem)", css)
-        self.assertIn("@media (min-width: 1280px)", css)
-        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr));", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-home-section-grid \{.*?repeat\(auto-fit, minmax\(min\(34rem, 100%\), 1fr\)\);",
+        )
+        self.assertIn("@container mod-app-card (max-width: 38rem)", css)
         self.assertIn(".mod-app-card-starting::before", css)
+        self.assertIn(".mod-app-card-starting::after", css)
         self.assertIn(".mod-app-card-running::before", css)
         self.assertIn(".mod-app-card-stopping::before", css)
+        self.assertIn(".mod-app-card-stopping::after", css)
+        self.assertIn("@keyframes mod-page-enter", css)
+        self.assertIn("@keyframes mod-live-value-pulse-a", css)
+        self.assertIn("@keyframes mod-live-value-pulse-b", css)
+        self.assertIn("@keyframes mod-system-chart-draw", css)
+        self.assertIn("@keyframes mod-console-output-pulse", css)
+        self.assertIn("@keyframes mod-chat-entry-arrive", css)
+        self.assertIn("@keyframes mod-chat-unread-arrive", css)
+        self.assertIn("@keyframes mod-control-press", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-section-tabs \.q-tab::after \{.*?right: 0;.*?left: 0;.*?"
+            r"transform: scaleX\(0\);.*?"
+            r"transform-origin: center;.*?"
+            r"transition: transform var\(--mod-motion-medium\)",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-chart-line-enter \{.*?stroke-dasharray: 1;.*?"
+            r"animation: mod-system-chart-draw",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)@media \(prefers-reduced-motion: reduce\) \{.*?"
+            r"animation-duration: 0\.01ms !important;",
+        )
         self.assertIn("font-variant-numeric: tabular-nums;", css)
-        self.assertIn("mod-app-card-strip-starting", css)
+        self.assertIn("mod-app-card-strip-starting 900ms linear infinite", css)
         self.assertIn("mod-app-card-strip-running 2.4s ease-in-out infinite", css)
-        self.assertIn("mod-app-card-strip-stopping 780ms linear infinite", css)
+        self.assertIn("mod-app-card-strip-stopping 900ms linear infinite", css)
         self.assertIn("mod-app-hero-border-starting 1.35s ease-in-out infinite", css)
         self.assertIn("mod-app-hero-border-running 2.4s ease-in-out infinite", css)
-        self.assertIn("top: calc(100% - 0.76rem);", css)
         self.assertIn("height: 3px;", css)
         self.assertIn("0 0 / 220% 100% no-repeat", css)
         self.assertIn("background-position: 100% 0;", css)
-        self.assertIn("background-position: 0 0, 0 1rem, 0 1.5rem;", css)
+        self.assertIn("--mod-app-rail-width: 0.72rem;", css)
+        self.assertIn("width: var(--mod-app-rail-width);", css)
+        self.assertIn("var(--mod-card) 40% 56%", css)
+        self.assertIn("transform: translateY(1.25rem);", css)
+        self.assertIn(") left top / 1rem 1.25rem repeat-y", css)
+        self.assertIn(") right top / 1rem 1.25rem repeat-y", css)
+        self.assertIn("transform: translateY(1.25rem);", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-app-card-starting::after \{.*?-45deg,.*?45deg,.*?"
+            r"animation: mod-app-card-strip-starting 900ms linear infinite;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-app-card-stopping::after \{.*?45deg,.*?-45deg,.*?"
+            r"animation: mod-app-card-strip-stopping 900ms linear infinite;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)@keyframes mod-app-card-strip-starting \{.*?0% \{.*?"
+            r"translateY\(1\.25rem\).*?100% \{.*?translateY\(0\)",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)@keyframes mod-app-card-strip-stopping \{.*?0% \{.*?"
+            r"translateY\(0\).*?100% \{.*?translateY\(1\.25rem\)",
+        )
+        self.assertNotIn("data:image/svg+xml", css)
+        self.assertNotIn(".mod-app-card-stopping.mod-app-card-live::before", css)
+        self.assertNotIn(".mod-app-card-starting.mod-app-card-live::before", css)
         self.assertIn("min-height: 3.35rem;", css)
         self.assertIn("font-size: 1.34rem !important;", css)
         self.assertNotIn(".mod-app-card-subtitle", css)

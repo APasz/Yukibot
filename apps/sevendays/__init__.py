@@ -1189,6 +1189,7 @@ class SevenDays_Settings(App_Settings):
                 [],
                 default=2,
                 desc="Control whether first-time joins may spawn near online friends.",
+                min_app_version=AppVersion(main="2.0"),
             ),
             Setting[int](
                 IntSettingSpec(),
@@ -2237,7 +2238,7 @@ class Matchers:
                 if self.app.relay_notice_player_left_enabled is False:
                     return
                 notice_action = PlayerSessionAction.LEFT
-            notice: PlayerSessionNotice = PlayerSessionNotice(
+            notice: PlayerSessionNotice = self.app.player_session_notice(
                 action=notice_action,
                 source=RelayNoticeSource.APP_LOG,
             )

@@ -64,6 +64,10 @@ class ModWebTheme:
                     --mod-panel: {palette.panel};
                     --mod-scrollbar-thumb: rgba(161, 161, 170, 0.34);
                     --mod-scrollbar-thumb-hover: rgba(161, 161, 170, 0.52);
+                    --mod-motion-fast: 120ms;
+                    --mod-motion-medium: 260ms;
+                    --mod-motion-slow: 420ms;
+                    --mod-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
                 }}"""
 
     def css(self) -> str:
@@ -196,8 +200,79 @@ class ModWebTheme:
                         linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
                         var(--mod-red-dark) !important;
                 }}
-                .mod-page {{ max-width: 1180px; margin: 0 auto; }}
+                .mod-page {{
+                    max-width: 1180px;
+                    margin: 0 auto;
+                    animation: mod-page-enter var(--mod-motion-medium) var(--mod-motion-ease) both;
+                }}
                 .mod-page-app {{ max-width: 1380px; }}
+                .mod-card-hero .mod-title {{
+                    animation: mod-hero-title-enter var(--mod-motion-slow) var(--mod-motion-ease) 40ms both;
+                }}
+                .mod-card-hero .mod-app-node-badge-wrap,
+                .mod-card-hero .mod-corner-badges,
+                .mod-card-hero .mod-home-capability-badges {{
+                    animation: mod-badge-rail-enter var(--mod-motion-medium) var(--mod-motion-ease) 110ms both;
+                }}
+                .mod-home-node-card,
+                .mod-home-section,
+                .mod-stat-card {{
+                    animation: mod-card-enter var(--mod-motion-medium) var(--mod-motion-ease) both;
+                }}
+                .mod-home-node-grid > :nth-child(2),
+                .mod-home-section-grid > :nth-child(2),
+                .mod-stat-grid > :nth-child(2) {{ animation-delay: 45ms; }}
+                .mod-home-node-grid > :nth-child(3),
+                .mod-home-section-grid > :nth-child(3),
+                .mod-stat-grid > :nth-child(3) {{ animation-delay: 90ms; }}
+                .mod-home-node-grid > :nth-child(4),
+                .mod-home-section-grid > :nth-child(4),
+                .mod-stat-grid > :nth-child(4) {{ animation-delay: 135ms; }}
+                .mod-row,
+                .mod-save-card,
+                .mod-config-file-row,
+                .mod-setting-shell {{
+                    outline: 1px solid transparent;
+                    outline-offset: -1px;
+                    animation: mod-list-item-enter var(--mod-motion-medium) var(--mod-motion-ease) both;
+                }}
+                .mod-live-value-pulse-a {{
+                    animation: mod-live-value-pulse-a 520ms var(--mod-motion-ease);
+                }}
+                .mod-live-value-pulse-b {{
+                    animation: mod-live-value-pulse-b 520ms var(--mod-motion-ease);
+                }}
+                @keyframes mod-page-enter {{
+                    from {{ opacity: 0; translate: 0 0.4rem; }}
+                    to {{ opacity: 1; translate: 0 0; }}
+                }}
+                @keyframes mod-hero-title-enter {{
+                    from {{ opacity: 0; translate: 0 0.38rem; }}
+                    to {{ opacity: 1; translate: 0 0; }}
+                }}
+                @keyframes mod-badge-rail-enter {{
+                    from {{ opacity: 0; translate: 0 0.28rem; }}
+                    to {{ opacity: 1; translate: 0 0; }}
+                }}
+                @keyframes mod-card-enter {{
+                    from {{ opacity: 0; translate: 0 0.34rem; }}
+                    to {{ opacity: 1; translate: 0 0; }}
+                }}
+                @keyframes mod-list-item-enter {{
+                    0% {{ opacity: 0.68; translate: -0.2rem 0; outline-color: rgba(139, 92, 246, 0); }}
+                    45% {{ opacity: 1; outline-color: rgba(167, 139, 250, 0.58); }}
+                    100% {{ opacity: 1; translate: 0 0; outline-color: transparent; }}
+                }}
+                @keyframes mod-live-value-pulse-a {{
+                    0% {{ color: #ffffff; filter: brightness(1.75); translate: 0 1px; }}
+                    45% {{ text-shadow: 0 0 0.7rem rgba(196, 181, 253, 0.58); }}
+                    100% {{ filter: brightness(1); translate: 0 0; text-shadow: none; }}
+                }}
+                @keyframes mod-live-value-pulse-b {{
+                    0% {{ color: #ffffff; filter: brightness(1.75); translate: 0 1px; }}
+                    45% {{ text-shadow: 0 0 0.7rem rgba(196, 181, 253, 0.58); }}
+                    100% {{ filter: brightness(1); translate: 0 0; text-shadow: none; }}
+                }}
                 .mod-card {{
                     border-radius: 0 !important;
                     background: linear-gradient(135deg, rgba(9, 9, 13, 0.98), rgba(15, 15, 21, 0.98)) !important;
@@ -483,7 +558,13 @@ class ModWebTheme:
                         padding-top: 0;
                     }}
                 }}
-                .mod-app-card {{ transition: border-color 150ms ease, background 150ms ease; }}
+                .mod-app-card {{
+                    --mod-app-rail-width: 0.72rem;
+                    --mod-app-chevron-width: 2rem;
+                    transition: border-color 150ms ease, background 150ms ease;
+                    container-name: mod-app-card;
+                    container-type: inline-size;
+                }}
                 .mod-app-card:hover {{
                     border-color: rgba(139, 92, 246, 0.58) !important;
                     background: linear-gradient(135deg, #0d0d12, #151018) !important;
@@ -527,7 +608,7 @@ class ModWebTheme:
                 }}
                 .mod-app-card .mod-app-card-shell {{
                     gap: 0.7rem !important;
-                    padding: 0.26rem 0.78rem 0.26rem 0.92rem !important;
+                    padding: 0.26rem 0.78rem 0.26rem calc(var(--mod-app-rail-width) + 0.5rem) !important;
                 }}
                 .mod-app-card .mod-app-card-main {{
                     gap: 0 !important;
@@ -570,6 +651,21 @@ class ModWebTheme:
                 .mod-app-card .mod-app-card-api-separator {{
                     height: 0.72rem;
                 }}
+                @container mod-app-card (max-width: 38rem) {{
+                    .mod-app-card-shell {{
+                        grid-template-columns: minmax(0, 1fr);
+                        min-height: auto;
+                        align-items: start !important;
+                    }}
+                    .mod-app-card-actions {{
+                        width: 100%;
+                        flex-wrap: wrap !important;
+                        justify-content: flex-start !important;
+                    }}
+                    .mod-app-card-badges {{
+                        flex-wrap: wrap !important;
+                    }}
+                }}
                 .mod-app-runtime-chip {{
                     display: inline-flex !important;
                     align-items: center;
@@ -584,20 +680,44 @@ class ModWebTheme:
                 .mod-app-card-live::before {{
                     animation: mod-app-card-strip-live 760ms ease-out;
                 }}
-                .mod-app-card-starting::before {{
-                    top: 0.42rem;
-                    bottom: auto;
-                    left: 0.08rem;
-                    width: 0.34rem;
-                    height: 0.34rem;
-                    border-radius: 999px;
-                    animation: mod-app-card-strip-starting 1.35s cubic-bezier(0.56, 0.04, 0.44, 0.96) infinite;
-                    will-change: top, opacity, filter;
+                .mod-app-card-starting::before,
+                .mod-app-card-stopping::before {{
+                    width: var(--mod-app-rail-width);
+                    opacity: 1;
+                    filter: none;
+                    background: var(--mod-app-strip-color, var(--mod-border-hot));
+                    animation: none;
                 }}
-                .mod-app-card-starting.mod-app-card-live::before {{
-                    animation:
-                        mod-app-card-strip-live 760ms ease-out,
-                        mod-app-card-strip-starting 1.35s cubic-bezier(0.56, 0.04, 0.44, 0.96) 760ms infinite;
+                .mod-app-card-starting::after,
+                .mod-app-card-stopping::after {{
+                    content: "";
+                    position: absolute;
+                    z-index: 1;
+                    top: -1.25rem;
+                    bottom: 0;
+                    left: calc((var(--mod-app-rail-width) - var(--mod-app-chevron-width)) / 2);
+                    width: var(--mod-app-chevron-width);
+                    pointer-events: none;
+                    clip-path: inset(
+                        0 calc((var(--mod-app-chevron-width) - var(--mod-app-rail-width)) / 2)
+                    );
+                    will-change: transform;
+                }}
+                .mod-app-card-starting::after {{
+                    background:
+                        linear-gradient(
+                            -45deg,
+                            transparent 0 40%,
+                            var(--mod-card) 40% 56%,
+                            transparent 56% 100%
+                        ) left top / 1rem 1.25rem repeat-y,
+                        linear-gradient(
+                            45deg,
+                            transparent 0 40%,
+                            var(--mod-card) 40% 56%,
+                            transparent 56% 100%
+                        ) right top / 1rem 1.25rem repeat-y;
+                    animation: mod-app-card-strip-starting 900ms linear infinite;
                 }}
                 .mod-app-card-running::before {{
                     animation: mod-app-card-strip-running 2.4s ease-in-out infinite;
@@ -608,35 +728,21 @@ class ModWebTheme:
                         mod-app-card-strip-live 760ms ease-out,
                         mod-app-card-strip-running 2.4s ease-in-out 760ms infinite;
                 }}
-                .mod-app-card-stopping::before {{
-                    width: 0.62rem;
+                .mod-app-card-stopping::after {{
                     background:
                         linear-gradient(
-                            180deg,
-                            rgba(0, 0, 0, 0.14),
-                            rgba(0, 0, 0, 0.14)
-                        ) 0 0 / 100% 100% no-repeat,
+                            45deg,
+                            transparent 0 40%,
+                            var(--mod-card) 40% 56%,
+                            transparent 56% 100%
+                        ) left top / 1rem 1.25rem repeat-y,
                         linear-gradient(
-                            150deg,
-                            transparent 0 26%,
-                            rgba(255, 255, 255, 0.92) 26% 38%,
-                            var(--mod-app-strip-color, var(--mod-border-hot)) 38% 52%,
-                            transparent 52% 100%
-                        ) 0 0 / 100% 1rem repeat-y,
-                        linear-gradient(
-                            30deg,
-                            transparent 0 26%,
-                            rgba(255, 255, 255, 0.92) 26% 38%,
-                            var(--mod-app-strip-color, var(--mod-border-hot)) 38% 52%,
-                            transparent 52% 100%
-                        ) 0 0.5rem / 100% 1rem repeat-y;
-                    animation: mod-app-card-strip-stopping 780ms linear infinite;
-                    will-change: background-position, opacity, filter;
-                }}
-                .mod-app-card-stopping.mod-app-card-live::before {{
-                    animation:
-                        mod-app-card-strip-live 760ms ease-out,
-                        mod-app-card-strip-stopping 780ms linear 760ms infinite;
+                            -45deg,
+                            transparent 0 40%,
+                            var(--mod-card) 40% 56%,
+                            transparent 56% 100%
+                        ) right top / 1rem 1.25rem repeat-y;
+                    animation: mod-app-card-strip-stopping 900ms linear infinite;
                 }}
                 .mod-app-runtime-chip-live {{
                     animation: mod-app-runtime-chip-live 820ms ease-out;
@@ -702,19 +808,10 @@ class ModWebTheme:
                 }}
                 @keyframes mod-app-card-strip-starting {{
                     0% {{
-                        top: 0.42rem;
-                        opacity: 0.86;
-                        filter: saturate(0.96) brightness(0.98);
-                    }}
-                    50% {{
-                        top: calc(100% - 0.76rem);
-                        opacity: 1;
-                        filter: saturate(1.12) brightness(1.22);
+                        transform: translateY(1.25rem);
                     }}
                     100% {{
-                        top: 0.42rem;
-                        opacity: 0.86;
-                        filter: saturate(0.96) brightness(0.98);
+                        transform: translateY(0);
                     }}
                 }}
                 @keyframes mod-app-card-strip-running {{
@@ -730,14 +827,10 @@ class ModWebTheme:
                 }}
                 @keyframes mod-app-card-strip-stopping {{
                     0% {{
-                        background-position: 0 0, 0 0, 0 0.5rem;
-                        opacity: 0.92;
-                        filter: saturate(1) brightness(1);
+                        transform: translateY(0);
                     }}
                     100% {{
-                        background-position: 0 0, 0 1rem, 0 1.5rem;
-                        opacity: 1;
-                        filter: saturate(1.02) brightness(1.04);
+                        transform: translateY(1.25rem);
                     }}
                 }}
                 @keyframes mod-app-runtime-chip-live {{
@@ -799,7 +892,7 @@ class ModWebTheme:
                     top: 0;
                     bottom: 0;
                     left: 0;
-                    width: 0.42rem;
+                    width: var(--mod-app-rail-width);
                     background: var(--mod-app-strip-color, var(--mod-border-hot));
                     border-radius: 0;
                     pointer-events: none;
@@ -873,6 +966,7 @@ class ModWebTheme:
                     justify-content: flex-start;
                 }}
                 .mod-section-tabs .q-tab {{
+                    position: relative;
                     min-height: 2.65rem;
                     padding: 0.4rem 0.78rem;
                     color: var(--mod-muted) !important;
@@ -887,6 +981,19 @@ class ModWebTheme:
                     font-weight: 900;
                     letter-spacing: 0.1em;
                     text-transform: uppercase;
+                    overflow: hidden;
+                }}
+                .mod-section-tabs .q-tab::after {{
+                    content: "";
+                    position: absolute;
+                    right: 0;
+                    bottom: 0;
+                    left: 0;
+                    height: 2px;
+                    background: linear-gradient(90deg, #7c3aed, #c4b5fd);
+                    transform: scaleX(0);
+                    transform-origin: center;
+                    transition: transform var(--mod-motion-medium) var(--mod-motion-ease);
                 }}
                 .mod-section-tabs .q-tab--active {{
                     color: var(--mod-text) !important;
@@ -897,6 +1004,9 @@ class ModWebTheme:
                     box-shadow:
                         inset 0 0 0 1px rgba(196, 181, 253, 0.14),
                         0 12px 26px rgba(0, 0, 0, 0.28);
+                }}
+                .mod-section-tabs .q-tab--active::after {{
+                    transform: scaleX(1);
                 }}
                 .mod-section-tabs .q-tabs__arrow {{
                     color: var(--mod-muted) !important;
@@ -3202,11 +3312,33 @@ class ModWebTheme:
                 }}
                 .mod-home-section-grid {{
                     display: grid;
-                    grid-template-columns: minmax(0, 1fr);
+                    grid-template-columns: repeat(auto-fit, minmax(min(34rem, 100%), 1fr));
                     gap: 1.5rem;
                 }}
                 .mod-home-section {{
                     min-width: 0;
+                    container-name: mod-home-section;
+                    container-type: inline-size;
+                }}
+                .mod-home-section-header {{
+                    display: grid !important;
+                    grid-template-columns: minmax(0, 1fr) max-content;
+                    align-items: center !important;
+                    gap: 0.6rem 1rem !important;
+                }}
+                .mod-home-section-identity {{
+                    min-width: 0;
+                }}
+                .mod-home-section-resource-badges {{
+                    justify-content: flex-end;
+                }}
+                @container mod-home-section (max-width: 30rem) {{
+                    .mod-home-section-header {{
+                        grid-template-columns: minmax(0, 1fr);
+                    }}
+                    .mod-home-section-resource-badges {{
+                        justify-content: flex-start;
+                    }}
                 }}
                 .mod-home-section-avatar {{
                     width: 1.6rem;
@@ -3224,6 +3356,83 @@ class ModWebTheme:
                     width: calc(100% + 2px) !important;
                     max-width: none !important;
                     margin: 0 !important;
+                }}
+                .mod-home-hero {{
+                    padding: 0 !important;
+                    gap: 0 !important;
+                }}
+                .mod-home-edge-badge-wrap {{
+                    position: relative !important;
+                    inset: auto !important;
+                    width: 100% !important;
+                    max-width: 100% !important;
+                    margin: 0 !important;
+                    padding: 0 !important;
+                    box-sizing: border-box !important;
+                    z-index: 2;
+                    pointer-events: none;
+                }}
+                .mod-home-edge-badge-row {{
+                    display: grid !important;
+                    grid-template-columns: max-content minmax(0, 1fr);
+                    width: 100%;
+                    align-items: flex-start;
+                    column-gap: 0.5rem;
+                    row-gap: 0;
+                    pointer-events: auto;
+                }}
+                .mod-home-app-count-badge {{
+                    flex: 0 0 auto;
+                    border-left: 0 !important;
+                }}
+                .mod-home-node-badge-list {{
+                    display: flex !important;
+                    width: 100%;
+                    min-width: 0;
+                    flex-wrap: wrap !important;
+                    justify-content: flex-end;
+                    column-gap: 0.5rem;
+                    row-gap: 0;
+                }}
+                .mod-home-node-badge-list .mod-node-status-badge {{
+                    min-width: min(10.75rem, 100%);
+                    max-width: 100%;
+                }}
+                .mod-home-node-status-badge-text {{
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }}
+                .mod-home-hero-shell {{
+                    padding-top: clamp(0.75rem, 2.5cqi, 1.5rem) !important;
+                }}
+                .mod-home-hero-header {{
+                    display: flex !important;
+                    justify-content: center !important;
+                }}
+                .mod-home-hero-header .mod-hero-header-main {{
+                    flex: 0 1 auto;
+                    width: 100%;
+                    align-items: center;
+                    text-align: center;
+                }}
+                .mod-home-hero-title {{
+                    font-size: clamp(1.65rem, 5cqi, 3rem) !important;
+                    line-height: 0.98 !important;
+                    text-wrap: nowrap !important;
+                    white-space: nowrap;
+                }}
+                .mod-home-capability-badges {{
+                    display: flex !important;
+                    width: 100% !important;
+                    min-width: 0;
+                    flex-direction: row !important;
+                    flex-wrap: wrap !important;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 0.5rem;
+                    padding-top: 0.5rem;
                 }}
                 .mod-system-edge-badge-row {{
                     width: 100%;
@@ -3276,17 +3485,15 @@ class ModWebTheme:
                         padding-top: 4.8rem !important;
                     }}
                 }}
-                @media (min-width: 1280px) {{
-                    .mod-home-section-grid {{
-                        grid-template-columns: repeat(2, minmax(0, 1fr));
-                    }}
-                }}
                 .mod-home-node-grid {{
+                    display: grid !important;
+                    grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
                     align-items: stretch;
+                    gap: 0.75rem !important;
                 }}
                 .mod-home-node-card {{
-                    min-width: min(19rem, 100%);
-                    flex: 1 1 19rem;
+                    width: 100%;
+                    min-width: 0;
                     border-radius: 0 !important;
                     background: rgba(10, 10, 14, 0.86) !important;
                     border: 1px solid #2f2f37 !important;
@@ -3398,9 +3605,12 @@ class ModWebTheme:
                     text-overflow: ellipsis;
                     white-space: nowrap;
                 }}
-                @media (max-width: 640px) {{
-                    .mod-home-node-card {{
-                        min-width: 100%;
+                @container mod-app-hero (max-width: 24rem) {{
+                    .mod-home-edge-badge-row {{
+                        column-gap: 0.35rem;
+                    }}
+                    .mod-home-node-badge-list {{
+                        column-gap: 0.35rem;
                     }}
                 }}
                 .mod-stat-grid {{ align-items: stretch; }}
@@ -3528,6 +3738,14 @@ class ModWebTheme:
                     stroke-linecap: round;
                     stroke-linejoin: round;
                     vector-effect: non-scaling-stroke;
+                }}
+                .mod-system-chart-line-enter {{
+                    stroke-dasharray: 1;
+                    stroke-dashoffset: 1;
+                    animation: mod-system-chart-draw 720ms var(--mod-motion-ease) forwards;
+                }}
+                @keyframes mod-system-chart-draw {{
+                    to {{ stroke-dashoffset: 0; }}
                 }}
                 .mod-system-chart-empty {{
                     display: flex;
@@ -4724,6 +4942,23 @@ class ModWebTheme:
                     overflow-wrap: inherit;
                     word-break: inherit;
                 }}
+                .mod-console-stdout {{
+                    position: relative;
+                    transition: border-color var(--mod-motion-fast) ease, box-shadow var(--mod-motion-fast) ease;
+                }}
+                .mod-console-stdout-update {{
+                    animation: mod-console-output-pulse 480ms var(--mod-motion-ease);
+                }}
+                @keyframes mod-console-output-pulse {{
+                    0% {{
+                        border-left-color: #c4b5fd;
+                        box-shadow: inset 3px 0 0 rgba(139, 92, 246, 0.76);
+                    }}
+                    100% {{
+                        border-left-color: rgba(82, 82, 91, 0.82);
+                        box-shadow: inset 3px 0 0 rgba(139, 92, 246, 0);
+                    }}
+                }}
                 .mod-chat-quote {{
                     margin: 0.18rem 0 0;
                     padding: 0.22rem 0 0.22rem 0.62rem;
@@ -4759,6 +4994,13 @@ class ModWebTheme:
                 }}
                 .mod-chat-entry + .mod-chat-entry {{
                     margin-top: -0.08rem;
+                }}
+                .mod-chat-entry-live {{
+                    animation: mod-chat-entry-arrive 320ms var(--mod-motion-ease) both;
+                }}
+                @keyframes mod-chat-entry-arrive {{
+                    from {{ opacity: 0; translate: 0 0.28rem; }}
+                    to {{ opacity: 1; translate: 0 0; }}
                 }}
                 .mod-chat-entry-main {{
                     gap: 0.04rem !important;
@@ -5006,6 +5248,14 @@ class ModWebTheme:
                     background: rgba(28, 28, 38, 0.96);
                     border-color: rgba(196, 181, 253, 0.52);
                 }}
+                .mod-chat-unread-live {{
+                    animation: mod-chat-unread-arrive 260ms var(--mod-motion-ease) both;
+                }}
+                @keyframes mod-chat-unread-arrive {{
+                    0% {{ opacity: 0; scale: 0.96; translate: 0 0.25rem; }}
+                    70% {{ opacity: 1; scale: 1.015; translate: 0 0; }}
+                    100% {{ opacity: 1; scale: 1; translate: 0 0; }}
+                }}
                 .mod-chat-unread-count {{
                     color: rgba(228, 228, 231, 0.86) !important;
                     font-size: 0.65rem !important;
@@ -5067,6 +5317,16 @@ class ModWebTheme:
                     box-shadow: none !important;
                 }}
                 .mod-action:hover {{ filter: brightness(1.14); transform: translateY(-1px); }}
+                .mod-list-button:active,
+                .mod-action:active,
+                .mod-toolbar-button:active,
+                .mod-app-card-api-link:active {{
+                    animation: mod-control-press 130ms ease-out;
+                }}
+                @keyframes mod-control-press {{
+                    50% {{ scale: 0.985; translate: 0 1px; filter: brightness(0.94); }}
+                    100% {{ scale: 1; translate: 0 0; }}
+                }}
                 .mod-user-header-tray-shell:not(:has(.mod-user-header-tray)) {{
                     display: none !important;
                     min-height: 0 !important;
@@ -5098,18 +5358,6 @@ class ModWebTheme:
                     }}
                     .mod-chat-shell-header {{ flex-wrap: wrap !important; }}
                     .mod-chat-shell-header-main {{ flex-basis: 100%; }}
-                    .mod-app-card-shell {{
-                        grid-template-columns: minmax(0, 1fr);
-                        min-height: auto;
-                        align-items: start !important;
-                    }}
-                    .mod-app-card-actions {{
-                        flex-wrap: wrap !important;
-                        justify-content: flex-start !important;
-                    }}
-                    .mod-app-card-badges {{
-                        flex-wrap: wrap !important;
-                    }}
                     .mod-chat-shell-card {{
                         width: min(100%, calc(100vw - 1rem)) !important;
                         min-height: 32rem;
@@ -5360,6 +5608,17 @@ class ModWebTheme:
                     .mod-mods-toolbar-actions .mod-list-button.danger {{
                         grid-column: 2;
                         width: 100%;
+                    }}
+                }}
+                @media (prefers-reduced-motion: reduce) {{
+                    *,
+                    *::before,
+                    *::after {{
+                        scroll-behavior: auto !important;
+                        animation-duration: 0.01ms !important;
+                        animation-delay: 0ms !important;
+                        animation-iteration-count: 1 !important;
+                        transition-duration: 0.01ms !important;
                     }}
                 }}
             </style>

@@ -26,6 +26,8 @@ class TailReaderKind(enum.StrEnum):
 
 
 class Tailer:
+    _TASK_STOP_TIMEOUT_SECONDS = 1.0
+
     def __init__(
         self,
         app_alive: Callable[[], AppAliveResult],
@@ -105,14 +107,15 @@ class Tailer:
 
     async def stop(self) -> None:
         log.info(f"{__name__}.stop")
-        for task in (self._read_task, self._log_clear_task):
-            if task is not None and not task.done():
-                task.cancel()
-        for task in (self._read_task, self._log_clear_task):
-            if task is None:
-                continue
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        current_loop = asyncio.get_running_loop()
+        tasks: tuple[tuple[str, asyncio.Task[None] | None], ...] = (
+            ("reader loop", self._read_task),
+            ("log cleaner", self._log_clear_task),
+        )
+        for _, task in tasks:
+            self._request_task_stop(task, current_loop=current_loop)
+        for label, task in tasks:
+            await self._wait_for_task_stop(task, current_loop=current_loop, label=label)
         self._read_task = None
         self._log_clear_task = None
         self._running = False
@@ -176,6 +179,50 @@ class Tailer:
         with contextlib.suppress(OSError, ValueError):
             self.reader.close()
         self.reader = None
+
+    def _request_task_stop(
+        self,
+        task: asyncio.Task[None] | None,
+        *,
+        current_loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        if task is None or task.done():
+            return
+        task_loop = task.get_loop()
+        if task_loop is current_loop:
+            task.cancel()
+            return
+        if task_loop.is_closed():
+            log.warning("Tailer task cancellation skipped because the owning event loop is already closed.")
+            return
+        task_loop.call_soon_threadsafe(task.cancel)
+
+    async def _wait_for_task_stop(
+        self,
+        task: asyncio.Task[None] | None,
+        *,
+        current_loop: asyncio.AbstractEventLoop,
+        label: str,
+        timeout_seconds: float = _TASK_STOP_TIMEOUT_SECONDS,
+    ) -> None:
+        if task is None or task.done():
+            return
+        task_loop = task.get_loop()
+        if task_loop is not current_loop:
+            deadline = current_loop.time() + timeout_seconds
+            while not task.done():
+                if current_loop.time() >= deadline:
+                    log.warning("Tailer %s did not finish in time after cross-loop cancellation.", label)
+                    return
+                await asyncio.sleep(0.05)
+            return
+
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout_seconds)
+        except asyncio.TimeoutError:
+            log.warning("Tailer %s did not finish in time after cancellation.", label)
+        except asyncio.CancelledError:
+            pass
 
     async def _get_reader(self) -> StreamReader | BufferedIOBase | TextIOBase | None:
         if self.sreader or self.breader or self.reader:

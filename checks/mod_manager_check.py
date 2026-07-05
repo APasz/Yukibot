@@ -84,6 +84,11 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
             "https://www.spigotmc.org/resources/example.1/": KnownModPageProvider.SPIGOT_MC,
             "https://hangar.papermc.io/example": KnownModPageProvider.HANGAR,
             "https://dev.bukkit.org/projects/example": KnownModPageProvider.BUKKIT,
+            "https://discord.gg/example": KnownModPageProvider.DISCORD,
+            "https://www.reddit.com/r/example/comments/abc123/mod_release/": KnownModPageProvider.REDDIT,
+            "https://youtu.be/example": KnownModPageProvider.YOUTUBE,
+            "https://www.patreon.com/example": KnownModPageProvider.PATREON,
+            "https://ko-fi.com/example": KnownModPageProvider.KO_FI,
             "https://github.com/example/mod": KnownModPageProvider.GITHUB,
             "https://gitlab.com/example/mod": KnownModPageProvider.GITLAB,
         }

@@ -69,7 +69,6 @@ from relay_notices import (
     GameProgressKind,
     GameProgressNotice,
     PlayerSessionAction,
-    PlayerSessionNotice,
     RelayNoticeSource,
     notice_embed_spec,
     render_notice_text,
@@ -1186,7 +1185,10 @@ class Players:
 
                 for player in leaves:
                     if self.app.relay_notice_player_left_enabled is not False:
-                        notice = PlayerSessionNotice(action=PlayerSessionAction.LEFT, source=RelayNoticeSource.APP_POLL)
+                        notice = self.app.player_session_notice(
+                            action=PlayerSessionAction.LEFT,
+                            source=RelayNoticeSource.APP_POLL,
+                        )
                         app_friendly = getattr(self.app, "friendly", self.app.name)
                         DC_Relay.add(
                             DC_Bound(
@@ -1200,7 +1202,10 @@ class Players:
                     log.debug(f"Players.discard.{self._players=}")
                 for player in joins:
                     if self.app.relay_notice_player_joined_enabled is not False:
-                        notice = PlayerSessionNotice(action=PlayerSessionAction.JOINED, source=RelayNoticeSource.APP_POLL)
+                        notice = self.app.player_session_notice(
+                            action=PlayerSessionAction.JOINED,
+                            source=RelayNoticeSource.APP_POLL,
+                        )
                         app_friendly = getattr(self.app, "friendly", self.app.name)
                         DC_Relay.add(
                             DC_Bound(

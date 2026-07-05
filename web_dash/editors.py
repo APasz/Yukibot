@@ -306,6 +306,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                       const previousState = captureState(elementId);
                       const code = element.querySelector('code') || element;
                       code.textContent = text;
+                      element.classList.remove('mod-console-stdout-update');
+                      void element.offsetWidth;
+                      element.classList.add('mod-console-stdout-update');
                       if (forceScroll || previousState?.wasPinned) {
                         jump(elementId);
                         return;
@@ -331,7 +334,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         def _console_stdout_markup(snapshot: NodeConsoleStdoutSnapshot | None) -> str:
             content = _console_stdout_text(snapshot)
             return (
-                f'<pre id="{stdout_feed_id}" class="mod-chat-code-block" '
+                f'<pre id="{stdout_feed_id}" class="mod-chat-code-block mod-console-stdout" '
                 f'style="height: {stdout_height_value}; max-height: {stdout_height_value}; overflow: auto;"><code>'
                 f"{escape(content)}"
                 "</code></pre>"

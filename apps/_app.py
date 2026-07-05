@@ -53,6 +53,7 @@ from apps._save_files import AppSaveEntry, AppSaveRoot, list_app_save_files, res
 from apps._settings import App_Settings, Settings_Manager
 from apps._updater import AppUpdateInfo, AppUpdateStatus, Update_Manager
 from config import Activity_Manager, Name_Cache
+from relay_notices import PlayerSessionAction, PlayerSessionNotice, RelayNoticeSource, render_pack_text
 
 log = logging.getLogger(__name__)
 
@@ -335,6 +336,49 @@ class App(Generic[ConfigT], ABC):
     @property
     def mod_capabilities(self) -> AppModCapabilities:
         return mod_capabilities_for_scope(self.scope)
+
+    @property
+    def published_client_pack_version(self) -> str | None:
+        if not self.mod_capabilities.supports_client_pack:
+            return None
+        cfg = getattr(self, "cfg", None)
+        raw_version = getattr(cfg, "client_pack_published_version", None)
+        if not isinstance(raw_version, str):
+            return None
+        published_version = raw_version.strip()
+        return published_version or None
+
+    @property
+    def has_unpublished_client_pack_changes(self) -> bool:
+        if self.published_client_pack_version is None:
+            return False
+        cfg = getattr(self, "cfg", None)
+        return bool(getattr(cfg, "client_pack_content_dirty", False))
+
+    @property
+    def published_client_pack_text(self) -> str | None:
+        return render_pack_text(
+            pack_version=self.published_client_pack_version,
+            has_unpublished_changes=self.has_unpublished_client_pack_changes,
+        )
+
+    def player_session_notice(
+        self,
+        *,
+        action: PlayerSessionAction,
+        source: RelayNoticeSource,
+    ) -> PlayerSessionNotice:
+        pack_version: str | None = None
+        has_unpublished_pack_changes: bool = False
+        if action is PlayerSessionAction.JOINED:
+            pack_version = self.published_client_pack_version
+            has_unpublished_pack_changes = self.has_unpublished_client_pack_changes
+        return PlayerSessionNotice(
+            action=action,
+            source=source,
+            pack_version=pack_version,
+            has_unpublished_pack_changes=has_unpublished_pack_changes,
+        )
 
     @property
     def chat_relay_support(self) -> ChatRelaySupport:
@@ -757,8 +801,13 @@ class App(Generic[ConfigT], ABC):
         started: bool,
         uptime: timedelta | None = None,
     ) -> tuple[str, ...]:
-        del started, uptime
-        return ()
+        del uptime
+        if not started:
+            return ()
+        pack_text = self.published_client_pack_text
+        if pack_text is None:
+            return ()
+        return (pack_text,)
 
     @property
     def public_map_url(self) -> str | None:

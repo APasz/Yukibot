@@ -1078,13 +1078,23 @@ class ModWebAppPageMixin(
                     for index, activity_badge_label in enumerate(activity_badge_labels)
                 )
 
+        current_runtime_details: _ModWebAppHeroRuntimeDetails = initial_runtime_details
+
         def _apply_runtime(app_stats: NodeAppRuntimeSummary | None) -> None:
+            nonlocal current_runtime_details
             hero_card.classes(replace=self._app_hero_card_classes(app_stats))
             runtime_details = self._app_hero_runtime_details(app_stats)
-            status_value_label.set_text(runtime_details.status_text)
+            status_changed: bool = (
+                runtime_details.status_text != current_runtime_details.status_text
+                or runtime_details.status_tone != current_runtime_details.status_tone
+            )
+            if runtime_details.status_text != current_runtime_details.status_text:
+                status_value_label.set_text(runtime_details.status_text)
             status_value_label.classes(
                 replace=f"mod-app-hero-status-value mod-app-hero-status-value-{runtime_details.status_tone}"
             )
+            if status_changed:
+                self._pulse_live_value(status_value_label)
             self._set_optional_badge_state(player_badge, runtime_details.player_count_badge)
             self._set_html_tooltip_state(
                 player_badge_tooltip,
@@ -1138,6 +1148,7 @@ class ModWebAppPageMixin(
                 runtime_badge_row,
                 visible=runtime_details.player_count_badge is not None or bool(visible_activity_badges),
             )
+            current_runtime_details = runtime_details
 
         _apply_runtime(initial_app_stats)
         if refresh_async_app_stats is None:

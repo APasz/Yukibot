@@ -187,10 +187,18 @@ class PlayerSessionNotice:
     action: PlayerSessionAction
     source: RelayNoticeSource
     severity: RelayNoticeSeverity = RelayNoticeSeverity.INFO
+    pack_version: str | None = None
+    has_unpublished_pack_changes: bool = False
 
     @property
     def notice_type(self) -> RelayNoticeType:
         return RelayNoticeType.PLAYER_SESSION
+
+    def __post_init__(self) -> None:
+        if self.pack_version is not None and not self.pack_version.strip():
+            raise ValueError("Player session pack version must not be blank.")
+        if self.has_unpublished_pack_changes and self.pack_version is None:
+            raise ValueError("Player session unpublished pack changes require a pack version.")
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -198,15 +206,22 @@ class PlayerSessionNotice:
             "action": self.action.value,
             "source": self.source.value,
             "severity": self.severity.value,
+            "pack_version": self.pack_version,
+            "has_unpublished_pack_changes": self.has_unpublished_pack_changes,
         }
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "PlayerSessionNotice":
+        raw_has_unpublished_pack_changes = payload.get("has_unpublished_pack_changes", False)
+        if not isinstance(raw_has_unpublished_pack_changes, bool):
+            raise ValueError("has_unpublished_pack_changes is invalid.")
         try:
             return cls(
                 action=PlayerSessionAction(_required_string(payload, "action")),
                 source=RelayNoticeSource(_required_string(payload, "source")),
                 severity=RelayNoticeSeverity(_required_string(payload, "severity")),
+                pack_version=_optional_string(payload, "pack_version"),
+                has_unpublished_pack_changes=raw_has_unpublished_pack_changes,
             )
         except ValueError as xcp:
             raise ValueError("player session notice is invalid.") from xcp
@@ -575,10 +590,30 @@ def _render_game_death_embed_description(notice: GameDeathNotice) -> str:
     return "Died"
 
 
+def render_pack_text(*, pack_version: str | None, has_unpublished_changes: bool) -> str | None:
+    if pack_version is None:
+        return None
+    pack_text = f"Pack: {pack_version}"
+    if has_unpublished_changes:
+        return f"{pack_text} [Unpublished Changes]"
+    return pack_text
+
+
+def render_player_session_pack_text(notice: PlayerSessionNotice) -> str | None:
+    return render_pack_text(
+        pack_version=notice.pack_version,
+        has_unpublished_changes=notice.has_unpublished_pack_changes,
+    )
+
+
 def render_notice_body(notice: RelayNotice, *, app_name: str) -> str:
     if isinstance(notice, PlayerSessionNotice):
         if notice.action is PlayerSessionAction.JOINED:
-            return f"joined {app_name}"
+            body = f"joined {app_name}"
+            pack_text = render_player_session_pack_text(notice)
+            if pack_text is None:
+                return body
+            return f"{body} ({pack_text})"
         return f"left {app_name}"
     if isinstance(notice, GameDeathNotice):
         if notice.detail_text is not None:
@@ -683,6 +718,16 @@ def notice_badge_spec(notice: RelayNotice) -> RelayNoticeBadgeSpec | None:
     return None
 
 
+def notice_additional_badge_specs(notice: RelayNotice) -> tuple[RelayNoticeBadgeSpec, ...]:
+    if not isinstance(notice, PlayerSessionNotice):
+        return ()
+    pack_text = render_player_session_pack_text(notice)
+    if pack_text is None:
+        return ()
+    tone: RelayNoticeBadgeTone = "warn" if notice.has_unpublished_pack_changes else "black"
+    return (RelayNoticeBadgeSpec(text=pack_text, tone=tone),)
+
+
 def relay_notice_badge_spec_from_label(label: str) -> RelayNoticeBadgeSpec | None:
     text = label.strip()
     if not text:
@@ -708,7 +753,11 @@ def relay_notice_badge_spec_from_label(label: str) -> RelayNoticeBadgeSpec | Non
 def notice_embed_spec(notice: RelayNotice, *, app_name: str, author_name: str) -> RelayNoticeEmbedSpec | None:
     if isinstance(notice, PlayerSessionNotice):
         if notice.action is PlayerSessionAction.JOINED:
-            return RelayNoticeEmbedSpec(title=app_name, description=f"Joined {author_name}")
+            description_lines = [f"Joined {author_name}"]
+            pack_text = render_player_session_pack_text(notice)
+            if pack_text is not None:
+                description_lines.append(pack_text)
+            return RelayNoticeEmbedSpec(title=app_name, description="\n".join(description_lines))
         return RelayNoticeEmbedSpec(title=app_name, description=f"Left {author_name}")
     if isinstance(notice, GameDeathNotice):
         return RelayNoticeEmbedSpec(title=app_name, description=_render_game_death_embed_description(notice))

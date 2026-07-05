@@ -500,6 +500,7 @@ def _app_started_response_text(app: App) -> str:
     lines: list[str] = [f"{app.friendly} Started!"]
     if app.cfg.join_display_address is not None:
         lines.append(f"Join: `{app.cfg.join_display_address}`")
+    lines.extend(app.lifecycle_relay_description_lines(started=True))
     return "\n".join(lines)
 
 
