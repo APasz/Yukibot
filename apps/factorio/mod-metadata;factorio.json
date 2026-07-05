@@ -1,0 +1,951 @@
+{
+  "scope": "factorio",
+  "mods": [
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "SchallBeltConfiguration"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "SchallBeltConfiguration"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "schallbeltconfiguration"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/SchallBeltConfiguration"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "aai-containers"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "aai-containers"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "aai-containers"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/aai-containers"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "assembling-machine-request-chest-paste-multiplier"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "assembling-machine-request-chest-paste-multiplier"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "assembling-machine-request-chest-paste-multiplier"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/assembling-machine-request-chest-paste-multiplier"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "Better_Poles"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "Better_Poles"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "better_poles"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/Better_Poles"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "blueprint-sandboxes"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "blueprint-sandboxes"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "blueprint-sandboxes"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/blueprint-sandboxes"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "bobinserters"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "bobinserters"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "bobinserters"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/bobinserters"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "circuit-network-selector-wire-icons"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "circuit-network-selector-wire-icons"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "circuit-network-selector-wire-icons"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/circuit-network-selector-wire-icons"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "CleanedConcrete"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "CleanedConcrete"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "cleanedconcrete"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/CleanedConcrete"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "data-utils"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "data-utils"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "data-utils"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/data-utils"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "debloat-handmine-cliffs"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "debloat-handmine-cliffs"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "debloat-handmine-cliffs"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/debloat-handmine-cliffs"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "distant-misfires"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "distant-misfires"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "distant-misfires"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/distant-misfires"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "even-distribution"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "even-distribution"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "even-distribution"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/even-distribution"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "even-pickier-dollies"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "even-pickier-dollies"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "even-pickier-dollies"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/even-pickier-dollies"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "events-logger"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "events-logger"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "events-logger"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/events-logger"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "factoryplanner"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "factoryplanner"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "factoryplanner"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/factoryplanner"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "far-reach"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "far-reach"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "far-reach"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/far-reach"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "fire-lights"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "fire-lights"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "fire-lights"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/fire-lights"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "flib"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "flib"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "flib"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/flib"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "GUI_Unifyer"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "GUI_Unifyer"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "gui_unifyer"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/GUI_Unifyer"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "heat_glow"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "heat_glow"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "heat_glow"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/heat_glow"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "HelicopterRevival"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "HelicopterRevival"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "helicopterrevival"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/HelicopterRevival"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "m_WhereIsMyBody"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "m_WhereIsMyBody"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "m_whereismybody"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/m_WhereIsMyBody"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "osha_safety"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "osha_safety"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "osha_safety"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/osha_safety"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "RateCalculator"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "RateCalculator"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "ratecalculator"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/RateCalculator"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "resourceMarker"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "resourceMarker"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "resourcemarker"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/resourceMarker"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "Shortcuts-ick"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "Shortcuts-ick"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "shortcuts-ick"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/Shortcuts-ick"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "Sort-All-Inventories"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "Sort-All-Inventories"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "sort-all-inventories"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/Sort-All-Inventories"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "squeak-through-2"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "squeak-through-2"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "squeak-through-2"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/squeak-through-2"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "Todo-List"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "Todo-List"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "todo-list"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/Todo-List"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "train-stop-defaults"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "train-stop-defaults"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "train-stop-defaults"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/train-stop-defaults"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "tree_collision"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "tree_collision"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "tree_collision"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/tree_collision"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "VehicleSnap"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "VehicleSnap"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "vehiclesnap"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/VehicleSnap"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "visual_tracers"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "visual_tracers"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "visual_tracers"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/visual_tracers"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "Waterfill_v17"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "Waterfill_v17"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "waterfill_v17"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/Waterfill_v17"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "yemtositemcount"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "yemtositemcount"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "yemtositemcount"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/yemtositemcount"
+        }
+      ]
+    }
+  ],
+  "schema_version": 1
+}

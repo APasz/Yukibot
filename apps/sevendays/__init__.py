@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import hikari
 
@@ -26,7 +27,15 @@ from _discord import (
 from _file import File_Utils
 from _security import Power_Level
 from apps._app import AM_Receiver, App, AppActivityProvider, AppActivityProviderMetadata
-from apps._config import App_Config, AppVersion, Mod_Config, ModType
+from apps._config import (
+    App_Config,
+    AppVersion,
+    KnownModPageProvider,
+    Mod_Config,
+    ModPageLink,
+    ModType,
+    known_mod_page_provider_for_url,
+)
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod
@@ -67,6 +76,7 @@ log = logging.getLogger(__name__)
 type GameStatValue = int | float | str | bool | None
 type SevenDaysRuntimeLogSignature = tuple[int, int, int, int]
 
+_SEVENDAYS_NEXUSMODS_GAME_DOMAIN = "7daystodie"
 _SEVENDAYS_VERSION_RE = re.compile(
     r"Version:\s*V\s*(?P<version>\d+(?:\.\d+)*(?:\s*\([^)]+\)|\s*[bB]\d+)?)",
     re.IGNORECASE,
@@ -395,6 +405,42 @@ def _read_modinfo_value(pointer: Path, field_name: str) -> str | None:
         value = str(raw_value).strip()
         return value or None
     return None
+
+
+def _mod_page_from_sevendays_website(raw_website: str | None) -> ModPageLink | None:
+    if raw_website is None:
+        return None
+    provider = known_mod_page_provider_for_url(raw_website)
+    if provider is None or provider not in {
+        KnownModPageProvider.NEXUSMODS,
+        KnownModPageProvider.SEVEN_DAYS_TO_DIE_MODS,
+    }:
+        return None
+
+    parsed = urlsplit(raw_website)
+    path_segments = tuple(segment for segment in parsed.path.split("/") if segment)
+    if provider is KnownModPageProvider.NEXUSMODS:
+        hostname = parsed.hostname.casefold() if parsed.hostname is not None else ""
+        if hostname in {"nexusmods.com", "www.nexusmods.com"}:
+            valid_project_path = (
+                len(path_segments) >= 3
+                and path_segments[0].casefold() == _SEVENDAYS_NEXUSMODS_GAME_DOMAIN
+                and path_segments[1].casefold() == "mods"
+                and path_segments[2].isdecimal()
+            )
+        else:
+            valid_project_path = (
+                hostname == f"{_SEVENDAYS_NEXUSMODS_GAME_DOMAIN}.nexusmods.com"
+                and len(path_segments) >= 2
+                and path_segments[0].casefold() == "mods"
+                and path_segments[1].isdecimal()
+        )
+        if not valid_project_path:
+            return None
+    elif len(path_segments) < 2 or path_segments[0].casefold() != "mods":
+        return None
+
+    return ModPageLink(name=provider.value, url=raw_website)
 
 
 def _read_serverconfig_value(pointer: Path, property_name: str) -> str | None:
@@ -936,21 +982,45 @@ class Mod_7D2D(Mod):
         elif disabled_exists and not enabled_exists:
             self.cfg.enabled = False
 
-    def detect_version(self) -> str | None:
+    def _current_mod_info_path(self) -> Path | None:
         self.sync_enabled_state()
         if self.mod_info_enabled_path.exists():
-            return _read_modinfo_value(self.mod_info_enabled_path, "Version")
+            return self.mod_info_enabled_path
         if self.mod_info_disabled_path.exists():
-            return _read_modinfo_value(self.mod_info_disabled_path, "Version")
+            return self.mod_info_disabled_path
         return None
 
+    def _mod_info_value(self, field_name: str) -> str | None:
+        pointer = self._current_mod_info_path()
+        return None if pointer is None else _read_modinfo_value(pointer, field_name)
+
+    def detect_version(self) -> str | None:
+        return self._mod_info_value("Version")
+
     def detect_friendly(self) -> str | None:
-        self.sync_enabled_state()
-        if self.mod_info_enabled_path.exists():
-            return _read_modinfo_value(self.mod_info_enabled_path, "DisplayName")
-        if self.mod_info_disabled_path.exists():
-            return _read_modinfo_value(self.mod_info_disabled_path, "DisplayName")
-        return None
+        return self._mod_info_value("DisplayName")
+
+    def native_metadata_id(self) -> str | None:
+        return self._mod_info_value("Name")
+
+    def metadata_fallback_id(self) -> str:
+        return (self.native_metadata_id() or self.name).casefold()
+
+    def detect_mod_page(self) -> ModPageLink | None:
+        return _mod_page_from_sevendays_website(self._mod_info_value("Website"))
+
+    def sync_metadata(self) -> None:
+        super().sync_metadata()
+        detected_page = self.detect_mod_page()
+        if detected_page is None:
+            return
+        detected_provider = known_mod_page_provider_for_url(detected_page.url)
+        if any(
+            known_mod_page_provider_for_url(existing_page.url) is detected_provider
+            for existing_page in self.cfg.mod_pages
+        ):
+            return
+        self.cfg.mod_pages = (*self.cfg.mod_pages, detected_page)
 
     async def install(self, src: Path, atomic: bool = True):
         await self._handle_extr(src, atomic)

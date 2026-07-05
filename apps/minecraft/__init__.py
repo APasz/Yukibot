@@ -46,7 +46,15 @@ from apps._app import (
     AppRuntimeFaultKind,
     RelayAdvancementTerms,
 )
-from apps._config import App_Config, AppVersion, Mod_Config, ModType, normalise_app_version
+from apps._config import (
+    App_Config,
+    AppVersion,
+    Mod_Config,
+    ModPageLink,
+    ModType,
+    known_mod_page_provider_for_url,
+    normalise_app_version,
+)
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod, humanise_mod_identifier
@@ -267,6 +275,7 @@ _MINECRAFT_MOD_METADATA_MAX_BYTES = 1_048_576
 _MINECRAFT_FORGE_METADATA_PATHS = ("META-INF/neoforge.mods.toml", "META-INF/mods.toml")
 _MINECRAFT_FABRIC_METADATA_PATH = "fabric.mod.json"
 _MINECRAFT_QUILT_METADATA_PATH = "quilt.mod.json"
+_MINECRAFT_MANIFEST_PATH = "META-INF/MANIFEST.MF"
 _KUBEJS_MOD_BASE_NAME = "kubejs"
 _YUKIBOT_DATA_RELATIVE_PATH = Path(".yukibot")
 _LEGACY_YUKIBOT_DATA_RELATIVE_PATH = Path("yukibot")
@@ -2019,7 +2028,22 @@ def _nonempty_metadata_text(value: object) -> str | None:
     return text or None
 
 
-def _forge_mod_display_name(payload: object) -> str | None:
+@dataclass(frozen=True, slots=True)
+class MinecraftModMetadata:
+    mod_id: str | None = None
+    display_name: str | None = None
+    version: str | None = None
+    homepage: str | None = None
+
+
+def _usable_minecraft_mod_version(value: object) -> str | None:
+    version = _nonempty_metadata_text(value)
+    if version is None or (version.startswith("${") and version.endswith("}")):
+        return None
+    return version
+
+
+def _forge_mod_metadata(payload: object) -> MinecraftModMetadata | None:
     metadata = _string_mapping(payload)
     if metadata is None:
         return None
@@ -2028,21 +2052,42 @@ def _forge_mod_display_name(payload: object) -> str | None:
         return None
     for raw_mod in cast(list[object], raw_mods):
         mod = _string_mapping(raw_mod)
-        if mod is not None and (display_name := _nonempty_metadata_text(mod.get("displayName"))) is not None:
-            return display_name
+        if mod is not None:
+            return MinecraftModMetadata(
+                mod_id=_nonempty_metadata_text(mod.get("modId")),
+                display_name=_nonempty_metadata_text(mod.get("displayName")),
+                version=_usable_minecraft_mod_version(mod.get("version")),
+                homepage=_nonempty_metadata_text(mod.get("displayURL")),
+            )
     return None
 
 
-def _fabric_mod_display_name(payload: object) -> str | None:
+def _fabric_mod_metadata(payload: object) -> MinecraftModMetadata | None:
     metadata = _string_mapping(payload)
-    return None if metadata is None else _nonempty_metadata_text(metadata.get("name"))
+    if metadata is None:
+        return None
+    contact = _string_mapping(metadata.get("contact"))
+    return MinecraftModMetadata(
+        mod_id=_nonempty_metadata_text(metadata.get("id")),
+        display_name=_nonempty_metadata_text(metadata.get("name")),
+        version=_usable_minecraft_mod_version(metadata.get("version")),
+        homepage=None if contact is None else _nonempty_metadata_text(contact.get("homepage")),
+    )
 
 
-def _quilt_mod_display_name(payload: object) -> str | None:
+def _quilt_mod_metadata(payload: object) -> MinecraftModMetadata | None:
     metadata = _string_mapping(payload)
     quilt_loader = None if metadata is None else _string_mapping(metadata.get("quilt_loader"))
     quilt_metadata = None if quilt_loader is None else _string_mapping(quilt_loader.get("metadata"))
-    return None if quilt_metadata is None else _nonempty_metadata_text(quilt_metadata.get("name"))
+    if quilt_loader is None:
+        return None
+    contact = None if quilt_metadata is None else _string_mapping(quilt_metadata.get("contact"))
+    return MinecraftModMetadata(
+        mod_id=_nonempty_metadata_text(quilt_loader.get("id")),
+        display_name=None if quilt_metadata is None else _nonempty_metadata_text(quilt_metadata.get("name")),
+        version=_usable_minecraft_mod_version(quilt_loader.get("version")),
+        homepage=None if contact is None else _nonempty_metadata_text(contact.get("homepage")),
+    )
 
 
 def _read_minecraft_mod_metadata_entry(archive: zipfile.ZipFile, member_name: str) -> str | None:
@@ -2058,7 +2103,36 @@ def _read_minecraft_mod_metadata_entry(archive: zipfile.ZipFile, member_name: st
         return None
 
 
-def _minecraft_mod_metadata_display_name(pointer: Path) -> str | None:
+def _minecraft_manifest_version(archive: zipfile.ZipFile) -> str | None:
+    raw_manifest = _read_minecraft_mod_metadata_entry(archive, _MINECRAFT_MANIFEST_PATH)
+    if raw_manifest is None:
+        return None
+    attributes: dict[str, str] = {}
+    current_name: str | None = None
+    for line in raw_manifest.splitlines():
+        if line.startswith(" ") and current_name is not None:
+            attributes[current_name] += line[1:]
+            continue
+        if ":" not in line:
+            current_name = None
+            continue
+        raw_name, raw_value = line.split(":", 1)
+        current_name = raw_name.strip().casefold()
+        attributes[current_name] = raw_value.strip()
+    return _usable_minecraft_mod_version(attributes.get("implementation-version"))
+
+
+def _minecraft_metadata_with_manifest_version(
+    archive: zipfile.ZipFile,
+    metadata: MinecraftModMetadata,
+) -> MinecraftModMetadata:
+    if metadata.version is not None:
+        return metadata
+    manifest_version = _minecraft_manifest_version(archive)
+    return metadata if manifest_version is None else replace(metadata, version=manifest_version)
+
+
+def _minecraft_mod_metadata(pointer: Path) -> MinecraftModMetadata | None:
     if not pointer.is_file():
         return None
     try:
@@ -2068,34 +2142,47 @@ def _minecraft_mod_metadata_display_name(pointer: Path) -> str | None:
                 if raw_metadata is None:
                     continue
                 try:
-                    display_name = _forge_mod_display_name(tomllib.loads(raw_metadata))
+                    metadata = _forge_mod_metadata(tomllib.loads(raw_metadata))
                 except tomllib.TOMLDecodeError:
                     continue
-                if display_name is not None:
-                    return display_name
+                if metadata is not None:
+                    return _minecraft_metadata_with_manifest_version(archive, metadata)
 
             raw_fabric_metadata = _read_minecraft_mod_metadata_entry(archive, _MINECRAFT_FABRIC_METADATA_PATH)
             if raw_fabric_metadata is not None:
                 try:
                     fabric_payload = cast(object, json.loads(raw_fabric_metadata))
-                    display_name = _fabric_mod_display_name(fabric_payload)
+                    metadata = _fabric_mod_metadata(fabric_payload)
                 except json.JSONDecodeError:
-                    display_name = None
-                if display_name is not None:
-                    return display_name
+                    metadata = None
+                if metadata is not None:
+                    return _minecraft_metadata_with_manifest_version(archive, metadata)
 
             raw_quilt_metadata = _read_minecraft_mod_metadata_entry(archive, _MINECRAFT_QUILT_METADATA_PATH)
             if raw_quilt_metadata is not None:
                 try:
                     quilt_payload = cast(object, json.loads(raw_quilt_metadata))
-                    display_name = _quilt_mod_display_name(quilt_payload)
+                    metadata = _quilt_mod_metadata(quilt_payload)
                 except json.JSONDecodeError:
-                    display_name = None
-                if display_name is not None:
-                    return display_name
+                    metadata = None
+                if metadata is not None:
+                    return _minecraft_metadata_with_manifest_version(archive, metadata)
     except (OSError, zipfile.BadZipFile):
         return None
     return None
+
+
+def _minecraft_mod_page(raw_url: str | None) -> ModPageLink | None:
+    if raw_url is None:
+        return None
+    provider = known_mod_page_provider_for_url(raw_url)
+    try:
+        return ModPageLink(
+            name="Homepage" if provider is None else provider.value,
+            url=raw_url,
+        )
+    except ValueError:
+        return None
 
 
 def _bundled_kubejs_yuki_log_script_source() -> str:
@@ -2274,13 +2361,29 @@ def _load_squaremap_web_address(pointer: Path) -> str | None:
 
 class Mod_MC(Mod):
     def __init__(self, cfg: Mod_Config):
+        self._detected_metadata = MinecraftModMetadata()
         super().__init__(cfg)
 
     async def install(self, src: Path, atomic: bool = True):
         await self._handle_drop(src, atomic)
 
     def sync_metadata(self) -> None:
+        self.sync_enabled_state()
+        self._detected_metadata = _minecraft_mod_metadata(self.path) or MinecraftModMetadata()
         super().sync_metadata()
+        detected_page = _minecraft_mod_page(self._detected_metadata.homepage)
+        if detected_page is not None:
+            detected_provider = known_mod_page_provider_for_url(detected_page.url)
+            has_page = any(
+                existing_page.url == detected_page.url
+                or (
+                    detected_provider is not None
+                    and known_mod_page_provider_for_url(existing_page.url) is detected_provider
+                )
+                for existing_page in self.cfg.mod_pages
+            )
+            if not has_page:
+                self.cfg.mod_pages = (*self.cfg.mod_pages, detected_page)
         if _is_squaremap_mod_name(self.name) and self.cfg.classification_override is None:
             self.cfg.mod_type = ModType.SERVER
 
@@ -2290,10 +2393,16 @@ class Mod_MC(Mod):
         return super().default_mod_type()
 
     def detect_version(self) -> str | None:
-        return _detect_minecraft_mod_version(self.name)
+        return self._detected_metadata.version or _detect_minecraft_mod_version(self.name)
 
     def detect_friendly(self) -> str | None:
-        return _minecraft_mod_metadata_display_name(self.path) or _detect_minecraft_mod_friendly(self.name)
+        return self._detected_metadata.display_name or _detect_minecraft_mod_friendly(self.name)
+
+    def native_metadata_id(self) -> str | None:
+        return self._detected_metadata.mod_id
+
+    def metadata_fallback_id(self) -> str:
+        return _detect_minecraft_mod_base_name(self.name).casefold()
 
 
 @dataclass(frozen=True, slots=True)

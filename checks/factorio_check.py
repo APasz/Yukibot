@@ -4,10 +4,13 @@ import unittest
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from apps._config import App_Config, AppVersion, Mod_Config
+from modmux.models import ModID, Provider
+
+from apps._config import App_Config, AppVersion, KnownModPageProvider, Mod_Config
 from apps._mod import Mod_Manager
 from apps.factorio import Factorio, Matchers, Mod_Factorio, detect_factorio_version
 
@@ -106,6 +109,62 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
         self.assertEqual(mod.friendly, "Circuit Network Selector Wire Icons")
 
+    def test_detects_title_version_and_mod_page_from_info_json(self) -> None:
+        with TemporaryDirectory() as tmp:
+            mods_dir = Path(tmp)
+            archive_path = mods_dir / "example_9.9.9.zip"
+            self._write_factorio_mod_archive(
+                archive_path,
+                mod_name="example",
+                version="2.3.4",
+                title="Example Mod",
+                homepage="https://mods.factorio.com/mod/example?from=info",
+            )
+            mod = Mod_Factorio(Mod_Config(name=archive_path.name, directory=mods_dir))
+
+            mod.sync_metadata()
+
+        self.assertEqual(mod.version, "2.3.4")
+        self.assertEqual(mod.friendly, "Example Mod")
+        self.assertEqual(len(mod.cfg.mod_pages), 1)
+        self.assertEqual(mod.cfg.mod_pages[0].name, KnownModPageProvider.FACTORIO_MODS.value)
+        self.assertEqual(mod.cfg.mod_pages[0].url, "https://mods.factorio.com/mod/example")
+
+    def test_uses_modmux_when_info_homepage_is_not_a_factorio_mod_page(self) -> None:
+        with TemporaryDirectory() as tmp:
+            mods_dir = Path(tmp)
+            archive_path = mods_dir / "example_1.0.0.zip"
+            self._write_factorio_mod_archive(
+                archive_path,
+                mod_name="example",
+                homepage="https://example.com/example",
+            )
+            mod = Mod_Factorio(Mod_Config(name=archive_path.name, directory=mods_dir))
+            mod.sync_metadata()
+            client = MagicMock()
+            client.get_mod = AsyncMock(
+                return_value=SimpleNamespace(
+                    slug="resolved-example",
+                    id=ModID(provider=Provider.WUBE, id="resolved-example"),
+                )
+            )
+            muxer_context = MagicMock()
+            muxer_context.__aenter__ = AsyncMock(return_value=client)
+            muxer_context.__aexit__ = AsyncMock(return_value=None)
+
+            with patch("apps.factorio.Muxer", return_value=muxer_context):
+                asyncio.run(Mod_Factorio.sync_external_metadata_batch((mod,)))
+
+        client.get_mod.assert_awaited_once_with(
+            Provider.WUBE,
+            ModID(provider=Provider.WUBE, id="example"),
+            author_resolution=False,
+        )
+        self.assertEqual(
+            mod.cfg.mod_pages[0].url,
+            "https://mods.factorio.com/mod/resolved-example",
+        )
+
     def test_reload_removes_stale_factorio_metadata_entries_from_db(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -171,9 +230,23 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             self.assertNotIn("mod-list.json", db_path.read_text(encoding="utf-8"))
 
     @staticmethod
-    def _write_factorio_mod_archive(pointer: Path, *, mod_name: str) -> None:
+    def _write_factorio_mod_archive(
+        pointer: Path,
+        *,
+        mod_name: str,
+        version: str = "1.0.0",
+        title: str | None = None,
+        homepage: str | None = None,
+    ) -> None:
+        payload: dict[str, str] = {
+            "name": mod_name,
+            "version": version,
+            "homepage": homepage or f"https://mods.factorio.com/mod/{mod_name}",
+        }
+        if title is not None:
+            payload["title"] = title
         with zipfile.ZipFile(pointer, "w") as archive:
-            archive.writestr(f"{mod_name}_1.0.0/info.json", json.dumps({"name": mod_name, "version": "1.0.0"}))
+            archive.writestr(f"{mod_name}_{version}/info.json", json.dumps(payload))
 
 
 class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):

@@ -536,7 +536,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             parameter: NodeConsoleActionParameter | None = action.parameter
                             current_value: str = draft_values.get(action.key, "")
                             with ui.column().classes("w-full gap-3"):
-                                with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
+                                with ui.row().classes(
+                                    "mod-tab-toolbar mod-tab-toolbar-surface mod-inline-toolbar w-full"
+                                ):
                                     action_select: Select = bind_console_popup_refresh_lock(
                                         ui.select(
                                             {entry.key: entry.label for entry in current_console_actions.actions},
@@ -548,7 +550,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                     )
                                     if len(current_console_actions.actions) == 1 or action_in_flight:
                                         action_select.disable()
-                                    with ui.row().classes("mod-tab-toolbar-actions"):
+                                    with ui.row().classes("mod-tab-toolbar-actions mod-inline-toolbar-actions"):
                                         run_button: Button = ui.button("Run", on_click=run_selected_action).classes(
                                             "mod-list-button"
                                         )
@@ -1661,7 +1663,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     title="Settings",
                     description=self._settings_card_description(),
                 )
-                with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
+                with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface mod-inline-toolbar w-full"):
                     search_input = (
                         ui.input(placeholder="Search settings", value=search_query_text)
                         .props("filled square dense clearable hide-bottom-space color=accent")
@@ -1676,7 +1678,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         _setting_card_list.refresh(search_query_text)
 
                     search_input.on("keydown.enter", _submit_setting_search)
-                    with ui.row().classes("mod-tab-toolbar-actions"):
+                    with ui.row().classes("mod-tab-toolbar-actions mod-inline-toolbar-actions"):
                         reload_button = ui.button("Reload", on_click=reload_settings).classes(
                             "mod-list-button secondary"
                         )

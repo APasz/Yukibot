@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import aiofiles
+from modmux import parse_url
+from modmux.models import Provider
 
 import config
 from _file import File_Utils
@@ -27,6 +29,7 @@ from apps._config import (
     ModType,
     is_client_pack_candidate,
 )
+from apps._mod_metadata import ModIdentity, ModIdentityKind, ScopeModMetadataStore, SharedModMetadata
 
 log = logging.getLogger(__name__)
 _MOD_SEPARATOR_RE = re.compile(r"[_\-\s]+")
@@ -279,6 +282,69 @@ class Mod(ABC):
     def detect_friendly(self) -> str | None:
         return None
 
+    def native_metadata_id(self) -> str | None:
+        return None
+
+    def metadata_fallback_id(self) -> str:
+        stem = Path(self.name).stem
+        version = self.version
+        if version is not None and stem.casefold().endswith(version.casefold()):
+            stem = stem[: -len(version)].rstrip("-_. ")
+        return stem.casefold()
+
+    def metadata_identities(self, *, scope: str) -> tuple[ModIdentity, ...]:
+        identities: list[ModIdentity] = []
+        if self.cfg.platforms.modrinth is not None:
+            identities.append(
+                ModIdentity(
+                    kind=ModIdentityKind.PROVIDER,
+                    namespace=Provider.MODRINTH.value,
+                    value=self.cfg.platforms.modrinth.project_id,
+                )
+            )
+        if self.cfg.platforms.curseforge is not None:
+            identities.append(
+                ModIdentity(
+                    kind=ModIdentityKind.PROVIDER,
+                    namespace=Provider.CURSEFORGE.value,
+                    value=str(self.cfg.platforms.curseforge.project_id),
+                )
+            )
+        for page in self.cfg.mod_pages:
+            provider_id = parse_url(page.url)
+            if provider_id is None:
+                continue
+            identities.append(
+                ModIdentity(
+                    kind=ModIdentityKind.PROVIDER,
+                    namespace=provider_id.provider.value,
+                    value=provider_id.id,
+                )
+            )
+        if native_id := self.native_metadata_id():
+            identities.append(
+                ModIdentity(
+                    kind=ModIdentityKind.NATIVE,
+                    namespace=scope,
+                    value=native_id,
+                )
+            )
+        identities.append(
+            ModIdentity(
+                kind=ModIdentityKind.FILENAME,
+                namespace=scope,
+                value=self.metadata_fallback_id(),
+            )
+        )
+        unique: list[ModIdentity] = []
+        known_keys: set[tuple[ModIdentityKind, str, str]] = set()
+        for identity in identities:
+            if identity.key in known_keys:
+                continue
+            unique.append(identity)
+            known_keys.add(identity.key)
+        return tuple(unique)
+
     def sync_metadata(self) -> None:
         self.sync_enabled_state()
         if self.cfg.placement is not ModPlacement.CLIENT_ONLY:
@@ -294,6 +360,10 @@ class Mod(ABC):
             detected_friendly = self.detect_friendly()
             if detected_friendly is not None and detected_friendly.strip():
                 self.friendly = detected_friendly.strip()
+
+    @classmethod
+    async def sync_external_metadata_batch(cls, mods: Iterable["Mod"]) -> None:
+        """Enrich locally detected metadata from app-specific external providers."""
 
     def is_coremod(self, silent: bool = False) -> bool:
         if not self.is_protected:
@@ -416,8 +486,15 @@ class Mod_Manager:
             self.modcf_cls = modcf_cls
 
         self.app_name = app_cfg.name or "~UNKNOWN~"
+        self.scope = (app_cfg.scope or self.app_name).strip().casefold()
         self.index: dict[str, Mod] = {}
         self._lookup: dict[str, str] = {}
+
+        scope_slug = re.sub(r"[^a-z0-9_.-]+", "-", self.scope).strip("-.") or "unknown"
+        self.shared_metadata = ScopeModMetadataStore(
+            scope=self.scope,
+            path=app_cfg.apps_dir / f"mod-metadata;{scope_slug}.json",
+        )
 
         if db_path:
             self.db_path = db_path
@@ -528,6 +605,86 @@ class Mod_Manager:
             return mod.storage_path.exists()
         return mod.exists()
 
+    @staticmethod
+    def _legacy_classification_override(mod: Mod) -> ModClassificationOverride | None:
+        if mod.cfg.classification_override is not None:
+            return mod.cfg.classification_override
+        default_mod_type = mod.default_mod_type()
+        if mod.cfg.mod_type is ModType.COREMOD and default_mod_type is not ModType.COREMOD:
+            return ModClassificationOverride(
+                mod_type=ModType.COREMOD,
+                download_block_reason=mod.cfg.download_block_reason,
+            )
+        if mod.cfg.download_block_reason in {
+            ModDownloadBlockReason.ARTIFACT,
+            ModDownloadBlockReason.OTHER,
+        }:
+            return ModClassificationOverride(
+                mod_type=mod.cfg.mod_type,
+                download_block_reason=mod.cfg.download_block_reason,
+            )
+        return None
+
+    def _apply_shared_metadata(self, mod: Mod, shared: SharedModMetadata | None) -> None:
+        mod.cfg.metadata_overrides = mod.cfg.metadata_overrides.model_copy(
+            update={"friendly_name": None if shared is None else shared.friendly_name}
+        )
+        mod.cfg.classification_override = None if shared is None else shared.classification_override
+        mod.cfg.mod_pages = () if shared is None else shared.mod_pages
+        mod.sync_metadata()
+        mod.cfg.client_pack.apply_default_inclusion(mod.mod_type)
+
+    def _migrate_shared_metadata(self, mods: Iterable[Mod]) -> None:
+        for mod in mods:
+            identities = mod.metadata_identities(scope=self.scope)
+            shared = self.shared_metadata.migrate(
+                identities=identities,
+                friendly_name=mod.cfg.metadata_overrides.friendly_name,
+                classification_override=self._legacy_classification_override(mod),
+                mod_pages=mod.cfg.mod_pages,
+            )
+            self._apply_shared_metadata(mod, shared)
+        self.shared_metadata.save_if_dirty()
+
+    def _set_shared_metadata(self, mod: Mod) -> None:
+        shared = self.shared_metadata.set(
+            identities=mod.metadata_identities(scope=self.scope),
+            friendly_name=mod.cfg.metadata_overrides.friendly_name,
+            classification_override=mod.cfg.classification_override,
+            mod_pages=mod.cfg.mod_pages,
+        )
+        self.shared_metadata.save_if_dirty()
+        self._apply_shared_metadata(mod, shared)
+
+    def _restore_shared_metadata(
+        self,
+        *,
+        identities: tuple[ModIdentity, ...],
+        shared: SharedModMetadata | None,
+    ) -> None:
+        self.shared_metadata.set(
+            identities=identities,
+            friendly_name=None if shared is None else shared.friendly_name,
+            classification_override=None if shared is None else shared.classification_override,
+            mod_pages=() if shared is None else shared.mod_pages,
+        )
+        self.shared_metadata.save_if_dirty()
+
+    @staticmethod
+    def _instance_config(mod: Mod) -> Mod_Config:
+        instance_config = mod.cfg.model_copy(deep=True)
+        instance_config.metadata_overrides = instance_config.metadata_overrides.model_copy(
+            update={"friendly_name": None}
+        )
+        instance_config.classification_override = None
+        instance_config.mod_pages = ()
+        base_mod_type = ModType.CLIENT if mod.cfg.placement is ModPlacement.CLIENT_ONLY else mod.default_mod_type()
+        instance_config.mod_type = base_mod_type
+        instance_config.download_block_reason = (
+            ModDownloadBlockReason.BUILTIN if base_mod_type is ModType.BUILTIN else None
+        )
+        return instance_config
+
     async def load_mods(self):
         log.info(f"Loading mod DB for {self.app_name} from {self.db_path}")
         discovery_candidates = self._discovery_candidates()
@@ -568,12 +725,16 @@ class Mod_Manager:
             known_files.add(mod.name)
             known_candidate_names.add(candidate.name)
 
+        self._migrate_shared_metadata(self.index.values())
+        await self.mod_cls.sync_external_metadata_batch(tuple(self.index.values()))
+        self._migrate_shared_metadata(self.index.values())
         self._rebuild_lookup()
         await self.save_mods()
 
     async def save_mods(self):
         self.validate_client_pack_configuration()
-        lines = [m.cfg.model_dump_json() for m in self.index.values()]
+        self.shared_metadata.save_if_dirty()
+        lines = [self._instance_config(mod).model_dump_json() for mod in self.index.values()]
         async with aiofiles.open(self.db_path, mode="w") as f:
             await f.write("\n".join(lines))
 
@@ -650,6 +811,9 @@ class Mod_Manager:
         else:
             await mod.install(src, atomic)
         mod.sync_metadata()
+        self._migrate_shared_metadata((mod,))
+        await self.mod_cls.sync_external_metadata_batch((mod,))
+        self._migrate_shared_metadata((mod,))
         self.index[mod.name] = mod
         self._rebuild_lookup()
         await self.save_mods()
@@ -692,12 +856,12 @@ class Mod_Manager:
         if not state and not mod.is_coremod_type:
             return mod
         next_mod_type = ModType.COREMOD if state else ModType.REGULAR
-        if mod.cfg.classification_override is not None:
-            mod.cfg.classification_override = mod.cfg.classification_override.model_copy(
-                update={"mod_type": next_mod_type}
-            )
-        elif state or mod.is_coremod_type:
-            mod.cfg.mod_type = next_mod_type
+        current_reason = mod.download_block_reason
+        mod.cfg.classification_override = ModClassificationOverride(
+            mod_type=next_mod_type,
+            download_block_reason=current_reason,
+        )
+        self._set_shared_metadata(mod)
         await self.save_mods()
         return mod
 
@@ -709,12 +873,11 @@ class Mod_Manager:
         mod = self.get(mod_name)
         if reason is not None and mod.cfg.client_pack.policy is not ClientPackPolicy.REQUIRED:
             raise ValueError(f"Client-pack mod {mod.name!r} cannot be blocked from downloads")
-        if mod.cfg.classification_override is not None:
-            mod.cfg.classification_override = mod.cfg.classification_override.model_copy(
-                update={"download_block_reason": reason}
-            )
-        else:
-            mod.cfg.download_block_reason = reason
+        mod.cfg.classification_override = ModClassificationOverride(
+            mod_type=mod.mod_type,
+            download_block_reason=reason,
+        )
+        self._set_shared_metadata(mod)
         await self.save_mods()
         return mod
 
@@ -740,6 +903,8 @@ class Mod_Manager:
         previous_client_pack = mod.cfg.client_pack
         previous_platforms = mod.cfg.platforms
         previous_friendly = mod.friendly
+        previous_shared_identities = mod.metadata_identities(scope=self.scope)
+        previous_shared = self.shared_metadata.resolve(previous_shared_identities)
         try:
             mod.cfg.classification_override = ModClassificationOverride(
                 mod_type=mod_type,
@@ -753,9 +918,15 @@ class Mod_Manager:
             if platforms is not None:
                 mod.cfg.platforms = platforms
             mod.sync_metadata()
+            await self.mod_cls.sync_external_metadata_batch((mod,))
+            self._set_shared_metadata(mod)
             self._rebuild_lookup()
             await self.save_mods()
         except Exception:
+            self._restore_shared_metadata(
+                identities=previous_shared_identities,
+                shared=previous_shared,
+            )
             mod.cfg.classification_override = previous_classification_override
             mod.cfg.mod_pages = previous_mod_pages
             mod.cfg.metadata_overrides = previous_metadata_overrides

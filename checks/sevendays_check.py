@@ -12,7 +12,7 @@ from _mod_ops import download_entries
 from _discord import Fileish, OutboundRelayFormatter, RelayMessageReferenceKind, RelayOutboundFormatOptions
 from _security import Power_Level
 from _utils import Utilities
-from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModType
+from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModPageLink, ModType
 from apps._console import ConsoleResponseSource, execute_console_action
 from apps._mod import Mod_Manager
 from apps.sevendays import (
@@ -163,6 +163,97 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             mod.sync_metadata()
 
             self.assertEqual(mod.friendly, "Better Loot")
+
+    def test_sync_metadata_adds_supported_modinfo_website_as_mod_page(self) -> None:
+        cases = (
+            ("https://www.nexusmods.com/7daystodie/mods/123", "NexusMods"),
+            (
+                "https://7daystodiemods.com/mods/craftfromcontainerplus",
+                "7D2Dmods",
+            ),
+        )
+        for website, expected_name in cases:
+            with self.subTest(website=website), TemporaryDirectory() as tmp:
+                mods_dir = Path(tmp) / "Mods"
+                mod_dir = mods_dir / "ExampleMod"
+                mod_dir.mkdir(parents=True)
+                (mod_dir / "ModInfo.xml").write_text(
+                    f'<xml><Website value="{website}" /></xml>',
+                    encoding="utf-8",
+                )
+                mod = Mod_7D2D(Mod_Config(name="ExampleMod", directory=mods_dir))
+
+                mod.sync_metadata()
+
+                self.assertEqual(
+                    mod.cfg.mod_pages,
+                    (ModPageLink(name=expected_name, url=website),),
+                )
+
+    def test_sync_metadata_reads_website_from_disabled_modinfo(self) -> None:
+        with TemporaryDirectory() as tmp:
+            mods_dir = Path(tmp) / "Mods"
+            mod_dir = mods_dir / "ExampleMod"
+            mod_dir.mkdir(parents=True)
+            website = "https://7daystodie.nexusmods.com/mods/456"
+            (mod_dir / "ModInfo.xml.disabled").write_text(
+                f'<xml><Website value="{website}" /></xml>',
+                encoding="utf-8",
+            )
+            mod = Mod_7D2D(Mod_Config(name="ExampleMod", directory=mods_dir))
+
+            mod.sync_metadata()
+
+            self.assertFalse(mod.cfg.enabled)
+            self.assertEqual(
+                mod.cfg.mod_pages,
+                (ModPageLink(name="NexusMods", url=website),),
+            )
+
+    def test_sync_metadata_preserves_existing_page_for_detected_provider(self) -> None:
+        with TemporaryDirectory() as tmp:
+            mods_dir = Path(tmp) / "Mods"
+            mod_dir = mods_dir / "ExampleMod"
+            mod_dir.mkdir(parents=True)
+            (mod_dir / "ModInfo.xml").write_text(
+                '<xml><Website value="https://www.nexusmods.com/7daystodie/mods/123" /></xml>',
+                encoding="utf-8",
+            )
+            existing_page = ModPageLink(
+                name="NexusMods",
+                url="https://www.nexusmods.com/7daystodie/mods/456",
+            )
+            mod = Mod_7D2D(
+                Mod_Config(name="ExampleMod", directory=mods_dir, mod_pages=(existing_page,))
+            )
+
+            mod.sync_metadata()
+
+            self.assertEqual(mod.cfg.mod_pages, (existing_page,))
+
+    def test_sync_metadata_ignores_non_project_modinfo_websites(self) -> None:
+        websites = (
+            "https://www.nexusmods.com/skyrimspecialedition/mods/123",
+            "https://www.nexusmods.com/7daystodie/users/123",
+            "https://7daystodiemods.com/",
+            "https://7daystodiemods.com/about",
+            "https://example.com/example-mod",
+            "http://www.nexusmods.com/7daystodie/mods/123",
+        )
+        for website in websites:
+            with self.subTest(website=website), TemporaryDirectory() as tmp:
+                mods_dir = Path(tmp) / "Mods"
+                mod_dir = mods_dir / "ExampleMod"
+                mod_dir.mkdir(parents=True)
+                (mod_dir / "ModInfo.xml").write_text(
+                    f'<xml><Website value="{website}" /></xml>',
+                    encoding="utf-8",
+                )
+                mod = Mod_7D2D(Mod_Config(name="ExampleMod", directory=mods_dir))
+
+                mod.sync_metadata()
+
+                self.assertEqual(mod.cfg.mod_pages, ())
 
     def test_detect_sevendays_version_from_log(self) -> None:
         with TemporaryDirectory() as tmp:

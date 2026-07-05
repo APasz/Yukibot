@@ -4,14 +4,18 @@ import logging
 import re
 import tarfile
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from re import Match, Pattern
 from typing import Generic, TypeAlias, TypeVar, cast
+from urllib.parse import quote
 
 import aiohttp
 import hikari
+from modmux import Muxer, parse_url
+from modmux.models import ModID, Provider
+from modmux.modmux_errors import ModMuxError
 
 import config
 from _discord import (
@@ -26,7 +30,14 @@ from _discord import (
 from _file import File_Utils
 from _security import Power_Level
 from apps._app import AM_Receiver, App, RelayAdvancementTerms
-from apps._config import App_Config, AppVersion, Mod_Config
+from apps._config import (
+    App_Config,
+    AppVersion,
+    KnownModPageProvider,
+    Mod_Config,
+    ModPageLink,
+    known_mod_page_provider_for_url,
+)
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
 from apps._mod import Mod, humanise_mod_identifier
 from apps._rcon import RconClient
@@ -92,6 +103,38 @@ def _json_object(value: object, *, label: str) -> dict[str, object]:
 
 def _load_json_object(raw: str | bytes, *, label: str) -> dict[str, object]:
     return _json_object(cast(object, json.loads(raw)), label=label)
+
+
+def _optional_factorio_metadata_text(
+    payload: Mapping[str, object],
+    field_name: str,
+    *,
+    label: str,
+) -> str | None:
+    raw_value = payload.get(field_name)
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        raise ValueError(f"{label} {field_name} must be a string.")
+    value = raw_value.strip()
+    return value or None
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioModMetadata:
+    name: str | None = None
+    version: str | None = None
+    title: str | None = None
+    homepage: str | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object], *, label: str) -> "FactorioModMetadata":
+        return cls(
+            name=_optional_factorio_metadata_text(payload, "name", label=label),
+            version=_optional_factorio_metadata_text(payload, "version", label=label),
+            title=_optional_factorio_metadata_text(payload, "title", label=label),
+            homepage=_optional_factorio_metadata_text(payload, "homepage", label=label),
+        )
 
 
 def detect_factorio_version(*, directory: Path) -> AppVersion | None:
@@ -166,24 +209,19 @@ class FactorioModList:
         pointer.write_text(json.dumps(payload, indent=4) + "\n", config.STR_ENCODE)
 
 
-def _factorio_mod_name_from_archive(pointer: Path) -> str | None:
+def _factorio_mod_metadata_from_archive(pointer: Path) -> FactorioModMetadata | None:
     if not pointer.exists():
         return None
     if pointer.is_dir():
         info_pointer = pointer / _FACTORIO_INFO_JSON_NAME
         if not info_pointer.exists():
             return None
+        label = f"Factorio info.json {info_pointer}"
         payload = _load_json_object(
             info_pointer.read_text(config.STR_ENCODE),
-            label=f"Factorio info.json {info_pointer}",
+            label=label,
         )
-        raw_name = payload.get("name")
-        if raw_name is None:
-            return None
-        if not isinstance(raw_name, str):
-            raise ValueError(f"Factorio info.json name must be a string: {info_pointer}")
-        mod_name = raw_name.strip()
-        return mod_name or None
+        return FactorioModMetadata.from_mapping(payload, label=label)
 
     if pointer.suffix.lower() != ".zip":
         return None
@@ -192,24 +230,19 @@ def _factorio_mod_name_from_archive(pointer: Path) -> str | None:
         for member_name in archive.namelist():
             normalised = member_name.rstrip("/")
             if normalised == _FACTORIO_INFO_JSON_NAME or normalised.endswith(f"/{_FACTORIO_INFO_JSON_NAME}"):
+                label = f"Factorio archive info.json {pointer}"
                 payload = _load_json_object(
                     archive.read(member_name),
-                    label=f"Factorio archive info.json {pointer}",
+                    label=label,
                 )
-                raw_name = payload.get("name")
-                if raw_name is None:
-                    return None
-                if not isinstance(raw_name, str):
-                    raise ValueError(f"Factorio archive info.json name must be a string: {pointer}")
-                mod_name = raw_name.strip()
-                return mod_name or None
+                return FactorioModMetadata.from_mapping(payload, label=label)
     return None
 
 
 def _factorio_mod_name_from_path(pointer: Path) -> str:
-    archive_name = _factorio_mod_name_from_archive(pointer)
-    if archive_name is not None:
-        return archive_name
+    metadata = _factorio_mod_metadata_from_archive(pointer)
+    if metadata is not None and metadata.name is not None:
+        return metadata.name
     stem = pointer.stem if pointer.is_file() else pointer.name
     if "_" not in stem:
         return stem
@@ -223,8 +256,32 @@ def _factorio_mod_version_from_name(name: str) -> str | None:
     return match.group("version").removeprefix("v")
 
 
+def _factorio_mod_page(raw_url: str | None) -> ModPageLink | None:
+    if raw_url is None:
+        return None
+    mod_id = parse_url(raw_url)
+    if mod_id is None or mod_id.provider is not Provider.WUBE:
+        return None
+    canonical_url = f"https://mods.factorio.com/mod/{quote(mod_id.id, safe='')}"
+    return ModPageLink(name=KnownModPageProvider.FACTORIO_MODS.value, url=canonical_url)
+
+
+async def _find_factorio_mod_page_via_modmux(*, mod_id: str, muxer: Muxer) -> ModPageLink:
+    resolved_mod = await muxer.get_mod(
+        Provider.WUBE,
+        ModID(provider=Provider.WUBE, id=mod_id),
+        author_resolution=False,
+    )
+    resolved_id = resolved_mod.slug or resolved_mod.id.id
+    page = _factorio_mod_page(f"https://mods.factorio.com/mod/{resolved_id}")
+    if page is None:
+        raise ValueError(f"modmux returned an invalid Factorio mod ID: {resolved_id!r}")
+    return page
+
+
 class Mod_Factorio(Mod):
     def __init__(self, cfg: Mod_Config):
+        self._detected_metadata = FactorioModMetadata()
         super().__init__(cfg)
 
     @classmethod
@@ -251,7 +308,7 @@ class Mod_Factorio(Mod):
 
     @property
     def factorio_mod_id(self) -> str:
-        return _factorio_mod_name_from_path(self.path)
+        return self._detected_metadata.name or _factorio_mod_name_from_path(self.path)
 
     def exists(self) -> bool:
         if self.name in _FACTORIO_IGNORED_MOD_FILES:
@@ -272,10 +329,57 @@ class Mod_Factorio(Mod):
             self.cfg.enabled = mod_state
 
     def detect_version(self) -> str | None:
-        return _factorio_mod_version_from_name(self.name)
+        return self._detected_metadata.version or _factorio_mod_version_from_name(self.name)
 
     def detect_friendly(self) -> str | None:
+        if self._detected_metadata.title is not None:
+            return self._detected_metadata.title
         return humanise_mod_identifier(self.factorio_mod_id, split_single_camel=True)
+
+    def native_metadata_id(self) -> str:
+        return self.factorio_mod_id
+
+    def metadata_fallback_id(self) -> str:
+        return self.factorio_mod_id.casefold()
+
+    def detect_mod_page(self) -> ModPageLink | None:
+        return _factorio_mod_page(self._detected_metadata.homepage)
+
+    def _has_factorio_mod_page(self) -> bool:
+        return any(
+            known_mod_page_provider_for_url(page.url) is KnownModPageProvider.FACTORIO_MODS
+            for page in self.cfg.mod_pages
+        )
+
+    def _add_factorio_mod_page(self, page: ModPageLink) -> None:
+        if not self._has_factorio_mod_page():
+            self.cfg.mod_pages = (*self.cfg.mod_pages, page)
+
+    def sync_metadata(self) -> None:
+        self._detected_metadata = _factorio_mod_metadata_from_archive(self.path) or FactorioModMetadata()
+        super().sync_metadata()
+        detected_page = self.detect_mod_page()
+        if detected_page is not None:
+            self._add_factorio_mod_page(detected_page)
+
+    @classmethod
+    async def sync_external_metadata_batch(cls, mods: Iterable[Mod]) -> None:
+        factorio_mods = tuple(
+            mod for mod in mods if isinstance(mod, cls) and not mod._has_factorio_mod_page()
+        )
+        if not factorio_mods:
+            return
+
+        async with Muxer() as muxer:
+            async def resolve_page(mod: "Mod_Factorio") -> None:
+                try:
+                    page = await _find_factorio_mod_page_via_modmux(mod_id=mod.factorio_mod_id, muxer=muxer)
+                except (ModMuxError, ValueError) as xcp:
+                    log.warning("Factorio mod page lookup failed for %s: %s", mod.name, xcp)
+                    return
+                mod._add_factorio_mod_page(page)
+
+            await asyncio.gather(*(resolve_page(mod) for mod in factorio_mods))
 
     async def install(self, src: Path, atomic: bool = True):
         await self._handle_drop(src, atomic)

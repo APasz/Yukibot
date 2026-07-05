@@ -1,0 +1,2982 @@
+{
+  "scope": "minecraft",
+  "mods": [
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "ad-astra-giselle-addon"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "ad_astra_giselle_addon"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "ad-astra-giselle-addon"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/ad-astra-giselle-addon"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "3ufwT9JF"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "635042"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "ad-astra"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "ad-astra"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "ad_astra"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "ad_astra"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "regular",
+        "download_block_reason": null
+      },
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/ad-astra"
+        },
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/ad-astra"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "cl5ec0Qm"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "1090999"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "addonslib"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "addonslib"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "addonslib"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "addonslib"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "regular",
+        "download_block_reason": null
+      },
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/addonslib"
+        },
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/addonslib"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "SOw6jD6x"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "431725"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "advanced-peripherals"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "advancedperipherals"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "advancedperipherals"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "advancedperipherals-1.20.1-0.7.46r"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "regular",
+        "download_block_reason": null
+      },
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/advanced-peripherals"
+        },
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/advancedperipherals"
+        },
+        {
+          "name": "Homepage",
+          "url": "https://docs.intelligence-modding.de/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "aether"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "aether"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "aether-1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/aether"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "aetherdelight"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "aether_delight_1.0.0_forge_1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/members/nocubeyt/projects"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "alexs-mobs"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "alexsmobs"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "alexsmobs"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/alexs-mobs"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "appleskin"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "appleskin"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/squeek502/AppleSkin"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "aquaculture"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "aquaculture"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://minecraft.curseforge.com/projects/aquaculture"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "artifacts"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "artifacts"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "artifacts-forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/artifacts"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "athena"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "athena"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "athena"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/athena"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "balm"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "balm-forge-1.20.1-7.3.38-all"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mods.twelveiterations.com/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "computercraft"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "barnyard computers"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "cc-tweaked"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://tweaked.cc"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "better-advancements"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "betteradvancements"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "betteradvancements"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/better-advancements"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "better-village-forge"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "bettervillage"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "bettervillage-forge-1.20.1-3.3.1-all"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/better-village-forge"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "bookshelf"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "bookshelf"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "bookshelf"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/bookshelf"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "botarium"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "botarium"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "botarium"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/botarium"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "buildinggadgets2"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "buildinggadgets2"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/Direwolf20-MC/BuildingGadgets2"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "caelus"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "caelus-forge-3.2.0+1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/TheIllusiveC4/Caelus"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "carryon"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "carryon"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://tschipp.ch"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "cgm"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "cgm-unofficial-1.4.19+forge+1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mrcrayfish.com/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "charginggadgets"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "charginggadgets"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/Direwolf20-MC/ChargingGadgets"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "chipped"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "chipped"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "chipped"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/chipped"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "chunky"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "chunky"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/pop4959/Chunky"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "citadel"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "citadel"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/Alex-the-666/Citadel"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "clumps"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "clumps"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "clumps"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/clumps"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "cobweb"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "cobweb"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/crystal-nest/cobweb/tree/1.20.1"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "collective"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "collective"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://serilum.com/mod/collective"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "compressedcreativity"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "compressedcreativity-1.20.1-0.2.0-all"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/Lgmrszd/CompressedCreativity"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "configured"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "configured"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mrcrayfish.com/mods?id=configured"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "constructionwand"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "constructionwand"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/Theta-Dev/ConstructionWand"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "copycats"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "copycats-3.0.7+mc.1.20.1-forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/copycats-plus/copycats"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "corgilib"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "corgilib"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/CorgiTaco/CorgiLib"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "craftingtweaks"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "craftingtweaks"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mods.twelveiterations.com/minecraft/craftingtweaks"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "create"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "create"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "create"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/create"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "create_new_age"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "create-new-age-1.1.7f+forge-mc1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://antarcticgardens.org/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "create-stuff-additions"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "create_sa"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "create-stuff-additions1.20.1_v2.1.2"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/create-stuff-additions"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "createaddition"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "createaddition"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/mrh0/createaddition"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "sMvUb4Rb"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "509285"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "create-deco"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "create-deco"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "createdeco"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "createdeco-2.0.3"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "regular",
+        "download_block_reason": null
+      },
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/create-deco"
+        },
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/create-deco"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "create-diesel-generators"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "createdieselgenerators"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "createdieselgenerators"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/create-diesel-generators"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "cucumber"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "cucumber"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://blakesmods.com/cucumber"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "curios"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "curios"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "curios-forge-5.14.1+1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/curios"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "t6BIRVZn"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "362528"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "decorative-blocks"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "decorative-blocks"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "decorative_blocks"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "decorative_blocks"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "regular",
+        "download_block_reason": null
+      },
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/decorative-blocks"
+        },
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/decorative-blocks"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "doubledoors"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "doubledoors"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://serilum.com/mod/double-doors"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "elevatorid"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "elevatorid-1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://minecraft.curseforge.com/projects/openblocks-elevator/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "enchantment-descriptions"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "enchdesc"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "enchantmentdescriptions"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/enchantment-descriptions"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "enderman-overhaul"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "endermanoverhaul"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "endermanoverhaul"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/enderman-overhaul"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "entityculling"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "entityculling"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "entityculling-forge-1.10.2-mc1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/entityculling"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "epherolib"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "epherolib"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://discord.gg/GZjtAn3F6W"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "farmers-cutting-oh-the-biomes-weve-gone"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mr_farmers_cuttingohthebiomeswevegone"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "farmers-cutting-oh-the-biomes-weve-gone-1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/datapack/farmers-cutting-oh-the-biomes-weve-gone"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "farmers_croptopia"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "farmers_croptopia"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/ACCBDD/farmers-croptopia"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "farmersdelight"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "farmersdelight"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/vectorwing/FarmersDelight"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "female-gender-forge"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "wildfire_gender"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "female-gender-mod"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/female-gender-forge"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "framedblocks"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "framedblocks"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "framedblocks"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/framedblocks"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "framework"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "framework"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mrcrayfish.com/mods?id=framework"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "gravestone-mod"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "gravestone"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "gravestone"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/gravestone-mod"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "guard-villagers"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "guardvillagers"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "guardvillagers"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/guard-villagers"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "guideme"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "guideme"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/AppliedEnergistics/GuideME/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "harvest_with_ease"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "harvest-with-ease"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/crystal-nest/harvest-with-ease/tree/1.20.1"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "immersive-aircraft"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "immersive_aircraft"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "immersive_aircraft-1.4.0+1.20.1-forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/immersive-aircraft"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "immersive-paintings"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "immersive_paintings"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "immersive_paintings-0.6.13+1.20.1-forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/immersive-paintings"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "immersiveengineering"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "immersiveengineering-1.20.1-10.2.0-183"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://minecraft.curseforge.com/projects/immersive-engineering/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "immersive-petroleum"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "immersivepetroleum"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "immersivepetroleum-1.20.1-4.3.1-36"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/immersive-petroleum"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "ironchest"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "ironchest"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://minecraft.curseforge.com/projects/iron-chests"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "iron-furnaces"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "ironfurnaces"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "ironfurnaces"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/iron-furnaces/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "ironjetpacks"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "ironjetpacks"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://blakesmods.com/iron-jetpacks"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "jade"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "jade"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://minecraft.curseforge.com/projects/jade"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "jei"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "jei"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "jei"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/jei"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "journeymap-integration"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "jmi"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "jmi-forge-1.20.1-0.14-48"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/journeymap-integration"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "lfHFW1mp"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "1555762"
+        },
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "journeymap"
+        },
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "journeymap"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "journeymap"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "journeymap-1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "regular",
+        "download_block_reason": null
+      },
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/plugin/journeymap"
+        },
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/journeymap"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "just-enough-resources-jer"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "jeresources"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "justenoughresources"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/just-enough-resources-jer"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "library-ferret-forge"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "libraryferret"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "libraryferret"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/library-ferret-forge"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "lootr"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "lootr"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://minecraft.curseforge.com/projects/lootr"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mantle"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mantle"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://minecraft.curseforge.com/projects/mantle"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-bridges"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwbridges"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-bridges-3.1.2-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-bridges"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-doors"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwdoors"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-doors-1.1.5-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-doors"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-furniture"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwfurnitures"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-furniture-3.4.1-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-furniture"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-lights-and-lamps"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwlights"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-lights-1.1.5-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-lights-and-lamps"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-fences-and-walls"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwfences"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-mcwfences-1.2.1-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-fences-and-walls"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-paths-and-pavings"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwpaths"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-mcwpaths-1.1.1-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-paths-and-pavings"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-stairs"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwstairs"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-mcwstairs-1.0.2-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-stairs"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-windows"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwwindows"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-mcwwindows-2.4.2-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-windows"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-paintings"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwpaintings"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-paintings-1.1.0-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-paintings"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-roofs"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwroofs"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-roofs-2.3.2-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-roofs"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "macaws-trapdoors"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mcwtrpdoors"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mcw-trapdoors-1.1.5-mc1.20.1forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/macaws-trapdoors"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mekanism"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mekanism"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://aidancbrady.com/mekanism/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "mekanism-ad-astra-ores"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mekanismaaa"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mekanism-ad-astra-ores"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/mekanism-ad-astra-ores"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mekanismadditions"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mekanismadditions"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://aidancbrady.com/mekanism/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mekanismgenerators"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mekanismgenerators"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://aidancbrady.com/mekanism/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "mekanismtools"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "mekanismtools"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://aidancbrady.com/mekanism/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "MODRINTH",
+          "value": "modernfix"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "modernfix"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "modernfix-forge-5.27.40+mc1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Modrinth",
+          "url": "https://modrinth.com/mod/modernfix"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "moregates"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "moregates"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mcreator.net"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "naturescompass"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "naturescompass-1.20.1"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/MattCzyr/NaturesCompass"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "netherportalfix"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "netherportalfix"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mods.twelveiterations.com/mc/netherportalfix"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "nethersdelight"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "nethersdelight"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/Umpaz/NethersDelight"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "no-chat-reports"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "nochatreports"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "nochatreports"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/no-chat-reports"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "biomeswevegone"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "oh-the-biomes-weve-gone-forge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://potionstudios.net/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "oh-the-trees-youll-grow"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "ohthetreesyoullgrow"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "oh-the-trees-youll-grow"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://curseforge.com/minecraft/mc-mods/oh-the-trees-youll-grow"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "refinedstorage"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "refinedstorage"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://refinedmods.com/refined-storage"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "refinedstorageaddons"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "refinedstorageaddons"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://refinedmods.com/refined-storage-addons"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "refurbished_furniture"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "refurbished_furniture"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mrcrayfish.com/mods/furniture_refurbished"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "squaremap"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "squaremap"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/jpenilla/squaremap/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "tcintegrations"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "tcintegrations"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "GitHub",
+          "url": "https://github.com/wendall911/TCIntegrations"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "tinkers-construct"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "tconstruct"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "tconstruct"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/tinkers-construct"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "terralith"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "terralith_1.20.x_v2.5.4"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://www.stardustlabs.net/"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "the-twilight-forest"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "twilightforest"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "twilightforest-1.20.1-4.3.2508-universal"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/the-twilight-forest"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "villagernames"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "villagernames"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://serilum.com/mod/villager-names"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "waystones"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "waystones"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "Homepage",
+          "url": "https://mods.twelveiterations.com/mc/waystones"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "yungs-api"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "yungsapi"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "yungsapi"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/yungs-api"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "yungs-better-dungeons"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "betterdungeons"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "yungsbetterdungeons"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/yungs-better-dungeons"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "yungs-better-end-island"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "betterendisland"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "yungsbetterendisland"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/yungs-better-end-island"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "yungs-better-nether-fortresses"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "betterfortresses"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "yungsbetternetherfortresses"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/yungs-better-nether-fortresses"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "yungs-better-ocean-monuments"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "betteroceanmonuments"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "yungsbetteroceanmonuments"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/yungs-better-ocean-monuments"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "yungs-better-strongholds"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "betterstrongholds"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "yungsbetterstrongholds"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/yungs-better-strongholds"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "CURSEFORGE",
+          "value": "yungs-better-witch-huts"
+        },
+        {
+          "kind": "native",
+          "namespace": "minecraft",
+          "value": "betterwitchhuts"
+        },
+        {
+          "kind": "filename",
+          "namespace": "minecraft",
+          "value": "yungsbetterwitchhuts"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "CurseForge",
+          "url": "https://www.curseforge.com/minecraft/mc-mods/yungs-better-witch-huts"
+        }
+      ]
+    }
+  ],
+  "schema_version": 1
+}

@@ -1859,6 +1859,18 @@ class ModWebTheme:
                     flex-wrap: wrap;
                     margin-left: auto;
                 }}
+                .mod-inline-toolbar {{
+                    flex-wrap: nowrap;
+                    align-items: center;
+                }}
+                .mod-inline-toolbar > :is(.mod-settings-search, .mod-console-select-action) {{
+                    flex: 1 1 0;
+                    min-width: 0;
+                }}
+                .mod-inline-toolbar-actions {{
+                    flex: 0 0 auto;
+                    flex-wrap: nowrap;
+                }}
                 .mod-save-grid {{
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
@@ -5148,46 +5160,42 @@ class ModWebTheme:
                         max-width: 100%;
                     }}
                     .mod-mods-toolbar-filters {{
-                        display: grid !important;
-                        grid-template-columns: minmax(0, 1fr) auto;
+                        display: flex !important;
                         align-items: center;
                         width: 100%;
                     }}
                     .mod-mods-toolbar-search {{
-                        grid-column: 1 / -1;
-                        width: 100%;
+                        flex: 1 1 0;
+                        width: auto;
                     }}
                     .mod-config-select.mod-mods-toolbar-sort {{
-                        grid-column: 1;
-                        width: 100%;
-                        min-width: 0;
-                    }}
-                    .mod-mods-toolbar-result-count {{
-                        grid-column: 2;
+                        flex: 0 1 9rem;
+                        width: 9rem;
+                        min-width: 7.5rem;
                     }}
                     .mod-mods-toolbar-actions {{
-                        display: grid !important;
-                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                        display: flex !important;
+                        flex-wrap: nowrap;
                         width: 100%;
                         align-self: stretch;
                         margin-left: 0;
                     }}
                     .mod-mods-toolbar-actions .mod-toolbar-button {{
-                        width: 100%;
+                        flex: 1 1 0;
+                        width: 0;
                         min-width: 0;
                     }}
                     .mod-mods-toolbar-actions .mod-toolbar-selection-button {{
+                        flex: 0 0 auto;
                         width: auto;
                         min-width: 4.75rem;
-                        justify-self: end;
                     }}
                     .mod-mods-toolbar-actions .mod-toolbar-menu-button {{
+                        flex: 0 0 2.5rem;
                         width: 2.5rem;
                         min-width: 2.5rem;
-                        justify-self: end;
                     }}
                     .mod-mods-toolbar-actions .mod-list-button.danger {{
-                        grid-column: 2;
                         margin-left: 0;
                     }}
                     .mod-config-select,
@@ -5204,6 +5212,7 @@ class ModWebTheme:
                         max-width: none !important;
                     }}
                     .mod-tab-toolbar-actions {{ width: 100%; margin-left: 0; }}
+                    .mod-inline-toolbar-actions {{ width: auto; margin-left: auto; }}
                     .mod-save-card-button {{ flex-basis: 100%; min-width: 0; }}
                     .mod-chat-entry {{
                         flex-wrap: wrap;
@@ -5304,6 +5313,54 @@ class ModWebTheme:
                     .mod-chat-timeline {{ max-height: none; }}
                     .mod-chat-input {{ flex-basis: 100%; min-width: 0; }}
                     .mod-chat-send {{ width: 100%; }}
+                }}
+                @media (max-width: 30rem) {{
+                    .mod-inline-toolbar {{
+                        flex-wrap: wrap;
+                    }}
+                    .mod-inline-toolbar > :is(.mod-settings-search, .mod-console-select-action) {{
+                        flex-basis: 100%;
+                    }}
+                    .mod-inline-toolbar-actions {{
+                        width: 100%;
+                        margin-left: 0;
+                    }}
+                    .mod-mods-toolbar-filters {{
+                        display: grid !important;
+                        grid-template-columns: minmax(0, 1fr) auto;
+                    }}
+                    .mod-mods-toolbar-search {{
+                        grid-column: 1 / -1;
+                        width: 100%;
+                    }}
+                    .mod-config-select.mod-mods-toolbar-sort {{
+                        grid-column: 1;
+                        width: 100%;
+                        min-width: 0;
+                    }}
+                    .mod-mods-toolbar-result-count {{
+                        grid-column: 2;
+                    }}
+                    .mod-mods-toolbar-actions {{
+                        display: grid !important;
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                    }}
+                    .mod-mods-toolbar-actions .mod-toolbar-button {{
+                        width: 100%;
+                    }}
+                    .mod-mods-toolbar-actions .mod-toolbar-selection-button {{
+                        width: auto;
+                        justify-self: end;
+                    }}
+                    .mod-mods-toolbar-actions .mod-toolbar-menu-button {{
+                        grid-column: 2;
+                        width: 2.5rem;
+                        justify-self: end;
+                    }}
+                    .mod-mods-toolbar-actions .mod-list-button.danger {{
+                        grid-column: 2;
+                        width: 100%;
+                    }}
                 }}
             </style>
             """

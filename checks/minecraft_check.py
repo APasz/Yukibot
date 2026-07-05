@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import config
 from _relay_embeds import build_app_lifecycle_embed
-from apps._config import Mod_Config, ModDownloadBlockReason, ModType
+from apps._config import Mod_Config, ModType
 from apps import minecraft
 from apps.minecraft import (
     Activities as MinecraftActivities,
@@ -136,7 +136,7 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
                     mod.sync_metadata()
                     self.assertEqual(mod.friendly, expected)
 
-    def test_embedded_display_name_does_not_override_filename_version(self) -> None:
+    def test_prefers_embedded_version_over_filename_version(self) -> None:
         with TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
             filename = "bellsandwhistles-0.4.5-1.20.x-Create6.0+.jar"
@@ -152,7 +152,99 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
             mod.sync_metadata()
 
             self.assertEqual(mod.friendly, "Create: Bells & Whistles")
-            self.assertEqual(mod.cfg.version, "0.4.5")
+            self.assertEqual(mod.cfg.version, "0.4.3-1.20.x")
+
+    def test_reads_version_and_homepage_across_supported_loaders(self) -> None:
+        metadata_cases = {
+            "forge.jar": (
+                "META-INF/mods.toml",
+                'modLoader="javafml"\n[[mods]]\nmodId="example"\nversion="2.1.0"\n'
+                'displayName="Forge Example"\ndisplayURL="https://modrinth.com/mod/example"\n',
+                "2.1.0",
+                "https://modrinth.com/mod/example",
+            ),
+            "fabric.jar": (
+                "fabric.mod.json",
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "id": "example",
+                        "version": "3.2.1",
+                        "name": "Fabric Example",
+                        "contact": {"homepage": "https://example.com/fabric"},
+                    }
+                ),
+                "3.2.1",
+                "https://example.com/fabric",
+            ),
+            "quilt.jar": (
+                "quilt.mod.json",
+                json.dumps(
+                    {
+                        "quilt_loader": {
+                            "id": "example",
+                            "version": "4.3.2",
+                            "metadata": {
+                                "name": "Quilt Example",
+                                "contact": {"homepage": "https://github.com/example/quilt"},
+                            },
+                        }
+                    }
+                ),
+                "4.3.2",
+                "https://github.com/example/quilt",
+            ),
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            for filename, (metadata_path, metadata_text, version, homepage) in metadata_cases.items():
+                with self.subTest(filename=filename):
+                    with zipfile.ZipFile(directory / filename, "w") as archive:
+                        archive.writestr(metadata_path, metadata_text)
+                    mod = Mod_MC(Mod_Config(name=filename, directory=directory))
+
+                    mod.sync_metadata()
+
+                    self.assertEqual(mod.version, version)
+                    self.assertEqual(len(mod.cfg.mod_pages), 1)
+                    self.assertEqual(mod.cfg.mod_pages[0].url, homepage)
+
+    def test_resolves_forge_version_placeholder_from_jar_manifest(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            filename = "example-forge-1.20.1-1.4.2.jar"
+            with zipfile.ZipFile(directory / filename, "w") as archive:
+                archive.writestr(
+                    "META-INF/mods.toml",
+                    'modLoader="javafml"\n[[mods]]\nmodId="example"\n'
+                    'version="${file.jarVersion}"\ndisplayName="Example"\n',
+                )
+                archive.writestr(
+                    "META-INF/MANIFEST.MF",
+                    "Manifest-Version: 1.0\nImplementation-Version: 7.6.5\n",
+                )
+            mod = Mod_MC(Mod_Config(name=filename, directory=directory))
+
+            mod.sync_metadata()
+
+        self.assertEqual(mod.version, "7.6.5")
+
+    def test_falls_back_to_filename_when_embedded_version_is_unresolved(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            filename = "example-forge-1.20.1-1.4.2.jar"
+            with zipfile.ZipFile(directory / filename, "w") as archive:
+                archive.writestr(
+                    "META-INF/mods.toml",
+                    'modLoader="javafml"\n[[mods]]\nmodId="example"\n'
+                    'version="${file.jarVersion}"\ndisplayName="Example"\n',
+                )
+            mod = Mod_MC(Mod_Config(name=filename, directory=directory))
+
+            mod.sync_metadata()
+
+        self.assertEqual(mod.version, "1.4.2")
 
     def test_reads_metadata_from_disabled_mod_archive(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -184,12 +276,12 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
 
             self.assertEqual(mod.friendly, "Fallback Name")
 
-    def test_squaremap_mod_is_server_only(self) -> None:
+    def test_squaremap_mod_uses_server_side_classification(self) -> None:
         mod = Mod_MC(Mod_Config(name="squaremap-forge-mc1.20.1-1.2.0.jar", directory=Path(".")))
         mod.sync_metadata()
 
         self.assertIs(mod.mod_type, ModType.SERVER)
-        self.assertIs(mod.cfg.download_block_reason, ModDownloadBlockReason.SERVER_ONLY)
+        self.assertIsNone(mod.cfg.download_block_reason)
 
     def test_started_embed_includes_squaremap_link(self) -> None:
         with TemporaryDirectory() as temp_dir:

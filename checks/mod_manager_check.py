@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -49,6 +50,18 @@ class _DetectedServerMod(_FileMod):
         return ModDownloadBlockReason.SERVER_ONLY
 
 
+class _VersionedFileMod(_FileMod):
+    def native_metadata_id(self) -> str:
+        return self.name.split("-", 1)[0]
+
+    def detect_version(self) -> str | None:
+        stem = Path(self.name).stem
+        return stem.rsplit("-", 1)[1] if "-" in stem else None
+
+    def metadata_fallback_id(self) -> str:
+        return self.native_metadata_id().casefold()
+
+
 class ModManagerTests(unittest.IsolatedAsyncioTestCase):
     def test_mod_page_links_require_a_name_and_absolute_https_url(self) -> None:
         with self.assertRaises(ValueError):
@@ -71,6 +84,8 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
             "https://www.spigotmc.org/resources/example.1/": KnownModPageProvider.SPIGOT_MC,
             "https://hangar.papermc.io/example": KnownModPageProvider.HANGAR,
             "https://dev.bukkit.org/projects/example": KnownModPageProvider.BUKKIT,
+            "https://github.com/example/mod": KnownModPageProvider.GITHUB,
+            "https://gitlab.com/example/mod": KnownModPageProvider.GITLAB,
         }
         for url, expected in cases.items():
             with self.subTest(url=url):
@@ -78,6 +93,12 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(known_mod_page_provider_for_url("https://example.com/mod/example"))
         self.assertIsNone(known_mod_page_provider_for_url("not a URL"))
+
+    def test_code_hosting_mod_page_providers_are_ordered_last(self) -> None:
+        self.assertEqual(
+            tuple(KnownModPageProvider)[-2:],
+            (KnownModPageProvider.GITHUB, KnownModPageProvider.GITLAB),
+        )
 
     def test_mod_page_display_order_prioritises_related_providers(self) -> None:
         pages = (
@@ -408,13 +429,13 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
 
         updated = await manager.set_coremod("example.zip", True)
 
-        self.assertTrue(updated.cfg.coremod)
+        self.assertTrue(updated.is_coremod_type)
 
         await manager.reload_mods()
 
         reloaded = manager.get("example.zip")
-        self.assertTrue(reloaded.cfg.coremod)
-        self.assertEqual(reloaded.cfg.mod_type, ModType.COREMOD)
+        self.assertTrue(reloaded.is_coremod_type)
+        self.assertEqual(reloaded.mod_type, ModType.COREMOD)
 
     async def test_legacy_builtin_block_reason_migrates_to_builtin_mod_type(self) -> None:
         (self.mods_dir / "builtin.zip").write_text("payload", encoding="utf-8")
@@ -463,7 +484,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
 
         reloaded = manager.get("example.zip")
         self.assertFalse(reloaded.downloadable)
-        self.assertEqual(reloaded.cfg.download_block_reason, ModDownloadBlockReason.OTHER)
+        self.assertEqual(reloaded.download_block_reason, ModDownloadBlockReason.OTHER)
 
     async def test_platform_metadata_persists_across_reload(self) -> None:
         manager = self._build_manager()
@@ -537,6 +558,105 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.reload_mods()
 
         self.assertEqual(manager.get("example.zip").cfg.mod_pages, mod_pages)
+
+    async def test_project_metadata_is_shared_across_scope_instances(self) -> None:
+        first_app_dir = self.apps_dir / "first"
+        second_app_dir = self.apps_dir / "second"
+        first_mods_dir = first_app_dir / "mods"
+        second_mods_dir = second_app_dir / "mods"
+        first_mods_dir.mkdir(parents=True)
+        second_mods_dir.mkdir(parents=True)
+        first_source = self._write_source_file("sharedmod-1.0.zip")
+        second_source = self._write_source_file("sharedmod-2.0.zip")
+
+        def build_manager(*, name: str, app_dir: Path, mods_dir: Path) -> Mod_Manager:
+            return Mod_Manager(
+                App_Config(
+                    name=name,
+                    instance_key=name,
+                    directory=app_dir,
+                    apps_dir=self.apps_dir,
+                    mods_dir=mods_dir,
+                    join_host="127.0.0.1",
+                    scope="shared-scope",
+                ),
+                mod_cls=_VersionedFileMod,
+                db_path=self.temp_path / f"{name}.jsonl",
+            )
+
+        first = build_manager(name="first", app_dir=first_app_dir, mods_dir=first_mods_dir)
+        second = build_manager(name="second", app_dir=second_app_dir, mods_dir=second_mods_dir)
+        await first.add(first_source)
+        await second.add(second_source)
+        pages = (ModPageLink(name="GitHub", url="https://github.com/example/sharedmod"),)
+
+        await first.update_properties(
+            "sharedmod-1.0.zip",
+            mod_type=ModType.CLIENT,
+            download_block_reason=None,
+            metadata_overrides=ModMetadataOverrides(
+                friendly_name="Shared Mod",
+                version="1.0-local",
+                origin="curated-first",
+            ),
+            mod_pages=pages,
+            client_pack=ClientPackConfig(policy=ClientPackPolicy.OPTIONAL, default_selected=True),
+        )
+        await second.reload_mods()
+
+        first_mod = first.get("sharedmod-1.0.zip")
+        second_mod = second.get("sharedmod-2.0.zip")
+        self.assertEqual(second_mod.friendly, "Shared Mod")
+        self.assertEqual(second_mod.mod_type, ModType.CLIENT)
+        self.assertEqual(second_mod.cfg.mod_pages, pages)
+        self.assertEqual(second_mod.version, "2.0")
+        self.assertEqual(second_mod.origin, "manual")
+        self.assertIs(second_mod.cfg.client_pack.policy, ClientPackPolicy.REQUIRED)
+        self.assertEqual(first_mod.version, "1.0-local")
+        self.assertEqual(first_mod.origin, "curated-first")
+        self.assertIs(first_mod.cfg.client_pack.policy, ClientPackPolicy.OPTIONAL)
+
+        shared_document = json.loads(
+            (self.apps_dir / "mod-metadata;shared-scope.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(shared_document["mods"][0]["friendly_name"], "Shared Mod")
+        for db_path in (self.temp_path / "first.jsonl", self.temp_path / "second.jsonl"):
+            instance_payload = json.loads(db_path.read_text(encoding="utf-8"))
+            self.assertIsNone(instance_payload["metadata_overrides"]["friendly_name"])
+            self.assertIsNone(instance_payload["classification_override"])
+            self.assertEqual(instance_payload["mod_pages"], [])
+
+    async def test_legacy_instance_project_metadata_migrates_to_scope_store(self) -> None:
+        mod_path = self.mods_dir / "legacy-1.0.zip"
+        mod_path.write_text("payload", encoding="utf-8")
+        page = ModPageLink(name="GitHub", url="https://github.com/example/legacy")
+        legacy_config = Mod_Config(
+            name=mod_path.name,
+            directory=self.mods_dir,
+            classification_override=ModClassificationOverride(mod_type=ModType.SERVER),
+            metadata_overrides=ModMetadataOverrides(
+                friendly_name="Legacy Shared Name",
+                version="1.0-local",
+                origin="legacy-instance",
+            ),
+            mod_pages=(page,),
+        )
+        self.db_path.write_text(legacy_config.model_dump_json(), encoding="utf-8")
+        manager = self._build_manager(mod_cls=_VersionedFileMod)
+
+        await manager.reload_mods()
+
+        migrated = manager.get(mod_path.name)
+        self.assertEqual(migrated.friendly, "Legacy Shared Name")
+        self.assertEqual(migrated.mod_type, ModType.SERVER)
+        self.assertEqual(migrated.cfg.mod_pages, (page,))
+        self.assertEqual(migrated.version, "1.0-local")
+        self.assertEqual(migrated.origin, "legacy-instance")
+        instance_payload = json.loads(self.db_path.read_text(encoding="utf-8"))
+        self.assertIsNone(instance_payload["metadata_overrides"]["friendly_name"])
+        self.assertEqual(instance_payload["metadata_overrides"]["origin"], "legacy-instance")
+        self.assertIsNone(instance_payload["classification_override"])
+        self.assertEqual(instance_payload["mod_pages"], [])
 
     async def test_update_properties_persists_optional_client_pack_policy(self) -> None:
         manager = self._build_manager()

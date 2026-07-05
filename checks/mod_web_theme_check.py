@@ -145,6 +145,8 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-user-avatar", css)
         self.assertIn("border: 3px solid transparent !important", css)
         self.assertIn(".mod-settings-search", css)
+        self.assertIn(".mod-inline-toolbar", css)
+        self.assertIn(".mod-inline-toolbar-actions", css)
         self.assertIn(".mod-mods-toolbar-search", css)
         self.assertIn(".mod-mods-toolbar-filters", css)
         self.assertIn(".mod-mods-toolbar-result-count", css)
@@ -163,6 +165,16 @@ class ModWebThemeTests(unittest.TestCase):
             css,
             r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-menu-button \{.*?"
             r"width: 2\.5rem;.*?min-width: 2\.5rem;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)@media \(max-width: 720px\).*?\.mod-mods-toolbar-filters \{.*?"
+            r"display: flex !important;.*?\.mod-mods-toolbar-actions \{.*?flex-wrap: nowrap;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)@media \(max-width: 30rem\).*?\.mod-mods-toolbar-filters \{.*?"
+            r"display: grid !important;",
         )
         self.assertIn(".mod-toolbar-menu-item-danger", css)
         self.assertIn(".mod-modlist-dialog-card", css)

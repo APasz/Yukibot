@@ -1,13 +1,15 @@
 import asyncio
+import json
 import logging
 import re
 import tomllib
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from logging import Logger
 from pathlib import Path
 from re import Match
-from typing import Any
+from typing import Any, cast
 
 import hikari
 import tomli_w
@@ -24,9 +26,9 @@ from _discord import (
 )
 from _security import Power_Level
 from apps._app import App
-from apps._config import App_Config, AppVersion, Mod_Config
+from apps._config import App_Config, AppVersion, Mod_Config, ModPageLink
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
-from apps._mod import Mod
+from apps._mod import Mod, humanise_mod_identifier
 from apps._settings import (
     App_Settings,
     BoolSettingSpec,
@@ -48,9 +50,155 @@ from relay_notices import (
 
 log: Logger = logging.getLogger(__name__)
 
+_BEAMMP_METADATA_MAX_BYTES = 1_048_576
+_BEAMMP_MOD_VERSION_RE = re.compile(
+    r"(?:^|[-_. ])v?(?P<version>\d+(?:\.\d+)+(?:[-+._][A-Za-z0-9]+)*)$",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class BeamMpModMetadata:
+    native_id: str | None = None
+    title: str | None = None
+    version: str | None = None
+    homepage: str | None = None
+
+
+def _beammp_metadata_text(payload: Mapping[str, object], *field_names: str) -> str | None:
+    for field_name in field_names:
+        value = payload.get(field_name)
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if text:
+            return text
+    return None
+
+
+def _beammp_metadata_version(payload: Mapping[str, object], *field_names: str) -> str | None:
+    text = _beammp_metadata_text(payload, *field_names)
+    if text is not None:
+        return text
+    for field_name in field_names:
+        value = payload.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            continue
+        return str(value)
+    return None
+
+
+def _beammp_metadata_mapping(raw: bytes) -> Mapping[str, object] | None:
+    try:
+        payload = cast(object, json.loads(raw.decode("utf-8-sig")))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    mapping = cast(Mapping[object, object], payload)
+    if not all(isinstance(key, str) for key in mapping):
+        return None
+    return cast(Mapping[str, object], mapping)
+
+
+def _beammp_metadata_from_mapping(payload: Mapping[str, object]) -> BeamMpModMetadata:
+    resource_id = payload.get("resource_id")
+    native_id = (
+        str(resource_id)
+        if isinstance(resource_id, int) and not isinstance(resource_id, bool) and resource_id > 0
+        else _beammp_metadata_text(payload, "id", "mod_id")
+    )
+    return BeamMpModMetadata(
+        native_id=native_id,
+        title=_beammp_metadata_text(payload, "title", "Name", "name"),
+        version=_beammp_metadata_version(payload, "version_string", "version", "Version"),
+        homepage=_beammp_metadata_text(payload, "homepage", "resource_url", "url"),
+    )
+
+
+def _beammp_mod_metadata(pointer: Path) -> BeamMpModMetadata | None:
+    if not pointer.is_file() or pointer.suffix.casefold() != ".zip":
+        return None
+    try:
+        with zipfile.ZipFile(pointer, "r") as archive:
+            package_entries: list[zipfile.ZipInfo] = []
+            content_entries: list[zipfile.ZipInfo] = []
+            for member in archive.infolist():
+                if member.is_dir() or member.file_size > _BEAMMP_METADATA_MAX_BYTES:
+                    continue
+                parts = tuple(part for part in member.filename.replace("\\", "/").split("/") if part)
+                folded_parts = tuple(part.casefold() for part in parts)
+                if len(parts) >= 2 and folded_parts[0] == "mod_info" and folded_parts[-1] == "info.json":
+                    package_entries.append(member)
+                elif (
+                    len(parts) == 3
+                    and folded_parts[0] in {"levels", "vehicles"}
+                    and folded_parts[-1] == "info.json"
+                ):
+                    content_entries.append(member)
+
+            candidates = package_entries or (content_entries if len(content_entries) == 1 else [])
+            for member in candidates:
+                payload = _beammp_metadata_mapping(archive.read(member))
+                if payload is None:
+                    continue
+                metadata = _beammp_metadata_from_mapping(payload)
+                if metadata.native_id is None and len(parts := tuple(
+                    part for part in member.filename.replace("\\", "/").split("/") if part
+                )) >= 2:
+                    metadata = replace(metadata, native_id=parts[1])
+                if any((metadata.native_id, metadata.title, metadata.version, metadata.homepage)):
+                    return metadata
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        return None
+    return None
+
+
+def _beammp_filename_version(name: str) -> str | None:
+    match = _BEAMMP_MOD_VERSION_RE.search(Path(name).stem)
+    return None if match is None else match.group("version").removeprefix("v")
+
+
+def _beammp_mod_page(raw_url: str | None) -> ModPageLink | None:
+    if raw_url is None:
+        return None
+    try:
+        return ModPageLink(name="Homepage", url=raw_url)
+    except ValueError:
+        return None
+
+
 class Mod_BeamMP(Mod):
     def __init__(self, cfg: Mod_Config):
+        self._detected_metadata = BeamMpModMetadata()
         super().__init__(cfg)
+
+    def sync_metadata(self) -> None:
+        self.sync_enabled_state()
+        self._detected_metadata = _beammp_mod_metadata(self.path) or BeamMpModMetadata()
+        super().sync_metadata()
+        detected_page = _beammp_mod_page(self._detected_metadata.homepage)
+        if detected_page is not None and all(page.url != detected_page.url for page in self.cfg.mod_pages):
+            self.cfg.mod_pages = (*self.cfg.mod_pages, detected_page)
+
+    def detect_version(self) -> str | None:
+        return self._detected_metadata.version or _beammp_filename_version(self.name)
+
+    def detect_friendly(self) -> str | None:
+        return self._detected_metadata.title or humanise_mod_identifier(
+            Path(self.name).stem,
+            split_single_camel=True,
+        )
+
+    def native_metadata_id(self) -> str | None:
+        return self._detected_metadata.native_id
+
+    def metadata_fallback_id(self) -> str:
+        stem = Path(self.name).stem
+        match = _BEAMMP_MOD_VERSION_RE.search(stem)
+        if match is not None:
+            stem = stem[: match.start()].rstrip("-_. ")
+        return stem.casefold()
 
     async def install(self, src: Path, atomic: bool = True):
         await self._handle_drop(src, atomic)

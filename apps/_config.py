@@ -947,6 +947,8 @@ class KnownModPageProvider(enum.StrEnum):
     SPIGOT_MC = "SpigotMC"
     HANGAR = "Hangar"
     BUKKIT = "Bukkit"
+    GITHUB = "GitHub"
+    GITLAB = "GitLab"
 
     @property
     def domains(self) -> tuple[str, ...]:
@@ -977,6 +979,10 @@ class KnownModPageProvider(enum.StrEnum):
                 return ("hangar.papermc.io",)
             case KnownModPageProvider.BUKKIT:
                 return ("dev.bukkit.org",)
+            case KnownModPageProvider.GITHUB:
+                return ("github.com",)
+            case KnownModPageProvider.GITLAB:
+                return ("gitlab.com",)
 
 
 def normalise_mod_page_url(raw: object) -> str:
@@ -1974,7 +1980,10 @@ class Mod_Config(BaseModel):
 
     @property
     def coremod(self) -> bool:
-        return self.mod_type is ModType.COREMOD
+        effective_mod_type = (
+            self.mod_type if self.classification_override is None else self.classification_override.mod_type
+        )
+        return effective_mod_type is ModType.COREMOD
 
     @field_validator("directory", "client_path", mode="before")
     @classmethod
