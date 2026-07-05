@@ -32,12 +32,14 @@ from apps._config import (
     ClientPackMetadataConfig,
     ClientPackPolicy,
     ClientPackRelease,
+    LauncherMetadataDiscovery,
     LauncherMetadataResolution,
     LauncherProviderUrls,
     ModDistributionMode,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPageLink,
+    ModPageDiscovery,
     ModPlacement,
     ModType,
     is_client_pack_candidate,
@@ -8529,10 +8531,12 @@ class ModWebTests(unittest.TestCase):
         table.selected = []
         ui.table.return_value = table
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        dialog = MagicMock()
 
         with (
             patch.object(service, "_user_has_level", return_value=False),
             patch.object(service, "_render_flat_tab_header"),
+            patch.object(service, "_render_mod_info_dialog", return_value=dialog) as render_mod_dialog,
             patch.object(
                 service,
                 "_render_mod_toolbar",
@@ -8546,14 +8550,23 @@ class ModWebTests(unittest.TestCase):
             patch.object(service, "_render_mod_download_row") as render_standard_row,
         ):
             service._render_mods_section(ui=cast(ModWebUi, ui), model=model, user=user)
+            click_handler = table.on.call_args.args[1]
+            asyncio.run(click_handler(SimpleNamespace(args={"action": "details", "name": mods[0].name})))
 
         ui.table.assert_called_once()
         self.assertEqual(len(ui.table.call_args.kwargs["rows"]), 50)
         self.assertIn("virtual-scroll", table.props.call_args.args[0])
         virtual_row_template = table.add_slot.call_args.args[1]
         self.assertIn("['mod-row', 'mod-row-clickable', props.row.state_class]", virtual_row_template)
+        self.assertIn(':data-mod-name="props.row.name"', virtual_row_template)
+        self.assertIn("data-mod-download", virtual_row_template)
+        self.assertNotIn("$parent.$emit", virtual_row_template)
         self.assertIn('class="mod-pill size"', virtual_row_template)
         self.assertIn("'mod-setting-badge', 'mod-mod-type-badge'", virtual_row_template)
+        table.on.assert_called_once()
+        self.assertEqual(table.on.call_args.args[0], "click")
+        render_mod_dialog.assert_called_once_with(ui=ui, entry=mods[0], model=model, user=user)
+        dialog.open.assert_called_once()
         render_standard_row.assert_not_called()
 
     def test_filter_mod_entries_matches_name_version_and_state_tokens(self) -> None:
@@ -10181,6 +10194,113 @@ class ModWebTests(unittest.TestCase):
             user=user,
             method="POST",
             json_payload={"launcher_urls": launcher_urls.model_dump(mode="json")},
+        )
+
+    def test_resolve_mod_launcher_metadata_uses_effective_mod_page_values(self) -> None:
+        service = ModWebService()
+        entry = self._mod_entry(name="alpha.jar")
+        mod_pages = (
+            ModPageLink(name="Modrinth", url="https://modrinth.com/mod/alpha"),
+        )
+        existing_urls = LauncherProviderUrls(
+            curseforge="https://www.curseforge.com/minecraft/mc-mods/alpha/files/123"
+        )
+        expected = LauncherMetadataDiscovery()
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="minecraft_alpha")),
+        )
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="https://yuki.example/api/node",
+            api_url="/api/node-proxy/yuki/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_json_async",
+                new=AsyncMock(return_value=expected.model_dump(mode="json")),
+            ) as remote_json,
+        ):
+            result = asyncio.run(
+                service._resolve_mod_launcher_metadata(
+                    model=model,
+                    entry=entry,
+                    mod_pages=mod_pages,
+                    existing_launcher_urls=existing_urls,
+                    user=user,
+                )
+            )
+
+        self.assertEqual(result, expected)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="minecraft_alpha",
+            path="/apps/minecraft_alpha/mods/alpha.jar/launcher-metadata/resolve",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "mod_pages": [page.model_dump(mode="json") for page in mod_pages],
+                "existing_launcher_urls": existing_urls.model_dump(mode="json"),
+            },
+        )
+
+    def test_find_mod_pages_uses_effective_mod_page_values(self) -> None:
+        service = ModWebService()
+        entry = self._mod_entry(name="alpha.jar")
+        mod_pages = (
+            ModPageLink(name="Modrinth", url="https://modrinth.com/mod/alpha"),
+        )
+        expected = ModPageDiscovery()
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="minecraft_alpha")),
+        )
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="https://yuki.example/api/node",
+            api_url="/api/node-proxy/yuki/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_json_async",
+                new=AsyncMock(return_value=expected.model_dump(mode="json")),
+            ) as remote_json,
+        ):
+            result = asyncio.run(
+                service._find_mod_pages(
+                    model=model,
+                    entry=entry,
+                    mod_pages=mod_pages,
+                    user=user,
+                )
+            )
+
+        self.assertEqual(result, expected)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="minecraft_alpha",
+            path="/apps/minecraft_alpha/mods/alpha.jar/mod-pages/resolve",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"mod_pages": [page.model_dump(mode="json") for page in mod_pages]},
         )
 
     def test_render_saves_editor_uses_direct_upload_and_settings_search_styling(self) -> None:

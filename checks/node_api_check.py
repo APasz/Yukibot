@@ -40,6 +40,7 @@ from apps._config import (
     ClientPackMetadataConfig,
     ClientPackPolicy,
     ClientPackRelease,
+    LauncherMetadataDiscovery,
     LauncherMetadataResolution,
     LauncherProviderUrls,
     Mod_Config,
@@ -47,6 +48,7 @@ from apps._config import (
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPageLink,
+    ModPageDiscovery,
     ModPlacement,
     ModPlatformMetadata,
     ModType,
@@ -125,6 +127,8 @@ from node_api import (
     NodeModEntry,
     NodeModList,
     NodeModMetadataFetchRequest,
+    NodeModMetadataResolveRequest,
+    NodeModPageResolveRequest,
     NodeModMutationAction,
     NodeModMutationResult,
     NodeModPropertiesUpdateRequest,
@@ -3600,6 +3604,104 @@ class NodeApiTests(unittest.TestCase):
             scope=app.scope,
             urls=launcher_urls,
             local_filename=mod.storage_path.name,
+            local_path=mod.storage_path,
+        )
+        manager.update_properties.assert_not_called()
+
+    def test_resolve_mod_launcher_metadata_uses_effective_pages_without_mutating_mod(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mod_path = Path(temp_dir) / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            mod = _TestMod(Mod_Config(name=mod_path.name, directory=Path(temp_dir)))
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = mod
+            app = _build_app(manager)
+            app.cfg.version = AppVersion(main="1.20.1", loader="forge")
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+            mod_pages = (
+                ModPageLink(name="Modrinth", url="https://modrinth.com/mod/example"),
+            )
+            existing_urls = LauncherProviderUrls(
+                curseforge="https://www.curseforge.com/minecraft/mc-mods/example/files/123"
+            )
+            expected = LauncherMetadataDiscovery()
+
+            with patch(
+                "node_api.discover_launcher_metadata",
+                new=AsyncMock(return_value=expected),
+            ) as discover_metadata:
+                result = asyncio.run(
+                    service.resolve_mod_launcher_metadata(
+                        app=app,
+                        mod_name=mod.name,
+                        resolve_request=NodeModMetadataResolveRequest(
+                            mod_pages=mod_pages,
+                            existing_launcher_urls=existing_urls,
+                        ),
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(result, expected)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        discover_metadata.assert_awaited_once_with(
+            scope=app.scope,
+            mod_pages=mod_pages,
+            existing_urls=existing_urls,
+            local_path=mod.storage_path,
+            game_version="1.20.1",
+            loader="forge",
+        )
+        manager.update_properties.assert_not_called()
+
+    def test_find_mod_pages_uses_local_mod_data_without_mutating_mod(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mod_path = Path(temp_dir) / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            mod = _TestMod(Mod_Config(name=mod_path.name, directory=Path(temp_dir)))
+            mod.friendly = "Example Mod"
+            mod.cfg.version = "2.0.0"
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = mod
+            app = _build_app(manager)
+            app.cfg.version = AppVersion(main="1.20.1", loader="forge")
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+            mod_pages = (
+                ModPageLink(name="Modrinth", url="https://modrinth.com/mod/example"),
+            )
+            expected = ModPageDiscovery()
+
+            with patch(
+                "node_api.discover_mod_pages",
+                new=AsyncMock(return_value=expected),
+            ) as discover_pages:
+                result = asyncio.run(
+                    service.find_mod_pages(
+                        app=app,
+                        mod_name=mod.name,
+                        resolve_request=NodeModPageResolveRequest(mod_pages=mod_pages),
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(result, expected)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        discover_pages.assert_awaited_once_with(
+            scope=app.scope,
+            existing_mod_pages=mod_pages,
+            local_path=mod.storage_path,
+            friendly_name="Example Mod",
+            detected_version="2.0.0",
+            game_version="1.20.1",
+            loader="forge",
         )
         manager.update_properties.assert_not_called()
 

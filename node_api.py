@@ -77,8 +77,10 @@ from apps._config import (
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
     ClientPackRelease,
+    LauncherMetadataDiscovery,
     LauncherMetadataResolution,
     LauncherProviderUrls,
+    ModPageDiscovery,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPageLink,
@@ -91,7 +93,12 @@ from apps._config import (
     normalise_app_title_font,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
-from apps._launcher_metadata import resolve_launcher_metadata, resolve_launcher_metadata_resolution
+from apps._launcher_metadata import (
+    discover_mod_pages,
+    discover_launcher_metadata,
+    resolve_launcher_metadata,
+    resolve_launcher_metadata_resolution,
+)
 from apps._console import (
     ConsoleAction,
     ConsoleActionParameter,
@@ -1217,6 +1224,15 @@ class NodeModPropertiesUpdateRequest(BaseModel):
 
 class NodeModMetadataFetchRequest(BaseModel):
     launcher_urls: LauncherProviderUrls
+
+
+class NodeModMetadataResolveRequest(BaseModel):
+    mod_pages: tuple[ModPageLink, ...]
+    existing_launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
+
+
+class NodeModPageResolveRequest(BaseModel):
+    mod_pages: tuple[ModPageLink, ...]
 
 
 class NodeClientPackModConfigUpdate(BaseModel):
@@ -4962,6 +4978,68 @@ class NodeApiService:
                 actor_user_id=actor_user_id,
             )
             return resolution.model_dump(mode="json")
+
+        @nicegui_app.post(
+            f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/launcher-metadata/resolve"
+        )
+        async def _resolve_mod_launcher_metadata(
+            app_name: str,
+            mod_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            grant = self._require_access(
+                request,
+                access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+            )
+            resolve_request = NodeModMetadataResolveRequest.model_validate(payload)
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            discovery = await self.resolve_mod_launcher_metadata(
+                app=self._resolve_app(app_name),
+                mod_name=mod_name,
+                resolve_request=resolve_request,
+                actor_user_id=actor_user_id,
+            )
+            return discovery.model_dump(mode="json")
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/mod-pages/resolve")
+        async def _resolve_mod_pages(
+            app_name: str,
+            mod_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            grant = self._require_access(
+                request,
+                access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+            )
+            resolve_request = NodeModPageResolveRequest.model_validate(payload)
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            discovery = await self.find_mod_pages(
+                app=self._resolve_app(app_name),
+                mod_name=mod_name,
+                resolve_request=resolve_request,
+                actor_user_id=actor_user_id,
+            )
+            return discovery.model_dump(mode="json")
 
         @nicegui_app.put(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/client-pack-config")
         async def _update_client_pack_config(
@@ -9285,6 +9363,63 @@ class NodeApiService:
             mod=result_mod_entry,
         )
 
+    async def find_mod_pages(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        resolve_request: NodeModPageResolveRequest,
+        actor_user_id: int,
+    ) -> ModPageDiscovery:
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        mod: Mod = manager.get(mod_name)
+        await self._require_acl().perm_check(
+            actor_user_id,
+            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+        )
+        version = app.cfg.version
+        try:
+            return await discover_mod_pages(
+                scope=app.scope,
+                existing_mod_pages=resolve_request.mod_pages,
+                local_path=mod.storage_path,
+                friendly_name=mod.friendly,
+                detected_version=mod.version,
+                game_version=None if version is None else version.main,
+                loader=None if version is None else version.loader,
+            )
+        except (OSError, ValueError) as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+
+    async def resolve_mod_launcher_metadata(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        resolve_request: NodeModMetadataResolveRequest,
+        actor_user_id: int,
+    ) -> LauncherMetadataDiscovery:
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        mod: Mod = manager.get(mod_name)
+        await self._require_acl().perm_check(
+            actor_user_id,
+            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+        )
+        version = app.cfg.version
+        try:
+            return await discover_launcher_metadata(
+                scope=app.scope,
+                mod_pages=resolve_request.mod_pages,
+                existing_urls=resolve_request.existing_launcher_urls,
+                local_path=mod.storage_path,
+                game_version=None if version is None else version.main,
+                loader=None if version is None else version.loader,
+            )
+        except (OSError, ValueError) as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+
     async def fetch_mod_launcher_metadata(
         self,
         *,
@@ -9305,6 +9440,7 @@ class NodeApiService:
                 scope=app.scope,
                 urls=fetch_request.launcher_urls,
                 local_filename=mod.storage_path.name,
+                local_path=mod.storage_path,
             )
         except ValueError as xcp:
             raise _http_exception(409, str(xcp)) from xcp
@@ -9331,6 +9467,7 @@ class NodeApiService:
                 scope=app.scope,
                 urls=update.launcher_urls,
                 local_filename=mod.storage_path.name,
+                local_path=mod.storage_path,
             )
             updated_mod = await manager.update_properties(
                 mod,

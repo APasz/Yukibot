@@ -31,6 +31,7 @@ from apps._config import (
     ModrinthModMetadata,
     ModType,
     known_mod_page_provider_for_url,
+    mod_pages_in_display_order,
 )
 from apps._mod import Mod, Mod_Manager
 
@@ -77,6 +78,41 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(known_mod_page_provider_for_url("https://example.com/mod/example"))
         self.assertIsNone(known_mod_page_provider_for_url("not a URL"))
+
+    def test_mod_page_display_order_prioritises_related_providers(self) -> None:
+        pages = (
+            ModPageLink(name="7D2Dmods", url="https://7daystodiemods.com/example"),
+            ModPageLink(
+                name="TransportFever.net",
+                url="https://www.transportfever.net/filebase/entry/1",
+            ),
+            ModPageLink(name="NexusMods", url="https://www.nexusmods.com/game/mods/1"),
+            ModPageLink(
+                name="Steam Workshop",
+                url="https://steamcommunity.com/sharedfiles/filedetails/?id=1",
+            ),
+            ModPageLink(name="mod.io", url="https://mod.io/g/example/m/mod"),
+            ModPageLink(
+                name="CurseForge",
+                url="https://www.curseforge.com/minecraft/mc-mods/example",
+            ),
+            ModPageLink(name="Modrinth", url="https://modrinth.com/mod/example"),
+        )
+
+        ordered = mod_pages_in_display_order(pages)
+
+        self.assertEqual(
+            tuple(page.name for page in ordered),
+            (
+                "Modrinth",
+                "CurseForge",
+                "mod.io",
+                "Steam Workshop",
+                "NexusMods",
+                "TransportFever.net",
+                "7D2Dmods",
+            ),
+        )
 
     def setUp(self) -> None:
         Mod_Manager._instances.clear()

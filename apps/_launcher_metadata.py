@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import hashlib
+import json
 import logging
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import httpx
 from modmux import Muxer
@@ -19,11 +24,24 @@ import config
 from apps._config import (
     CurseForgeFileReference,
     CurseForgeModMetadata,
+    LauncherMetadataCandidate,
+    LauncherMetadataDiscovery,
+    LauncherMetadataMatchReason,
+    LauncherMetadataProviderCandidates,
+    LauncherMetadataReleaseChannel,
     LauncherMetadataResolution,
     LauncherProviderUrls,
+    ModPageLink,
     ModPlatformMetadata,
     ModrinthModMetadata,
     ModType,
+    KnownModPageProvider,
+    ModPageCandidate,
+    ModPageDiscovery,
+    ModPageMatchConfidence,
+    ModPageMatchReason,
+    ModPageProviderCandidates,
+    known_mod_page_provider_for_url,
     launcher_provider_label,
     mod_capabilities_for_scope,
 )
@@ -41,6 +59,129 @@ class ModrinthSideSupport(enum.StrEnum):
     @property
     def supported(self) -> bool:
         return self in {ModrinthSideSupport.REQUIRED, ModrinthSideSupport.OPTIONAL}
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalFileIdentity:
+    filename: str
+    size: int
+    sha1: str
+    curseforge_fingerprint: int
+
+
+_CURSEFORGE_FINGERPRINT_WHITESPACE = frozenset({9, 10, 13, 32})
+_UINT32_MASK = 0xFFFFFFFF
+
+
+def _murmur2_32(data: bytes | bytearray, *, seed: int = 1) -> int:
+    multiplier = 0x5BD1E995
+    value = (seed ^ len(data)) & _UINT32_MASK
+    block_end = len(data) - (len(data) % 4)
+    for offset in range(0, block_end, 4):
+        block = int.from_bytes(data[offset : offset + 4], byteorder="little")
+        block = (block * multiplier) & _UINT32_MASK
+        block ^= block >> 24
+        block = (block * multiplier) & _UINT32_MASK
+        value = (value * multiplier) & _UINT32_MASK
+        value ^= block
+
+    tail = data[block_end:]
+    if len(tail) == 3:
+        value ^= tail[2] << 16
+    if len(tail) >= 2:
+        value ^= tail[1] << 8
+    if tail:
+        value ^= tail[0]
+        value = (value * multiplier) & _UINT32_MASK
+
+    value ^= value >> 13
+    value = (value * multiplier) & _UINT32_MASK
+    value ^= value >> 15
+    return value & _UINT32_MASK
+
+
+def _curseforge_fingerprint(data: bytes) -> int:
+    normalised = bytes(value for value in data if value not in _CURSEFORGE_FINGERPRINT_WHITESPACE)
+    return _murmur2_32(normalised)
+
+
+def _local_file_identity(path: Path) -> _LocalFileIdentity:
+    digest = hashlib.sha1(usedforsecurity=False)
+    fingerprint_data = bytearray()
+    size = 0
+    with path.open("rb") as file:
+        while chunk := file.read(1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+            fingerprint_data.extend(
+                value for value in chunk if value not in _CURSEFORGE_FINGERPRINT_WHITESPACE
+            )
+    return _LocalFileIdentity(
+        filename=path.name,
+        size=size,
+        sha1=digest.hexdigest(),
+        curseforge_fingerprint=_murmur2_32(fingerprint_data),
+    )
+
+
+def _optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _text_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(text for item in cast(list[object], value) if (text := _optional_text(item)) is not None)
+
+
+def _release_channel(value: object) -> LauncherMetadataReleaseChannel:
+    try:
+        return LauncherMetadataReleaseChannel(value)
+    except (TypeError, ValueError):
+        return LauncherMetadataReleaseChannel.UNKNOWN
+
+
+def _match_reasons(
+    *,
+    local: _LocalFileIdentity,
+    remote_filename: str,
+    remote_size: int | None,
+    remote_sha1: str | None,
+) -> tuple[LauncherMetadataMatchReason, ...]:
+    reasons: list[LauncherMetadataMatchReason] = []
+    if remote_sha1 is not None and remote_sha1.casefold() == local.sha1:
+        reasons.append(LauncherMetadataMatchReason.SHA1)
+    if remote_filename.casefold() == local.filename.casefold():
+        reasons.append(
+            LauncherMetadataMatchReason.FILENAME_AND_SIZE
+            if remote_size == local.size
+            else LauncherMetadataMatchReason.FILENAME
+        )
+    return tuple(reasons)
+
+
+def _candidate_sort_key(
+    candidate: LauncherMetadataCandidate,
+    *,
+    game_version: str | None,
+    loader: str | None,
+) -> tuple[int, int, int]:
+    reason_rank = min(
+        {
+            LauncherMetadataMatchReason.SHA1: 0,
+            LauncherMetadataMatchReason.FILENAME_AND_SIZE: 1,
+            LauncherMetadataMatchReason.FILENAME: 2,
+        }[reason]
+        for reason in candidate.match_reasons
+    )
+    game_rank = 0 if game_version is not None and game_version in candidate.game_versions else 1
+    loader_rank = 0 if loader is not None and loader.casefold() in {
+        candidate_loader.casefold() for candidate_loader in candidate.loaders
+    } else 1
+    return reason_rank, game_rank, loader_rank
 
 
 def _provider_mod_id(page_url: str, expected_provider: Provider) -> ModID:
@@ -77,6 +218,140 @@ def launcher_project_page_url(page_url: str, provider: Provider) -> str:
     assert parsed.hostname is not None
     project_path = "/" + "/".join(segments[:marker_index])
     return urlunsplit(("https", parsed.hostname.casefold(), project_path, "", ""))
+
+
+def _normalise_launcher_project_page(page_url: str, provider: Provider) -> str:
+    _provider_mod_id(page_url, provider)
+    parsed = urlsplit(page_url)
+    segments = [unquote(segment) for segment in parsed.path.split("/") if segment]
+    marker = "version" if provider is Provider.MODRINTH else "files"
+    if marker in segments:
+        return launcher_project_page_url(page_url, provider)
+    assert parsed.hostname is not None
+    return urlunsplit(
+        (
+            "https",
+            parsed.hostname.casefold(),
+            "/" + "/".join(segments),
+            "",
+            "",
+        )
+    )
+
+
+def _launcher_project_pages(
+    mod_pages: tuple[ModPageLink, ...],
+    *,
+    supported: frozenset[Provider],
+    excluded: frozenset[Provider],
+) -> dict[Provider, str]:
+    known_to_launcher = {
+        KnownModPageProvider.MODRINTH: Provider.MODRINTH,
+        KnownModPageProvider.CURSEFORGE: Provider.CURSEFORGE,
+    }
+    project_pages: dict[Provider, str] = {}
+    for mod_page in mod_pages:
+        known_provider = known_mod_page_provider_for_url(mod_page.url)
+        if known_provider is None:
+            continue
+        provider = known_to_launcher.get(known_provider)
+        if provider is None or provider not in supported or provider in excluded:
+            continue
+        project_page = _normalise_launcher_project_page(mod_page.url, provider)
+        existing = project_pages.get(provider)
+        if existing is not None and existing != project_page:
+            raise ValueError(
+                f"Multiple {launcher_provider_label(provider)} project pages were supplied."
+            )
+        project_pages[provider] = project_page
+    return project_pages
+
+
+def _modrinth_candidate(
+    *,
+    project_page_url: str,
+    version: Mapping[str, object],
+    file_payload: Mapping[str, object],
+    local: _LocalFileIdentity,
+) -> LauncherMetadataCandidate | None:
+    filename = _required_text(file_payload, "filename", label="Modrinth file")
+    size = _required_positive_int(file_payload, "size", label="Modrinth file")
+    hashes = _required_mapping(file_payload.get("hashes"), label="Modrinth file hashes")
+    sha1 = _optional_text(hashes.get("sha1"))
+    reasons = _match_reasons(
+        local=local,
+        remote_filename=filename,
+        remote_size=size,
+        remote_sha1=sha1,
+    )
+    if not reasons:
+        return None
+    version_id = _required_text(version, "id", label="Modrinth version")
+    return LauncherMetadataCandidate(
+        provider=Provider.MODRINTH,
+        project_page_url=project_page_url,
+        file_page_url=f"{project_page_url}/version/{quote(version_id, safe='')}",
+        version=_required_text(version, "version_number", label="Modrinth version"),
+        filename=filename,
+        size=size,
+        game_versions=_text_tuple(version.get("game_versions")),
+        loaders=_text_tuple(version.get("loaders")),
+        release_channel=_release_channel(version.get("version_type")),
+        match_reasons=reasons,
+    )
+
+
+async def _discover_modrinth_candidates(
+    project_page_url: str,
+    *,
+    local: _LocalFileIdentity,
+    game_version: str | None,
+    loader: str | None,
+    http: httpx.AsyncClient,
+) -> tuple[LauncherMetadataCandidate, ...]:
+    mod_id = _provider_mod_id(project_page_url, Provider.MODRINTH)
+    response = await http.get(
+        f"https://api.modrinth.com/v2/project/{mod_id.id}/version",
+        params={"include_changelog": "false"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    raw_versions = cast(object, response.json())
+    if not isinstance(raw_versions, list):
+        raise ValueError("Modrinth returned invalid version metadata.")
+
+    candidates_by_page: dict[str, LauncherMetadataCandidate] = {}
+    for raw_version in cast(list[object], raw_versions):
+        version = _required_mapping(raw_version, label="Modrinth version")
+        raw_files = version.get("files")
+        if not isinstance(raw_files, list):
+            raise ValueError("Modrinth version returned invalid file metadata.")
+        for raw_file in cast(list[object], raw_files):
+            candidate = _modrinth_candidate(
+                project_page_url=project_page_url,
+                version=version,
+                file_payload=_required_mapping(raw_file, label="Modrinth file"),
+                local=local,
+            )
+            if candidate is None:
+                continue
+            previous = candidates_by_page.get(candidate.file_page_url)
+            if previous is None or _candidate_sort_key(
+                candidate,
+                game_version=game_version,
+                loader=loader,
+            ) < _candidate_sort_key(previous, game_version=game_version, loader=loader):
+                candidates_by_page[candidate.file_page_url] = candidate
+    return tuple(
+        sorted(
+            candidates_by_page.values(),
+            key=lambda candidate: _candidate_sort_key(
+                candidate,
+                game_version=game_version,
+                loader=loader,
+            ),
+        )
+    )
 
 
 def _required_mapping(raw: object, *, label: str) -> Mapping[str, object]:
@@ -130,6 +405,7 @@ async def _resolve_modrinth(
     page_url: str,
     *,
     local_filename: str,
+    local_sha1: str | None,
     http: httpx.AsyncClient,
 ) -> tuple[ModrinthModMetadata, ModType | None]:
     mod_id = _provider_mod_id(page_url, Provider.MODRINTH)
@@ -170,10 +446,23 @@ async def _resolve_modrinth(
         (
             file_payload
             for file_payload in files
-            if str(file_payload.get("filename", "")).casefold() == local_filename.casefold()
+            if local_sha1 is not None
+            and _optional_text(
+                _required_mapping(file_payload.get("hashes"), label="Modrinth file hashes").get("sha1")
+            )
+            == local_sha1
         ),
         None,
     )
+    if selected_file is None:
+        selected_file = next(
+            (
+                file_payload
+                for file_payload in files
+                if str(file_payload.get("filename", "")).casefold() == local_filename.casefold()
+            ),
+            None,
+        )
     if selected_file is None:
         selected_file = next((file_payload for file_payload in files if file_payload.get("primary") is True), files[0])
 
@@ -253,9 +542,22 @@ async def _resolve_curseforge(
     file_reference = _version_reference(page_url, Provider.CURSEFORGE)
     if not file_reference.isdecimal():
         raise ValueError("CurseForge file URL must end with a numeric file ID.")
+    project_id = await _resolve_curseforge_project_id(mod_id, http=http)
+    return CurseForgeModMetadata(
+        page_url=page_url,
+        project_id=project_id,
+        file_id=int(file_reference),
+    )
+
+
+async def _resolve_curseforge_project_id(
+    mod_id: ModID,
+    *,
+    http: httpx.AsyncClient,
+) -> int:
     credentials = _modmux_credentials()
     if not credentials:
-        raise ValueError("CURSEFORGE_API_KEY is required to resolve CurseForge file pages.")
+        raise ValueError("CURSEFORGE_API_KEY is required to resolve CurseForge pages.")
 
     try:
         async with Muxer(creds=credentials, http=http) as muxer:
@@ -264,10 +566,126 @@ async def _resolve_curseforge(
         raise ValueError(f"CurseForge metadata lookup failed: {xcp}") from xcp
     if not resolved_mod.id.id.isdecimal():
         raise ValueError("CurseForge returned a non-numeric project ID.")
-    return CurseForgeModMetadata(
-        page_url=page_url,
-        project_id=int(resolved_mod.id.id),
-        file_id=int(file_reference),
+    return int(resolved_mod.id.id)
+
+
+def _curseforge_sha1(file_payload: Mapping[str, object]) -> str | None:
+    raw_hashes = file_payload.get("hashes")
+    if not isinstance(raw_hashes, list):
+        return None
+    for raw_hash in cast(list[object], raw_hashes):
+        file_hash = _required_mapping(raw_hash, label="CurseForge file hash")
+        if file_hash.get("algo") == 1:
+            return _optional_text(file_hash.get("value"))
+    return None
+
+
+def _curseforge_release_channel(value: object) -> LauncherMetadataReleaseChannel:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return LauncherMetadataReleaseChannel.UNKNOWN
+    channels: dict[int, LauncherMetadataReleaseChannel] = {
+        1: LauncherMetadataReleaseChannel.RELEASE,
+        2: LauncherMetadataReleaseChannel.BETA,
+        3: LauncherMetadataReleaseChannel.ALPHA,
+    }
+    return channels.get(value, LauncherMetadataReleaseChannel.UNKNOWN)
+
+
+def _curseforge_candidate(
+    *,
+    project_page_url: str,
+    file_payload: Mapping[str, object],
+    local: _LocalFileIdentity,
+) -> LauncherMetadataCandidate | None:
+    filename = _required_text(file_payload, "fileName", label="CurseForge file")
+    size = _required_positive_int(file_payload, "fileLength", label="CurseForge file")
+    reasons = _match_reasons(
+        local=local,
+        remote_filename=filename,
+        remote_size=size,
+        remote_sha1=_curseforge_sha1(file_payload),
+    )
+    if not reasons:
+        return None
+    file_id = _required_positive_int(file_payload, "id", label="CurseForge file")
+    compatibility = _text_tuple(file_payload.get("gameVersions"))
+    known_loaders = frozenset({"forge", "fabric", "quilt", "neoforge", "liteloader", "cauldron"})
+    loaders = tuple(value for value in compatibility if value.casefold() in known_loaders)
+    game_versions = tuple(value for value in compatibility if value.casefold() not in known_loaders)
+    return LauncherMetadataCandidate(
+        provider=Provider.CURSEFORGE,
+        project_page_url=project_page_url,
+        file_page_url=f"{project_page_url}/files/{file_id}",
+        version=_optional_text(file_payload.get("displayName")) or filename,
+        filename=filename,
+        size=size,
+        game_versions=game_versions,
+        loaders=loaders,
+        release_channel=_curseforge_release_channel(file_payload.get("releaseType")),
+        match_reasons=reasons,
+    )
+
+
+async def _discover_curseforge_candidates(
+    project_page_url: str,
+    *,
+    local: _LocalFileIdentity,
+    game_version: str | None,
+    loader: str | None,
+    http: httpx.AsyncClient,
+) -> tuple[LauncherMetadataCandidate, ...]:
+    mod_id = _provider_mod_id(project_page_url, Provider.CURSEFORGE)
+    project_id = await _resolve_curseforge_project_id(mod_id, http=http)
+    headers = {"x-api-key": _curseforge_api_key() or ""}
+    candidates: list[LauncherMetadataCandidate] = []
+    index = 0
+    page_size = 50
+    total_count: int | None = None
+    while total_count is None or index < total_count:
+        response = await http.get(
+            f"https://api.curseforge.com/v1/mods/{project_id}/files",
+            headers=headers,
+            params={"index": index, "pageSize": page_size},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = _required_mapping(cast(object, response.json()), label="CurseForge files response")
+        raw_files = payload.get("data")
+        pagination = _required_mapping(payload.get("pagination"), label="CurseForge files pagination")
+        if not isinstance(raw_files, list):
+            raise ValueError("CurseForge returned invalid file metadata.")
+        result_count = pagination.get("resultCount")
+        total_count_value = pagination.get("totalCount")
+        if (
+            isinstance(result_count, bool)
+            or not isinstance(result_count, int)
+            or result_count < 0
+            or isinstance(total_count_value, bool)
+            or not isinstance(total_count_value, int)
+            or total_count_value < 0
+        ):
+            raise ValueError("CurseForge returned invalid file pagination.")
+        total_count = total_count_value
+        for raw_file in cast(list[object], raw_files):
+            candidate = _curseforge_candidate(
+                project_page_url=project_page_url,
+                file_payload=_required_mapping(raw_file, label="CurseForge file"),
+                local=local,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        if result_count == 0:
+            break
+        index += result_count
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda candidate: _candidate_sort_key(
+                candidate,
+                game_version=game_version,
+                loader=loader,
+            ),
+        )
     )
 
 
@@ -283,11 +701,546 @@ async def _resolve_curseforge_source(
     return await _resolve_curseforge(urls.curseforge, http=http)
 
 
+def _normalised_project_name(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _project_search_terms(
+    *,
+    friendly_name: str,
+    local_filename: str,
+    detected_version: str | None,
+    game_version: str | None,
+    loader: str | None,
+) -> tuple[str, ...]:
+    filename_stem = Path(local_filename).stem
+    cleaned_stem = filename_stem
+    for token in (detected_version, game_version, loader):
+        if token is None or not token.strip():
+            continue
+        cleaned_stem = re.sub(re.escape(token), " ", cleaned_stem, flags=re.IGNORECASE)
+    cleaned_stem = re.sub(r"[-_.+]+", " ", cleaned_stem).strip()
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw_term in (friendly_name, cleaned_stem, filename_stem):
+        term = raw_term.strip()
+        normalised = _normalised_project_name(term)
+        if not normalised or normalised in seen:
+            continue
+        terms.append(term)
+        seen.add(normalised)
+    return tuple(terms)
+
+
+def _search_match_reasons(
+    *,
+    title: str,
+    slug: str,
+    search_terms: tuple[str, ...],
+    game_versions: tuple[str, ...],
+    loaders: tuple[str, ...],
+    game_version: str | None,
+    loader: str | None,
+) -> tuple[ModPageMatchConfidence, tuple[ModPageMatchReason, ...]]:
+    candidate_names = {_normalised_project_name(title), _normalised_project_name(slug)}
+    search_names = {_normalised_project_name(term) for term in search_terms}
+    exact_name = bool(candidate_names & search_names)
+    reasons: list[ModPageMatchReason] = [ModPageMatchReason.NAME]
+    if game_version is not None and game_version.casefold() in {
+        value.casefold() for value in game_versions
+    }:
+        reasons.append(ModPageMatchReason.GAME_VERSION)
+    if loader is not None and loader.casefold() in {value.casefold() for value in loaders}:
+        reasons.append(ModPageMatchReason.LOADER)
+    confidence = ModPageMatchConfidence.STRONG if exact_name else ModPageMatchConfidence.POSSIBLE
+    return confidence, tuple(reasons)
+
+
+def _mod_page_candidate_sort_key(candidate: ModPageCandidate) -> tuple[int, int]:
+    confidence_rank = {
+        ModPageMatchConfidence.EXACT: 0,
+        ModPageMatchConfidence.STRONG: 1,
+        ModPageMatchConfidence.POSSIBLE: 2,
+    }[candidate.confidence]
+    return confidence_rank, -len(candidate.match_reasons)
+
+
+def _modrinth_project_candidate(
+    project: Mapping[str, object],
+    *,
+    confidence: ModPageMatchConfidence,
+    match_reasons: tuple[ModPageMatchReason, ...],
+) -> ModPageCandidate:
+    project_id = _required_text(project, "project_id", label="Modrinth project")
+    slug = _required_text(project, "slug", label="Modrinth project")
+    project_type = _optional_text(project.get("project_type")) or "mod"
+    title = _required_text(project, "title", label="Modrinth project")
+    return ModPageCandidate(
+        provider=Provider.MODRINTH,
+        page=ModPageLink(
+            name=KnownModPageProvider.MODRINTH.value,
+            url=f"https://modrinth.com/{quote(project_type, safe='')}/{quote(slug, safe='')}",
+        ),
+        project_id=project_id,
+        title=title,
+        author=_optional_text(project.get("author")),
+        summary=_optional_text(project.get("description")),
+        game_versions=(
+            _text_tuple(project.get("game_versions"))
+            or _text_tuple(project.get("versions"))
+        ),
+        loaders=(
+            _text_tuple(project.get("loaders"))
+            or _text_tuple(project.get("categories"))
+        ),
+        confidence=confidence,
+        match_reasons=match_reasons,
+    )
+
+
+async def _modrinth_exact_project_candidate(
+    local: _LocalFileIdentity,
+    *,
+    http: httpx.AsyncClient,
+) -> ModPageCandidate | None:
+    version_response = await http.get(
+        f"https://api.modrinth.com/v2/version_file/{local.sha1}",
+        params={"algorithm": "sha1"},
+        timeout=30,
+    )
+    if version_response.status_code == 404:
+        return None
+    version_response.raise_for_status()
+    version = _required_mapping(cast(object, version_response.json()), label="Modrinth version")
+    project_id = _required_text(version, "project_id", label="Modrinth version")
+    project_response = await http.get(
+        f"https://api.modrinth.com/v2/project/{quote(project_id, safe='')}",
+        timeout=30,
+    )
+    project_response.raise_for_status()
+    project = dict(
+        _required_mapping(cast(object, project_response.json()), label="Modrinth project")
+    )
+    project.setdefault("project_id", project_id)
+    return _modrinth_project_candidate(
+        project,
+        confidence=ModPageMatchConfidence.EXACT,
+        match_reasons=(ModPageMatchReason.FILE_HASH,),
+    )
+
+
+async def _search_modrinth_projects(
+    *,
+    search_terms: tuple[str, ...],
+    game_version: str | None,
+    loader: str | None,
+    http: httpx.AsyncClient,
+) -> tuple[ModPageCandidate, ...]:
+    facets: list[list[str]] = [["project_type:mod"]]
+    raw_hits: list[object] = []
+    for search_term in search_terms:
+        response = await http.get(
+            "https://api.modrinth.com/v2/search",
+            params={
+                "query": search_term,
+                "facets": json.dumps(facets, separators=(",", ":")),
+                "index": "relevance",
+                "limit": 10,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = _required_mapping(cast(object, response.json()), label="Modrinth search")
+        raw_results = payload.get("hits")
+        if not isinstance(raw_results, list):
+            raise ValueError("Modrinth returned invalid project search results.")
+        raw_hits = cast(list[object], raw_results)
+        if raw_hits:
+            break
+    candidates: list[ModPageCandidate] = []
+    for raw_hit in raw_hits:
+        hit = _required_mapping(raw_hit, label="Modrinth search result")
+        title = _required_text(hit, "title", label="Modrinth search result")
+        slug = _required_text(hit, "slug", label="Modrinth search result")
+        game_versions = _text_tuple(hit.get("versions"))
+        loaders = _text_tuple(hit.get("categories"))
+        confidence, reasons = _search_match_reasons(
+            title=title,
+            slug=slug,
+            search_terms=search_terms,
+            game_versions=game_versions,
+            loaders=loaders,
+            game_version=game_version,
+            loader=loader,
+        )
+        candidates.append(
+            _modrinth_project_candidate(
+                hit,
+                confidence=confidence,
+                match_reasons=reasons,
+            )
+        )
+    return tuple(sorted(candidates, key=_mod_page_candidate_sort_key))
+
+
+def _curseforge_project_page_url(project: Mapping[str, object]) -> str:
+    raw_links = project.get("links")
+    links = (
+        _required_mapping(raw_links, label="CurseForge project links")
+        if raw_links is not None
+        else {}
+    )
+    website_url = _optional_text(links.get("websiteUrl"))
+    if website_url is not None:
+        if known_mod_page_provider_for_url(website_url) is not KnownModPageProvider.CURSEFORGE:
+            raise ValueError("CurseForge returned an invalid project page URL.")
+        return website_url
+    slug = _required_text(project, "slug", label="CurseForge project")
+    return f"https://www.curseforge.com/minecraft/mc-mods/{quote(slug, safe='')}"
+
+
+def _curseforge_project_compatibility(
+    project: Mapping[str, object],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    game_versions: list[str] = []
+    raw_indexes = project.get("latestFilesIndexes")
+    if isinstance(raw_indexes, list):
+        for raw_index in cast(list[object], raw_indexes):
+            index = _required_mapping(raw_index, label="CurseForge latest file index")
+            game_version = _optional_text(index.get("gameVersion"))
+            if game_version is not None and game_version not in game_versions:
+                game_versions.append(game_version)
+    category_names: list[str] = []
+    raw_categories = project.get("categories")
+    if isinstance(raw_categories, list):
+        for raw_category in cast(list[object], raw_categories):
+            category = _required_mapping(raw_category, label="CurseForge category")
+            name = _optional_text(category.get("name"))
+            if name is not None:
+                category_names.append(name)
+    known_loaders = frozenset({"forge", "fabric", "quilt", "neoforge", "liteloader", "cauldron"})
+    loaders = tuple(name for name in category_names if name.casefold() in known_loaders)
+    return tuple(game_versions), loaders
+
+
+def _curseforge_project_candidate(
+    project: Mapping[str, object],
+    *,
+    confidence: ModPageMatchConfidence,
+    match_reasons: tuple[ModPageMatchReason, ...],
+) -> ModPageCandidate:
+    project_id = _required_positive_int(project, "id", label="CurseForge project")
+    title = _required_text(project, "name", label="CurseForge project")
+    game_versions, loaders = _curseforge_project_compatibility(project)
+    author: str | None = None
+    raw_authors = project.get("authors")
+    if isinstance(raw_authors, list) and raw_authors:
+        author = _optional_text(
+            _required_mapping(raw_authors[0], label="CurseForge author").get("name")
+        )
+    return ModPageCandidate(
+        provider=Provider.CURSEFORGE,
+        page=ModPageLink(
+            name=KnownModPageProvider.CURSEFORGE.value,
+            url=_curseforge_project_page_url(project),
+        ),
+        project_id=str(project_id),
+        title=title,
+        author=author,
+        summary=_optional_text(project.get("summary")),
+        game_versions=game_versions,
+        loaders=loaders,
+        confidence=confidence,
+        match_reasons=match_reasons,
+    )
+
+
+async def _curseforge_projects_by_id(
+    project_ids: tuple[int, ...],
+    *,
+    confidence: ModPageMatchConfidence,
+    match_reasons: tuple[ModPageMatchReason, ...],
+    http: httpx.AsyncClient,
+    api_key: str,
+) -> tuple[ModPageCandidate, ...]:
+    async def fetch(project_id: int) -> ModPageCandidate:
+        response = await http.get(
+            f"https://api.curseforge.com/v1/mods/{project_id}",
+            headers={"x-api-key": api_key},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = _required_mapping(cast(object, response.json()), label="CurseForge project response")
+        project = _required_mapping(payload.get("data"), label="CurseForge project")
+        return _curseforge_project_candidate(
+            project,
+            confidence=confidence,
+            match_reasons=match_reasons,
+        )
+
+    return tuple(await asyncio.gather(*(fetch(project_id) for project_id in project_ids)))
+
+
+async def _curseforge_exact_project_candidates(
+    local: _LocalFileIdentity,
+    *,
+    http: httpx.AsyncClient,
+    api_key: str,
+) -> tuple[ModPageCandidate, ...]:
+    response = await http.post(
+        "https://api.curseforge.com/v1/fingerprints",
+        headers={"x-api-key": api_key},
+        json={"fingerprints": [local.curseforge_fingerprint]},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = _required_mapping(cast(object, response.json()), label="CurseForge fingerprint response")
+    data = _required_mapping(payload.get("data"), label="CurseForge fingerprint data")
+    raw_matches = data.get("exactMatches")
+    if not isinstance(raw_matches, list):
+        raise ValueError("CurseForge returned invalid fingerprint matches.")
+    project_ids: list[int] = []
+    for raw_match in cast(list[object], raw_matches):
+        match = _required_mapping(raw_match, label="CurseForge fingerprint match")
+        file_payload = _required_mapping(match.get("file"), label="CurseForge fingerprint file")
+        project_id = _required_positive_int(file_payload, "modId", label="CurseForge fingerprint file")
+        if project_id not in project_ids:
+            project_ids.append(project_id)
+    return await _curseforge_projects_by_id(
+        tuple(project_ids),
+        confidence=ModPageMatchConfidence.EXACT,
+        match_reasons=(ModPageMatchReason.FILE_FINGERPRINT,),
+        http=http,
+        api_key=api_key,
+    )
+
+
+async def _search_curseforge_projects(
+    *,
+    search_terms: tuple[str, ...],
+    game_version: str | None,
+    loader: str | None,
+    http: httpx.AsyncClient,
+    api_key: str,
+) -> tuple[ModPageCandidate, ...]:
+    raw_projects: list[object] = []
+    for search_term in search_terms:
+        response = await http.get(
+            "https://api.curseforge.com/v1/mods/search",
+            headers={"x-api-key": api_key},
+            params={
+                "gameId": 432,
+                "searchFilter": search_term,
+                "pageSize": 10,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = _required_mapping(cast(object, response.json()), label="CurseForge search response")
+        raw_results = payload.get("data")
+        if not isinstance(raw_results, list):
+            raise ValueError("CurseForge returned invalid project search results.")
+        raw_projects = cast(list[object], raw_results)
+        if raw_projects:
+            break
+    candidates: list[ModPageCandidate] = []
+    for raw_project in raw_projects:
+        project = _required_mapping(raw_project, label="CurseForge search result")
+        title = _required_text(project, "name", label="CurseForge search result")
+        slug = _required_text(project, "slug", label="CurseForge search result")
+        game_versions, loaders = _curseforge_project_compatibility(project)
+        confidence, reasons = _search_match_reasons(
+            title=title,
+            slug=slug,
+            search_terms=search_terms,
+            game_versions=game_versions,
+            loaders=loaders,
+            game_version=game_version,
+            loader=loader,
+        )
+        candidates.append(
+            _curseforge_project_candidate(
+                project,
+                confidence=confidence,
+                match_reasons=reasons,
+            )
+        )
+    return tuple(sorted(candidates, key=_mod_page_candidate_sort_key))
+
+
+async def discover_mod_pages(
+    *,
+    scope: str,
+    existing_mod_pages: tuple[ModPageLink, ...],
+    local_path: Path,
+    friendly_name: str,
+    detected_version: str | None = None,
+    game_version: str | None = None,
+    loader: str | None = None,
+    http: httpx.AsyncClient | None = None,
+) -> ModPageDiscovery:
+    capabilities = mod_capabilities_for_scope(scope)
+    existing_providers = {
+        provider
+        for page in existing_mod_pages
+        if (provider := known_mod_page_provider_for_url(page.url)) is not None
+    }
+    launcher_to_known = {
+        Provider.MODRINTH: KnownModPageProvider.MODRINTH,
+        Provider.CURSEFORGE: KnownModPageProvider.CURSEFORGE,
+    }
+    providers = tuple(
+        provider
+        for provider in capabilities.launcher_metadata_providers
+        if launcher_to_known.get(provider) not in existing_providers
+    )
+    if not providers:
+        raise ValueError("Mod Pages already contains all supported project providers.")
+
+    local = await asyncio.to_thread(_local_file_identity, local_path)
+    search_terms = _project_search_terms(
+        friendly_name=friendly_name,
+        local_filename=local.filename,
+        detected_version=detected_version,
+        game_version=game_version,
+        loader=loader,
+    )
+    if not search_terms:
+        raise ValueError("No usable local mod name was found for project search.")
+    owned_http = http is None
+    client = http or httpx.AsyncClient()
+
+    async def discover_provider(provider: Provider) -> ModPageProviderCandidates:
+        try:
+            match provider:
+                case Provider.MODRINTH:
+                    exact = await _modrinth_exact_project_candidate(local, http=client)
+                    candidates = (
+                        (exact,)
+                        if exact is not None
+                        else await _search_modrinth_projects(
+                            search_terms=search_terms,
+                            game_version=game_version,
+                            loader=loader,
+                            http=client,
+                        )
+                    )
+                case Provider.CURSEFORGE:
+                    api_key = _curseforge_api_key()
+                    if api_key is None:
+                        raise ValueError("CURSEFORGE_API_KEY is required to find CurseForge projects.")
+                    exact_candidates = await _curseforge_exact_project_candidates(
+                        local,
+                        http=client,
+                        api_key=api_key,
+                    )
+                    candidates = (
+                        exact_candidates
+                        if exact_candidates
+                        else await _search_curseforge_projects(
+                            search_terms=search_terms,
+                            game_version=game_version,
+                            loader=loader,
+                            http=client,
+                            api_key=api_key,
+                        )
+                    )
+                case _:
+                    raise ValueError(f"Unsupported mod page provider: {provider.value}")
+        except (ValueError, httpx.HTTPError) as xcp:
+            return ModPageProviderCandidates(provider=provider, error=str(xcp))
+        return ModPageProviderCandidates(provider=provider, candidates=candidates)
+
+    try:
+        results = await asyncio.gather(*(discover_provider(provider) for provider in providers))
+        return ModPageDiscovery(providers=tuple(results))
+    finally:
+        if owned_http:
+            await client.aclose()
+
+
+async def discover_launcher_metadata(
+    *,
+    scope: str,
+    mod_pages: tuple[ModPageLink, ...],
+    existing_urls: LauncherProviderUrls,
+    local_path: Path,
+    game_version: str | None = None,
+    loader: str | None = None,
+    http: httpx.AsyncClient | None = None,
+) -> LauncherMetadataDiscovery:
+    capabilities = mod_capabilities_for_scope(scope)
+    supported = frozenset(capabilities.launcher_metadata_providers)
+    excluded = frozenset(provider for provider in supported if existing_urls.has_provider(provider))
+    project_pages = _launcher_project_pages(
+        mod_pages,
+        supported=supported,
+        excluded=excluded,
+    )
+    if not project_pages:
+        raise ValueError(
+            "No unresolved Modrinth or CurseForge project pages were found in Mod Pages."
+        )
+
+    local = await asyncio.to_thread(_local_file_identity, local_path)
+    owned_http = http is None
+    client = http or httpx.AsyncClient()
+
+    async def discover_provider(
+        provider: Provider,
+        project_page_url: str,
+    ) -> LauncherMetadataProviderCandidates:
+        try:
+            match provider:
+                case Provider.MODRINTH:
+                    candidates = await _discover_modrinth_candidates(
+                        project_page_url,
+                        local=local,
+                        game_version=game_version,
+                        loader=loader,
+                        http=client,
+                    )
+                case Provider.CURSEFORGE:
+                    candidates = await _discover_curseforge_candidates(
+                        project_page_url,
+                        local=local,
+                        game_version=game_version,
+                        loader=loader,
+                        http=client,
+                    )
+                case _:
+                    raise ValueError(f"Unsupported launcher metadata provider: {provider.value}")
+        except (ValueError, httpx.HTTPError) as xcp:
+            return LauncherMetadataProviderCandidates(
+                provider=provider,
+                project_page_url=project_page_url,
+                error=str(xcp),
+            )
+        return LauncherMetadataProviderCandidates(
+            provider=provider,
+            project_page_url=project_page_url,
+            candidates=candidates,
+        )
+
+    try:
+        providers = await asyncio.gather(
+            *(
+                discover_provider(provider, project_page_url)
+                for provider, project_page_url in project_pages.items()
+            )
+        )
+        return LauncherMetadataDiscovery(providers=tuple(providers))
+    finally:
+        if owned_http:
+            await client.aclose()
+
+
 async def resolve_launcher_metadata_resolution(
     *,
     scope: str,
     urls: LauncherProviderUrls,
     local_filename: str,
+    local_path: Path | None = None,
     http: httpx.AsyncClient | None = None,
 ) -> LauncherMetadataResolution:
     capabilities = mod_capabilities_for_scope(scope)
@@ -309,12 +1262,18 @@ async def resolve_launcher_metadata_resolution(
     client = http or httpx.AsyncClient()
     try:
         try:
+            local_sha1 = (
+                None
+                if local_path is None or Provider.MODRINTH not in supplied_urls
+                else (await asyncio.to_thread(_local_file_identity, local_path)).sha1
+            )
             modrinth: ModrinthModMetadata | None = None
             suggested_mod_type: ModType | None = None
             if Provider.MODRINTH in supplied_urls:
                 modrinth, suggested_mod_type = await _resolve_modrinth(
                     supplied_urls[Provider.MODRINTH],
                     local_filename=local_filename,
+                    local_sha1=local_sha1,
                     http=client,
                 )
             curseforge = await _resolve_curseforge_source(urls, http=client)
@@ -335,12 +1294,14 @@ async def resolve_launcher_metadata(
     scope: str,
     urls: LauncherProviderUrls,
     local_filename: str,
+    local_path: Path | None = None,
     http: httpx.AsyncClient | None = None,
 ) -> ModPlatformMetadata:
     resolution = await resolve_launcher_metadata_resolution(
         scope=scope,
         urls=urls,
         local_filename=local_filename,
+        local_path=local_path,
         http=http,
     )
     return resolution.platforms

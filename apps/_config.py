@@ -1016,6 +1016,144 @@ class ModPageLink(BaseModel):
         return normalise_mod_page_url(raw)
 
 
+_MOD_PAGE_DISPLAY_ORDER: tuple[KnownModPageProvider, ...] = (
+    KnownModPageProvider.MODRINTH,
+    KnownModPageProvider.CURSEFORGE,
+    KnownModPageProvider.MOD_IO,
+    KnownModPageProvider.STEAM_WORKSHOP,
+    KnownModPageProvider.NEXUSMODS,
+    KnownModPageProvider.TRANSPORT_FEVER_NET,
+    KnownModPageProvider.SEVEN_DAYS_TO_DIE_MODS,
+)
+_MOD_PAGE_DISPLAY_PRIORITY: dict[KnownModPageProvider, int] = {
+    provider: priority for priority, provider in enumerate(_MOD_PAGE_DISPLAY_ORDER)
+}
+
+
+def _mod_page_display_priority(page: ModPageLink) -> int:
+    provider = known_mod_page_provider_for_url(page.url)
+    if provider is None:
+        return len(_MOD_PAGE_DISPLAY_ORDER)
+    return _MOD_PAGE_DISPLAY_PRIORITY.get(provider, len(_MOD_PAGE_DISPLAY_ORDER))
+
+
+def mod_pages_in_display_order(mod_pages: Iterable[ModPageLink]) -> tuple[ModPageLink, ...]:
+    return tuple(sorted(mod_pages, key=_mod_page_display_priority))
+
+
+class ModPageMatchConfidence(enum.StrEnum):
+    EXACT = "exact"
+    STRONG = "strong"
+    POSSIBLE = "possible"
+
+    @property
+    def label(self) -> str:
+        return self.value.title()
+
+
+class ModPageMatchReason(enum.StrEnum):
+    FILE_HASH = "file_hash"
+    FILE_FINGERPRINT = "file_fingerprint"
+    NAME = "name"
+    GAME_VERSION = "game_version"
+    LOADER = "loader"
+
+    @property
+    def label(self) -> str:
+        match self:
+            case ModPageMatchReason.FILE_HASH:
+                return "file hash"
+            case ModPageMatchReason.FILE_FINGERPRINT:
+                return "file fingerprint"
+            case ModPageMatchReason.NAME:
+                return "name"
+            case ModPageMatchReason.GAME_VERSION:
+                return "game version"
+            case ModPageMatchReason.LOADER:
+                return "loader"
+
+
+class ModPageCandidate(BaseModel):
+    provider: Provider
+    page: ModPageLink
+    project_id: str
+    title: str
+    author: str | None = None
+    summary: str | None = None
+    game_versions: tuple[str, ...] = ()
+    loaders: tuple[str, ...] = ()
+    confidence: ModPageMatchConfidence
+    match_reasons: tuple[ModPageMatchReason, ...]
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("project_id", "title", mode="before")
+    @classmethod
+    def validate_required_text(cls, raw: object, info: ValidationInfo) -> str:
+        field_name = info.field_name or "value"
+        return _normalise_required_text(raw, field_name=field_name.replace("_", " "))
+
+    @field_validator("author", "summary", mode="before")
+    @classmethod
+    def validate_optional_text(cls, raw: object) -> str | None:
+        return normalise_optional_text(raw)
+
+    @model_validator(mode="after")
+    def validate_candidate(self) -> ModPageCandidate:
+        expected_page_provider = {
+            Provider.MODRINTH: KnownModPageProvider.MODRINTH,
+            Provider.CURSEFORGE: KnownModPageProvider.CURSEFORGE,
+        }.get(self.provider)
+        if expected_page_provider is None:
+            raise ValueError(f"unsupported mod page candidate provider: {self.provider.value}")
+        if known_mod_page_provider_for_url(self.page.url) is not expected_page_provider:
+            raise ValueError("mod page candidate URL does not match its provider")
+        if not self.match_reasons:
+            raise ValueError("mod page candidates require at least one match reason")
+        if len(self.match_reasons) != len(set(self.match_reasons)):
+            raise ValueError("mod page candidate match reasons must be unique")
+        return self
+
+    @property
+    def selection_label(self) -> str:
+        reasons = ", ".join(reason.label for reason in self.match_reasons)
+        author = f" by {self.author}" if self.author is not None else ""
+        return f"{self.title}{author} — {self.confidence.label} — matched {reasons}"
+
+
+class ModPageProviderCandidates(BaseModel):
+    provider: Provider
+    candidates: tuple[ModPageCandidate, ...] = ()
+    error: str | None = None
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @model_validator(mode="after")
+    def validate_candidates(self) -> ModPageProviderCandidates:
+        if any(candidate.provider is not self.provider for candidate in self.candidates):
+            raise ValueError("mod page candidates must match their provider result")
+        if self.error is not None and self.candidates:
+            raise ValueError("mod page provider results cannot contain candidates and an error")
+        return self
+
+
+class ModPageDiscovery(BaseModel):
+    providers: tuple[ModPageProviderCandidates, ...] = ()
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @model_validator(mode="after")
+    def validate_unique_providers(self) -> ModPageDiscovery:
+        providers = tuple(result.provider for result in self.providers)
+        if len(providers) != len(set(providers)):
+            raise ValueError("mod page discovery providers must be unique")
+        return self
+
+    @property
+    def candidates(self) -> tuple[ModPageCandidate, ...]:
+        return tuple(candidate for result in self.providers for candidate in result.candidates)
+
+
 class ModClassificationOverride(BaseModel):
     """Operator-selected classification that takes precedence over automatic detection."""
 
@@ -1152,6 +1290,124 @@ class LauncherProviderUrls(BaseModel):
         if self.curseforge is not None and self.curseforge_reference is not None:
             raise ValueError("Provide either a CurseForge file page or CurseForge project and file IDs, not both.")
         return self
+
+
+class LauncherMetadataMatchReason(enum.StrEnum):
+    SHA1 = "sha1"
+    FILENAME_AND_SIZE = "filename_and_size"
+    FILENAME = "filename"
+
+    @property
+    def label(self) -> str:
+        match self:
+            case LauncherMetadataMatchReason.SHA1:
+                return "SHA-1"
+            case LauncherMetadataMatchReason.FILENAME_AND_SIZE:
+                return "filename and size"
+            case LauncherMetadataMatchReason.FILENAME:
+                return "filename"
+
+
+class LauncherMetadataReleaseChannel(enum.StrEnum):
+    RELEASE = "release"
+    BETA = "beta"
+    ALPHA = "alpha"
+    UNKNOWN = "unknown"
+
+    @property
+    def label(self) -> str:
+        return self.value.title()
+
+
+class LauncherMetadataCandidate(BaseModel):
+    provider: Provider
+    project_page_url: str
+    file_page_url: str
+    version: str
+    filename: str
+    size: int | None = None
+    game_versions: tuple[str, ...] = ()
+    loaders: tuple[str, ...] = ()
+    release_channel: LauncherMetadataReleaseChannel = LauncherMetadataReleaseChannel.UNKNOWN
+    match_reasons: tuple[LauncherMetadataMatchReason, ...]
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("project_page_url", "file_page_url", mode="before")
+    @classmethod
+    def validate_page_url(cls, raw: object) -> str:
+        return normalise_mod_page_url(raw)
+
+    @field_validator("version", "filename", mode="before")
+    @classmethod
+    def validate_required_text(cls, raw: object, info: ValidationInfo) -> str:
+        field_name = info.field_name or "value"
+        return _normalise_required_text(raw, field_name=field_name.replace("_", " "))
+
+    @field_validator("size", mode="before")
+    @classmethod
+    def validate_size(cls, raw: object) -> int | None:
+        if raw is None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise TypeError("launcher metadata candidate size must be an integer")
+        if raw <= 0:
+            raise ValueError("launcher metadata candidate size must be positive")
+        return raw
+
+    @model_validator(mode="after")
+    def validate_match_reasons(self) -> LauncherMetadataCandidate:
+        if not self.match_reasons:
+            raise ValueError("launcher metadata candidates require at least one match reason")
+        if len(self.match_reasons) != len(set(self.match_reasons)):
+            raise ValueError("launcher metadata candidate match reasons must be unique")
+        return self
+
+    @property
+    def selection_label(self) -> str:
+        reasons = ", ".join(reason.label for reason in self.match_reasons)
+        compatibility = ", ".join((*self.game_versions, *self.loaders))
+        suffix = f" — {compatibility}" if compatibility else ""
+        return f"{self.version} — {self.filename} — matched {reasons}{suffix}"
+
+
+class LauncherMetadataProviderCandidates(BaseModel):
+    provider: Provider
+    project_page_url: str
+    candidates: tuple[LauncherMetadataCandidate, ...] = ()
+    error: str | None = None
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("project_page_url", mode="before")
+    @classmethod
+    def validate_project_page_url(cls, raw: object) -> str:
+        return normalise_mod_page_url(raw)
+
+    @model_validator(mode="after")
+    def validate_candidates(self) -> LauncherMetadataProviderCandidates:
+        if any(candidate.provider is not self.provider for candidate in self.candidates):
+            raise ValueError("launcher metadata candidates must match their provider result")
+        if self.error is not None and self.candidates:
+            raise ValueError("launcher metadata provider results cannot contain candidates and an error")
+        return self
+
+
+class LauncherMetadataDiscovery(BaseModel):
+    providers: tuple[LauncherMetadataProviderCandidates, ...] = ()
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @model_validator(mode="after")
+    def validate_unique_providers(self) -> LauncherMetadataDiscovery:
+        providers = tuple(result.provider for result in self.providers)
+        if len(providers) != len(set(providers)):
+            raise ValueError("launcher metadata discovery providers must be unique")
+        return self
+
+    @property
+    def candidates(self) -> tuple[LauncherMetadataCandidate, ...]:
+        return tuple(candidate for result in self.providers for candidate in result.candidates)
 
 
 class ModPlatformMetadata(BaseModel):

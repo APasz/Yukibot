@@ -149,6 +149,11 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-mods-toolbar-filters", css)
         self.assertIn(".mod-mods-toolbar-result-count", css)
         self.assertIn(".mod-list-button.mod-toolbar-primary", css)
+        self.assertIn(".mod-virtual-mod-table tbody tr.selected > td::after", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-virtual-mod-table tbody tr\.selected > td::after,.*?content: none !important;",
+        )
         self.assertRegex(
             css,
             r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-selection-button \{.*?"
@@ -161,6 +166,49 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertIn(".mod-toolbar-menu-item-danger", css)
         self.assertIn(".mod-modlist-dialog-card", css)
+        self.assertIn(".mod-dialog-card::before", css)
+        self.assertIn("@keyframes mod-dialog-accent-arrive", css)
+        self.assertIn(".mod-dialog-card:focus-within", css)
+        self.assertIn("overscroll-behavior: contain", css)
+        self.assertIn("@media (prefers-reduced-motion: reduce)", css)
+        self.assertIn(".mod-mod-details-dialog-card", css)
+        self.assertIn(".mod-mod-details-header", css)
+        self.assertIn(".mod-mod-details-footer", css)
+        self.assertIn(".mod-mod-details-danger-zone", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-details-shell \{.*?max-height:.*?overflow-y: auto;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-details-header \{.*?position: sticky;.*?top: 0;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-details-footer \{.*?position: sticky;.*?bottom: 0;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-details-links \{.*?width: calc\(100% - 2\.5rem\) !important;.*?box-sizing: border-box;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-details-dialog-card \.mod-app-details-field\.q-field--labeled "
+            r"\.q-field__native,.*?padding-top: 1\.35rem !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-details-dialog-card "
+            r"\.mod-app-details-field\.mod-mod-details-select \.q-field__control \{.*?"
+            r"height: 3\.35rem !important;.*?min-height: 3\.35rem !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-mod-details-dialog-card "
+            r"\.mod-app-details-field\.mod-mod-details-select \.q-field__native \{.*?"
+            r"height: auto !important;.*?min-height: 0 !important;.*?"
+            r"padding-top: 0\.875rem !important;.*?padding-bottom: 0\.125rem !important;",
+        )
         self.assertIn(".mod-modlist-preview-frame", css)
         self.assertRegex(
             css,

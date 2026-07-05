@@ -1237,9 +1237,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         def open_delete_dialog() -> None:
             nonlocal delete_dialog
             if delete_dialog is None:
-                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                with ui.dialog() as created_dialog:
                     delete_dialog = created_dialog
-                    with ui.card().classes("mod-card w-full"):
+                    with ui.card().classes("mod-card mod-dialog-card"):
                         with ui.column().classes("w-full gap-4 p-5"):
                             with ui.column().classes("gap-1"):
                                 ui.label("Delete Blueprint").classes("text-xl font-black mod-title-small")
@@ -1266,9 +1266,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if config_file is None:
                 raise ValueError("Blueprint config is not available.")
             if config_delete_dialog is None:
-                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                with ui.dialog() as created_dialog:
                     config_delete_dialog = created_dialog
-                    with ui.card().classes("mod-card w-full"):
+                    with ui.card().classes("mod-card mod-dialog-card"):
                         with ui.column().classes("w-full gap-4 p-5"):
                             with ui.column().classes("gap-1"):
                                 ui.label("Delete Blueprint Config").classes(
@@ -1291,9 +1291,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if config_file is None:
                 raise ValueError("Blueprint config is not available.")
             if config_dialog is None:
-                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                with ui.dialog() as created_dialog:
                     config_dialog = created_dialog
-                    with ui.card().classes("mod-card w-full"):
+                    with ui.card().classes("mod-card mod-dialog-card"):
                         with ui.column().classes("w-full gap-4 p-5"):
                             with ui.column().classes("gap-1 w-full"):
                                 ui.label(self._normalise_blueprint_title(config_file.label)).classes(
@@ -1400,9 +1400,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         def open_rename_dialog() -> None:
             nonlocal rename_dialog, rename_input
             if rename_dialog is None:
-                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                with ui.dialog() as created_dialog:
                     rename_dialog = created_dialog
-                    with ui.card().classes("mod-card w-full"):
+                    with ui.card().classes("mod-card mod-dialog-card"):
                         with ui.column().classes("w-full gap-4 p-5"):
                             with ui.column().classes("gap-1"):
                                 ui.label("Rename Save").classes("text-xl font-black mod-title-small")
@@ -1422,9 +1422,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         def open_delete_dialog() -> None:
             nonlocal delete_dialog
             if delete_dialog is None:
-                with ui.dialog().classes("mod-dialog-card") as created_dialog:
+                with ui.dialog() as created_dialog:
                     delete_dialog = created_dialog
-                    with ui.card().classes("mod-card w-full"):
+                    with ui.card().classes("mod-card mod-dialog-card"):
                         with ui.column().classes("w-full gap-4 p-5"):
                             with ui.column().classes("gap-1"):
                                 ui.label("Delete Save").classes("text-xl font-black mod-title-small")

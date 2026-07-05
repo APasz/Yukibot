@@ -12,6 +12,7 @@ from apps._config import (
     known_mod_page_provider_for_url,
     launcher_provider_label,
     mod_capabilities_for_scope,
+    mod_pages_in_display_order,
     normalise_mod_page_url,
 )
 from apps._launcher_metadata import has_curseforge_api_key, launcher_project_page_url
@@ -32,12 +33,14 @@ from .runtime_imports import (
     ClientPackPolicy,
     Column,
     Input,
+    LauncherMetadataDiscovery,
     LauncherMetadataResolution,
     Label,
     Literal,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPageLink,
+    ModPageDiscovery,
     ModPlacement,
     ModType,
     ModWebUser,
@@ -59,6 +62,7 @@ from .runtime_imports import (
     NodeSystemActionResult,
     NodeRestartScheduleState,
     RestartTarget,
+    Select,
     Power_Level,
     assert_never,
     asyncio,
@@ -544,6 +548,64 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return LauncherMetadataResolution.model_validate(payload)
 
+    async def _resolve_mod_launcher_metadata(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        mod_pages: tuple[ModPageLink, ...],
+        existing_launcher_urls: LauncherProviderUrls,
+        user: ModWebUser,
+    ) -> LauncherMetadataDiscovery:
+        if self._is_builtin_mod(entry):
+            raise PermissionError("Built-in mod metadata cannot be resolved from mod web.")
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to resolve mod metadata.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=(
+                f"/apps/{quote(model.app_name, safe='')}/mods/{quote(entry.name, safe='')}"
+                "/launcher-metadata/resolve"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "mod_pages": [page.model_dump(mode="json") for page in mod_pages],
+                "existing_launcher_urls": existing_launcher_urls.model_dump(mode="json"),
+            },
+        )
+        return LauncherMetadataDiscovery.model_validate(payload)
+
+    async def _find_mod_pages(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        mod_pages: tuple[ModPageLink, ...],
+        user: ModWebUser,
+    ) -> ModPageDiscovery:
+        if self._is_builtin_mod(entry):
+            raise PermissionError("Built-in mod pages cannot be resolved from mod web.")
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to resolve mod pages.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=(
+                f"/apps/{quote(model.app_name, safe='')}/mods/{quote(entry.name, safe='')}"
+                "/mod-pages/resolve"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"mod_pages": [page.model_dump(mode="json") for page in mod_pages]},
+        )
+        return ModPageDiscovery.model_validate(payload)
+
     @staticmethod
     def _mod_action_label(action: NodeModMutationAction, entry: NodeModEntry) -> str:
         match action:
@@ -940,6 +1002,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
         metadata_suggestion_label: Label | None = None
         mod_page_rows: list[_ModPageEditorRow] = []
         mod_pages_container: Column | None = None
+        mod_page_resolution_dialog: Dialog
+        mod_page_resolution_selects: dict[Provider, Select] = {}
+        mod_page_resolution_single_urls: dict[Provider, str] = {}
+        mod_page_resolution_pages: dict[str, ModPageLink] = {}
+        launcher_resolution_dialog: Dialog
+        launcher_resolution_selects: dict[Provider, Select] = {}
+        launcher_resolution_single_urls: dict[Provider, str] = {}
         curseforge_metadata = entry.platforms.curseforge
         use_curseforge_reference_inputs = Provider.CURSEFORGE in launcher_metadata_providers and (
             not has_curseforge_api_key()
@@ -1096,6 +1165,116 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 pages.append(ModPageLink(name=name, url=url))
             return tuple(pages)
 
+        async def confirm_mod_page_resolution() -> None:
+            selected_urls = dict(mod_page_resolution_single_urls)
+            for provider, selection in mod_page_resolution_selects.items():
+                selected_url = _value_as_text(selection).strip()
+                if not selected_url:
+                    ui.notify(
+                        f"Select a {launcher_provider_label(provider)} project page.",
+                        type="negative",
+                    )
+                    return
+                selected_urls[provider] = selected_url
+            for selected_url in selected_urls.values():
+                page = mod_page_resolution_pages.get(selected_url)
+                if page is None:
+                    raise RuntimeError("Selected mod page candidate is unavailable.")
+                add_mod_page_row(page)
+            mod_page_resolution_dialog.close()
+            ui.notify("Mod pages added. Save the mod properties to persist them.", type="positive")
+
+        def present_mod_page_resolution(discovery: ModPageDiscovery) -> None:
+            mod_page_resolution_dialog.clear()
+            mod_page_resolution_selects.clear()
+            mod_page_resolution_single_urls.clear()
+            mod_page_resolution_pages.clear()
+            with mod_page_resolution_dialog:
+                with ui.card().classes("mod-card mod-dialog-card mod-app-details-card"):
+                    ui.label("Find mod pages").classes("mod-card-title")
+                    ui.label(
+                        "Confirm the provider project pages found from the local mod. "
+                        "They will remain unsaved until you save the mod properties."
+                    ).classes("mod-subtitle text-xs")
+                    with ui.column().classes("w-full gap-3"):
+                        for provider_result in discovery.providers:
+                            provider_label = launcher_provider_label(provider_result.provider)
+                            if provider_result.error is not None:
+                                ui.label(f"{provider_label}: {provider_result.error}").classes(
+                                    "mod-subtitle text-xs text-negative"
+                                )
+                                continue
+                            if not provider_result.candidates:
+                                ui.label(f"{provider_label}: no matching projects found.").classes(
+                                    "mod-subtitle text-xs"
+                                )
+                                continue
+                            options = {
+                                candidate.page.url: candidate.selection_label
+                                for candidate in provider_result.candidates
+                            }
+                            for candidate in provider_result.candidates:
+                                mod_page_resolution_pages[candidate.page.url] = candidate.page
+                            first_url = provider_result.candidates[0].page.url
+                            if len(provider_result.candidates) == 1:
+                                mod_page_resolution_single_urls[provider_result.provider] = first_url
+                                ui.label(
+                                    f"{provider_label}: {provider_result.candidates[0].selection_label}"
+                                ).classes("mod-subtitle text-xs")
+                                continue
+                            mod_page_resolution_selects[provider_result.provider] = (
+                                ui.select(
+                                    options,
+                                    value=first_url,
+                                    label=f"{provider_label} project page",
+                                )
+                                .props("filled square dense hide-bottom-space color=accent options-dark")
+                                .classes("w-full mod-app-details-field")
+                            )
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Cancel", on_click=mod_page_resolution_dialog.close).classes(
+                            "mod-list-button secondary"
+                        )
+                        ui.button("Confirm", on_click=confirm_mod_page_resolution).classes(
+                            "mod-list-button"
+                        )
+            mod_page_resolution_dialog.open()
+
+        async def find_mod_pages_from_local_data() -> None:
+            try:
+                discovery = await self._find_mod_pages(
+                    model=model,
+                    entry=entry,
+                    mod_pages=mod_pages_from_inputs(),
+                    user=user,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Mod page discovery failed: node=%s app=%s mod=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    entry.name,
+                    xcp,
+                )
+                ui.notify(f"Mod page discovery failed: {xcp}", type="negative")
+                return
+            if not discovery.candidates:
+                details = "; ".join(
+                    (
+                        f"{launcher_provider_label(result.provider)}: {result.error}"
+                        if result.error is not None
+                        else f"{launcher_provider_label(result.provider)}: no matching projects"
+                    )
+                    for result in discovery.providers
+                )
+                ui.notify(
+                    f"No matching mod pages found. {details}",
+                    type="warning",
+                    multi_line=True,
+                )
+                return
+            present_mod_page_resolution(discovery)
+
         def ensure_launcher_mod_page_rows(launcher_urls: LauncherProviderUrls) -> None:
             existing_providers = {
                 provider
@@ -1160,6 +1339,117 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     f"({launcher_provider_label(resolution.suggestion_provider)})"
                 )
             ui.notify("Launcher metadata fetched.", type="positive")
+
+        async def confirm_launcher_resolution() -> None:
+            selected_urls = dict(launcher_resolution_single_urls)
+            for provider, selection in launcher_resolution_selects.items():
+                selected_url = _value_as_text(selection).strip()
+                if not selected_url:
+                    ui.notify(
+                        f"Select a {launcher_provider_label(provider)} file page.",
+                        type="negative",
+                    )
+                    return
+                selected_urls[provider] = selected_url
+
+            for provider, selected_url in selected_urls.items():
+                launcher_input = launcher_url_inputs.get(provider)
+                if launcher_input is None:
+                    raise RuntimeError(
+                        f"{launcher_provider_label(provider)} file-page input was not rendered."
+                    )
+                launcher_input.set_value(selected_url)
+            launcher_resolution_dialog.close()
+            await fetch_launcher_metadata()
+
+        def present_launcher_resolution(discovery: LauncherMetadataDiscovery) -> None:
+            launcher_resolution_dialog.clear()
+            launcher_resolution_selects.clear()
+            launcher_resolution_single_urls.clear()
+            with launcher_resolution_dialog:
+                with ui.card().classes("mod-card mod-dialog-card mod-app-details-card"):
+                    ui.label("Resolve launcher metadata").classes("mod-card-title")
+                    ui.label(
+                        "Confirm the provider file pages found for the local mod. "
+                        "They will remain unsaved until you save the mod properties."
+                    ).classes("mod-subtitle text-xs")
+                    with ui.column().classes("w-full gap-3"):
+                        for provider_result in discovery.providers:
+                            provider_label = launcher_provider_label(provider_result.provider)
+                            if provider_result.error is not None:
+                                ui.label(f"{provider_label}: {provider_result.error}").classes(
+                                    "mod-subtitle text-xs text-negative"
+                                )
+                                continue
+                            if not provider_result.candidates:
+                                ui.label(f"{provider_label}: no matching files found.").classes(
+                                    "mod-subtitle text-xs"
+                                )
+                                continue
+                            options = {
+                                candidate.file_page_url: candidate.selection_label
+                                for candidate in provider_result.candidates
+                            }
+                            first_url = provider_result.candidates[0].file_page_url
+                            if len(provider_result.candidates) == 1:
+                                launcher_resolution_single_urls[provider_result.provider] = first_url
+                                ui.label(
+                                    f"{provider_label}: {provider_result.candidates[0].selection_label}"
+                                ).classes("mod-subtitle text-xs")
+                                continue
+                            launcher_resolution_selects[provider_result.provider] = (
+                                ui.select(
+                                    options,
+                                    value=first_url,
+                                    label=f"{provider_label} file page",
+                                )
+                                .props("filled square dense hide-bottom-space color=accent options-dark")
+                                .classes("w-full mod-app-details-field")
+                            )
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Cancel", on_click=launcher_resolution_dialog.close).classes(
+                            "mod-list-button secondary"
+                        )
+                        ui.button("Confirm", on_click=confirm_launcher_resolution).classes(
+                            "mod-list-button"
+                        )
+            launcher_resolution_dialog.open()
+
+        async def resolve_launcher_metadata_from_mod_pages() -> None:
+            try:
+                discovery = await self._resolve_mod_launcher_metadata(
+                    model=model,
+                    entry=entry,
+                    mod_pages=mod_pages_from_inputs(),
+                    existing_launcher_urls=launcher_urls_from_inputs(),
+                    user=user,
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Mod launcher metadata resolution failed: node=%s app=%s mod=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    entry.name,
+                    xcp,
+                )
+                ui.notify(f"Metadata resolution failed: {xcp}", type="negative")
+                return
+            if not discovery.candidates:
+                details = "; ".join(
+                    (
+                        f"{launcher_provider_label(result.provider)}: {result.error}"
+                        if result.error is not None
+                        else f"{launcher_provider_label(result.provider)}: no matching files"
+                    )
+                    for result in discovery.providers
+                )
+                ui.notify(
+                    f"No launcher metadata matches found. {details}",
+                    type="warning",
+                    multi_line=True,
+                )
+                return
+            present_launcher_resolution(discovery)
 
         async def save_properties() -> None:
             try:
@@ -1261,6 +1551,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
 
             return _handle_mod_action
 
+        mod_page_resolution_dialog = ui.dialog()
+        launcher_resolution_dialog = ui.dialog()
+
         with ui.dialog() as delete_confirm_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
@@ -1271,12 +1564,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         ui.button("Delete", on_click=confirm_delete).classes("mod-list-button danger")
 
         with ui.dialog() as dialog:
-            with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
-                with ui.column().classes("w-full gap-4 p-5"):
-                    with ui.column().classes("gap-0"):
+            with ui.card().classes(
+                "mod-card mod-dialog-card mod-app-details-dialog-card mod-mod-details-dialog-card"
+            ):
+                with ui.column().classes("w-full mod-mod-details-shell"):
+                    with ui.column().classes("w-full gap-0 mod-mod-details-header"):
                         ui.label(entry.friendly).classes("text-xl font-black mod-title-small")
                         ui.label(entry.name).classes("mod-subtitle text-sm break-all")
-                    with ui.grid(columns=2).classes("mod-detail-grid"):
+                    with ui.grid(columns=2).classes("mod-detail-grid mod-mod-details-summary"):
                         self._render_mod_detail_item(ui=ui, label="Placement", value=entry.placement.label)
                         self._render_mod_detail_item(ui=ui, label="Type", value=entry.mod_type.label)
                         self._render_mod_detail_item(ui=ui, label="Version", value=version_text)
@@ -1291,19 +1586,25 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                 value=client_pack_text,
                             )
                     if entry.mod_pages:
-                        with ui.column().classes("mod-detail-item mod-mod-page-links gap-1"):
+                        with ui.column().classes(
+                            "mod-detail-item mod-mod-page-links mod-mod-details-links gap-1"
+                        ):
                             ui.label("Mod pages").classes("mod-stat-label")
                             with ui.row().classes("w-full gap-3 flex-wrap"):
-                                for mod_page in entry.mod_pages:
+                                for mod_page in mod_pages_in_display_order(entry.mod_pages):
                                     ui.link(
                                         mod_page.name,
                                         mod_page.url,
                                         new_tab=True,
                                     ).props('rel="noopener noreferrer"').classes("mod-mod-page-link")
                     if can_edit_properties:
-                        with ui.column().classes("w-full gap-3 mod-app-details-section"):
+                        with ui.column().classes(
+                            "w-full gap-3 mod-app-details-section mod-mod-details-editor"
+                        ):
                             ui.label("Classification").classes("mod-stat-label")
-                            with ui.row().classes("w-full gap-2 flex-wrap"):
+                            with ui.row().classes(
+                                "w-full gap-2 flex-wrap mod-mod-details-classification"
+                            ):
                                 mod_type_select = (
                                     ui.select(
                                         {
@@ -1315,7 +1616,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         label="Type",
                                     )
                                     .props("filled square dense hide-bottom-space color=accent options-dark")
-                                    .classes("mod-app-details-field")
+                                    .classes("mod-app-details-field mod-mod-details-select")
                                 )
                                 download_block_reason_select = (
                                     ui.select(
@@ -1335,9 +1636,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         label="Download block reason",
                                     )
                                     .props("filled square dense hide-bottom-space color=accent options-dark")
-                                    .classes("mod-app-details-field")
+                                    .classes("mod-app-details-field mod-mod-details-select")
                                 )
-                            with ui.column().classes("w-full gap-2"):
+                            with ui.column().classes("w-full gap-2 mod-mod-details-subsection"):
                                 ui.label("Mod pages").classes("mod-stat-label")
                                 ui.label(
                                     "Add links to this mod's project or information pages. "
@@ -1347,11 +1648,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     pass
                                 for mod_page in entry.mod_pages:
                                     add_mod_page_row(mod_page)
-                                ui.button("Add mod page", on_click=lambda: add_mod_page_row()).classes(
-                                    "mod-list-button secondary"
-                                )
+                                with ui.row().classes(
+                                    "w-full gap-2 flex-wrap mod-mod-details-inline-actions"
+                                ):
+                                    ui.button(
+                                        "Add mod page",
+                                        on_click=lambda: add_mod_page_row(),
+                                    ).classes("mod-list-button secondary")
+                                    find_mod_pages_button = ui.button(
+                                        "Find Mod Pages",
+                                        on_click=find_mod_pages_from_local_data,
+                                    ).classes("mod-list-button mod-mod-details-discovery-button")
+                                    find_mod_pages_button.set_visibility(bool(launcher_metadata_providers))
                             if supports_client_pack:
-                                with ui.column().classes("w-full gap-2"):
+                                with ui.column().classes("w-full gap-2 mod-mod-details-subsection"):
                                     ui.label("Client pack").classes("mod-stat-label")
                                     ui.label(
                                         "Choose whether this mod is included in client packs and, when included, "
@@ -1370,7 +1680,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                             label="Policy",
                                         )
                                         .props("filled square dense hide-bottom-space color=accent options-dark")
-                                        .classes("mod-app-details-field mod-client-pack-select")
+                                        .classes(
+                                            "mod-app-details-field mod-mod-details-select mod-client-pack-select"
+                                        )
                                     )
                                     with ui.column().classes("w-full gap-1") as optional_client_pack_controls:
                                         client_pack_default_selected_checkbox = ui.checkbox(
@@ -1403,7 +1715,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         lambda _: refresh_client_pack_policy_controls(),
                                     )
                                     refresh_client_pack_policy_controls()
-                            with ui.row().classes("w-full gap-2 mod-details-tab-row"):
+                            ui.label("Metadata").classes("mod-stat-label mod-mod-details-metadata-label")
+                            with ui.row().classes(
+                                "w-full gap-2 mod-details-tab-row mod-mod-details-metadata-tabs"
+                            ):
                                 overrides_button = ui.button(
                                     "Overrides",
                                     on_click=lambda: toggle_metadata_panel("overrides"),
@@ -1413,7 +1728,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     on_click=lambda: toggle_metadata_panel("launcher"),
                                 ).classes("mod-list-button secondary mod-details-tab-button")
                                 launcher_metadata_button.set_visibility(bool(launcher_metadata_providers))
-                            with ui.column().classes("w-full gap-2") as overrides_section:
+                            with ui.column().classes(
+                                "w-full gap-2 mod-mod-details-metadata-panel"
+                            ) as overrides_section:
                                 ui.label("Overrides").classes("mod-stat-label")
                                 ui.label(
                                     "Blank values continue using metadata detected from the mod file."
@@ -1464,7 +1781,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     )
                                 )
                             overrides_section.set_visibility(False)
-                            with ui.column().classes("w-full gap-2") as launcher_metadata_section:
+                            with ui.column().classes(
+                                "w-full gap-2 mod-mod-details-metadata-panel"
+                            ) as launcher_metadata_section:
                                 ui.label("Launcher Metadata").classes("mod-stat-label")
                                 ui.label(launcher_metadata_description).classes("mod-subtitle text-xs")
                                 with ui.column().classes("w-full gap-2"):
@@ -1523,14 +1842,22 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                 metadata_suggestion_label = ui.label(
                                     "Suggested type: fetch metadata to check provider support."
                                 ).classes("mod-subtitle text-xs")
-                                with ui.row().classes("w-full justify-end"):
+                                ui.label(
+                                    "Resolve from Mod Pages searches saved and currently edited project links "
+                                    "for providers whose file page is blank."
+                                ).classes("mod-subtitle text-xs")
+                                with ui.row().classes("w-full justify-end gap-2 flex-wrap"):
+                                    ui.button(
+                                        "Resolve from Mod Pages",
+                                        on_click=resolve_launcher_metadata_from_mod_pages,
+                                    ).classes("mod-list-button")
                                     ui.button(
                                         "Fetch Metadata",
                                         on_click=fetch_launcher_metadata,
                                     ).classes("mod-list-button secondary")
                             launcher_metadata_section.set_visibility(False)
                     if available_actions:
-                        with ui.column().classes("gap-2"):
+                        with ui.column().classes("gap-2 mod-mod-details-danger-zone"):
                             ui.label("Privileged Actions").classes("mod-stat-label")
                             with ui.row().classes("w-full gap-2 flex-wrap"):
                                 for action in available_actions:
@@ -1543,7 +1870,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         self._mod_action_label(action, entry),
                                         on_click=on_click,
                                     ).classes(self._mod_action_button_classes(action, entry))
-                    with ui.row().classes("w-full justify-end gap-2"):
+                    with ui.row().classes("w-full justify-end gap-2 mod-mod-details-footer"):
                         ui.button("Close", on_click=dialog.close).classes("mod-list-button secondary")
                         if can_edit_properties:
                             ui.button("Save", on_click=save_properties).classes("mod-list-button")

@@ -1109,10 +1109,10 @@ class ModWebTheme:
                     color: #fecaca !important;
                 }}
                 .mod-modlist-dialog-card {{
-                    width: min(46rem, calc(100vw - 1.5rem));
-                    max-height: min(48rem, calc(100vh - 1.5rem));
+                    width: min(46rem, calc(100vw - 1.5rem)) !important;
+                    max-height: min(48rem, calc(100vh - 1.5rem)) !important;
                     height: auto !important;
-                    overflow: hidden;
+                    overflow: hidden !important;
                 }}
                 .mod-modlist-dialog-card > .nicegui-content,
                 .mod-modlist-dialog-card .nicegui-content {{
@@ -3023,7 +3023,9 @@ class ModWebTheme:
                     background: transparent !important;
                 }}
                 .mod-virtual-mod-table tbody tr.selected > td::before,
+                .mod-virtual-mod-table tbody tr.selected > td::after,
                 .mod-virtual-mod-table tbody tr:hover > td::before {{
+                    content: none !important;
                     background: transparent !important;
                     opacity: 0 !important;
                 }}
@@ -3632,9 +3634,73 @@ class ModWebTheme:
                     padding-top: 0.9rem;
                     border-top: 1px solid rgba(127, 29, 29, 0.52);
                 }}
+                @keyframes mod-dialog-accent-arrive {{
+                    0% {{
+                        opacity: 0;
+                        background-position: 100% 0;
+                    }}
+                    35% {{ opacity: 1; }}
+                    100% {{
+                        opacity: 0.78;
+                        background-position: 0 0;
+                    }}
+                }}
                 .mod-dialog-card {{
                     width: min(30rem, calc(100vw - 2rem)) !important;
                     max-width: none !important;
+                    max-height: calc(100vh - 1.5rem);
+                    position: relative;
+                    isolation: isolate;
+                    overflow-x: hidden;
+                    overflow-y: auto;
+                    overscroll-behavior: contain;
+                    scrollbar-color: rgba(139, 92, 246, 0.58) rgba(9, 9, 13, 0.88);
+                    transition: border-color 160ms ease, box-shadow 160ms ease;
+                }}
+                .mod-dialog-card:focus-within {{
+                    border-color: rgba(139, 92, 246, 0.68) !important;
+                    box-shadow:
+                        0 24px 70px rgba(0, 0, 0, 0.52),
+                        0 0 0 1px rgba(139, 92, 246, 0.14),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+                }}
+                .mod-dialog-card > .nicegui-content {{
+                    width: 100%;
+                    min-width: 0;
+                    max-width: 100%;
+                }}
+                .mod-dialog-card::before {{
+                    content: "";
+                    position: absolute;
+                    z-index: 5;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 2px;
+                    pointer-events: none;
+                    background:
+                        linear-gradient(
+                            90deg,
+                            transparent 0%,
+                            rgba(139, 92, 246, 0.28) 22%,
+                            #c4b5fd 50%,
+                            rgba(139, 92, 246, 0.28) 78%,
+                            transparent 100%
+                        ) 100% 0 / 220% 100% no-repeat;
+                    animation: mod-dialog-accent-arrive 680ms cubic-bezier(0.22, 1, 0.36, 1) both;
+                }}
+                @media (prefers-reduced-motion: reduce) {{
+                    .mod-dialog-card::before {{
+                        animation: none !important;
+                        opacity: 0.55;
+                        background-position: 50% 0;
+                    }}
+                }}
+                @media (max-width: 36rem) {{
+                    .mod-dialog-card {{
+                        width: calc(100vw - 0.75rem) !important;
+                        max-height: calc(100vh - 0.75rem);
+                    }}
                 }}
                 .mod-client-pack-dialog-card {{
                     width: min(36rem, calc(100vw - 2rem)) !important;
@@ -4045,6 +4111,167 @@ class ModWebTheme:
                 }}
                 .mod-app-details-actions {{
                     margin-top: 0.15rem;
+                }}
+                .mod-mod-details-dialog-card {{
+                    width: min(48rem, calc(100vw - 1.5rem)) !important;
+                    max-height: min(56rem, calc(100vh - 1rem));
+                    padding: 0 !important;
+                    overflow: hidden;
+                }}
+                .mod-mod-details-shell {{
+                    max-height: min(56rem, calc(100vh - 1rem));
+                    gap: 0 !important;
+                    padding: 0 !important;
+                    overflow-x: hidden;
+                    overflow-y: auto;
+                    scrollbar-color: rgba(139, 92, 246, 0.58) rgba(9, 9, 13, 0.88);
+                }}
+                .mod-mod-details-header {{
+                    position: sticky;
+                    top: 0;
+                    z-index: 3;
+                    padding: 1.05rem 1.25rem 0.95rem;
+                    border-bottom: 1px solid rgba(113, 113, 122, 0.64);
+                    background:
+                        linear-gradient(100deg, rgba(88, 28, 135, 0.26), transparent 58%),
+                        rgba(7, 7, 11, 0.98);
+                    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+                    backdrop-filter: blur(14px);
+                }}
+                .mod-mod-details-summary {{
+                    gap: 0.55rem !important;
+                    padding: 1rem 1.25rem 0.8rem;
+                }}
+                .mod-mod-details-summary .mod-detail-item {{
+                    min-height: 3.4rem;
+                    padding: 0.65rem 0.75rem;
+                    border: 1px solid rgba(63, 63, 70, 0.7);
+                    background: rgba(8, 8, 12, 0.68);
+                }}
+                .mod-mod-details-links {{
+                    width: calc(100% - 2.5rem) !important;
+                    max-width: calc(100% - 2.5rem);
+                    min-width: 0;
+                    align-self: center;
+                    box-sizing: border-box;
+                    margin: 0 1.25rem;
+                    padding: 0.75rem 0.85rem;
+                    border: 1px solid rgba(109, 40, 217, 0.42);
+                    background: rgba(46, 22, 72, 0.22);
+                }}
+                .mod-mod-details-editor {{
+                    width: calc(100% - 2.5rem) !important;
+                    max-width: calc(100% - 2.5rem);
+                    min-width: 0;
+                    align-self: center;
+                    box-sizing: border-box;
+                    margin: 1rem 1.25rem;
+                    padding: 1rem;
+                }}
+                .mod-mod-details-dialog-card .mod-app-details-field .q-field__control {{
+                    min-height: 3.35rem;
+                }}
+                .mod-mod-details-dialog-card .mod-app-details-field.q-field--labeled .q-field__native,
+                .mod-mod-details-dialog-card .mod-app-details-field.q-field--labeled .q-field__input {{
+                    min-height: 3.35rem;
+                    padding-top: 1.35rem !important;
+                    padding-bottom: 0.25rem !important;
+                    line-height: 1.15 !important;
+                }}
+                .mod-mod-details-dialog-card .mod-app-details-field.mod-mod-details-select .q-field__control {{
+                    height: 3.35rem !important;
+                    min-height: 3.35rem !important;
+                }}
+                .mod-mod-details-dialog-card .mod-app-details-field.mod-mod-details-select .q-field__native {{
+                    height: auto !important;
+                    min-height: 0 !important;
+                    padding-top: 0.875rem !important;
+                    padding-bottom: 0.125rem !important;
+                }}
+                .mod-mod-details-dialog-card .mod-app-details-field.mod-mod-details-select .q-field__marginal {{
+                    height: 3.35rem !important;
+                }}
+                .mod-mod-details-dialog-card .mod-app-details-field .q-field__label {{
+                    line-height: 1 !important;
+                }}
+                .mod-mod-details-classification {{
+                    padding-bottom: 0.15rem;
+                }}
+                .mod-mod-details-subsection,
+                .mod-mod-details-metadata-label {{
+                    padding-top: 0.9rem;
+                    border-top: 1px solid rgba(82, 82, 91, 0.62);
+                }}
+                .mod-mod-details-metadata-label {{
+                    margin-top: 0.1rem;
+                }}
+                .mod-mod-details-metadata-tabs {{
+                    gap: 0.55rem !important;
+                }}
+                .mod-mod-details-metadata-panel {{
+                    padding: 0.85rem;
+                    border: 1px solid rgba(82, 82, 91, 0.62);
+                    background: rgba(5, 5, 8, 0.54);
+                }}
+                .mod-mod-details-inline-actions {{
+                    justify-content: flex-end;
+                }}
+                .mod-mod-details-discovery-button {{
+                    border-color: rgba(139, 92, 246, 0.78) !important;
+                    box-shadow: inset 0 -2px 0 rgba(196, 181, 253, 0.28) !important;
+                }}
+                .mod-mod-details-danger-zone {{
+                    width: calc(100% - 2.5rem) !important;
+                    max-width: calc(100% - 2.5rem);
+                    min-width: 0;
+                    align-self: center;
+                    box-sizing: border-box;
+                    margin: 0 1.25rem 1rem;
+                    padding: 0.85rem 1rem;
+                    border: 1px solid rgba(220, 38, 38, 0.48);
+                    background:
+                        linear-gradient(135deg, rgba(127, 29, 29, 0.14), transparent 62%),
+                        rgba(10, 7, 9, 0.72);
+                }}
+                .mod-mod-details-danger-zone .mod-stat-label {{
+                    color: #fca5a5 !important;
+                }}
+                .mod-mod-details-footer {{
+                    position: sticky;
+                    bottom: 0;
+                    z-index: 3;
+                    padding: 0.85rem 1.25rem;
+                    border-top: 1px solid rgba(113, 113, 122, 0.64);
+                    background: rgba(7, 7, 11, 0.97);
+                    box-shadow: 0 -12px 30px rgba(0, 0, 0, 0.3);
+                    backdrop-filter: blur(14px);
+                }}
+                @media (max-width: 640px) {{
+                    .mod-mod-details-dialog-card {{
+                        width: calc(100vw - 0.75rem) !important;
+                        max-height: calc(100vh - 0.75rem);
+                    }}
+                    .mod-mod-details-shell {{
+                        width: 100% !important;
+                        max-height: calc(100vh - 0.75rem);
+                    }}
+                    .mod-mod-details-header,
+                    .mod-mod-details-footer {{
+                        padding-inline: 0.9rem;
+                    }}
+                    .mod-mod-details-summary {{
+                        padding: 0.85rem 0.9rem 0.7rem;
+                    }}
+                    .mod-mod-details-links,
+                    .mod-mod-details-editor,
+                    .mod-mod-details-danger-zone {{
+                        width: calc(100% - 1.8rem) !important;
+                        max-width: calc(100% - 1.8rem);
+                        margin-inline: 0.9rem;
+                    }}
+                    .mod-mod-details-inline-actions .mod-list-button {{
+                        flex: 1 1 10rem;
+                    }}
                 }}
                 .mod-fake-chat-dialog-card {{
                     width: min(52rem, calc(100vw - 1.5rem)) !important;

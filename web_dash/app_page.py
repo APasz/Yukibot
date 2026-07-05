@@ -72,6 +72,7 @@ from .runtime_imports import (
     Html,
     Input,
     Label,
+    Literal,
     LiteralString,
     Mapping,
     ModPlacement,
@@ -174,6 +175,9 @@ class _VirtualModRow(TypedDict):
     show_placement: bool
     show_policy: bool
     state_class: str
+
+
+type _VirtualModAction = Literal["details", "download"]
 
 __all__ = (
     "ModWebAppPageMixin",
@@ -5123,20 +5127,7 @@ class ModWebAppPageMixin(
 
                         opened_dialogs: dict[str, Dialog] = {}
 
-                        def open_virtual_mod(event: ModWebEventArgumentsContainer) -> None:
-                            raw_args: object = getattr(event, "args", None)
-                            args: Mapping[str, object] | None = (
-                                cast(Mapping[str, object], raw_args)
-                                if isinstance(raw_args, Mapping)
-                                else None
-                            )
-                            raw_row: object = (
-                                args.get("row", args) if args is not None else raw_args
-                            )
-                            if not isinstance(raw_row, Mapping):
-                                return
-                            row: Mapping[str, object] = cast(Mapping[str, object], raw_row)
-                            mod_name: str = str(row.get("name", ""))
+                        def open_virtual_mod(mod_name: str) -> None:
                             entry: NodeModEntry | None = mod_by_name.get(mod_name)
                             if entry is None:
                                 return
@@ -5151,8 +5142,19 @@ class ModWebAppPageMixin(
                                 opened_dialogs[mod_name] = dialog
                             dialog.open()
 
-                        async def download_virtual_mod(event: ModWebEventArgumentsContainer) -> None:
-                            mod_name: str = _event_args_as_text(event).strip()
+                        async def handle_virtual_mod_action(event: ModWebEventArgumentsContainer) -> None:
+                            raw_args: object = getattr(event, "args", None)
+                            if not isinstance(raw_args, Mapping):
+                                return
+                            payload: Mapping[str, object] = cast(Mapping[str, object], raw_args)
+                            action_value: object = payload.get("action")
+                            if action_value not in ("details", "download"):
+                                return
+                            action: _VirtualModAction = action_value
+                            mod_name: str = str(payload.get("name", "")).strip()
+                            if action == "details":
+                                open_virtual_mod(mod_name)
+                                return
                             entry: NodeModEntry | None = mod_by_name.get(mod_name)
                             download_url: str | None = model.mod_download_urls.get(mod_name)
                             if entry is None or download_url is None:
@@ -5199,7 +5201,7 @@ class ModWebAppPageMixin(
                             <q-tr :props="props" class="mod-virtual-row">
                               <q-td :colspan="props.cols.length + 1" class="mod-virtual-row-cell">
                                 <div :class="['mod-row', 'mod-row-clickable', props.row.state_class]"
-                                     @click="$parent.$emit('modRowClick', {row: props.row})">
+                                     :data-mod-name="props.row.name">
                                   <q-checkbox v-if="props.row.selectable" v-model="props.selected"
                                               dense @click.stop />
                                   <q-checkbox v-else :model-value="false" dense disable @click.stop />
@@ -5220,8 +5222,7 @@ class ModWebAppPageMixin(
                                     </span>
                                   </div>
                                   <q-btn v-if="props.row.downloadable" flat dense no-caps label="Download"
-                                         class="mod-row-download"
-                                         @click.stop="$parent.$emit('modDownload', props.row.name)" />
+                                         class="mod-row-download" data-mod-download />
                                   <span v-else class="mod-row-download blocked">Blocked</span>
                                   <div class="mod-setting-badge-rail mod-mod-type-badge-rail">
                                     <span :class="['mod-badge', props.row.type_tone,
@@ -5234,8 +5235,21 @@ class ModWebAppPageMixin(
                             </q-tr>
                             """,
                         )
-                        virtual_mod_table.on("modRowClick", open_virtual_mod, ["row"])
-                        virtual_mod_table.on("modDownload", download_virtual_mod)
+                        virtual_mod_table.on(
+                            "click",
+                            handle_virtual_mod_action,
+                            js_handler="""
+                            (event) => {
+                              const target = event.target instanceof Element ? event.target : null;
+                              const row = target?.closest('[data-mod-name]');
+                              if (!row) return;
+                              emit({
+                                action: target.closest('[data-mod-download]') ? 'download' : 'details',
+                                name: row.dataset.modName,
+                              });
+                            }
+                            """,
+                        )
                         return
 
                     with ui.column().classes("w-full mod-list"):
