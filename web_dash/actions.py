@@ -21,6 +21,7 @@ from apps._launcher_metadata import has_curseforge_api_key, launcher_project_pag
 from apps.minecraft import MinecraftRecipeMutation
 
 from .constants import (
+    _BULK_METADATA_REQUEST_TIMEOUT_SECONDS,
     _DOWNLOAD_FEEDBACK_DELAY_SECONDS,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     log,
@@ -29,6 +30,7 @@ from .nicegui_protocols import ModWebUi, _value_as_object, _value_as_text
 from .runtime_imports import (
     Awaitable,
     BadgeTone,
+    BulkLauncherMetadataDiscovery,
     Button,
     Callable,
     Checkbox,
@@ -52,6 +54,7 @@ from .runtime_imports import (
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
+    NodeBulkLauncherMetadataApplyResult,
     NodeCapacityMutationResult,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
@@ -97,6 +100,14 @@ class _ModPageEditorRow:
     name_input: Input
     url_input: Input
     automatic_name: str | None = None
+
+
+def _launcher_provider_selection_payload(
+    providers: tuple[Provider, ...] | None,
+) -> dict[str, list[str]]:
+    if providers is None:
+        return {}
+    return {"providers": [provider.value for provider in providers]}
 
 
 class ModWebActionsMixin(ModWebServiceSupport):
@@ -204,8 +215,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _mod_client_pack_summary(entry: NodeModEntry) -> str:
-        if entry.mod_type is ModType.SERVER:
-            return "Excluded — Server-only"
         if entry.mod_type is ModType.BUILTIN:
             return "Excluded — Built-in"
         if entry.placement is ModPlacement.SERVER_DISABLED:
@@ -614,6 +623,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         model: ModWebPageModel,
         entry: NodeModEntry,
         launcher_urls: LauncherProviderUrls,
+        providers: tuple[Provider, ...] | None = None,
         user: ModWebUser,
     ) -> LauncherMetadataResolution:
         if self._is_builtin_mod(entry):
@@ -630,7 +640,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
             method="POST",
-            json_payload={"launcher_urls": launcher_urls.model_dump(mode="json")},
+            json_payload={
+                "launcher_urls": launcher_urls.model_dump(mode="json"),
+                **_launcher_provider_selection_payload(providers),
+            },
         )
         return LauncherMetadataResolution.model_validate(payload)
 
@@ -641,6 +654,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         entry: NodeModEntry,
         mod_pages: tuple[ModPageLink, ...],
         existing_launcher_urls: LauncherProviderUrls,
+        providers: tuple[Provider, ...] | None = None,
         user: ModWebUser,
     ) -> LauncherMetadataDiscovery:
         if self._is_builtin_mod(entry):
@@ -661,6 +675,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload={
                 "mod_pages": [page.model_dump(mode="json") for page in mod_pages],
                 "existing_launcher_urls": existing_launcher_urls.model_dump(mode="json"),
+                **_launcher_provider_selection_payload(providers),
             },
         )
         return LauncherMetadataDiscovery.model_validate(payload)
@@ -671,6 +686,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         model: ModWebPageModel,
         entry: NodeModEntry,
         mod_pages: tuple[ModPageLink, ...],
+        providers: tuple[Provider, ...] | None = None,
         user: ModWebUser,
     ) -> ModPageDiscovery:
         if self._is_builtin_mod(entry):
@@ -688,9 +704,94 @@ class ModWebActionsMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
             method="POST",
-            json_payload={"mod_pages": [page.model_dump(mode="json") for page in mod_pages]},
+            json_payload={
+                "mod_pages": [page.model_dump(mode="json") for page in mod_pages],
+                **_launcher_provider_selection_payload(providers),
+            },
         )
         return ModPageDiscovery.model_validate(payload)
+
+    async def _discover_bulk_mod_metadata(
+        self,
+        *,
+        model: ModWebPageModel,
+        operation_id: str,
+        mod_names: tuple[str, ...] = (),
+        user: ModWebUser,
+    ) -> BulkLauncherMetadataDiscovery:
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to resolve mod metadata.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=f"/apps/{quote(model.app_name, safe='')}/mods/metadata/discover",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"operation_id": operation_id, "mod_names": list(mod_names)},
+            timeout=_BULK_METADATA_REQUEST_TIMEOUT_SECONDS,
+        )
+        return BulkLauncherMetadataDiscovery.model_validate(payload)
+
+    async def _apply_bulk_mod_metadata(
+        self,
+        *,
+        model: ModWebPageModel,
+        operation_id: str,
+        discovery_operation_id: str,
+        mod_names: tuple[str, ...],
+        apply_suggested_type_mod_names: tuple[str, ...] = (),
+        user: ModWebUser,
+    ) -> NodeBulkLauncherMetadataApplyResult:
+        if not mod_names:
+            raise ValueError("Select at least one exact metadata match to apply.")
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to update mod metadata.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=f"/apps/{quote(model.app_name, safe='')}/mods/metadata/apply",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "operation_id": operation_id,
+                "discovery_operation_id": discovery_operation_id,
+                "mod_names": list(mod_names),
+                "apply_suggested_type_mod_names": list(apply_suggested_type_mod_names),
+            },
+            timeout=_BULK_METADATA_REQUEST_TIMEOUT_SECONDS,
+        )
+        return NodeBulkLauncherMetadataApplyResult.model_validate(payload)
+
+    async def _cancel_bulk_mod_metadata(
+        self,
+        *,
+        model: ModWebPageModel,
+        operation_id: str,
+        user: ModWebUser,
+    ) -> bool:
+        required_level = required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES)
+        if not self._user_has_level(user, required_level):
+            raise PermissionError(f"{required_level.name.title()} access is required to cancel mod metadata.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=(
+                f"/apps/{quote(model.app_name, safe='')}/mods/metadata/"
+                f"{quote(operation_id, safe='')}/cancel"
+            ),
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={},
+        )
+        raw_cancelled = payload.get("cancelled")
+        if not isinstance(raw_cancelled, bool):
+            raise ValueError("Bulk metadata cancellation returned an invalid response.")
+        return raw_cancelled
 
     @staticmethod
     def _mod_action_label(action: NodeModMutationAction, entry: NodeModEntry) -> str:
@@ -1363,12 +1464,15 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         )
             mod_page_resolution_dialog.open()
 
-        async def _find_mod_pages_from_local_data() -> None:
+        async def _find_mod_pages_from_local_data(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             try:
                 discovery = await self._find_mod_pages(
                     model=model,
                     entry=entry,
                     mod_pages=mod_pages_from_inputs(),
+                    providers=providers,
                     user=user,
                 )
             except Exception as xcp:
@@ -1398,12 +1502,14 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return
             present_mod_page_resolution(discovery)
 
-        async def find_mod_pages_from_local_data() -> None:
+        async def find_mod_pages_from_local_data(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             if find_mod_pages_button is None:
                 raise RuntimeError("Find Mod Pages button was not rendered.")
             await self._run_with_loading_button(
                 button=find_mod_pages_button,
-                action=_find_mod_pages_from_local_data,
+                action=lambda: _find_mod_pages_from_local_data(providers),
             )
 
         def ensure_launcher_mod_page_rows(launcher_urls: LauncherProviderUrls) -> None:
@@ -1451,7 +1557,15 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     f"({launcher_provider_label(resolution.suggestion_provider)})"
                 )
 
-        async def _fetch_launcher_metadata() -> None:
+        def launcher_metadata_error_summary(resolution: LauncherMetadataResolution) -> str:
+            return "; ".join(
+                f"{launcher_provider_label(error.provider)}: {error.message}"
+                for error in resolution.provider_errors
+            )
+
+        async def _fetch_launcher_metadata(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             try:
                 launcher_urls = launcher_urls_from_inputs()
                 ensure_launcher_mod_page_rows(launcher_urls)
@@ -1459,6 +1573,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     model=model,
                     entry=entry,
                     launcher_urls=launcher_urls,
+                    providers=providers,
                     user=user,
                 )
             except Exception as xcp:
@@ -1472,14 +1587,24 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 ui.notify(f"Metadata fetch failed: {xcp}", type="negative")
                 return
             apply_launcher_metadata_resolution(resolution)
-            ui.notify("Launcher metadata fetched.", type="positive")
+            if resolution.provider_errors:
+                ui.notify(
+                    "Metadata fetched from available providers. "
+                    f"Unavailable providers: {launcher_metadata_error_summary(resolution)}",
+                    type="warning",
+                    multi_line=True,
+                )
+            else:
+                ui.notify("Launcher metadata fetched.", type="positive")
 
-        async def fetch_launcher_metadata() -> None:
+        async def fetch_launcher_metadata(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             if fetch_launcher_metadata_button is None:
                 raise RuntimeError("Fetch Metadata button was not rendered.")
             await self._run_with_loading_button(
                 button=fetch_launcher_metadata_button,
-                action=_fetch_launcher_metadata,
+                action=lambda: _fetch_launcher_metadata(providers),
             )
 
         async def confirm_launcher_resolution() -> None:
@@ -1574,13 +1699,16 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         )
             launcher_resolution_dialog.open()
 
-        async def _resolve_launcher_metadata_from_mod_pages() -> None:
+        async def _resolve_launcher_metadata_from_mod_pages(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             try:
                 discovery = await self._resolve_mod_launcher_metadata(
                     model=model,
                     entry=entry,
                     mod_pages=mod_pages_from_inputs(),
                     existing_launcher_urls=launcher_urls_from_inputs(),
+                    providers=providers,
                     user=user,
                 )
             except Exception as xcp:
@@ -1608,14 +1736,37 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     multi_line=True,
                 )
                 return
-            present_launcher_resolution(discovery)
+            selected_urls = self._automatic_launcher_urls(discovery)
+            if selected_urls:
+                apply_launcher_urls(selected_urls)
+                provider_errors = tuple(
+                    result for result in discovery.providers if result.error is not None
+                )
+                if provider_errors:
+                    details = "; ".join(
+                        f"{launcher_provider_label(result.provider)}: {result.error}"
+                        for result in provider_errors
+                    )
+                    ui.notify(
+                        f"Resolved available provider metadata. Unavailable providers: {details}",
+                        type="warning",
+                        multi_line=True,
+                    )
+                await _fetch_launcher_metadata(providers)
+                return
+            present_launcher_resolution(
+                discovery,
+                on_confirm=lambda: _fetch_launcher_metadata(providers),
+            )
 
-        async def resolve_launcher_metadata_from_mod_pages() -> None:
+        async def resolve_launcher_metadata_from_mod_pages(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             if resolve_launcher_metadata_button is None:
                 raise RuntimeError("Resolve from Mod Pages button was not rendered.")
             await self._run_with_loading_button(
                 button=resolve_launcher_metadata_button,
-                action=_resolve_launcher_metadata_from_mod_pages,
+                action=lambda: _resolve_launcher_metadata_from_mod_pages(providers),
             )
 
         def set_detection_status(message: str) -> None:
@@ -1640,6 +1791,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
             known_provider_by_launcher = {
                 Provider.MODRINTH: KnownModPageProvider.MODRINTH,
                 Provider.CURSEFORGE: KnownModPageProvider.CURSEFORGE,
+            }
+            provider_errors = {
+                error.provider: error.message for error in resolution.provider_errors
             }
             with metadata_detection_review_dialog:
                 with ui.card().classes(
@@ -1680,6 +1834,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                 ui.label(launcher_provider_label(provider)).classes(
                                     "mod-metadata-review-provider-title"
                                 )
+                                if error_message := provider_errors.get(provider):
+                                    ui.label(error_message).classes(
+                                        "mod-subtitle text-xs text-negative"
+                                    )
                                 if project_page is not None:
                                     ui.label("Project page").classes(
                                         "mod-metadata-review-field-label"
@@ -1722,7 +1880,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         ).classes("mod-list-button")
             metadata_detection_review_dialog.open()
 
-        async def finish_metadata_detection() -> None:
+        async def finish_metadata_detection(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             set_detection_status("Fetching provider metadata…")
             launcher_urls = launcher_urls_from_inputs()
             ensure_launcher_mod_page_rows(launcher_urls)
@@ -1730,19 +1890,28 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 model=model,
                 entry=entry,
                 launcher_urls=launcher_urls,
+                providers=providers,
                 user=user,
             )
             apply_launcher_metadata_resolution(resolution)
-            set_detection_status("Detection complete. Review the detected values.")
+            if resolution.provider_errors:
+                set_detection_status(
+                    "Detection complete with unavailable provider metadata. Review the details."
+                )
+            else:
+                set_detection_status("Detection complete. Review the detected values.")
             present_metadata_detection_review(resolution)
 
-        async def resolve_launcher_metadata_for_detection() -> None:
+        async def resolve_launcher_metadata_for_detection(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             set_detection_status("Resolving matching launcher files…")
             discovery = await self._resolve_mod_launcher_metadata(
                 model=model,
                 entry=entry,
                 mod_pages=mod_pages_from_inputs(),
                 existing_launcher_urls=launcher_urls_from_inputs(),
+                providers=providers,
                 user=user,
             )
             if not discovery.candidates:
@@ -1750,7 +1919,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     launcher_urls_from_inputs().has_provider(provider)
                     for provider in launcher_metadata_providers
                 ):
-                    await finish_metadata_detection()
+                    await finish_metadata_detection(providers)
                     return
                 raise ValueError("No matching launcher files were found for the detected mod pages.")
             selected_urls = self._automatic_launcher_urls(discovery)
@@ -1758,18 +1927,21 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 set_detection_status("Choose the matching launcher files to continue.")
                 present_launcher_resolution(
                     discovery,
-                    on_confirm=resume_detection_after_launcher_selection,
+                    on_confirm=lambda: resume_detection_after_launcher_selection(providers),
                 )
                 return
             apply_launcher_urls(selected_urls)
-            await finish_metadata_detection()
+            await finish_metadata_detection(providers)
 
-        async def discover_mod_pages_for_detection() -> None:
+        async def discover_mod_pages_for_detection(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             set_detection_status("Finding matching project pages…")
             discovery = await self._find_mod_pages(
                 model=model,
                 entry=entry,
                 mod_pages=mod_pages_from_inputs(),
+                providers=providers,
                 user=user,
             )
             if not discovery.candidates:
@@ -1777,7 +1949,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     launcher_urls_from_inputs().has_provider(provider)
                     for provider in launcher_metadata_providers
                 ):
-                    await finish_metadata_detection()
+                    await finish_metadata_detection(providers)
                     return
                 raise ValueError("No matching project pages were found for the local mod.")
             selected_pages = self._automatic_mod_pages(discovery)
@@ -1785,12 +1957,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 set_detection_status("Choose the matching project pages to continue.")
                 present_mod_page_resolution(
                     discovery,
-                    on_confirm=resume_detection_after_mod_page_selection,
+                    on_confirm=lambda: resume_detection_after_mod_page_selection(providers),
                 )
                 return
             for page in selected_pages:
                 add_mod_page_row_if_missing(page)
-            await resolve_launcher_metadata_for_detection()
+            await resolve_launcher_metadata_for_detection(providers)
 
         async def run_metadata_detection_action(
             action: Callable[[], Awaitable[None]],
@@ -1817,33 +1989,65 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 action=guarded_action,
             )
 
-        async def detect_metadata() -> None:
+        async def detect_metadata(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
             async def start_detection() -> None:
                 launcher_urls = launcher_urls_from_inputs()
                 mod_pages = mod_pages_from_inputs()
                 providers_missing_pages = self._launcher_providers_missing_mod_pages(
-                    providers=launcher_metadata_providers,
+                    providers=(launcher_metadata_providers if providers is None else providers),
                     launcher_urls=launcher_urls,
                     mod_pages=mod_pages,
                 )
                 if providers_missing_pages:
-                    await discover_mod_pages_for_detection()
+                    await discover_mod_pages_for_detection(providers)
                     return
                 if any(
                     not launcher_urls.has_provider(provider)
-                    for provider in launcher_metadata_providers
+                    for provider in (launcher_metadata_providers if providers is None else providers)
                 ):
-                    await resolve_launcher_metadata_for_detection()
+                    await resolve_launcher_metadata_for_detection(providers)
                     return
-                await finish_metadata_detection()
+                await finish_metadata_detection(providers)
 
             await run_metadata_detection_action(start_detection)
 
-        async def resume_detection_after_mod_page_selection() -> None:
-            await run_metadata_detection_action(resolve_launcher_metadata_for_detection)
+        async def resume_detection_after_mod_page_selection(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
+            await run_metadata_detection_action(
+                lambda: resolve_launcher_metadata_for_detection(providers)
+            )
 
-        async def resume_detection_after_launcher_selection() -> None:
-            await run_metadata_detection_action(finish_metadata_detection)
+        async def resume_detection_after_launcher_selection(
+            providers: tuple[Provider, ...] | None = None,
+        ) -> None:
+            await run_metadata_detection_action(lambda: finish_metadata_detection(providers))
+
+        def add_provider_context_menu(
+            *,
+            button: Button,
+            action: Callable[[tuple[Provider, ...] | None], Awaitable[None]],
+        ) -> None:
+            context_menu_factory = getattr(ui, "context_menu", None)
+            menu_item_factory = getattr(ui, "menu_item", None)
+            if not callable(context_menu_factory) or not callable(menu_item_factory):
+                return
+
+            def provider_action(provider: Provider) -> Callable[[], Awaitable[None]]:
+                async def run() -> None:
+                    await action((provider,))
+
+                return run
+
+            with button:
+                with ui.context_menu().classes("mod-chat-entry-menu"):
+                    for provider in launcher_metadata_providers:
+                        ui.menu_item(
+                            launcher_provider_label(provider),
+                            on_click=provider_action(provider),
+                        ).classes("mod-chat-entry-menu-item")
 
         async def save_detected_metadata() -> None:
             if metadata_detection_save_button is None:
@@ -1949,9 +2153,17 @@ class ModWebActionsMixin(ModWebServiceSupport):
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
-        async def confirm_delete() -> None:
-            delete_confirm_dialog.close()
+        async def _confirm_delete() -> None:
             await run_mod_action(NodeModMutationAction.DELETE)
+            delete_confirm_dialog.close()
+
+        async def confirm_delete() -> None:
+            if delete_confirm_button is None:
+                raise RuntimeError("Delete button was not rendered.")
+            await self._run_with_loading_button(
+                button=delete_confirm_button,
+                action=_confirm_delete,
+            )
 
         def _create_mod_action_handler(
             action: NodeModMutationAction,
@@ -1964,6 +2176,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         mod_page_resolution_dialog = ui.dialog()
         launcher_resolution_dialog = ui.dialog()
         metadata_detection_review_dialog = ui.dialog()
+        delete_confirm_button: Button | None = None
 
         with ui.dialog() as delete_confirm_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -1972,7 +2185,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
                     ui.label(f"{entry.friendly} will be removed from the server.").classes("mod-subtitle text-sm")
                     with ui.row().classes("w-full justify-end gap-2"):
                         ui.button("Cancel", on_click=delete_confirm_dialog.close).classes("mod-list-button secondary")
-                        ui.button("Delete", on_click=confirm_delete).classes("mod-list-button danger")
+                        delete_confirm_button = ui.button(
+                            "Delete",
+                            on_click=confirm_delete,
+                        ).classes("mod-list-button danger")
 
         with ui.dialog() as dialog:
             with ui.card().classes(
@@ -2148,8 +2364,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
                             ) as metadata_detection_controls:
                                 detect_metadata_button = ui.button(
                                     "Detect Metadata",
-                                    on_click=detect_metadata,
+                                    on_click=lambda: detect_metadata(),
                                 ).classes("mod-list-button mod-mod-details-discovery-button")
+                                add_provider_context_menu(
+                                    button=detect_metadata_button,
+                                    action=detect_metadata,
+                                )
                                 detect_metadata_status_label = ui.label(
                                     "Detect project pages, launcher files, and a classification suggestion in one workflow."
                                 ).classes("mod-subtitle text-xs grow")
@@ -2229,16 +2449,28 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                 with ui.row().classes("w-full gap-2 flex-wrap"):
                                     find_mod_pages_button = ui.button(
                                         "Find Mod Pages",
-                                        on_click=find_mod_pages_from_local_data,
+                                        on_click=lambda: find_mod_pages_from_local_data(),
                                     ).classes("mod-list-button secondary")
+                                    add_provider_context_menu(
+                                        button=find_mod_pages_button,
+                                        action=find_mod_pages_from_local_data,
+                                    )
                                     resolve_launcher_metadata_button = ui.button(
                                         "Resolve from Mod Pages",
-                                        on_click=resolve_launcher_metadata_from_mod_pages,
+                                        on_click=lambda: resolve_launcher_metadata_from_mod_pages(),
                                     ).classes("mod-list-button")
+                                    add_provider_context_menu(
+                                        button=resolve_launcher_metadata_button,
+                                        action=resolve_launcher_metadata_from_mod_pages,
+                                    )
                                     fetch_launcher_metadata_button = ui.button(
                                         "Fetch Metadata",
-                                        on_click=fetch_launcher_metadata,
+                                        on_click=lambda: fetch_launcher_metadata(),
                                     ).classes("mod-list-button secondary")
+                                    add_provider_context_menu(
+                                        button=fetch_launcher_metadata_button,
+                                        action=fetch_launcher_metadata,
+                                    )
                                 with ui.column().classes("w-full gap-2"):
                                     for provider in launcher_metadata_providers:
                                         if provider is Provider.CURSEFORGE and use_curseforge_reference_inputs:

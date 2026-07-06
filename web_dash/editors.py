@@ -1367,9 +1367,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         detail_path_text: str | None = self._save_detail_path_text(save=save, root_count=root_count)
         rename_dialog: Dialog | None = None
         rename_input: Input | None = None
+        rename_submit_button: Button | None = None
         delete_dialog: Dialog | None = None
+        delete_submit_button: Button | None = None
 
-        async def rename_selected() -> None:
+        async def _rename_selected() -> None:
             if rename_input is None:
                 raise ValueError("Save rename input is not available.")
             try:
@@ -1387,7 +1389,15 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
-        async def delete_selected() -> None:
+        async def rename_selected() -> None:
+            if rename_submit_button is None:
+                raise RuntimeError("Save Rename button was not rendered.")
+            await self._run_with_loading_button(
+                button=rename_submit_button,
+                action=_rename_selected,
+            )
+
+        async def _delete_selected() -> None:
             try:
                 result: NodeSaveMutationResult = await self._delete_save(
                     model=model,
@@ -1402,8 +1412,16 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
+        async def delete_selected() -> None:
+            if delete_submit_button is None:
+                raise RuntimeError("Save Delete button was not rendered.")
+            await self._run_with_loading_button(
+                button=delete_submit_button,
+                action=_delete_selected,
+            )
+
         def open_rename_dialog() -> None:
-            nonlocal rename_dialog, rename_input
+            nonlocal rename_dialog, rename_input, rename_submit_button
             if rename_dialog is None:
                 with ui.dialog() as created_dialog:
                     rename_dialog = created_dialog
@@ -1421,11 +1439,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                 ui.button("Cancel", on_click=created_dialog.close).classes(
                                     "mod-list-button secondary"
                                 )
-                                ui.button("Rename", on_click=rename_selected).classes("mod-list-button")
+                                rename_submit_button = ui.button(
+                                    "Rename",
+                                    on_click=rename_selected,
+                                ).classes("mod-list-button")
             rename_dialog.open()
 
         def open_delete_dialog() -> None:
-            nonlocal delete_dialog
+            nonlocal delete_dialog, delete_submit_button
             if delete_dialog is None:
                 with ui.dialog() as created_dialog:
                     delete_dialog = created_dialog
@@ -1440,7 +1461,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                 ui.button("Cancel", on_click=created_dialog.close).classes(
                                     "mod-list-button secondary"
                                 )
-                                ui.button("Delete", on_click=delete_selected).classes("mod-list-button danger")
+                                delete_submit_button = ui.button(
+                                    "Delete",
+                                    on_click=delete_selected,
+                                ).classes("mod-list-button danger")
             delete_dialog.open()
 
         with ui.card().classes("mod-save-card"):
@@ -1567,7 +1591,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 invalid_setting_keys.add(setting.key)
             refresh_save_button()
 
-        async def save_settings() -> None:
+        async def _save_settings_action() -> None:
             if not draft_values:
                 ui.notify("No pending setting changes.", type="warning")
                 return
@@ -1596,7 +1620,15 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
-        async def reload_settings() -> None:
+        async def save_settings() -> None:
+            if save_button is None:
+                raise RuntimeError("Settings Save button was not rendered.")
+            await self._run_with_loading_button(
+                button=save_button,
+                action=_save_settings_action,
+            )
+
+        async def _reload_settings_action() -> None:
             try:
                 result: NodeSettingsActionResult = await self._reload_settings(model=model, user=user)
             except Exception as xcp:
@@ -1610,6 +1642,14 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
+
+        async def reload_settings() -> None:
+            if reload_button is None:
+                raise RuntimeError("Settings Reload button was not rendered.")
+            await self._run_with_loading_button(
+                button=reload_button,
+                action=_reload_settings_action,
+            )
 
         @ui.refreshable
         def _setting_card_list(search_query: str) -> None:

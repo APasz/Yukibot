@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -22,11 +22,15 @@ from pydantic import SecretStr
 
 import config
 from apps._config import (
+    BulkLauncherMetadataDiscovery,
+    BulkLauncherMetadataEntry,
+    BulkLauncherMetadataStatus,
     CurseForgeFileReference,
     CurseForgeModMetadata,
     LauncherMetadataCandidate,
     LauncherMetadataDiscovery,
     LauncherMetadataMatchReason,
+    LauncherMetadataProviderError,
     LauncherMetadataProviderCandidates,
     LauncherMetadataReleaseChannel,
     LauncherMetadataResolution,
@@ -50,6 +54,33 @@ from apps._config import (
 log = logging.getLogger(__name__)
 
 
+def _metadata_provider_error(
+    provider: Provider,
+    exception: ValueError | httpx.HTTPError,
+) -> LauncherMetadataProviderError:
+    message = str(exception).strip() or type(exception).__name__
+    return LauncherMetadataProviderError(provider=provider, message=message)
+
+
+def _selected_launcher_metadata_providers(
+    *,
+    scope: str,
+    supported: tuple[Provider, ...],
+    requested: tuple[Provider, ...] | None,
+) -> tuple[Provider, ...]:
+    if requested is None:
+        return supported
+    if not requested:
+        raise ValueError("Select at least one launcher metadata provider.")
+    if len(requested) != len(set(requested)):
+        raise ValueError("Launcher metadata providers must be unique.")
+    unsupported = tuple(provider for provider in requested if provider not in supported)
+    if unsupported:
+        names = ", ".join(launcher_provider_label(provider) for provider in unsupported)
+        raise ValueError(f"{scope} does not support launcher metadata from: {names}.")
+    return requested
+
+
 class ModrinthSideSupport(enum.StrEnum):
     REQUIRED = "required"
     OPTIONAL = "optional"
@@ -67,6 +98,28 @@ class _LocalFileIdentity:
     size: int
     sha1: str
     curseforge_fingerprint: int
+
+
+@dataclass(frozen=True, slots=True)
+class BulkLauncherMetadataTarget:
+    mod_name: str
+    friendly_name: str
+    local_path: Path
+    existing_mod_pages: tuple[ModPageLink, ...]
+    existing_platforms: ModPlatformMetadata
+
+
+@dataclass(frozen=True, slots=True)
+class _BulkModrinthMatch:
+    mod_page: ModPageLink
+    metadata: ModrinthModMetadata
+    suggested_mod_type: ModType | None
+
+
+@dataclass(frozen=True, slots=True)
+class _BulkCurseForgeMatch:
+    mod_page: ModPageLink
+    metadata: CurseForgeModMetadata
 
 
 _CURSEFORGE_FINGERPRINT_WHITESPACE = frozenset({9, 10, 13, 32})
@@ -105,7 +158,14 @@ def _curseforge_fingerprint(data: bytes) -> int:
     return _murmur2_32(normalised)
 
 
-def _local_file_identity(path: Path) -> _LocalFileIdentity:
+def _local_file_identity(
+    path: Path,
+    *,
+    logical_filename: str | None = None,
+) -> _LocalFileIdentity:
+    filename = path.name if logical_filename is None else logical_filename.strip()
+    if not filename or Path(filename).name != filename:
+        raise ValueError("Local mod filename must be a single file name.")
     digest = hashlib.sha1(usedforsecurity=False)
     fingerprint_data = bytearray()
     size = 0
@@ -117,7 +177,7 @@ def _local_file_identity(path: Path) -> _LocalFileIdentity:
                 value for value in chunk if value not in _CURSEFORGE_FINGERPRINT_WHITESPACE
             )
     return _LocalFileIdentity(
-        filename=path.name,
+        filename=filename,
         size=size,
         sha1=digest.hexdigest(),
         curseforge_fingerprint=_murmur2_32(fingerprint_data),
@@ -171,9 +231,10 @@ def _candidate_sort_key(
 ) -> tuple[int, int, int]:
     reason_rank = min(
         {
-            LauncherMetadataMatchReason.SHA1: 0,
-            LauncherMetadataMatchReason.FILENAME_AND_SIZE: 1,
-            LauncherMetadataMatchReason.FILENAME: 2,
+            LauncherMetadataMatchReason.EXPLICIT_FILE_PAGE: 0,
+            LauncherMetadataMatchReason.SHA1: 1,
+            LauncherMetadataMatchReason.FILENAME_AND_SIZE: 2,
+            LauncherMetadataMatchReason.FILENAME: 3,
         }[reason]
         for reason in candidate.match_reasons
     )
@@ -239,17 +300,42 @@ def _normalise_launcher_project_page(page_url: str, provider: Provider) -> str:
     )
 
 
-def _launcher_project_pages(
+@dataclass(frozen=True, slots=True)
+class _LauncherProjectPageCollection:
+    project_pages: dict[Provider, str]
+    explicit_file_pages: dict[Provider, str]
+    errors: dict[Provider, LauncherMetadataProviderCandidates]
+
+
+def _normalise_explicit_launcher_file_page(
+    page_url: str,
+    provider: Provider,
+) -> str | None:
+    parsed = urlsplit(page_url)
+    segments = [unquote(segment) for segment in parsed.path.split("/") if segment]
+    marker = "version" if provider is Provider.MODRINTH else "files"
+    if marker not in segments:
+        return None
+    _version_reference(page_url, provider)
+    assert parsed.hostname is not None
+    return urlunsplit(
+        ("https", parsed.hostname.casefold(), "/" + "/".join(segments), "", "")
+    )
+
+
+def _collect_launcher_project_pages(
     mod_pages: tuple[ModPageLink, ...],
     *,
     supported: frozenset[Provider],
     excluded: frozenset[Provider],
-) -> dict[Provider, str]:
+) -> _LauncherProjectPageCollection:
     known_to_launcher = {
         KnownModPageProvider.MODRINTH: Provider.MODRINTH,
         KnownModPageProvider.CURSEFORGE: Provider.CURSEFORGE,
     }
     project_pages: dict[Provider, str] = {}
+    explicit_file_pages: dict[Provider, str] = {}
+    errors: dict[Provider, LauncherMetadataProviderCandidates] = {}
     for mod_page in mod_pages:
         known_provider = known_mod_page_provider_for_url(mod_page.url)
         if known_provider is None:
@@ -257,14 +343,85 @@ def _launcher_project_pages(
         provider = known_to_launcher.get(known_provider)
         if provider is None or provider not in supported or provider in excluded:
             continue
-        project_page = _normalise_launcher_project_page(mod_page.url, provider)
+        if provider in errors:
+            continue
+        try:
+            project_page = _normalise_launcher_project_page(mod_page.url, provider)
+            explicit_file_page = _normalise_explicit_launcher_file_page(
+                mod_page.url,
+                provider,
+            )
+        except ValueError as xcp:
+            project_pages.pop(provider, None)
+            explicit_file_pages.pop(provider, None)
+            errors[provider] = LauncherMetadataProviderCandidates(
+                provider=provider,
+                project_page_url=mod_page.url,
+                error=str(xcp),
+            )
+            continue
         existing = project_pages.get(provider)
         if existing is not None and existing != project_page:
-            raise ValueError(
-                f"Multiple {launcher_provider_label(provider)} project pages were supplied."
+            project_pages.pop(provider, None)
+            explicit_file_pages.pop(provider, None)
+            errors[provider] = LauncherMetadataProviderCandidates(
+                provider=provider,
+                project_page_url=mod_page.url,
+                error=(
+                    f"Multiple {launcher_provider_label(provider)} project pages were supplied."
+                ),
             )
+            continue
+        existing_file_page = explicit_file_pages.get(provider)
+        if (
+            explicit_file_page is not None
+            and existing_file_page is not None
+            and existing_file_page != explicit_file_page
+        ):
+            project_pages.pop(provider, None)
+            explicit_file_pages.pop(provider, None)
+            errors[provider] = LauncherMetadataProviderCandidates(
+                provider=provider,
+                project_page_url=mod_page.url,
+                error=f"Multiple {launcher_provider_label(provider)} file pages were supplied.",
+            )
+            continue
         project_pages[provider] = project_page
-    return project_pages
+        if explicit_file_page is not None:
+            explicit_file_pages[provider] = explicit_file_page
+    return _LauncherProjectPageCollection(
+        project_pages=project_pages,
+        explicit_file_pages=explicit_file_pages,
+        errors=errors,
+    )
+
+
+def _candidates_for_explicit_file_page(
+    candidates: tuple[LauncherMetadataCandidate, ...],
+    *,
+    provider: Provider,
+    file_page_url: str | None,
+) -> tuple[LauncherMetadataCandidate, ...]:
+    if file_page_url is None:
+        return candidates
+    explicit_reference = _version_reference(file_page_url, provider)
+    matching = tuple(
+        candidate.model_copy(
+            update={
+                "match_reasons": (
+                    LauncherMetadataMatchReason.EXPLICIT_FILE_PAGE,
+                    *candidate.match_reasons,
+                )
+            }
+        )
+        for candidate in candidates
+        if explicit_reference
+        in {
+            _version_reference(candidate.file_page_url, provider),
+            candidate.version,
+        }
+    )
+    return matching or candidates
 
 
 def _modrinth_candidate(
@@ -1096,18 +1253,415 @@ async def _search_curseforge_projects(
     return tuple(sorted(candidates, key=_mod_page_candidate_sort_key))
 
 
+async def _bulk_local_file_identities(
+    targets: tuple[BulkLauncherMetadataTarget, ...],
+) -> dict[str, _LocalFileIdentity]:
+    log.info("Bulk launcher metadata identity scan started: files=%s", len(targets))
+    semaphore = asyncio.Semaphore(4)
+
+    async def calculate(target: BulkLauncherMetadataTarget) -> tuple[str, _LocalFileIdentity]:
+        async with semaphore:
+            identity = await asyncio.to_thread(
+                _local_file_identity,
+                target.local_path,
+                logical_filename=target.mod_name,
+            )
+        return target.mod_name, identity
+
+    identities = dict(await asyncio.gather(*(calculate(target) for target in targets)))
+    log.info("Bulk launcher metadata identity scan completed: files=%s", len(identities))
+    return identities
+
+
+async def _bulk_modrinth_exact_matches(
+    targets: tuple[BulkLauncherMetadataTarget, ...],
+    identities: Mapping[str, _LocalFileIdentity],
+    *,
+    http: httpx.AsyncClient,
+) -> dict[str, _BulkModrinthMatch]:
+    eligible_targets = tuple(
+        target for target in targets if target.existing_platforms.modrinth is None
+    )
+    if not eligible_targets:
+        return {}
+    hashes = tuple(dict.fromkeys(identities[target.mod_name].sha1 for target in eligible_targets))
+    log.info("Bulk Modrinth file lookup started: hashes=%s", len(hashes))
+    response = await http.post(
+        "https://api.modrinth.com/v2/version_files",
+        json={"hashes": hashes, "algorithm": "sha1"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    versions_by_hash = _required_mapping(
+        cast(object, response.json()),
+        label="Modrinth bulk version response",
+    )
+    project_ids = tuple(
+        dict.fromkeys(
+            _required_text(
+                _required_mapping(raw_version, label="Modrinth version"),
+                "project_id",
+                label="Modrinth version",
+            )
+            for raw_version in versions_by_hash.values()
+        )
+    )
+    projects_by_id: dict[str, Mapping[str, object]] = {}
+    for offset in range(0, len(project_ids), 100):
+        project_id_chunk = project_ids[offset : offset + 100]
+        projects_response = await http.get(
+            "https://api.modrinth.com/v2/projects",
+            params={"ids": json.dumps(project_id_chunk, separators=(",", ":"))},
+            timeout=30,
+        )
+        projects_response.raise_for_status()
+        raw_projects = cast(object, projects_response.json())
+        if not isinstance(raw_projects, list):
+            raise ValueError("Modrinth returned invalid bulk project metadata.")
+        for raw_project in cast(list[object], raw_projects):
+            project = _required_mapping(raw_project, label="Modrinth project")
+            project_id = _required_text(project, "id", label="Modrinth project")
+            projects_by_id[project_id] = project
+
+    matches: dict[str, _BulkModrinthMatch] = {}
+    for target in eligible_targets:
+        local = identities[target.mod_name]
+        raw_version = versions_by_hash.get(local.sha1)
+        if raw_version is None:
+            continue
+        version = _required_mapping(raw_version, label="Modrinth version")
+        project_id = _required_text(version, "project_id", label="Modrinth version")
+        project = projects_by_id.get(project_id)
+        if project is None:
+            raise ValueError(f"Modrinth omitted bulk project metadata for {project_id!r}.")
+        raw_files = version.get("files")
+        if not isinstance(raw_files, list):
+            raise ValueError("Modrinth version returned invalid file metadata.")
+        selected_file: Mapping[str, object] | None = None
+        for raw_file in cast(list[object], raw_files):
+            file_payload = _required_mapping(raw_file, label="Modrinth file")
+            hashes_payload = _required_mapping(
+                file_payload.get("hashes"),
+                label="Modrinth file hashes",
+            )
+            if _optional_text(hashes_payload.get("sha1")) == local.sha1:
+                selected_file = file_payload
+                break
+        if selected_file is None:
+            raise ValueError(f"Modrinth bulk match omitted the matching file for {target.mod_name!r}.")
+        slug = _required_text(project, "slug", label="Modrinth project")
+        project_type = _optional_text(project.get("project_type")) or "mod"
+        project_page_url = (
+            f"https://modrinth.com/{quote(project_type, safe='')}/{quote(slug, safe='')}"
+        )
+        version_id = _required_text(version, "id", label="Modrinth version")
+        file_page_url = f"{project_page_url}/version/{quote(version_id, safe='')}"
+        hashes_payload = _required_mapping(
+            selected_file.get("hashes"),
+            label="Modrinth file hashes",
+        )
+        suggested_mod_type = _suggest_mod_type_from_modrinth(
+            client=_required_modrinth_side_support(project, "client_side"),
+            server=_required_modrinth_side_support(project, "server_side"),
+        )
+        matches[target.mod_name] = _BulkModrinthMatch(
+            mod_page=ModPageLink(
+                name=KnownModPageProvider.MODRINTH.value,
+                url=project_page_url,
+            ),
+            metadata=ModrinthModMetadata(
+                page_url=file_page_url,
+                project_id=project_id,
+                version_id=version_id,
+                download_url=_required_text(selected_file, "url", label="Modrinth file"),
+                filename=_required_text(selected_file, "filename", label="Modrinth file"),
+                sha1=_required_text(hashes_payload, "sha1", label="Modrinth file hashes"),
+                sha512=_required_text(hashes_payload, "sha512", label="Modrinth file hashes"),
+                size=_required_positive_int(selected_file, "size", label="Modrinth file"),
+            ),
+            suggested_mod_type=suggested_mod_type,
+        )
+    log.info(
+        "Bulk Modrinth file lookup completed: hashes=%s matches=%s projects=%s",
+        len(hashes),
+        len(matches),
+        len(projects_by_id),
+    )
+    return matches
+
+
+async def _bulk_curseforge_exact_matches(
+    targets: tuple[BulkLauncherMetadataTarget, ...],
+    identities: Mapping[str, _LocalFileIdentity],
+    *,
+    http: httpx.AsyncClient,
+) -> dict[str, _BulkCurseForgeMatch]:
+    eligible_targets = tuple(
+        target for target in targets if target.existing_platforms.curseforge is None
+    )
+    if not eligible_targets:
+        return {}
+    api_key = _curseforge_api_key()
+    if api_key is None:
+        raise ValueError("CURSEFORGE_API_KEY is required for bulk CurseForge discovery.")
+    fingerprints = tuple(
+        dict.fromkeys(
+            identities[target.mod_name].curseforge_fingerprint for target in eligible_targets
+        )
+    )
+    log.info("Bulk CurseForge fingerprint lookup started: fingerprints=%s", len(fingerprints))
+    response = await http.post(
+        "https://api.curseforge.com/v1/fingerprints/432",
+        headers={"x-api-key": api_key},
+        json={"fingerprints": fingerprints},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = _required_mapping(cast(object, response.json()), label="CurseForge fingerprint response")
+    data = _required_mapping(payload.get("data"), label="CurseForge fingerprint data")
+    raw_matches = data.get("exactMatches")
+    if not isinstance(raw_matches, list):
+        raise ValueError("CurseForge returned invalid exact fingerprint matches.")
+    files_by_fingerprint: dict[int, Mapping[str, object]] = {}
+    for raw_match in cast(list[object], raw_matches):
+        match = _required_mapping(raw_match, label="CurseForge fingerprint match")
+        file_payload = _required_mapping(match.get("file"), label="CurseForge fingerprint file")
+        raw_fingerprint = file_payload.get("fileFingerprint", match.get("id"))
+        if isinstance(raw_fingerprint, bool) or not isinstance(raw_fingerprint, int):
+            raise ValueError("CurseForge fingerprint match omitted its fingerprint.")
+        files_by_fingerprint[raw_fingerprint] = file_payload
+
+    project_ids = tuple(
+        dict.fromkeys(
+            _required_positive_int(file_payload, "modId", label="CurseForge fingerprint file")
+            for file_payload in files_by_fingerprint.values()
+        )
+    )
+    projects_by_id: dict[int, Mapping[str, object]] = {}
+    for offset in range(0, len(project_ids), 50):
+        project_id_chunk = project_ids[offset : offset + 50]
+        projects_response = await http.post(
+            "https://api.curseforge.com/v1/mods",
+            headers={"x-api-key": api_key},
+            json={"modIds": project_id_chunk},
+            timeout=30,
+        )
+        projects_response.raise_for_status()
+        projects_payload = _required_mapping(
+            cast(object, projects_response.json()),
+            label="CurseForge bulk projects response",
+        )
+        raw_projects = projects_payload.get("data")
+        if not isinstance(raw_projects, list):
+            raise ValueError("CurseForge returned invalid bulk project metadata.")
+        for raw_project in cast(list[object], raw_projects):
+            project = _required_mapping(raw_project, label="CurseForge project")
+            project_id = _required_positive_int(project, "id", label="CurseForge project")
+            projects_by_id[project_id] = project
+
+    matches: dict[str, _BulkCurseForgeMatch] = {}
+    for target in eligible_targets:
+        local = identities[target.mod_name]
+        file_payload = files_by_fingerprint.get(local.curseforge_fingerprint)
+        if file_payload is None:
+            continue
+        project_id = _required_positive_int(
+            file_payload,
+            "modId",
+            label="CurseForge fingerprint file",
+        )
+        project = projects_by_id.get(project_id)
+        if project is None:
+            raise ValueError(f"CurseForge omitted bulk project metadata for {project_id}.")
+        project_page_url = _curseforge_project_page_url(project)
+        file_id = _required_positive_int(file_payload, "id", label="CurseForge fingerprint file")
+        file_page_url = f"{project_page_url}/files/{file_id}"
+        matches[target.mod_name] = _BulkCurseForgeMatch(
+            mod_page=ModPageLink(
+                name=KnownModPageProvider.CURSEFORGE.value,
+                url=project_page_url,
+            ),
+            metadata=CurseForgeModMetadata(
+                page_url=file_page_url,
+                project_id=project_id,
+                file_id=file_id,
+            ),
+        )
+    log.info(
+        "Bulk CurseForge fingerprint lookup completed: fingerprints=%s matches=%s projects=%s",
+        len(fingerprints),
+        len(matches),
+        len(projects_by_id),
+    )
+    return matches
+
+
+async def discover_bulk_launcher_metadata(
+    *,
+    scope: str,
+    targets: tuple[BulkLauncherMetadataTarget, ...],
+    http: httpx.AsyncClient | None = None,
+) -> BulkLauncherMetadataDiscovery:
+    capabilities = mod_capabilities_for_scope(scope)
+    supported = frozenset(capabilities.launcher_metadata_providers)
+    if not supported:
+        raise ValueError(f"{scope} does not support bulk launcher metadata discovery.")
+    mod_names = tuple(target.mod_name for target in targets)
+    if len(mod_names) != len(set(mod_names)):
+        raise ValueError("Bulk launcher metadata targets must have unique mod names.")
+    if not targets:
+        return BulkLauncherMetadataDiscovery()
+
+    identity_targets = tuple(
+        target
+        for target in targets
+        if target.existing_platforms.modrinth is None
+        or target.existing_platforms.curseforge is None
+    )
+    identities = await _bulk_local_file_identities(identity_targets)
+    owned_http = http is None
+    client = http or httpx.AsyncClient()
+    modrinth_matches: dict[str, _BulkModrinthMatch] = {}
+    curseforge_matches: dict[str, _BulkCurseForgeMatch] = {}
+    provider_errors: list[LauncherMetadataProviderError] = []
+
+    async def discover_modrinth() -> None:
+        nonlocal modrinth_matches
+        if Provider.MODRINTH not in supported:
+            return
+        try:
+            modrinth_matches = await _bulk_modrinth_exact_matches(
+                targets,
+                identities,
+                http=client,
+            )
+        except (ValueError, httpx.HTTPError) as xcp:
+            provider_errors.append(_metadata_provider_error(Provider.MODRINTH, xcp))
+
+    async def discover_curseforge() -> None:
+        nonlocal curseforge_matches
+        if Provider.CURSEFORGE not in supported:
+            return
+        try:
+            curseforge_matches = await _bulk_curseforge_exact_matches(
+                targets,
+                identities,
+                http=client,
+            )
+        except (ValueError, httpx.HTTPError) as xcp:
+            provider_errors.append(_metadata_provider_error(Provider.CURSEFORGE, xcp))
+
+    try:
+        await asyncio.gather(discover_modrinth(), discover_curseforge())
+    finally:
+        if owned_http:
+            await client.aclose()
+
+    entries: list[BulkLauncherMetadataEntry] = []
+    for target in targets:
+        modrinth_match = modrinth_matches.get(target.mod_name)
+        curseforge_match = curseforge_matches.get(target.mod_name)
+        existing_page_providers = {
+            provider
+            for page in target.existing_mod_pages
+            if (provider := known_mod_page_provider_for_url(page.url)) is not None
+        }
+        if (
+            modrinth_match is None
+            and target.existing_platforms.modrinth is not None
+            and KnownModPageProvider.MODRINTH not in existing_page_providers
+        ):
+            existing_modrinth = target.existing_platforms.modrinth
+            modrinth_match = _BulkModrinthMatch(
+                mod_page=ModPageLink(
+                    name=KnownModPageProvider.MODRINTH.value,
+                    url=launcher_project_page_url(
+                        existing_modrinth.page_url,
+                        Provider.MODRINTH,
+                    ),
+                ),
+                metadata=existing_modrinth,
+                suggested_mod_type=None,
+            )
+        if (
+            curseforge_match is None
+            and target.existing_platforms.curseforge is not None
+            and target.existing_platforms.curseforge.page_url is not None
+            and KnownModPageProvider.CURSEFORGE not in existing_page_providers
+        ):
+            existing_curseforge = target.existing_platforms.curseforge
+            assert existing_curseforge.page_url is not None
+            curseforge_match = _BulkCurseForgeMatch(
+                mod_page=ModPageLink(
+                    name=KnownModPageProvider.CURSEFORGE.value,
+                    url=launcher_project_page_url(
+                        existing_curseforge.page_url,
+                        Provider.CURSEFORGE,
+                    ),
+                ),
+                metadata=existing_curseforge,
+            )
+        matched_providers = tuple(
+            provider
+            for provider, match in (
+                (Provider.MODRINTH, modrinth_match),
+                (Provider.CURSEFORGE, curseforge_match),
+            )
+            if match is not None
+        )
+        proposed_pages = tuple(
+            match.mod_page
+            for known_provider, match in (
+                (KnownModPageProvider.MODRINTH, modrinth_match),
+                (KnownModPageProvider.CURSEFORGE, curseforge_match),
+            )
+            if match is not None and known_provider not in existing_page_providers
+        )
+        entries.append(
+            BulkLauncherMetadataEntry(
+                mod_name=target.mod_name,
+                friendly_name=target.friendly_name,
+                status=(
+                    BulkLauncherMetadataStatus.EXACT
+                    if matched_providers
+                    else BulkLauncherMetadataStatus.UNMATCHED
+                ),
+                mod_pages=proposed_pages,
+                platforms=ModPlatformMetadata(
+                    modrinth=None if modrinth_match is None else modrinth_match.metadata,
+                    curseforge=None if curseforge_match is None else curseforge_match.metadata,
+                ),
+                suggested_mod_type=(
+                    None if modrinth_match is None else modrinth_match.suggested_mod_type
+                ),
+                matched_providers=matched_providers,
+            )
+        )
+    return BulkLauncherMetadataDiscovery(
+        entries=tuple(entries),
+        provider_errors=tuple(sorted(provider_errors, key=lambda error: error.provider.value)),
+    )
+
+
 async def discover_mod_pages(
     *,
     scope: str,
     existing_mod_pages: tuple[ModPageLink, ...],
     local_path: Path,
+    local_filename: str | None = None,
     friendly_name: str,
     detected_version: str | None = None,
     game_version: str | None = None,
     loader: str | None = None,
+    providers: tuple[Provider, ...] | None = None,
     http: httpx.AsyncClient | None = None,
 ) -> ModPageDiscovery:
     capabilities = mod_capabilities_for_scope(scope)
+    selected_providers = _selected_launcher_metadata_providers(
+        scope=scope,
+        supported=capabilities.launcher_metadata_providers,
+        requested=providers,
+    )
     existing_providers = {
         provider
         for page in existing_mod_pages
@@ -1117,15 +1671,19 @@ async def discover_mod_pages(
         Provider.MODRINTH: KnownModPageProvider.MODRINTH,
         Provider.CURSEFORGE: KnownModPageProvider.CURSEFORGE,
     }
-    providers = tuple(
+    unresolved_providers = tuple(
         provider
-        for provider in capabilities.launcher_metadata_providers
+        for provider in selected_providers
         if launcher_to_known.get(provider) not in existing_providers
     )
-    if not providers:
+    if not unresolved_providers:
         raise ValueError("Mod Pages already contains all supported project providers.")
 
-    local = await asyncio.to_thread(_local_file_identity, local_path)
+    local = await asyncio.to_thread(
+        _local_file_identity,
+        local_path,
+        logical_filename=local_filename,
+    )
     search_terms = _project_search_terms(
         friendly_name=friendly_name,
         local_filename=local.filename,
@@ -1180,7 +1738,9 @@ async def discover_mod_pages(
         return ModPageProviderCandidates(provider=provider, candidates=candidates)
 
     try:
-        results = await asyncio.gather(*(discover_provider(provider) for provider in providers))
+        results = await asyncio.gather(
+            *(discover_provider(provider) for provider in unresolved_providers)
+        )
         return ModPageDiscovery(providers=tuple(results))
     finally:
         if owned_http:
@@ -1193,24 +1753,43 @@ async def discover_launcher_metadata(
     mod_pages: tuple[ModPageLink, ...],
     existing_urls: LauncherProviderUrls,
     local_path: Path,
+    local_filename: str | None = None,
     game_version: str | None = None,
     loader: str | None = None,
+    providers: tuple[Provider, ...] | None = None,
     http: httpx.AsyncClient | None = None,
 ) -> LauncherMetadataDiscovery:
     capabilities = mod_capabilities_for_scope(scope)
-    supported = frozenset(capabilities.launcher_metadata_providers)
+    selected_providers = _selected_launcher_metadata_providers(
+        scope=scope,
+        supported=capabilities.launcher_metadata_providers,
+        requested=providers,
+    )
+    supported = frozenset(selected_providers)
     excluded = frozenset(provider for provider in supported if existing_urls.has_provider(provider))
-    project_pages = _launcher_project_pages(
+    page_collection = _collect_launcher_project_pages(
         mod_pages,
         supported=supported,
         excluded=excluded,
     )
-    if not project_pages:
+    if not page_collection.project_pages:
+        if page_collection.errors:
+            return LauncherMetadataDiscovery(
+                providers=tuple(
+                    page_collection.errors[provider]
+                    for provider in selected_providers
+                    if provider in page_collection.errors
+                )
+            )
         raise ValueError(
             "No unresolved Modrinth or CurseForge project pages were found in Mod Pages."
         )
 
-    local = await asyncio.to_thread(_local_file_identity, local_path)
+    local = await asyncio.to_thread(
+        _local_file_identity,
+        local_path,
+        logical_filename=local_filename,
+    )
     owned_http = http is None
     client = http or httpx.AsyncClient()
 
@@ -1238,6 +1817,11 @@ async def discover_launcher_metadata(
                     )
                 case _:
                     raise ValueError(f"Unsupported launcher metadata provider: {provider.value}")
+            candidates = _candidates_for_explicit_file_page(
+                candidates,
+                provider=provider,
+                file_page_url=page_collection.explicit_file_pages.get(provider),
+            )
         except (ValueError, httpx.HTTPError) as xcp:
             return LauncherMetadataProviderCandidates(
                 provider=provider,
@@ -1251,13 +1835,23 @@ async def discover_launcher_metadata(
         )
 
     try:
-        providers = await asyncio.gather(
+        provider_results = await asyncio.gather(
             *(
                 discover_provider(provider, project_page_url)
-                for provider, project_page_url in project_pages.items()
+                for provider, project_page_url in page_collection.project_pages.items()
             )
         )
-        return LauncherMetadataDiscovery(providers=tuple(providers))
+        results_by_provider = {
+            **page_collection.errors,
+            **{result.provider: result for result in provider_results},
+        }
+        return LauncherMetadataDiscovery(
+            providers=tuple(
+                results_by_provider[provider]
+                for provider in selected_providers
+                if provider in results_by_provider
+            )
+        )
     finally:
         if owned_http:
             await client.aclose()
@@ -1269,48 +1863,103 @@ async def resolve_launcher_metadata_resolution(
     urls: LauncherProviderUrls,
     local_filename: str,
     local_path: Path | None = None,
+    providers: tuple[Provider, ...] | None = None,
     http: httpx.AsyncClient | None = None,
 ) -> LauncherMetadataResolution:
     capabilities = mod_capabilities_for_scope(scope)
-    supported = frozenset(capabilities.launcher_metadata_providers)
-    supplied_urls = {
-        provider: page_url
+    selected_providers = _selected_launcher_metadata_providers(
+        scope=scope,
+        supported=capabilities.launcher_metadata_providers,
+        requested=providers,
+    )
+    supported = frozenset(selected_providers)
+    app_supported = frozenset(capabilities.launcher_metadata_providers)
+    all_supplied_providers = {
+        provider
         for provider in (Provider.MODRINTH, Provider.CURSEFORGE)
-        if (page_url := urls.for_provider(provider)) is not None
+        if urls.has_provider(provider)
     }
-    supplied_providers = {
-        provider for provider in (Provider.MODRINTH, Provider.CURSEFORGE) if urls.has_provider(provider)
-    }
-    unsupported = tuple(provider for provider in supplied_providers if provider not in supported)
+    unsupported = tuple(
+        provider for provider in all_supplied_providers if provider not in app_supported
+    )
     if unsupported:
         names = ", ".join(launcher_provider_label(provider) for provider in unsupported)
         raise ValueError(f"{scope} does not support launcher metadata from: {names}.")
+    supplied_urls = {
+        provider: page_url
+        for provider in (Provider.MODRINTH, Provider.CURSEFORGE)
+        if provider in supported and (page_url := urls.for_provider(provider)) is not None
+    }
+    supplied_providers = {
+        provider for provider in supported if urls.has_provider(provider)
+    }
+    if providers is not None and not supplied_providers:
+        names = ", ".join(launcher_provider_label(provider) for provider in selected_providers)
+        raise ValueError(f"No launcher metadata source was supplied for: {names}.")
 
     owned_http = http is None
     client = http or httpx.AsyncClient()
     try:
-        try:
-            local_sha1 = (
-                None
-                if local_path is None or Provider.MODRINTH not in supplied_urls
-                else (await asyncio.to_thread(_local_file_identity, local_path)).sha1
-            )
-            modrinth: ModrinthModMetadata | None = None
-            suggested_mod_type: ModType | None = None
-            if Provider.MODRINTH in supplied_urls:
+        local_sha1 = (
+            None
+            if local_path is None or Provider.MODRINTH not in supplied_urls
+            else (
+                await asyncio.to_thread(
+                    _local_file_identity,
+                    local_path,
+                    logical_filename=local_filename,
+                )
+            ).sha1
+        )
+        modrinth: ModrinthModMetadata | None = None
+        curseforge: CurseForgeModMetadata | None = None
+        suggested_mod_type: ModType | None = None
+        provider_errors: list[LauncherMetadataProviderError] = []
+
+        async def resolve_modrinth_provider() -> None:
+            nonlocal modrinth, suggested_mod_type
+            try:
                 modrinth, suggested_mod_type = await _resolve_modrinth(
                     supplied_urls[Provider.MODRINTH],
                     local_filename=local_filename,
                     local_sha1=local_sha1,
                     http=client,
                 )
-            curseforge = await _resolve_curseforge_source(urls, http=client)
-        except httpx.HTTPError as xcp:
-            raise ValueError(f"Launcher metadata lookup failed: {xcp}") from xcp
+            except (ValueError, httpx.HTTPError) as xcp:
+                provider_errors.append(_metadata_provider_error(Provider.MODRINTH, xcp))
+
+        async def resolve_curseforge_provider() -> None:
+            nonlocal curseforge
+            try:
+                curseforge = await _resolve_curseforge_source(urls, http=client)
+            except (ValueError, httpx.HTTPError) as xcp:
+                provider_errors.append(_metadata_provider_error(Provider.CURSEFORGE, xcp))
+
+        provider_resolutions: list[Awaitable[None]] = []
+        if Provider.MODRINTH in supplied_urls:
+            provider_resolutions.append(resolve_modrinth_provider())
+        if Provider.CURSEFORGE in supplied_providers:
+            provider_resolutions.append(resolve_curseforge_provider())
+        await asyncio.gather(*provider_resolutions)
+
+        provider_errors.sort(key=lambda error: error.provider.value)
+        if provider_errors and modrinth is None and curseforge is None:
+            details = "; ".join(
+                f"{launcher_provider_label(error.provider)}: {error.message}"
+                for error in provider_errors
+            )
+            raise ValueError(f"Launcher metadata lookup failed: {details}")
+        for error in provider_errors:
+            log.warning(
+                "%s launcher metadata lookup failed; other providers will be retained: %s",
+                launcher_provider_label(error.provider),
+                error.message,
+            )
         return LauncherMetadataResolution(
             platforms=ModPlatformMetadata(modrinth=modrinth, curseforge=curseforge),
             suggested_mod_type=suggested_mod_type,
             suggestion_provider=(Provider.MODRINTH if suggested_mod_type is not None else None),
+            provider_errors=tuple(provider_errors),
         )
     finally:
         if owned_http:
@@ -1323,6 +1972,7 @@ async def resolve_launcher_metadata(
     urls: LauncherProviderUrls,
     local_filename: str,
     local_path: Path | None = None,
+    providers: tuple[Provider, ...] | None = None,
     http: httpx.AsyncClient | None = None,
 ) -> ModPlatformMetadata:
     resolution = await resolve_launcher_metadata_resolution(
@@ -1330,6 +1980,7 @@ async def resolve_launcher_metadata(
         urls=urls,
         local_filename=local_filename,
         local_path=local_path,
+        providers=providers,
         http=http,
     )
     return resolution.platforms

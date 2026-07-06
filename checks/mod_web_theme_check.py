@@ -9,6 +9,7 @@ from mod_web_theme import (
     apply_mod_web_theme,
     mod_web_badge_class,
 )
+from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT, MOD_WEB_TOAST_VERSION
 
 
 class _FakeUi:
@@ -32,6 +33,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("--mod-red: #dc2626", css)
         self.assertIn("--mod-warning: #f59e0b", css)
         self.assertIn("--mod-motion-medium: 260ms", css)
+        self.assertIn("--mod-motion-tab-accent: 320ms", css)
         self.assertIn("--mod-motion-ease: cubic-bezier(0.22, 1, 0.36, 1)", css)
         self.assertIn(".mod-card", css)
         self.assertIn(".q-notification.bg-warning", css)
@@ -161,9 +163,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertRegex(
             css,
             r"(?s)\.mod-section-tabs \.q-tab::after \{.*?right: 0;.*?left: 0;.*?"
+            r"linear-gradient\(90deg, #7c3aed 0%, #c4b5fd 50%, #7c3aed 100%\);.*?"
             r"transform: scaleX\(0\);.*?"
             r"transform-origin: center;.*?"
-            r"transition: transform var\(--mod-motion-medium\)",
+            r"transition: transform var\(--mod-motion-tab-accent\)",
         )
         self.assertRegex(
             css,
@@ -234,7 +237,19 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-virtual-mod-table tbody tr.selected > td::after", css)
         self.assertRegex(
             css,
+            r"(?s)\.mod-virtual-mod-table \.q-table__middle \{.*?"
+            r"overflow-x: hidden;.*?overflow-y: auto;",
+        )
+        self.assertRegex(
+            css,
             r"(?s)\.mod-virtual-mod-table tbody tr\.selected > td::after,.*?content: none !important;",
+        )
+        self.assertNotRegex(css, r"(?s)\.mod-row:hover \{[^}]*border-color:")
+        self.assertNotIn(".mod-row-disabled:hover", css)
+        self.assertNotIn(".mod-row-client-only:hover", css)
+        self.assertNotRegex(
+            css,
+            r"(?s)\.mod-row,\s*\.mod-save-card.*?animation: mod-list-item-enter",
         )
         self.assertRegex(
             css,
@@ -346,6 +361,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-metadata-review-card", css)
         self.assertIn(".mod-metadata-review-provider-title", css)
         self.assertIn(".mod-metadata-review-link", css)
+        self.assertIn(".mod-bulk-metadata-dialog-card", css)
+        self.assertIn(".mod-bulk-metadata-table", css)
+        self.assertIn(".mod-bulk-metadata-selection-checkbox", css)
+        self.assertIn(".mod-bulk-metadata-type-checkbox", css)
         self.assertIn(".mod-app-details-section", css)
         self.assertIn(".mod-app-details-field", css)
         self.assertIn(".mod-page-editor-controls", css)
@@ -406,6 +425,11 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-client-pack-config-invalid .q-field__control", css)
         self.assertIn(".mod-app-details-state-button", css)
         self.assertIn(".mod-toolbar-button-fill", css)
+        self.assertIn(".mod-toolbar-status-button", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-toolbar-status-button \.q-btn__content \{.*?color: #f5f3ff !important;",
+        )
         self.assertIn(".mod-setting-control-surface", css)
         self.assertIn(".mod-setting-field-secondary", css)
         self.assertIn(".mod-setting-menu", css)
@@ -581,7 +605,15 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertIsNotNone(ui.head_html)
         self.assertIn('/mod-web/assets/theme.css?v=', str(ui.head_html))
+        self.assertIn(f'/mod-web/assets/toasts.js?v={MOD_WEB_TOAST_VERSION}', str(ui.head_html))
         self.assertIn("content-visibility: auto", MOD_WEB_THEME_STYLESHEET)
+
+    def test_toast_client_queues_timers_and_pauses_on_hover(self) -> None:
+        self.assertIn("const activeRecord", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn("remainingMilliseconds", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn("document.addEventListener('mouseover'", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn("document.addEventListener('mouseout'", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn("timeout: 0", MOD_WEB_TOAST_JAVASCRIPT)
 
     def test_action_base_class_stays_on_mod_action_system(self) -> None:
         self.assertIn("mod-action", MOD_WEB_ACTION_BASE_CLASSES)

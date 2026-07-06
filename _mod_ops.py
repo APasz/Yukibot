@@ -44,6 +44,8 @@ class ArchiveDataEntry:
 
 type WritableArchiveEntry = ArchiveEntry | ArchiveDataEntry
 
+_ALREADY_COMPRESSED_ARCHIVE_SUFFIXES: frozenset[str] = frozenset({".jar", ".zip", ".mrpack"})
+
 
 class _HashDigest(Protocol):
     def update(self, content: bytes, /) -> object: ...
@@ -309,6 +311,11 @@ def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: 
         written_paths.add(key)
         return rendered
 
+    def compression_for(archive_member_path: PurePosixPath) -> int:
+        if archive_member_path.suffix.casefold() in _ALREADY_COMPRESSED_ARCHIVE_SUFFIXES:
+            return zipfile.ZIP_STORED
+        return zipfile.ZIP_DEFLATED
+
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for entry in entries:
             if isinstance(entry, ArchiveDataEntry):
@@ -316,7 +323,11 @@ def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: 
                 continue
             source_path = entry.source_path
             if source_path.is_file():
-                archive.write(source_path, reserve_archive_path(entry.archive_path))
+                archive.write(
+                    source_path,
+                    reserve_archive_path(entry.archive_path),
+                    compress_type=compression_for(entry.archive_path),
+                )
                 continue
 
             seen_directories: set[tuple[int, int]] = set()
@@ -339,7 +350,12 @@ def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: 
                     source_file = root_path / file_name
                     if source_file.is_symlink():
                         raise ValueError(f"Archive directory cannot contain symbolic links: {source_file}")
-                    archive.write(source_file, reserve_archive_path(archive_root / file_name))
+                    archive_file = archive_root / file_name
+                    archive.write(
+                        source_file,
+                        reserve_archive_path(archive_file),
+                        compress_type=compression_for(archive_file),
+                    )
 
 
 async def compress_archive_entries(

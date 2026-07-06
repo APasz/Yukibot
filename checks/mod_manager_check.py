@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from modmux.models import Provider
+
 from _mod_ops import (
     ClientPackSelection,
     ClientPackValidationError,
@@ -18,6 +20,8 @@ from _mod_ops import (
 )
 from apps._config import (
     App_Config,
+    BulkLauncherMetadataEntry,
+    BulkLauncherMetadataStatus,
     ClientPackConfig,
     ClientPackPolicy,
     CurseForgeModMetadata,
@@ -261,16 +265,18 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
     def test_client_pack_inclusion_defaults_from_mod_type(self) -> None:
         regular = Mod_Config(name="regular.zip", directory=self.mods_dir)
         server = Mod_Config(name="server.zip", directory=self.mods_dir, mod_type=ModType.SERVER)
-        explicitly_included_server = Mod_Config(
-            name="included-server.zip",
+        builtin = Mod_Config(name="builtin.zip", directory=self.mods_dir, mod_type=ModType.BUILTIN)
+        explicitly_excluded_server = Mod_Config(
+            name="excluded-server.zip",
             directory=self.mods_dir,
             mod_type=ModType.SERVER,
-            client_pack=ClientPackConfig(included_in_client=True),
+            client_pack=ClientPackConfig(included_in_client=False),
         )
 
         self.assertTrue(regular.client_pack.included_in_client)
-        self.assertFalse(server.client_pack.included_in_client)
-        self.assertTrue(explicitly_included_server.client_pack.included_in_client)
+        self.assertTrue(server.client_pack.included_in_client)
+        self.assertFalse(builtin.client_pack.included_in_client)
+        self.assertFalse(explicitly_excluded_server.client_pack.included_in_client)
 
     def test_alternative_client_pack_group_id_rejects_whitespace(self) -> None:
         for group_id in ("visual options", " visual-options", "visual-options ", "visual\toptions"):
@@ -564,6 +570,94 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(manager.get("example.zip").cfg.mod_pages, mod_pages)
 
+    async def test_apply_discovered_metadata_merges_exact_pages_without_reclassifying(self) -> None:
+        manager = self._build_manager()
+        mod = await manager.add(self._write_source_file())
+        existing_page = ModPageLink(name="GitHub", url="https://github.com/example/mod")
+        await manager.update_properties(
+            mod,
+            mod_type=ModType.CLIENT,
+            download_block_reason=None,
+            metadata_overrides=ModMetadataOverrides(),
+            mod_pages=(existing_page,),
+        )
+        modrinth_page = ModPageLink(name="Modrinth", url="https://modrinth.com/mod/example")
+        metadata = ModrinthModMetadata(
+            page_url="https://modrinth.com/mod/example/version/version-id",
+            project_id="project-id",
+            version_id="version-id",
+            download_url="https://cdn.modrinth.com/example.zip",
+        )
+        discovery = BulkLauncherMetadataEntry(
+            mod_name=mod.name,
+            friendly_name=mod.friendly,
+            status=BulkLauncherMetadataStatus.EXACT,
+            mod_pages=(modrinth_page,),
+            platforms=ModPlatformMetadata(modrinth=metadata),
+            suggested_mod_type=ModType.SERVER,
+            matched_providers=(Provider.MODRINTH,),
+        )
+
+        await manager.apply_discovered_launcher_metadata(mod, discovery)
+        await manager.reload_mods()
+
+        reloaded = manager.get(mod.name)
+        self.assertEqual(reloaded.cfg.mod_pages, (existing_page, modrinth_page))
+        self.assertEqual(reloaded.cfg.platforms.modrinth, metadata)
+        self.assertIs(reloaded.mod_type, ModType.CLIENT)
+
+    async def test_apply_discovered_metadata_can_apply_non_regular_type_suggestion(self) -> None:
+        manager = self._build_manager()
+        mod = await manager.add(self._write_source_file())
+        metadata = ModrinthModMetadata(
+            page_url="https://modrinth.com/mod/example/version/version-id",
+            project_id="project-id",
+            version_id="version-id",
+            download_url="https://cdn.modrinth.com/example.zip",
+        )
+        discovery = BulkLauncherMetadataEntry(
+            mod_name=mod.name,
+            friendly_name=mod.friendly,
+            status=BulkLauncherMetadataStatus.EXACT,
+            platforms=ModPlatformMetadata(modrinth=metadata),
+            suggested_mod_type=ModType.SERVER,
+            matched_providers=(Provider.MODRINTH,),
+        )
+
+        await manager.apply_discovered_launcher_metadata(
+            mod,
+            discovery,
+            apply_suggested_mod_type=True,
+        )
+        await manager.reload_mods()
+
+        self.assertIs(manager.get(mod.name).mod_type, ModType.SERVER)
+
+    async def test_apply_discovered_metadata_rejects_regular_type_suggestion(self) -> None:
+        manager = self._build_manager()
+        mod = await manager.add(self._write_source_file())
+        metadata = ModrinthModMetadata(
+            page_url="https://modrinth.com/mod/example/version/version-id",
+            project_id="project-id",
+            version_id="version-id",
+            download_url="https://cdn.modrinth.com/example.zip",
+        )
+        discovery = BulkLauncherMetadataEntry(
+            mod_name=mod.name,
+            friendly_name=mod.friendly,
+            status=BulkLauncherMetadataStatus.EXACT,
+            platforms=ModPlatformMetadata(modrinth=metadata),
+            suggested_mod_type=ModType.REGULAR,
+            matched_providers=(Provider.MODRINTH,),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Only non-Regular"):
+            await manager.apply_discovered_launcher_metadata(
+                mod,
+                discovery,
+                apply_suggested_mod_type=True,
+            )
+
     async def test_project_metadata_is_shared_across_scope_instances(self) -> None:
         first_app_dir = self.apps_dir / "first"
         second_app_dir = self.apps_dir / "second"
@@ -775,13 +869,13 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             {entry.archive_path.as_posix() for entry in entries},
-            {shared.name, client_side.name, client_only.name},
+            {shared.name, client_side.name, client_only.name, server.name},
         )
         self.assertTrue(shared.client_pack_eligible)
         self.assertTrue(client_side.client_pack_eligible)
         self.assertTrue(client_only.client_pack_eligible)
         self.assertFalse(disabled.client_pack_eligible)
-        self.assertFalse(server.client_pack_eligible)
+        self.assertTrue(server.client_pack_eligible)
 
     async def test_server_mod_is_directly_downloadable_and_can_be_included_in_client(self) -> None:
         manager = self._build_manager(mod_cls=_DetectedServerMod)
@@ -789,15 +883,13 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(server.mod_type, ModType.SERVER)
         self.assertTrue(server.downloadable)
-        self.assertFalse(server.cfg.client_pack.included_in_client)
-        self.assertFalse(server.client_pack_eligible)
+        self.assertTrue(server.cfg.client_pack.included_in_client)
+        self.assertTrue(server.client_pack_eligible)
         self.assertEqual(
             download_paths(manager, (server.name,), default_enabled_only=False),
             (server.storage_path,),
         )
 
-        server.cfg.client_pack.included_in_client = True
-        self.assertTrue(server.client_pack_eligible)
         self.assertEqual(
             tuple(
                 entry.mod_name
@@ -829,7 +921,7 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
                 client_overrides_dir=None,
             )
 
-    def test_client_pack_rejects_explicitly_selected_server_only_mod(self) -> None:
+    def test_client_pack_accepts_server_mod_with_legacy_server_only_reason(self) -> None:
         manager = self._build_manager()
         server = self._insert_existing_mod(
             manager,
@@ -838,15 +930,17 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
             download_block_reason=ModDownloadBlockReason.SERVER_ONLY,
         )
 
-        with self.assertRaisesRegex(ClientPackValidationError, "not eligible.*server.zip"):
-            build_client_pack_entries(
-                manager,
-                ClientPackSelection(
-                    selected_mod_names=frozenset({server.name}),
-                    supplied=True,
-                ),
-                client_overrides_dir=None,
-            )
+        entries = build_client_pack_entries(
+            manager,
+            ClientPackSelection(
+                selected_mod_names=frozenset({server.name}),
+                supplied=True,
+            ),
+            client_overrides_dir=None,
+        )
+
+        self.assertIsNone(server.download_block_reason)
+        self.assertEqual(tuple(entry.mod_name for entry in entries), (server.name,))
 
     def test_client_only_mod_requires_client_side_classification(self) -> None:
         manager = self._build_manager()

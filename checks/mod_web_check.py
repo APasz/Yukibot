@@ -27,6 +27,7 @@ from _security import Access_Control, Power_Level
 from apps._app import AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
 from apps._config import (
     AppTitleFont,
+    BulkLauncherMetadataDiscovery,
     ClientPackConfig,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
@@ -103,6 +104,7 @@ from node_api import (
     NodeAppTransitionState,
     NodeBlueprintEntry,
     NodeBlueprintList,
+    NodeBulkLauncherMetadataApplyResult,
     NodeChatEndpointSummary,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
@@ -445,6 +447,40 @@ class ModWebTests(unittest.TestCase):
                     provider=Provider.MODRINTH,
                     project_page_url=candidate.project_page_url,
                     candidates=(candidate,),
+                ),
+            )
+        )
+
+        self.assertEqual(
+            ModWebService._automatic_launcher_urls(discovery),
+            {Provider.MODRINTH: candidate.file_page_url},
+        )
+
+    def test_metadata_detection_accepts_explicit_modrinth_file_when_curseforge_fails(self) -> None:
+        candidate = LauncherMetadataCandidate(
+            provider=Provider.MODRINTH,
+            project_page_url="https://modrinth.com/mod/mouse-tweaks",
+            file_page_url="https://modrinth.com/mod/mouse-tweaks/version/7JVXOe3K",
+            version="1.20.1-2.25.1-forge",
+            filename="MouseTweaks-forge-mc1.20.1-2.25.1.jar",
+            match_reasons=(
+                LauncherMetadataMatchReason.EXPLICIT_FILE_PAGE,
+                LauncherMetadataMatchReason.FILENAME,
+            ),
+        )
+        discovery = LauncherMetadataDiscovery(
+            providers=(
+                LauncherMetadataProviderCandidates(
+                    provider=Provider.MODRINTH,
+                    project_page_url=candidate.project_page_url,
+                    candidates=(candidate,),
+                ),
+                LauncherMetadataProviderCandidates(
+                    provider=Provider.CURSEFORGE,
+                    project_page_url=(
+                        "https://www.curseforge.com/minecraft/mc-mods/mouse-tweaks"
+                    ),
+                    error="CurseForge unavailable",
                 ),
             )
         )
@@ -5095,8 +5131,8 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(search_query, "alpha fabric")
         javascript = cast(str, ui.run_javascript.call_args.args[0])
-        self.assertIn('url.searchParams.set("search", query)', javascript)
-        self.assertIn('const query = "alpha fabric"', javascript)
+        self.assertIn('url.searchParams.set("search", value)', javascript)
+        self.assertIn('const value = "alpha fabric"', javascript)
 
     def test_empty_page_search_query_removes_browser_url_parameter(self) -> None:
         ui = Mock()
@@ -5105,6 +5141,25 @@ class ModWebTests(unittest.TestCase):
 
         javascript = cast(str, ui.run_javascript.call_args.args[0])
         self.assertIn('url.searchParams.delete("search")', javascript)
+
+    def test_page_mod_sort_order_round_trips_through_browser_url(self) -> None:
+        ui = Mock()
+
+        sort_order = ModWebService._initial_page_mod_sort_order(
+            "/mod-web/mods/minecraft_alpha?tab=mods&mod_sort=size_descending"
+        )
+        ModWebService._replace_browser_mod_sort_order(ui=cast(ModWebUi, ui), order=sort_order)
+
+        self.assertIs(sort_order, ModWebModSortOrder.SIZE_DESCENDING)
+        javascript = cast(str, ui.run_javascript.call_args.args[0])
+        self.assertIn('url.searchParams.set("mod_sort", value)', javascript)
+        self.assertIn('const value = "size_descending"', javascript)
+        self.assertIs(
+            ModWebService._initial_page_mod_sort_order(
+                "/mod-web/mods/minecraft_alpha?tab=mods&mod_sort=invalid"
+            ),
+            ModWebModSortOrder.NEWEST,
+        )
 
     def test_toggle_simulated_down_node_url_preserves_existing_query(self) -> None:
         service = ModWebService()
@@ -8641,6 +8696,24 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(query["include_kubejs_scripts"], "false")
 
+    def test_download_query_supports_compact_excluded_mod_selection(self) -> None:
+        query = ModWebService._download_query(
+            enabled_only=False,
+            selected_only=True,
+            excluded_only=True,
+            mod_names=("not-selected.jar",),
+        )
+
+        self.assertEqual(
+            query,
+            {
+                "enabled_only": "false",
+                "selected_only": "true",
+                "excluded_only": "true",
+                "mod_name": ["not-selected.jar"],
+            },
+        )
+
     def test_server_and_admin_pack_downloads_require_sudo(self) -> None:
         self.assertIs(ModWebService._mod_download_required_level(None), Power_Level.visitor)
         self.assertIs(ModWebService._mod_download_required_level(PackPurpose.CLIENT), Power_Level.visitor)
@@ -8816,6 +8889,7 @@ class ModWebTests(unittest.TestCase):
                     download_button=None,
                     delete_control=None,
                     result_count_label=None,
+                    metadata_status_button=None,
                 ),
             ),
             patch.object(service, "_render_mod_download_row") as render_standard_row,
@@ -8827,6 +8901,7 @@ class ModWebTests(unittest.TestCase):
         ui.table.assert_called_once()
         self.assertEqual(len(ui.table.call_args.kwargs["rows"]), 50)
         self.assertIn("virtual-scroll", table.props.call_args.args[0])
+        self.assertIn("hide-bottom", table.props.call_args.args[0])
         virtual_row_template = table.add_slot.call_args.args[1]
         self.assertIn("['mod-row', 'mod-row-clickable', props.row.state_class]", virtual_row_template)
         self.assertIn(':data-mod-name="props.row.name"', virtual_row_template)
@@ -8839,6 +8914,10 @@ class ModWebTests(unittest.TestCase):
         render_mod_dialog.assert_called_once_with(ui=ui, entry=mods[0], model=model, user=user)
         dialog.open.assert_called_once()
         render_standard_row.assert_not_called()
+        scroll_javascript = cast(str, ui.run_javascript.call_args.args[0])
+        self.assertIn('window.sessionStorage.getItem(storageKey)', scroll_javascript)
+        self.assertIn('window.sessionStorage.setItem(storageKey, String(position))', scroll_javascript)
+        self.assertIn('mod-web:mods-scroll:yuki:factorio_alpha', scroll_javascript)
 
     def test_filter_mod_entries_matches_name_version_and_state_tokens(self) -> None:
         service = ModWebService()
@@ -9193,8 +9272,13 @@ class ModWebTests(unittest.TestCase):
                 self.class_value = value
                 return self
 
-            def props(self, value: str) -> "FakeButton":
-                self.props_value = value
+            def props(
+                self,
+                value: str | None = None,
+                *,
+                remove: str | None = None,
+            ) -> "FakeButton":
+                self.props_value = value if remove is None else f"remove:{remove}"
                 return self
 
             def on(
@@ -9212,6 +9296,9 @@ class ModWebTests(unittest.TestCase):
 
             def set_enabled(self, enabled: bool) -> None:
                 self.enabled = enabled
+
+            def set_visibility(self, visible: bool) -> None:
+                self.visible = visible
 
         class FakeLabel:
             def __init__(self, text: str) -> None:
@@ -9556,12 +9643,29 @@ class ModWebTests(unittest.TestCase):
         ui = FakeUi()
         rendered_mod_names: list[str] = []
         remote_json = AsyncMock(return_value={"changelog": "Persisted after Save."})
+
+        async def wait_for_metadata_cancellation(**_kwargs: object) -> BulkLauncherMetadataDiscovery:
+            await asyncio.Event().wait()
+            return BulkLauncherMetadataDiscovery()
+
+        discover_bulk_metadata = AsyncMock(side_effect=wait_for_metadata_cancellation)
+        cancel_bulk_metadata = AsyncMock(return_value=True)
         set_changelog_draft = Mock()
         get_changelog_draft = Mock(side_effect=[None, "Fresh shared draft."])
 
         with (
             patch.object(service, "_user_has_level", return_value=True),
             patch.object(service, "_remote_json_async", new=remote_json),
+            patch.object(
+                service,
+                "_discover_bulk_mod_metadata",
+                new=discover_bulk_metadata,
+            ),
+            patch.object(
+                service,
+                "_cancel_bulk_mod_metadata",
+                new=cancel_bulk_metadata,
+            ),
             patch.object(
                 service._backend,
                 "set_client_pack_changelog_draft",
@@ -9602,6 +9706,7 @@ class ModWebTests(unittest.TestCase):
             self.assertIsNotNone(save_button.on_click)
             assert save_button.on_click is not None
             asyncio.run(cast(Any, save_button.on_click()))
+            self.assertEqual(save_button.props_value, "remove:loading")
             remote_json.assert_awaited_once()
             self.assertEqual(
                 remote_json.await_args.kwargs["json_payload"].get("changelog"),
@@ -9672,6 +9777,8 @@ class ModWebTests(unittest.TestCase):
             self.assertNotIn("Configure <!>", toolbar_text)
             self.assertNotIn("Upload", toolbar_text)
             self.assertNotIn("Delete", toolbar_text)
+            self.assertNotIn("Find Metadata", toolbar_text)
+            self.assertIn("Metadata: Running", toolbar_text)
             self.assertIn("Clear", toolbar_text)
             self.assertIn("Download All/2", toolbar_text)
             self.assertEqual(
@@ -9680,7 +9787,45 @@ class ModWebTests(unittest.TestCase):
             )
             self.assertEqual(
                 [item.text for item in ui.menu_items],
-                ["Upload", "Configure <!>", "Delete"],
+                ["Upload", "Configure <!>", "Find Metadata", "Delete"],
+            )
+            initial_metadata_status = next(
+                button for button in ui.buttons if button.text == "Metadata: Running"
+            )
+            self.assertFalse(initial_metadata_status.visible)
+            find_metadata_item = next(
+                item for item in ui.menu_items if item.text == "Find Metadata"
+            )
+            self.assertIsNotNone(find_metadata_item.on_click)
+            assert find_metadata_item.on_click is not None
+
+            async def click_find_metadata() -> None:
+                find_metadata_item.on_click()
+                await asyncio.sleep(0)
+                running_status = next(
+                    button for button in ui.buttons if button.text == "Metadata: Scanning…"
+                )
+                self.assertTrue(running_status.visible)
+                self.assertTrue(running_status.enabled)
+                self.assertIsNotNone(running_status.on_click)
+                assert running_status.on_click is not None
+                running_status.on_click()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+
+            asyncio.run(click_find_metadata())
+            metadata_status_button = next(
+                button for button in ui.buttons if button.text == "Metadata: Cancelled"
+            )
+            self.assertIn("mod-toolbar-status-button", metadata_status_button.class_value or "")
+            self.assertTrue(metadata_status_button.visible)
+            self.assertFalse(metadata_status_button.enabled)
+            discovery_operation_id = discover_bulk_metadata.await_args.kwargs["operation_id"]
+            cancel_bulk_metadata.assert_awaited_once_with(
+                model=model,
+                operation_id=discovery_operation_id,
+                user=user,
             )
             self.assertIsNotNone(ui.modlist_format_select)
             assert ui.modlist_format_select is not None
@@ -9796,20 +9941,30 @@ class ModWebTests(unittest.TestCase):
             assert sort_change_handler is not None
             sort_change_handler(SimpleNamespace(value=ModWebModSortOrder.TYPE.value))
             self.assertEqual(rendered_mod_names[-2:], ["beta-forge.jar", "alpha-fabric.jar"])
+            self.assertIn('const value = "type"', ui.javascript_calls[-1])
+            self.assertIn('url.searchParams.set("mod_sort", value)', ui.javascript_calls[-1])
             rendered_mod_names.clear()
+            ui.javascript_calls.clear()
 
             self.assertNotIn("update:model-value", ui.inputs[0].handlers)
+            self.assertIn("clear", ui.inputs[0].handlers)
             search_handler = ui.inputs[0].handlers["keydown.enter"]
             ui.inputs[0].value = "beta"
             self.assertEqual(ui.javascript_calls, [])
             search_handler()
-            self.assertIn('const query = "beta"', ui.javascript_calls[-1])
+            self.assertIn('const value = "beta"', ui.javascript_calls[-1])
             self.assertEqual(rendered_mod_names, ["beta-forge.jar"])
             self.assertEqual(result_count_label.text, "1 of 2 mods")
 
             ui.inputs[0].value = "missing"
             search_handler()
             self.assertEqual(result_count_label.text, "0 of 2 mods")
+
+            rendered_mod_names.clear()
+            ui.inputs[0].handlers["clear"]()
+            self.assertEqual(ui.inputs[0].value, "")
+            self.assertEqual(rendered_mod_names, ["beta-forge.jar", "alpha-fabric.jar"])
+            self.assertIn('url.searchParams.delete("search")', ui.javascript_calls[-1])
 
         self.assertIn("No mods match that search.", [label.text for label in ui.labels])
 
@@ -10452,6 +10607,7 @@ class ModWebTests(unittest.TestCase):
                     model=model,
                     entry=entry,
                     launcher_urls=launcher_urls,
+                    providers=(Provider.MODRINTH,),
                     user=user,
                 )
             )
@@ -10464,7 +10620,10 @@ class ModWebTests(unittest.TestCase):
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
             method="POST",
-            json_payload={"launcher_urls": launcher_urls.model_dump(mode="json")},
+            json_payload={
+                "launcher_urls": launcher_urls.model_dump(mode="json"),
+                "providers": [Provider.MODRINTH.value],
+            },
         )
 
     def test_resolve_mod_launcher_metadata_uses_effective_mod_page_values(self) -> None:
@@ -10506,6 +10665,7 @@ class ModWebTests(unittest.TestCase):
                     entry=entry,
                     mod_pages=mod_pages,
                     existing_launcher_urls=existing_urls,
+                    providers=(Provider.MODRINTH,),
                     user=user,
                 )
             )
@@ -10521,6 +10681,7 @@ class ModWebTests(unittest.TestCase):
             json_payload={
                 "mod_pages": [page.model_dump(mode="json") for page in mod_pages],
                 "existing_launcher_urls": existing_urls.model_dump(mode="json"),
+                "providers": [Provider.MODRINTH.value],
             },
         )
 
@@ -10559,6 +10720,7 @@ class ModWebTests(unittest.TestCase):
                     model=model,
                     entry=entry,
                     mod_pages=mod_pages,
+                    providers=(Provider.CURSEFORGE,),
                     user=user,
                 )
             )
@@ -10571,7 +10733,163 @@ class ModWebTests(unittest.TestCase):
             scopes=(NodeApiScope.MODS_WRITE,),
             user=user,
             method="POST",
-            json_payload={"mod_pages": [page.model_dump(mode="json") for page in mod_pages]},
+            json_payload={
+                "mod_pages": [page.model_dump(mode="json") for page in mod_pages],
+                "providers": [Provider.CURSEFORGE.value],
+            },
+        )
+
+    def test_bulk_metadata_discovery_uses_bulk_node_endpoint(self) -> None:
+        service = ModWebService()
+        operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b290"
+        expected = BulkLauncherMetadataDiscovery()
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="minecraft_alpha")),
+        )
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="https://yuki.example/api/node",
+            api_url="/api/node-proxy/yuki/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_json_async",
+                new=AsyncMock(return_value=expected.model_dump(mode="json")),
+            ) as remote_json,
+        ):
+            result = asyncio.run(
+                service._discover_bulk_mod_metadata(
+                    model=model,
+                    operation_id=operation_id,
+                    user=user,
+                )
+            )
+
+        self.assertEqual(result, expected)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="minecraft_alpha",
+            path="/apps/minecraft_alpha/mods/metadata/discover",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"operation_id": operation_id, "mod_names": []},
+            timeout=600.0,
+        )
+
+    def test_bulk_metadata_apply_sends_selected_mod_names_and_type_opt_ins(self) -> None:
+        service = ModWebService()
+        operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b291"
+        discovery_operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b290"
+        expected = NodeBulkLauncherMetadataApplyResult(
+            discovery=BulkLauncherMetadataDiscovery(),
+            applied_mod_names=("alpha.jar",),
+        )
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="minecraft_alpha")),
+        )
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="https://yuki.example/api/node",
+            api_url="/api/node-proxy/yuki/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_json_async",
+                new=AsyncMock(return_value=expected.model_dump(mode="json")),
+            ) as remote_json,
+        ):
+            result = asyncio.run(
+                service._apply_bulk_mod_metadata(
+                    model=model,
+                    operation_id=operation_id,
+                    discovery_operation_id=discovery_operation_id,
+                    mod_names=("alpha.jar",),
+                    apply_suggested_type_mod_names=("alpha.jar",),
+                    user=user,
+                )
+            )
+
+        self.assertEqual(result, expected)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="minecraft_alpha",
+            path="/apps/minecraft_alpha/mods/metadata/apply",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "operation_id": operation_id,
+                "discovery_operation_id": discovery_operation_id,
+                "mod_names": ["alpha.jar"],
+                "apply_suggested_type_mod_names": ["alpha.jar"],
+            },
+            timeout=600.0,
+        )
+
+    def test_bulk_metadata_cancel_uses_operation_endpoint(self) -> None:
+        service = ModWebService()
+        operation_id = "c50f39cb-acde-441f-ab92-3fd507c7b292"
+        model = cast(
+            ModWebPageModel,
+            cast(object, SimpleNamespace(node_name="yuki", app_name="minecraft_alpha")),
+        )
+        node = ModWebNodeLink(
+            node_name="yuki",
+            label="Yuki",
+            url="/mod-web/nodes/yuki",
+            api_base_url="https://yuki.example/api/node",
+            api_url="/api/node-proxy/yuki/apps",
+            is_current=True,
+        )
+        user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_json_async",
+                new=AsyncMock(
+                    return_value={"operation_id": operation_id, "cancelled": True}
+                ),
+            ) as remote_json,
+        ):
+            cancelled = asyncio.run(
+                service._cancel_bulk_mod_metadata(
+                    model=model,
+                    operation_id=operation_id,
+                    user=user,
+                )
+            )
+
+        self.assertTrue(cancelled)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="minecraft_alpha",
+            path=f"/apps/minecraft_alpha/mods/metadata/{operation_id}/cancel",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={},
         )
 
     def test_render_saves_editor_uses_direct_upload_and_settings_search_styling(self) -> None:
@@ -12336,11 +12654,11 @@ class ModWebTests(unittest.TestCase):
         server_only = replace(
             entry,
             mod_type=ModType.SERVER,
-            client_pack_eligible=False,
+            client_pack_eligible=True,
         )
         self.assertEqual(
             ModWebService._mod_client_pack_summary(server_only),
-            "Excluded — Server-only",
+            "Required",
         )
 
         builtin = replace(

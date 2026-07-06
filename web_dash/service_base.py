@@ -17,6 +17,7 @@ from .runtime_imports import (
     App_Manager,
     Awaitable,
     BadgeTone,
+    BulkLauncherMetadataDiscovery,
     Callable,
     Checkbox,
     GatewayBot,
@@ -34,6 +35,7 @@ from .runtime_imports import (
     NodeAppRuntimeSummary,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
+    NodeBulkLauncherMetadataApplyResult,
     NodeCapacityMutationResult,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
@@ -423,6 +425,26 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_mutate_mod"]) -> Callable[..., Awaitable[NodeModMutationResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_discover_bulk_mod_metadata"]
+    ) -> Callable[..., Awaitable[BulkLauncherMetadataDiscovery]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_apply_bulk_mod_metadata"]
+    ) -> Callable[..., Awaitable[NodeBulkLauncherMetadataApplyResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_cancel_bulk_mod_metadata"]
+    ) -> Callable[..., Awaitable[bool]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_run_with_loading_button"]
+    ) -> Callable[..., Awaitable[None]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_node_capacity"]) -> Callable[..., Awaitable[config.NodeCapacityProfile]]: ...

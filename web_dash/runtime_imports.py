@@ -11,6 +11,7 @@ import re
 import tempfile
 import threading
 import time
+import uuid
 from asyncio.events import AbstractEventLoop
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field, replace
@@ -69,6 +70,9 @@ from _utils import Utilities
 from apps._app import App, AppRuntimeFault
 from apps._config import (
     AppTitleFont,
+    BulkLauncherMetadataDiscovery,
+    BulkLauncherMetadataEntry,
+    BulkLauncherMetadataStatus,
     ClientPackConfig,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
@@ -124,6 +128,7 @@ from node_api import (
     NodeBlueprintFileEntry,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
+    NodeBulkLauncherMetadataApplyResult,
     NodeCapacityMutationResult,
     NodeDiskEntry,
     NodeDiskManagementState,
@@ -188,6 +193,9 @@ __all__: tuple[str, ...] = (
     "App_Manager",
     "AppRuntimeFault",
     "AppTitleFont",
+    "BulkLauncherMetadataDiscovery",
+    "BulkLauncherMetadataEntry",
+    "BulkLauncherMetadataStatus",
     "SteamUpdateBranch",
     "SteamUpdatePreset",
     "AppUpdateInfo",
@@ -272,6 +280,7 @@ __all__: tuple[str, ...] = (
     "NodeBlueprintFileEntry",
     "NodeBlueprintList",
     "NodeBlueprintMutationResult",
+    "NodeBulkLauncherMetadataApplyResult",
     "NodeChatRoomSnapshot",
     "NodeChatStreamEvent",
     "NodeChatStreamEventKind",
@@ -385,4 +394,5 @@ __all__: tuple[str, ...] = (
     "urlencode",
     "urlsplit",
     "urlunsplit",
+    "uuid",
 )

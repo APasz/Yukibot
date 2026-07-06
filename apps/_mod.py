@@ -17,6 +17,8 @@ import config
 from _file import File_Utils
 from apps._config import (
     App_Config,
+    BulkLauncherMetadataEntry,
+    BulkLauncherMetadataStatus,
     ClientPackConfig,
     ClientPackPolicy,
     Mod_Config,
@@ -931,6 +933,67 @@ class Mod_Manager:
             mod.cfg.mod_pages = previous_mod_pages
             mod.cfg.metadata_overrides = previous_metadata_overrides
             mod.cfg.client_pack = previous_client_pack
+            mod.cfg.platforms = previous_platforms
+            mod.friendly = previous_friendly
+            self._rebuild_lookup()
+            raise
+        return mod
+
+    async def apply_discovered_launcher_metadata(
+        self,
+        mod_name: str | Mod,
+        discovery: BulkLauncherMetadataEntry,
+        *,
+        apply_suggested_mod_type: bool = False,
+    ) -> Mod:
+        mod = self.get(mod_name)
+        if discovery.mod_name != mod.name:
+            raise ValueError("Bulk launcher metadata entry does not match the target mod")
+        if discovery.status is not BulkLauncherMetadataStatus.EXACT:
+            raise ValueError("Only exact launcher metadata matches can be applied")
+        if mod.is_builtin:
+            raise ValueError("Built-in mod metadata cannot be changed")
+        suggested_mod_type = discovery.suggested_mod_type
+        if apply_suggested_mod_type and (
+            suggested_mod_type is None or suggested_mod_type is ModType.REGULAR
+        ):
+            raise ValueError("Only non-Regular launcher metadata type suggestions can be applied")
+
+        previous_classification_override = mod.cfg.classification_override
+        previous_mod_pages = mod.cfg.mod_pages
+        previous_platforms = mod.cfg.platforms
+        previous_friendly = mod.friendly
+        previous_shared_identities = mod.metadata_identities(scope=self.scope)
+        previous_shared = self.shared_metadata.resolve(previous_shared_identities)
+        known_page_urls = {page.url for page in previous_mod_pages}
+        merged_mod_pages = (
+            *previous_mod_pages,
+            *(page for page in discovery.mod_pages if page.url not in known_page_urls),
+        )
+        merged_platforms = ModPlatformMetadata(
+            modrinth=previous_platforms.modrinth or discovery.platforms.modrinth,
+            curseforge=previous_platforms.curseforge or discovery.platforms.curseforge,
+        )
+        try:
+            if apply_suggested_mod_type:
+                assert suggested_mod_type is not None
+                mod.cfg.classification_override = ModClassificationOverride(
+                    mod_type=suggested_mod_type,
+                    download_block_reason=mod.download_block_reason,
+                )
+            mod.cfg.mod_pages = merged_mod_pages
+            mod.cfg.platforms = merged_platforms
+            mod.sync_metadata()
+            self._set_shared_metadata(mod)
+            self._rebuild_lookup()
+            await self.save_mods()
+        except Exception:
+            self._restore_shared_metadata(
+                identities=previous_shared_identities,
+                shared=previous_shared,
+            )
+            mod.cfg.classification_override = previous_classification_override
+            mod.cfg.mod_pages = previous_mod_pages
             mod.cfg.platforms = previous_platforms
             mod.friendly = previous_friendly
             self._rebuild_lookup()

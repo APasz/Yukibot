@@ -9,6 +9,7 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from font_assets import font_assets
 from mod_web_theme import MOD_WEB_THEME_STYLESHEET
+from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT
 
 from .assets import CacheableTextAsset, cacheable_text_asset
 from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
@@ -250,6 +251,13 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             return self._static_text_asset_response(
                 request=request,
                 asset=cacheable_text_asset(MOD_WEB_THEME_STYLESHEET, "text/css"),
+            )
+
+        @nicegui_app.get("/mod-web/assets/toasts.js")
+        async def _toast_javascript(request: Request) -> StarletteResponse:
+            return self._static_text_asset_response(
+                request=request,
+                asset=cacheable_text_asset(MOD_WEB_TOAST_JAVASCRIPT, "text/javascript"),
             )
 
         @nicegui_app.get("/mod-web/assets/map.css")
@@ -783,6 +791,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             request: Request,
             enabled_only: bool = False,
             selected_only: bool = False,
+            excluded_only: bool = False,
             client_pack: bool = False,
             pack_purpose: PackPurpose | None = None,
             pack_format: PackFormat = PackFormat.GENERIC_ZIP,
@@ -799,6 +808,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             query = self._download_query(
                 enabled_only=enabled_only,
                 selected_only=selected_only,
+                excluded_only=excluded_only,
                 mod_names=mod_names,
                 client_pack=client_pack,
                 pack_purpose=pack_purpose,

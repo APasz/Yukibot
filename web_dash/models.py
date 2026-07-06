@@ -1995,6 +1995,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         *,
         enabled_only: bool,
         selected_only: bool,
+        excluded_only: bool = False,
         mod_names: tuple[str, ...],
         client_pack: bool = False,
         pack_purpose: PackPurpose | None = None,
@@ -2006,6 +2007,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             "enabled_only": str(enabled_only).lower(),
             "selected_only": str(selected_only).lower(),
         }
+        if excluded_only:
+            query["excluded_only"] = "true"
         if client_pack:
             query["client_pack"] = "true"
         if pack_format is not PackFormat.GENERIC_ZIP:

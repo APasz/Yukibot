@@ -358,6 +358,7 @@ class _ModWebModToolbarBindings:
     download_button: Button | None
     delete_control: _ModWebEnableableControl | None
     result_count_label: Label | None
+    metadata_status_button: Button | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -710,6 +711,7 @@ class ModWebBasePageModel:
     app_start_blocked: bool
     settings: NodeSettingList | None
     search_query: str = field(default="", kw_only=True)
+    mod_sort_order: ModWebModSortOrder = field(default=ModWebModSortOrder.NEWEST, kw_only=True)
     app_title_font_preset: str = field(default=AppTitleFont.AUTO.value, kw_only=True)
     console_actions: NodeConsoleActionList | None = field(default=None, kw_only=True)
     blueprints: NodeBlueprintList | None = field(default=None, kw_only=True)

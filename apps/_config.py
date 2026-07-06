@@ -909,7 +909,7 @@ class ModType(enum.StrEnum):
 
     @property
     def included_in_client_by_default(self) -> bool:
-        return self.side is not ModSide.SERVER
+        return self is not ModType.BUILTIN
 
 
 class ModMetadataOverrides(BaseModel):
@@ -1314,6 +1314,7 @@ class LauncherProviderUrls(BaseModel):
 
 
 class LauncherMetadataMatchReason(enum.StrEnum):
+    EXPLICIT_FILE_PAGE = "explicit_file_page"
     SHA1 = "sha1"
     FILENAME_AND_SIZE = "filename_and_size"
     FILENAME = "filename"
@@ -1321,6 +1322,8 @@ class LauncherMetadataMatchReason(enum.StrEnum):
     @property
     def label(self) -> str:
         match self:
+            case LauncherMetadataMatchReason.EXPLICIT_FILE_PAGE:
+                return "explicit file page"
             case LauncherMetadataMatchReason.SHA1:
                 return "SHA-1"
             case LauncherMetadataMatchReason.FILENAME_AND_SIZE:
@@ -1445,16 +1448,102 @@ class ModPlatformMetadata(BaseModel):
                 raise ValueError(f"Launcher metadata does not support {provider.value}.")
 
 
+class LauncherMetadataProviderError(BaseModel):
+    provider: Provider
+    message: str
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def validate_message(cls, raw: object) -> str:
+        return _normalise_required_text(raw, field_name="launcher metadata provider error")
+
+
 class LauncherMetadataResolution(BaseModel):
     platforms: ModPlatformMetadata = Field(default_factory=ModPlatformMetadata)
     suggested_mod_type: ModType | None = None
     suggestion_provider: Provider | None = None
+    provider_errors: tuple[LauncherMetadataProviderError, ...] = ()
 
     @model_validator(mode="after")
     def validate_suggestion_provider(self) -> LauncherMetadataResolution:
         if (self.suggested_mod_type is None) != (self.suggestion_provider is None):
             raise ValueError("Launcher metadata suggestions require both a mod type and provider")
+        providers = tuple(error.provider for error in self.provider_errors)
+        if len(providers) != len(set(providers)):
+            raise ValueError("launcher metadata provider errors must have unique providers")
         return self
+
+
+class BulkLauncherMetadataStatus(enum.StrEnum):
+    EXACT = "exact"
+    UNMATCHED = "unmatched"
+
+    @property
+    def label(self) -> str:
+        return self.value.title()
+
+
+BulkLauncherMetadataProviderError = LauncherMetadataProviderError
+
+
+class BulkLauncherMetadataEntry(BaseModel):
+    mod_name: str
+    friendly_name: str
+    status: BulkLauncherMetadataStatus
+    mod_pages: tuple[ModPageLink, ...] = ()
+    platforms: ModPlatformMetadata = Field(default_factory=ModPlatformMetadata)
+    suggested_mod_type: ModType | None = None
+    matched_providers: tuple[Provider, ...] = ()
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("mod_name", "friendly_name", mode="before")
+    @classmethod
+    def validate_required_text(cls, raw: object, info: ValidationInfo) -> str:
+        field_name = info.field_name or "value"
+        return _normalise_required_text(raw, field_name=field_name.replace("_", " "))
+
+    @model_validator(mode="after")
+    def validate_matches(self) -> BulkLauncherMetadataEntry:
+        if len(self.matched_providers) != len(set(self.matched_providers)):
+            raise ValueError("bulk launcher metadata matched providers must be unique")
+        expected_providers = tuple(
+            provider
+            for provider in (Provider.MODRINTH, Provider.CURSEFORGE)
+            if self.platforms.page_url_for(provider) is not None
+        )
+        if set(self.matched_providers) != set(expected_providers):
+            raise ValueError("bulk launcher metadata providers must match platform metadata")
+        if self.status is BulkLauncherMetadataStatus.EXACT and not self.matched_providers:
+            raise ValueError("exact bulk launcher metadata entries require a provider match")
+        if self.status is BulkLauncherMetadataStatus.UNMATCHED and self.matched_providers:
+            raise ValueError("unmatched bulk launcher metadata entries cannot contain provider matches")
+        return self
+
+
+class BulkLauncherMetadataDiscovery(BaseModel):
+    entries: tuple[BulkLauncherMetadataEntry, ...] = ()
+    provider_errors: tuple[BulkLauncherMetadataProviderError, ...] = ()
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @model_validator(mode="after")
+    def validate_unique_values(self) -> BulkLauncherMetadataDiscovery:
+        mod_names = tuple(entry.mod_name for entry in self.entries)
+        if len(mod_names) != len(set(mod_names)):
+            raise ValueError("bulk launcher metadata entries must have unique mod names")
+        providers = tuple(error.provider for error in self.provider_errors)
+        if len(providers) != len(set(providers)):
+            raise ValueError("bulk launcher metadata provider errors must have unique providers")
+        return self
+
+    @property
+    def exact_entries(self) -> tuple[BulkLauncherMetadataEntry, ...]:
+        return tuple(
+            entry for entry in self.entries if entry.status is BulkLauncherMetadataStatus.EXACT
+        )
 
 
 class ClientPackPolicy(enum.StrEnum):

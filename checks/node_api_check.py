@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+import uuid
 import zipfile
 from dataclasses import replace
 from datetime import datetime
@@ -35,11 +36,15 @@ from apps._config import (
     App_Config,
     AppTitleFont,
     AppVersion,
+    BulkLauncherMetadataDiscovery,
+    BulkLauncherMetadataEntry,
+    BulkLauncherMetadataStatus,
     ClientPackConfig,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
     ClientPackPolicy,
     ClientPackRelease,
+    ModrinthModMetadata,
     LauncherMetadataDiscovery,
     LauncherMetadataResolution,
     LauncherProviderUrls,
@@ -102,6 +107,8 @@ from node_api import (
     NodeAppTransitionState,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
+    NodeBulkLauncherMetadataRequest,
+    NodeBulkLauncherMetadataApplyRequest,
     NodeCapacityMutationResult,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
@@ -3593,7 +3600,10 @@ class NodeApiTests(unittest.TestCase):
                     service.fetch_mod_launcher_metadata(
                         app=app,
                         mod_name=mod.name,
-                        fetch_request=NodeModMetadataFetchRequest(launcher_urls=launcher_urls),
+                        fetch_request=NodeModMetadataFetchRequest(
+                            launcher_urls=launcher_urls,
+                            providers=(Provider.MODRINTH,),
+                        ),
                         actor_user_id=42,
                     )
                 )
@@ -3603,8 +3613,9 @@ class NodeApiTests(unittest.TestCase):
         resolve_metadata.assert_awaited_once_with(
             scope=app.scope,
             urls=launcher_urls,
-            local_filename=mod.storage_path.name,
+            local_filename=mod.name,
             local_path=mod.storage_path,
+            providers=(Provider.MODRINTH,),
         )
         manager.update_properties.assert_not_called()
 
@@ -3668,6 +3679,7 @@ class NodeApiTests(unittest.TestCase):
                         resolve_request=NodeModMetadataResolveRequest(
                             mod_pages=mod_pages,
                             existing_launcher_urls=existing_urls,
+                            providers=(Provider.MODRINTH,),
                         ),
                         actor_user_id=42,
                     )
@@ -3680,8 +3692,10 @@ class NodeApiTests(unittest.TestCase):
             mod_pages=mod_pages,
             existing_urls=existing_urls,
             local_path=mod.storage_path,
+            local_filename=mod.name,
             game_version="1.20.1",
             loader="forge",
+            providers=(Provider.MODRINTH,),
         )
         manager.update_properties.assert_not_called()
 
@@ -3714,7 +3728,10 @@ class NodeApiTests(unittest.TestCase):
                     service.find_mod_pages(
                         app=app,
                         mod_name=mod.name,
-                        resolve_request=NodeModPageResolveRequest(mod_pages=mod_pages),
+                        resolve_request=NodeModPageResolveRequest(
+                            mod_pages=mod_pages,
+                            providers=(Provider.CURSEFORGE,),
+                        ),
                         actor_user_id=42,
                     )
                 )
@@ -3725,12 +3742,171 @@ class NodeApiTests(unittest.TestCase):
             scope=app.scope,
             existing_mod_pages=mod_pages,
             local_path=mod.storage_path,
+            local_filename=mod.name,
             friendly_name="Example Mod",
             detected_version="2.0.0",
             game_version="1.20.1",
             loader="forge",
+            providers=(Provider.CURSEFORGE,),
         )
         manager.update_properties.assert_not_called()
+
+    def test_bulk_metadata_discovery_uses_all_non_builtin_mods_without_mutating(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mod_path = Path(temp_dir) / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            mod = _TestMod(Mod_Config(name=mod_path.name, directory=Path(temp_dir)))
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.list_mods.return_value = [mod]
+            app = _build_app(manager)
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+            expected = BulkLauncherMetadataDiscovery()
+
+            with patch(
+                "node_api.discover_bulk_launcher_metadata",
+                new=AsyncMock(return_value=expected),
+            ) as discover_metadata:
+                result = asyncio.run(
+                    service.discover_bulk_mod_metadata(
+                        app=app,
+                        discovery_request=NodeBulkLauncherMetadataRequest(),
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(result, expected)
+        acl.perm_check.assert_awaited_once_with(42, Power_Level.sudo)
+        targets = discover_metadata.await_args.kwargs["targets"]
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].mod_name, mod.name)
+        manager.apply_discovered_launcher_metadata.assert_not_called()
+
+    def test_bulk_metadata_apply_uses_cached_exact_matches_without_provider_requests(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            exact_path = Path(temp_dir) / "exact.jar"
+            unmatched_path = Path(temp_dir) / "unmatched.jar"
+            exact_path.write_bytes(b"exact")
+            unmatched_path.write_bytes(b"unmatched")
+            exact_mod = _TestMod(Mod_Config(name=exact_path.name, directory=Path(temp_dir)))
+            unmatched_mod = _TestMod(Mod_Config(name=unmatched_path.name, directory=Path(temp_dir)))
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.side_effect = lambda name: {
+                exact_mod.name: exact_mod,
+                unmatched_mod.name: unmatched_mod,
+            }[name]
+            manager.apply_discovered_launcher_metadata = AsyncMock(return_value=exact_mod)
+            app = _build_app(manager)
+            acl = Mock()
+            acl.perm_check = AsyncMock()
+            service = NodeApiService()
+            service.set_acl(cast(Any, acl))
+            exact_entry = BulkLauncherMetadataEntry(
+                mod_name=exact_mod.name,
+                friendly_name="Exact",
+                status=BulkLauncherMetadataStatus.EXACT,
+                platforms=ModPlatformMetadata(
+                    modrinth=ModrinthModMetadata(
+                        page_url="https://modrinth.com/mod/exact/version/version-id",
+                        project_id="project-id",
+                        version_id="version-id",
+                        download_url="https://cdn.modrinth.com/exact.jar",
+                    )
+                ),
+                suggested_mod_type=ModType.SERVER,
+                matched_providers=(Provider.MODRINTH,),
+            )
+            unmatched_entry = BulkLauncherMetadataEntry(
+                mod_name=unmatched_mod.name,
+                friendly_name="Unmatched",
+                status=BulkLauncherMetadataStatus.UNMATCHED,
+            )
+            discovery = BulkLauncherMetadataDiscovery(entries=(exact_entry, unmatched_entry))
+            discovery_operation_id = uuid.UUID("c50f39cb-acde-441f-ab92-3fd507c7b294")
+            service._cache_bulk_metadata_discovery(
+                app_name=app.name,
+                operation_id=discovery_operation_id,
+                discovery=discovery,
+            )
+
+            with (
+                patch(
+                    "node_api.discover_bulk_launcher_metadata",
+                    new=AsyncMock(),
+                ) as discover_metadata,
+                patch.object(service, "_invalidate_client_pack_content"),
+                patch.object(service, "_invalidate_mod_inventory"),
+            ):
+                result = asyncio.run(
+                    service.apply_bulk_mod_metadata(
+                        app=app,
+                        apply_request=NodeBulkLauncherMetadataApplyRequest(
+                            discovery_operation_id=discovery_operation_id,
+                            mod_names=(exact_mod.name,),
+                            apply_suggested_type_mod_names=(exact_mod.name,),
+                        ),
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(result.applied_mod_names, (exact_mod.name,))
+        self.assertEqual(result.applied_type_mod_names, (exact_mod.name,))
+        discover_metadata.assert_not_awaited()
+        manager.apply_discovered_launcher_metadata.assert_awaited_once_with(
+            exact_mod.name,
+            exact_entry,
+            apply_suggested_mod_type=True,
+        )
+
+    def test_bulk_metadata_apply_type_selections_must_be_selected_mods(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be selected for apply"):
+            NodeBulkLauncherMetadataApplyRequest(
+                discovery_operation_id=uuid.UUID("c50f39cb-acde-441f-ab92-3fd507c7b295"),
+                mod_names=("metadata-only.jar",),
+                apply_suggested_type_mod_names=("type-only.jar",),
+            )
+
+    def test_bulk_metadata_operation_can_be_cancelled_by_operation_id(self) -> None:
+        service = NodeApiService()
+        operation_id = uuid.UUID("c50f39cb-acde-441f-ab92-3fd507c7b293")
+
+        async def exercise() -> None:
+            action_started = asyncio.Event()
+
+            async def action() -> BulkLauncherMetadataDiscovery:
+                action_started.set()
+                await asyncio.Event().wait()
+                return BulkLauncherMetadataDiscovery()
+
+            operation_task = asyncio.create_task(
+                service._run_bulk_metadata_operation(
+                    app_name="minecraft_alpha",
+                    operation_id=operation_id,
+                    action=action,
+                )
+            )
+            await action_started.wait()
+
+            self.assertTrue(
+                service._cancel_bulk_metadata_operation(
+                    app_name="minecraft_alpha",
+                    operation_id=operation_id,
+                )
+            )
+            with self.assertRaises(asyncio.CancelledError):
+                await operation_task
+            self.assertFalse(
+                service._cancel_bulk_metadata_operation(
+                    app_name="minecraft_alpha",
+                    operation_id=operation_id,
+                )
+            )
+
+        asyncio.run(exercise())
 
     def test_update_client_pack_config_uses_admin_access_and_single_bulk_write(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -5837,6 +6013,42 @@ class NodeApiTests(unittest.TestCase):
         )
         self.assertEqual(archive_name, "Minecraft_Alpha_selected_mods.zip")
 
+    def test_excluded_mod_selection_archives_the_complement(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            mods = tuple(
+                _TestMod(Mod_Config(name=f"{name}.jar", directory=temp_path))
+                for name in ("first", "second", "third")
+            )
+            for mod in mods:
+                mod.storage_path.write_bytes(mod.name.encode())
+            archive_path = temp_path / "Minecraft_Alpha_selected_mods.zip"
+            mods_by_name = {mod.name: mod for mod in mods}
+            mod_manager = Mock()
+            mod_manager.reload_mods = AsyncMock()
+            mod_manager.get.side_effect = mods_by_name.__getitem__
+            mod_manager.list_mods.return_value = mods
+            app = _build_app(mod_manager)
+
+            with patch("node_api.compress_mod_archive_entries", new=AsyncMock(return_value=archive_path)) as compress:
+                response = asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(
+                            mod_names=("second.jar",),
+                            selected_only=True,
+                            excluded_only=True,
+                        ),
+                    )
+                )
+
+        self.assertEqual(Path(response.path), archive_path)
+        archive_entries, _archive_name = compress.await_args.args
+        self.assertEqual(
+            tuple(entry.archive_path.as_posix() for entry in archive_entries),
+            ("first.jar", "third.jar"),
+        )
+
     def test_single_directory_mod_archive_keeps_mod_folder_root(self) -> None:
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -5953,7 +6165,7 @@ class NodeApiTests(unittest.TestCase):
                 with zipfile.ZipFile(Path(response.path)) as archive:
                     self.assertEqual(sorted(archive.namelist()), ["client.jar", "disabled.jar"])
 
-    def test_client_pack_archive_excludes_downloadable_server_only_mod(self) -> None:
+    def test_client_pack_archive_includes_downloadable_server_only_mod(self) -> None:
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             zips_path = temp_path / "zips"
@@ -5999,22 +6211,23 @@ class NodeApiTests(unittest.TestCase):
                     )
                 )
                 with zipfile.ZipFile(Path(response.path)) as archive:
-                    self.assertEqual(sorted(archive.namelist()), ["client.jar", "regular.jar"])
-
-                with self.assertRaises(HTTPException) as raised:
-                    asyncio.run(
-                        NodeApiService().build_mod_download_response(
-                            app=app,
-                            request=NodeDownloadRequest(
-                                mod_names=(server.name,),
-                                selected_only=True,
-                                client_pack=True,
-                            ),
-                        )
+                    self.assertEqual(
+                        sorted(archive.namelist()),
+                        ["client.jar", "regular.jar", "server.jar"],
                     )
 
-        self.assertEqual(getattr(raised.exception, "status_code"), 400)
-        self.assertIn("not eligible", str(getattr(raised.exception, "detail")))
+                selected_response = asyncio.run(
+                    NodeApiService().build_mod_download_response(
+                        app=app,
+                        request=NodeDownloadRequest(
+                            mod_names=(server.name,),
+                            selected_only=True,
+                            client_pack=True,
+                        ),
+                    )
+                )
+                with zipfile.ZipFile(Path(selected_response.path)) as archive:
+                    self.assertIn("server.jar", archive.namelist())
 
     def test_client_pack_archive_includes_client_overrides(self) -> None:
         with TemporaryDirectory() as temp_dir:

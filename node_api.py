@@ -9,18 +9,19 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias, assert_never, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeAlias, TypeVar, assert_never, cast
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import hikari
 import psutil
 import requests
+from modmux.models import Provider
 from fastapi import (
     File,
     Form,
@@ -72,6 +73,9 @@ from apps._blueprint_files import (
 )
 from apps._config import (
     AppTitleFont,
+    BulkLauncherMetadataDiscovery,
+    BulkLauncherMetadataEntry,
+    BulkLauncherMetadataStatus,
     CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     ClientPackConfig,
     ClientPackKubeJsScript,
@@ -80,6 +84,7 @@ from apps._config import (
     LauncherMetadataDiscovery,
     LauncherMetadataResolution,
     LauncherProviderUrls,
+    KnownModPageProvider,
     ModPageDiscovery,
     ModDownloadBlockReason,
     ModMetadataOverrides,
@@ -88,12 +93,15 @@ from apps._config import (
     ModPlatformMetadata,
     ModType,
     is_client_pack_candidate,
+    known_mod_page_provider_for_url,
     normalise_client_pack_changelog,
     normalise_activity_provider_ids,
     normalise_app_title_font,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
 from apps._launcher_metadata import (
+    BulkLauncherMetadataTarget,
+    discover_bulk_launcher_metadata,
     discover_mod_pages,
     discover_launcher_metadata,
     resolve_launcher_metadata,
@@ -159,6 +167,8 @@ _NODE_SYSTEM_SUMMARY_CACHE_TTL_SECONDS = 1.0
 _LIVE_APP_RUNTIME_CACHE_TTL_SECONDS = 0.5
 _FULL_APP_RUNTIME_CACHE_TTL_SECONDS = 2.0
 _MOD_INVENTORY_CACHE_TTL_SECONDS = 5.0
+_BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS = 60.0 * 60.0
+_BULK_METADATA_DISCOVERY_CACHE_MAX_ENTRIES = 64
 _LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS = 0.75
 _LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 2.0
 _NODE_SYSTEM_HISTORY_INTERVAL_SECONDS = 10.0
@@ -1229,17 +1239,76 @@ class NodeModPropertiesUpdateRequest(BaseModel):
     launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
 
 
-class NodeModMetadataFetchRequest(BaseModel):
+class NodeLauncherProviderSelectionRequest(BaseModel):
+    providers: tuple[Provider, ...] | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class NodeModMetadataFetchRequest(NodeLauncherProviderSelectionRequest):
     launcher_urls: LauncherProviderUrls
 
 
-class NodeModMetadataResolveRequest(BaseModel):
+class NodeModMetadataResolveRequest(NodeLauncherProviderSelectionRequest):
     mod_pages: tuple[ModPageLink, ...]
     existing_launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
 
 
-class NodeModPageResolveRequest(BaseModel):
+class NodeModPageResolveRequest(NodeLauncherProviderSelectionRequest):
     mod_pages: tuple[ModPageLink, ...]
+
+
+class NodeBulkLauncherMetadataRequest(BaseModel):
+    operation_id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    mod_names: tuple[str, ...] = ()
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    @field_validator("mod_names", mode="before")
+    @classmethod
+    def validate_mod_names(cls, raw: object) -> object:
+        if not isinstance(raw, (list, tuple)):
+            raise TypeError("bulk launcher metadata mod names must be a list")
+        return raw
+
+    @model_validator(mode="after")
+    def validate_unique_mod_names(self) -> NodeBulkLauncherMetadataRequest:
+        if any(not name for name in self.mod_names):
+            raise ValueError("bulk launcher metadata mod names must not be blank")
+        if len(self.mod_names) != len(set(self.mod_names)):
+            raise ValueError("bulk launcher metadata mod names must be unique")
+        return self
+
+
+class NodeBulkLauncherMetadataApplyRequest(NodeBulkLauncherMetadataRequest):
+    discovery_operation_id: uuid.UUID
+    apply_suggested_type_mod_names: tuple[str, ...] = ()
+
+    @field_validator("apply_suggested_type_mod_names", mode="before")
+    @classmethod
+    def validate_apply_suggested_type_mod_names(cls, raw: object) -> object:
+        if not isinstance(raw, (list, tuple)):
+            raise TypeError("bulk launcher metadata type selections must be a list")
+        return raw
+
+    @model_validator(mode="after")
+    def validate_type_selections(self) -> NodeBulkLauncherMetadataApplyRequest:
+        selected_names = self.apply_suggested_type_mod_names
+        if any(not name for name in selected_names):
+            raise ValueError("bulk launcher metadata type selection names must not be blank")
+        if len(selected_names) != len(set(selected_names)):
+            raise ValueError("bulk launcher metadata type selection names must be unique")
+        if not set(selected_names).issubset(self.mod_names):
+            raise ValueError("bulk launcher metadata type selections must be selected for apply")
+        return self
+
+
+class NodeBulkLauncherMetadataApplyResult(BaseModel):
+    discovery: BulkLauncherMetadataDiscovery
+    applied_mod_names: tuple[str, ...] = ()
+    applied_type_mod_names: tuple[str, ...] = ()
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class NodeClientPackModConfigUpdate(BaseModel):
@@ -2191,6 +2260,12 @@ class _TimedModInventory:
     captured_at_seconds: float
     summary: NodeModSummary
     mods: tuple[NodeModEntry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedBulkMetadataDiscovery:
+    captured_at_seconds: float
+    discovery: BulkLauncherMetadataDiscovery
 
 
 @dataclass(frozen=True, slots=True)
@@ -3737,6 +3812,7 @@ class NodeDownloadRequest:
     mod_name: str | None = None
     mod_names: tuple[str, ...] = ()
     selected_only: bool = False
+    excluded_only: bool = False
     client_pack: bool = False
     pack_purpose: PackPurpose | None = None
     pack_format: PackFormat = PackFormat.GENERIC_ZIP
@@ -3954,6 +4030,9 @@ class RemoteRelayTTSForwarder:
         return body
 
 
+_BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
+
+
 class NodeApiService:
     def __init__(self) -> None:
         self._manager: App_Manager | None = None
@@ -3983,12 +4062,121 @@ class NodeApiService:
         self._mod_inventory_cache: dict[str, _TimedModInventory] = {}
         self._mod_inventory_cache_locks: dict[str, asyncio.Lock] = {}
         self._app_mutation_tasks: dict[str, asyncio.Task[None]] = {}
+        self._bulk_metadata_tasks: dict[tuple[str, uuid.UUID], asyncio.Task[object]] = {}
+        self._bulk_metadata_discoveries: dict[
+            tuple[str, uuid.UUID], _CachedBulkMetadataDiscovery
+        ] = {}
         self._local_runtime_watchers: dict[str, _NodeLocalAppRuntimeWatchState] = {}
         self._local_runtime_watch_lock = threading.RLock()
         self._local_node_state_watcher = _NodeLocalNodeStateWatchState()
         self._local_node_state_watch_lock = threading.RLock()
         self._routes_registered = False
         self._shutting_down = False
+
+    async def _run_bulk_metadata_operation(
+        self,
+        *,
+        app_name: str,
+        operation_id: uuid.UUID,
+        action: Callable[[], Awaitable[_BulkMetadataOperationResult]],
+    ) -> _BulkMetadataOperationResult:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("Bulk metadata operation is not running in an asyncio task.")
+        key = (app_name, operation_id)
+        existing = self._bulk_metadata_tasks.get(key)
+        if existing is not None and not existing.done():
+            raise _http_exception(409, f"Bulk metadata operation {operation_id} is already running.")
+        self._bulk_metadata_tasks[key] = cast(asyncio.Task[object], task)
+        log.info(
+            "Bulk mod metadata operation started: node=%s app=%s operation=%s",
+            self.node_name,
+            app_name,
+            operation_id,
+        )
+        try:
+            return await action()
+        except asyncio.CancelledError:
+            log.info(
+                "Bulk mod metadata operation cancelled: node=%s app=%s operation=%s",
+                self.node_name,
+                app_name,
+                operation_id,
+            )
+            raise
+        finally:
+            if self._bulk_metadata_tasks.get(key) is task:
+                self._bulk_metadata_tasks.pop(key, None)
+
+    def _cancel_bulk_metadata_operation(
+        self,
+        *,
+        app_name: str,
+        operation_id: uuid.UUID,
+    ) -> bool:
+        task = self._bulk_metadata_tasks.get((app_name, operation_id))
+        if task is None or task.done():
+            return False
+        task.cancel()
+        log.info(
+            "Bulk mod metadata cancellation requested: node=%s app=%s operation=%s",
+            self.node_name,
+            app_name,
+            operation_id,
+        )
+        return True
+
+    def _cache_bulk_metadata_discovery(
+        self,
+        *,
+        app_name: str,
+        operation_id: uuid.UUID,
+        discovery: BulkLauncherMetadataDiscovery,
+    ) -> None:
+        now = time.monotonic()
+        expired_keys = tuple(
+            key
+            for key, cached in self._bulk_metadata_discoveries.items()
+            if now - cached.captured_at_seconds
+            >= _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS
+        )
+        for key in expired_keys:
+            self._bulk_metadata_discoveries.pop(key, None)
+        cache_key = (app_name, operation_id)
+        if (
+            cache_key not in self._bulk_metadata_discoveries
+            and len(self._bulk_metadata_discoveries)
+            >= _BULK_METADATA_DISCOVERY_CACHE_MAX_ENTRIES
+        ):
+            oldest_key = min(
+                self._bulk_metadata_discoveries,
+                key=lambda key: self._bulk_metadata_discoveries[key].captured_at_seconds,
+            )
+            self._bulk_metadata_discoveries.pop(oldest_key, None)
+        self._bulk_metadata_discoveries[cache_key] = (
+            _CachedBulkMetadataDiscovery(
+                captured_at_seconds=now,
+                discovery=discovery,
+            )
+        )
+
+    def _cached_bulk_metadata_discovery(
+        self,
+        *,
+        app_name: str,
+        operation_id: uuid.UUID,
+    ) -> BulkLauncherMetadataDiscovery:
+        key = (app_name, operation_id)
+        cached = self._bulk_metadata_discoveries.get(key)
+        if cached is None:
+            raise _http_exception(409, "Bulk metadata discovery is unavailable; run discovery again.")
+        if (
+            time.monotonic() - cached.captured_at_seconds
+            >= _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS
+        ):
+            self._bulk_metadata_discoveries.pop(key, None)
+            raise _http_exception(409, "Bulk metadata discovery expired; run discovery again.")
+        return cached.discovery
 
     @property
     def node_name(self) -> str:
@@ -4808,6 +4996,7 @@ class NodeApiService:
             request: Request,
             enabled_only: bool = False,
             selected_only: bool = False,
+            excluded_only: bool = False,
             client_pack: bool = False,
             pack_purpose: PackPurpose | None = None,
             pack_format: PackFormat = PackFormat.GENERIC_ZIP,
@@ -4818,11 +5007,12 @@ class NodeApiService:
             mod_names = tuple(request.query_params.getlist("mod_name"))
             traffic_log.info(
                 "Node API mods archive request: node=%s app=%s enabled_only=%s selected_only=%s "
-                "client_pack=%s purpose=%s format=%s selected=%s",
+                "excluded_only=%s client_pack=%s purpose=%s format=%s selected=%s",
                 self.node_name,
                 app_name,
                 enabled_only,
                 selected_only,
+                excluded_only,
                 client_pack,
                 pack_purpose,
                 pack_format,
@@ -4839,6 +5029,7 @@ class NodeApiService:
                     enabled_only=enabled_only,
                     mod_names=mod_names,
                     selected_only=selected_only,
+                    excluded_only=excluded_only,
                     client_pack=client_pack,
                     pack_purpose=pack_purpose,
                     pack_format=pack_format,
@@ -5047,6 +5238,107 @@ class NodeApiService:
                 actor_user_id=actor_user_id,
             )
             return discovery.model_dump(mode="json")
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/metadata/discover")
+        async def _discover_bulk_mod_metadata(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            grant = self._require_access(
+                request,
+                access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+            )
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            discovery_request = NodeBulkLauncherMetadataRequest.model_validate(payload)
+            discovery = await self._run_bulk_metadata_operation(
+                app_name=app_name,
+                operation_id=discovery_request.operation_id,
+                action=lambda: self.discover_bulk_mod_metadata(
+                    app=self._resolve_app(app_name),
+                    discovery_request=discovery_request,
+                    actor_user_id=actor_user_id,
+                ),
+            )
+            return discovery.model_dump(mode="json")
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/metadata/apply")
+        async def _apply_bulk_mod_metadata(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            grant = self._require_access(
+                request,
+                access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+            )
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            apply_request = NodeBulkLauncherMetadataApplyRequest.model_validate(payload)
+            result = await self._run_bulk_metadata_operation(
+                app_name=app_name,
+                operation_id=apply_request.operation_id,
+                action=lambda: self.apply_bulk_mod_metadata(
+                    app=self._resolve_app(app_name),
+                    apply_request=apply_request,
+                    actor_user_id=actor_user_id,
+                ),
+            )
+            return result.model_dump(mode="json")
+
+        @nicegui_app.post(
+            f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/metadata/{{operation_id}}/cancel"
+        )
+        async def _cancel_bulk_mod_metadata(
+            app_name: str,
+            operation_id: uuid.UUID,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            grant = self._require_access(
+                request,
+                access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+            )
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            cancelled = self._cancel_bulk_metadata_operation(
+                app_name=app_name,
+                operation_id=operation_id,
+            )
+            traffic_log.info(
+                "Node API bulk mod metadata cancellation: node=%s app=%s operation=%s "
+                "cancelled=%s actor=%s",
+                self.node_name,
+                app_name,
+                operation_id,
+                cancelled,
+                actor_user_id,
+            )
+            return {"operation_id": str(operation_id), "cancelled": cancelled}
 
         @nicegui_app.put(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/client-pack-config")
         async def _update_client_pack_config(
@@ -8245,6 +8537,22 @@ class NodeApiService:
         selected_mod_names: tuple[str, ...] | None = (
             request.mod_names if request.selected_only or request.mod_names else None
         )
+        if request.excluded_only:
+            if not request.selected_only:
+                raise _http_exception(400, "Excluded mod selection requires selected-only mode.")
+            if pack_purpose is not None:
+                raise _http_exception(400, "Excluded mod selection is only supported for raw mod downloads.")
+            excluded_names = frozenset(request.mod_names)
+            for excluded_name in excluded_names:
+                try:
+                    require_downloadable(app.has_mod_manager.get(excluded_name))
+                except (KeyError, ModuleNotFoundError, NonDownloadableModError) as xcp:
+                    raise _http_exception(400, f"Invalid excluded mod selection: {excluded_name}") from xcp
+            selected_mod_names = tuple(
+                mod.name
+                for mod in app.has_mod_manager.list_mods()
+                if mod.downloadable and mod.name not in excluded_names
+            )
         entries: tuple[ArchiveEntry, ...]
         try:
             if pack_purpose is PackPurpose.CLIENT:
@@ -9391,13 +9699,218 @@ class NodeApiService:
                 scope=app.scope,
                 existing_mod_pages=resolve_request.mod_pages,
                 local_path=mod.storage_path,
+                local_filename=mod.name,
                 friendly_name=mod.friendly,
                 detected_version=mod.version,
                 game_version=None if version is None else version.main,
                 loader=None if version is None else version.loader,
+                providers=resolve_request.providers,
             )
         except (OSError, ValueError) as xcp:
             raise _http_exception(409, str(xcp)) from xcp
+
+    @staticmethod
+    def _bulk_launcher_metadata_targets(
+        *,
+        manager: Mod_Manager,
+        discovery_request: NodeBulkLauncherMetadataRequest,
+    ) -> tuple[BulkLauncherMetadataTarget, ...]:
+        mods = (
+            tuple(_get_mod_or_404(manager, mod_name) for mod_name in discovery_request.mod_names)
+            if discovery_request.mod_names
+            else tuple(manager.list_mods())
+        )
+        return tuple(
+            BulkLauncherMetadataTarget(
+                mod_name=mod.name,
+                friendly_name=mod.friendly,
+                local_path=mod.storage_path,
+                existing_mod_pages=mod.cfg.mod_pages,
+                existing_platforms=mod.cfg.platforms,
+            )
+            for mod in mods
+            if not mod.is_builtin
+            and (
+                mod.cfg.platforms.modrinth is None
+                or mod.cfg.platforms.curseforge is None
+                or (
+                    mod.cfg.platforms.modrinth is not None
+                    and not any(
+                        known_mod_page_provider_for_url(page.url)
+                        is KnownModPageProvider.MODRINTH
+                        for page in mod.cfg.mod_pages
+                    )
+                )
+                or (
+                    mod.cfg.platforms.curseforge is not None
+                    and mod.cfg.platforms.curseforge.page_url is not None
+                    and not any(
+                        known_mod_page_provider_for_url(page.url)
+                        is KnownModPageProvider.CURSEFORGE
+                        for page in mod.cfg.mod_pages
+                    )
+                )
+            )
+        )
+
+    async def discover_bulk_mod_metadata(
+        self,
+        *,
+        app: App,
+        discovery_request: NodeBulkLauncherMetadataRequest,
+        actor_user_id: int,
+    ) -> BulkLauncherMetadataDiscovery:
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        await self._require_acl().perm_check(
+            actor_user_id,
+            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+        )
+        targets = self._bulk_launcher_metadata_targets(
+            manager=manager,
+            discovery_request=discovery_request,
+        )
+        started_at = time.monotonic()
+        log.info(
+            "Bulk mod metadata discovery scanning: node=%s app=%s operation=%s targets=%s",
+            self.node_name,
+            app.name,
+            discovery_request.operation_id,
+            len(targets),
+        )
+        try:
+            discovery = await discover_bulk_launcher_metadata(scope=app.scope, targets=targets)
+        except (OSError, ValueError) as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+        exact_count = len(discovery.exact_entries)
+        log.info(
+            "Bulk mod metadata discovery completed: node=%s app=%s operation=%s exact=%s "
+            "unmatched=%s provider_errors=%s elapsed=%.2fs",
+            self.node_name,
+            app.name,
+            discovery_request.operation_id,
+            exact_count,
+            len(discovery.entries) - exact_count,
+            len(discovery.provider_errors),
+            time.monotonic() - started_at,
+        )
+        self._cache_bulk_metadata_discovery(
+            app_name=app.name,
+            operation_id=discovery_request.operation_id,
+            discovery=discovery,
+        )
+        return discovery
+
+    async def apply_bulk_mod_metadata(
+        self,
+        *,
+        app: App,
+        apply_request: NodeBulkLauncherMetadataApplyRequest,
+        actor_user_id: int,
+    ) -> NodeBulkLauncherMetadataApplyResult:
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        await self._require_acl().perm_check(
+            actor_user_id,
+            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+        )
+        started_at = time.monotonic()
+        type_selection_names = frozenset(apply_request.apply_suggested_type_mod_names)
+        discovery = self._cached_bulk_metadata_discovery(
+            app_name=app.name,
+            operation_id=apply_request.discovery_operation_id,
+        )
+        entries_by_name = {entry.mod_name: entry for entry in discovery.entries}
+        selected_entries: list[BulkLauncherMetadataEntry] = []
+        for mod_name in apply_request.mod_names:
+            entry = entries_by_name.get(mod_name)
+            if entry is None or entry.status is not BulkLauncherMetadataStatus.EXACT:
+                raise _http_exception(
+                    409,
+                    "Bulk metadata apply selections must be exact matches from the cached discovery.",
+                )
+            selected_entries.append(entry)
+        invalid_type_selection_names = tuple(
+            entry.mod_name
+            for entry in selected_entries
+            if entry.mod_name in type_selection_names
+            and (
+                entry.suggested_mod_type is None
+                or entry.suggested_mod_type is ModType.REGULAR
+            )
+        )
+        if invalid_type_selection_names:
+            raise _http_exception(
+                409,
+                "Bulk metadata type selections require cached non-Regular suggestions: "
+                + ", ".join(invalid_type_selection_names),
+            )
+        log.info(
+            "Bulk mod metadata apply using cached discovery: node=%s app=%s operation=%s "
+            "discovery_operation=%s targets=%s type_selections=%s",
+            self.node_name,
+            app.name,
+            apply_request.operation_id,
+            apply_request.discovery_operation_id,
+            len(selected_entries),
+            len(type_selection_names),
+        )
+        applied_mod_names: list[str] = []
+        applied_type_mod_names: list[str] = []
+        try:
+            for entry in selected_entries:
+                apply_suggested_mod_type = entry.mod_name in type_selection_names
+                await manager.apply_discovered_launcher_metadata(
+                    entry.mod_name,
+                    entry,
+                    apply_suggested_mod_type=apply_suggested_mod_type,
+                )
+                applied_mod_names.append(entry.mod_name)
+                if apply_suggested_mod_type:
+                    applied_type_mod_names.append(entry.mod_name)
+        except asyncio.CancelledError:
+            log.warning(
+                "Bulk mod metadata apply cancelled: node=%s app=%s operation=%s "
+                "applied_before_cancel=%s elapsed=%.2fs",
+                self.node_name,
+                app.name,
+                apply_request.operation_id,
+                len(applied_mod_names),
+                time.monotonic() - started_at,
+            )
+            raise
+        except (OSError, ValueError) as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+
+        if applied_mod_names:
+            self._invalidate_client_pack_content(app)
+            self._invalidate_mod_inventory(app.name)
+        traffic_log.info(
+            "Node API bulk mod metadata applied: node=%s app=%s count=%s actor=%s",
+            self.node_name,
+            app.name,
+            len(applied_mod_names),
+            actor_user_id,
+        )
+        log.info(
+            "Bulk mod metadata apply completed: node=%s app=%s operation=%s applied=%s "
+            "types_updated=%s elapsed=%.2fs",
+            self.node_name,
+            app.name,
+            apply_request.operation_id,
+            len(applied_mod_names),
+            len(applied_type_mod_names),
+            time.monotonic() - started_at,
+        )
+        self._bulk_metadata_discoveries.pop(
+            (app.name, apply_request.discovery_operation_id),
+            None,
+        )
+        return NodeBulkLauncherMetadataApplyResult(
+            discovery=discovery,
+            applied_mod_names=tuple(applied_mod_names),
+            applied_type_mod_names=tuple(applied_type_mod_names),
+        )
 
     async def resolve_mod_launcher_metadata(
         self,
@@ -9421,8 +9934,10 @@ class NodeApiService:
                 mod_pages=resolve_request.mod_pages,
                 existing_urls=resolve_request.existing_launcher_urls,
                 local_path=mod.storage_path,
+                local_filename=mod.name,
                 game_version=None if version is None else version.main,
                 loader=None if version is None else version.loader,
+                providers=resolve_request.providers,
             )
         except (OSError, ValueError) as xcp:
             raise _http_exception(409, str(xcp)) from xcp
@@ -9446,8 +9961,9 @@ class NodeApiService:
             return await resolve_launcher_metadata_resolution(
                 scope=app.scope,
                 urls=fetch_request.launcher_urls,
-                local_filename=mod.storage_path.name,
+                local_filename=mod.name,
                 local_path=mod.storage_path,
+                providers=fetch_request.providers,
             )
         except ValueError as xcp:
             raise _http_exception(409, str(xcp)) from xcp
@@ -9473,7 +9989,7 @@ class NodeApiService:
             platforms = await resolve_launcher_metadata(
                 scope=app.scope,
                 urls=update.launcher_urls,
-                local_filename=mod.storage_path.name,
+                local_filename=mod.name,
                 local_path=mod.storage_path,
             )
             updated_mod = await manager.update_properties(

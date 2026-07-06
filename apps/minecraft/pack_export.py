@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import enum
 import json
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from apps._config import ClientPackKubeJsScript, ClientPackPolicy, ModSide
 
 _KUBEJS_CLIENT_PACK_SCRIPT_DIRECTORIES = ("server_scripts", "startup_scripts")
 _NO_EXCLUDED_KUBEJS_SCRIPTS: frozenset[str] = frozenset()
+_MODRINTH_PREFLIGHT_CONCURRENCY = 12
 
 
 class PackPurpose(enum.StrEnum):
@@ -134,21 +136,17 @@ def _bundled_mod_entry(entry: ModArchiveEntry, *, override_root: str = "override
 
 
 def _validate_purpose(entries: tuple[ArchiveEntry, ...], purpose: PackPurpose) -> None:
-    if purpose is PackPurpose.ADMIN:
+    if purpose is not PackPurpose.SERVER:
         return
     excluded_mods = tuple(
         entry.mod_name
         for entry in entries
         if isinstance(entry, ModArchiveEntry)
-        and (
-            purpose is PackPurpose.CLIENT and entry.mod_type.side is ModSide.SERVER
-            or purpose is PackPurpose.SERVER and entry.mod_type.side is ModSide.CLIENT
-        )
+        and entry.mod_type.side is ModSide.CLIENT
     )
     if excluded_mods:
         names = ", ".join(excluded_mods)
-        excluded_side = "server-only" if purpose is PackPurpose.CLIENT else "client-only"
-        raise MinecraftPackExportError(f"{purpose.value.title()} packs cannot contain {excluded_side} mods: {names}")
+        raise MinecraftPackExportError(f"Server packs cannot contain client-only mods: {names}")
 
 
 def _modrinth_dependencies(spec: MinecraftPackSpec) -> dict[str, str]:
@@ -172,7 +170,7 @@ def _modrinth_dependencies(spec: MinecraftPackSpec) -> dict[str, str]:
     return dependencies
 
 
-def _modrinth_env(entry: ModArchiveEntry) -> dict[str, str]:
+def _modrinth_env(entry: ModArchiveEntry, purpose: PackPurpose) -> dict[str, str]:
     client_requirement = (
         "required" if entry.client_pack_policy is ClientPackPolicy.REQUIRED else "optional"
     )
@@ -180,6 +178,8 @@ def _modrinth_env(entry: ModArchiveEntry) -> dict[str, str]:
         case ModSide.CLIENT:
             return {"client": client_requirement, "server": "unsupported"}
         case ModSide.SERVER:
+            if purpose is PackPurpose.CLIENT:
+                return {"client": client_requirement, "server": "required"}
             return {"client": "unsupported", "server": "required"}
         case ModSide.BOTH:
             return {"client": client_requirement, "server": "required"}
@@ -222,7 +222,7 @@ def _modrinth_entries(
             {
                 "path": (PurePosixPath("mods") / metadata.filename).as_posix(),
                 "hashes": {"sha1": metadata.sha1, "sha512": metadata.sha512},
-                "env": _modrinth_env(entry),
+                "env": _modrinth_env(entry, spec.purpose),
                 "downloads": [metadata.download_url],
                 "fileSize": metadata.size,
             }
@@ -266,14 +266,23 @@ async def _preflight_modrinth_downloads(
     *,
     http: httpx.AsyncClient,
 ) -> None:
-    for entry in entries:
-        if not isinstance(entry, ModArchiveEntry) or entry.platforms.modrinth is None:
-            continue
-        await _preflight_remote_download(
-            mod_name=entry.mod_name,
-            download_url=entry.platforms.modrinth.download_url,
-            http=http,
-        )
+    remote_entries = tuple(
+        entry
+        for entry in entries
+        if isinstance(entry, ModArchiveEntry) and entry.platforms.modrinth is not None
+    )
+    semaphore = asyncio.Semaphore(_MODRINTH_PREFLIGHT_CONCURRENCY)
+
+    async def preflight(entry: ModArchiveEntry) -> None:
+        assert entry.platforms.modrinth is not None
+        async with semaphore:
+            await _preflight_remote_download(
+                mod_name=entry.mod_name,
+                download_url=entry.platforms.modrinth.download_url,
+                http=http,
+            )
+
+    await asyncio.gather(*(preflight(entry) for entry in remote_entries))
 
 
 def _curseforge_loader_id(spec: MinecraftPackSpec) -> str | None:

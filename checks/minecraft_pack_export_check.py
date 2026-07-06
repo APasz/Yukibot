@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 import zipfile
@@ -247,6 +248,52 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
                 set(archive.namelist()),
                 {"shared.jar", "client.jar", "bundled.jar", "overrides/options.txt"},
             )
+            self.assertEqual(archive.getinfo("shared.jar").compress_type, zipfile.ZIP_STORED)
+            self.assertEqual(archive.getinfo("client.jar").compress_type, zipfile.ZIP_STORED)
+            self.assertEqual(archive.getinfo("bundled.jar").compress_type, zipfile.ZIP_STORED)
+            self.assertEqual(archive.getinfo("overrides/options.txt").compress_type, zipfile.ZIP_DEFLATED)
+
+    async def test_modrinth_remote_preflights_run_concurrently(self) -> None:
+        active_requests = 0
+        peak_active_requests = 0
+
+        async def handle_request(request: httpx.Request) -> httpx.Response:
+            nonlocal active_requests, peak_active_requests
+            active_requests += 1
+            peak_active_requests = max(peak_active_requests, active_requests)
+            await asyncio.sleep(0.01)
+            active_requests -= 1
+            return httpx.Response(200, request=request)
+
+        mods = tuple(
+            self._mod(
+                f"remote-{index}.jar",
+                platforms=ModPlatformMetadata(
+                    modrinth=ModrinthModMetadata(
+                        page_url=f"https://modrinth.com/mod/remote-{index}/version/version-{index}",
+                        project_id=f"project-{index}",
+                        version_id=f"version-{index}",
+                        download_url=f"https://cdn.modrinth.com/data/remote-{index}.jar",
+                        filename=f"remote-{index}.jar",
+                        sha1=str(index) * 40,
+                        sha512=str(index) * 128,
+                        size=100 + index,
+                    )
+                ),
+            )
+            for index in range(1, 4)
+        )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http:
+            with patch.object(config, "DIR_ZIPS", self.zips):
+                await export_minecraft_pack(
+                    tuple(ModArchiveEntry.from_mod(mod) for mod in mods),
+                    self._spec(PackFormat.MODRINTH),
+                    "concurrent",
+                    http=http,
+                )
+
+        self.assertEqual(peak_active_requests, len(mods))
 
     async def test_modrinth_export_rejects_incomplete_remote_metadata_before_preflight(self) -> None:
         incomplete = self._mod(
@@ -323,15 +370,55 @@ class MinecraftPackExportTests(unittest.IsolatedAsyncioTestCase):
                 "blocked",
             )
 
-    async def test_client_export_rejects_server_only_entry(self) -> None:
+    async def test_client_export_includes_server_only_entry(self) -> None:
         server = self._mod("server.jar", mod_type=ModType.SERVER)
 
-        with self.assertRaisesRegex(MinecraftPackExportError, "server-only"):
-            await export_minecraft_pack(
+        with patch.object(config, "DIR_ZIPS", self.zips):
+            archive_path = await export_minecraft_pack(
                 (ModArchiveEntry.from_mod(server),),
                 self._spec(PackFormat.GENERIC_ZIP),
                 "example",
             )
+
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertEqual(archive.namelist(), ["server.jar"])
+
+    async def test_client_modrinth_pack_marks_server_only_entry_as_client_required(self) -> None:
+        server = self._mod(
+            "server.jar",
+            mod_type=ModType.SERVER,
+            platforms=ModPlatformMetadata(
+                modrinth=ModrinthModMetadata(
+                    page_url="https://modrinth.com/mod/server/version/server-version",
+                    project_id="server-project",
+                    version_id="server-version",
+                    download_url="https://cdn.modrinth.com/data/server/server.jar",
+                    filename="server.jar",
+                    sha1="1" * 40,
+                    sha512="2" * 128,
+                    size=101,
+                )
+            ),
+        )
+
+        async def handle_request(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, request=request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as http:
+            with patch.object(config, "DIR_ZIPS", self.zips):
+                archive_path = await export_minecraft_pack(
+                    (ModArchiveEntry.from_mod(server),),
+                    self._spec(PackFormat.MODRINTH),
+                    "example",
+                    http=http,
+                )
+
+        with zipfile.ZipFile(archive_path) as archive:
+            manifest = json.loads(archive.read("modrinth.index.json"))
+        self.assertEqual(
+            manifest["files"][0]["env"],
+            {"client": "required", "server": "required"},
+        )
 
     async def test_export_rejects_symlinks_inside_override_directory(self) -> None:
         outside = self.root / "outside.txt"

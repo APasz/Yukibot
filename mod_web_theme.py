@@ -4,6 +4,8 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from mod_web_toasts import MOD_WEB_TOAST_VERSION
+
 BadgeTone = Literal["black", "purple", "red", "warn", "grey"]
 
 
@@ -66,6 +68,7 @@ class ModWebTheme:
                     --mod-scrollbar-thumb-hover: rgba(161, 161, 170, 0.52);
                     --mod-motion-fast: 120ms;
                     --mod-motion-medium: 260ms;
+                    --mod-motion-tab-accent: 320ms;
                     --mod-motion-slow: 420ms;
                     --mod-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
                 }}"""
@@ -228,7 +231,6 @@ class ModWebTheme:
                 .mod-home-node-grid > :nth-child(4),
                 .mod-home-section-grid > :nth-child(4),
                 .mod-stat-grid > :nth-child(4) {{ animation-delay: 135ms; }}
-                .mod-row,
                 .mod-save-card,
                 .mod-config-file-row,
                 .mod-setting-shell {{
@@ -990,10 +992,10 @@ class ModWebTheme:
                     bottom: 0;
                     left: 0;
                     height: 2px;
-                    background: linear-gradient(90deg, #7c3aed, #c4b5fd);
+                    background: linear-gradient(90deg, #7c3aed 0%, #c4b5fd 50%, #7c3aed 100%);
                     transform: scaleX(0);
                     transform-origin: center;
-                    transition: transform var(--mod-motion-medium) var(--mod-motion-ease);
+                    transition: transform var(--mod-motion-tab-accent) var(--mod-motion-ease);
                 }}
                 .mod-section-tabs .q-tab--active {{
                     color: var(--mod-text) !important;
@@ -1205,6 +1207,22 @@ class ModWebTheme:
                     width: 2.5rem;
                     min-width: 2.5rem;
                     padding: 0 !important;
+                }}
+                .mod-mods-toolbar .mod-toolbar-status-button,
+                .mod-mods-toolbar .mod-toolbar-status-button.q-btn--disabled {{
+                    flex: 0 0 auto;
+                    min-width: 9.5rem;
+                    width: auto;
+                    opacity: 1 !important;
+                    color: #f5f3ff !important;
+                    border-color: rgba(139, 92, 246, 0.52) !important;
+                    background: rgba(24, 16, 34, 0.78) !important;
+                    cursor: default !important;
+                }}
+                .mod-mods-toolbar .mod-toolbar-status-button .q-btn__content {{
+                    opacity: 1 !important;
+                    color: #f5f3ff !important;
+                    text-shadow: 0 0 12px rgba(216, 180, 254, 0.2);
                 }}
                 .mod-toolbar-menu {{
                     min-width: 12rem;
@@ -3098,11 +3116,10 @@ class ModWebTheme:
                     background: #0b0b10 !important;
                     border: 1px solid #25252c !important;
                     box-shadow: inset 3px 0 0 rgba(139, 92, 246, 0.5);
-                    transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+                    transition: background 120ms ease, transform 120ms ease;
                 }}
                 .mod-row:hover {{
                     background: #101017 !important;
-                    border-color: rgba(139, 92, 246, 0.48) !important;
                     transform: translateX(1px);
                 }}
                 .mod-row.blocked {{
@@ -3130,7 +3147,15 @@ class ModWebTheme:
                     border-radius: 0;
                     background: transparent !important;
                 }}
-                .mod-virtual-mod-table .q-table__middle {{ overflow: auto; }}
+                .mod-virtual-mod-table .q-table__middle {{
+                    overflow-x: hidden;
+                    overflow-y: auto;
+                }}
+                .mod-virtual-mod-table .q-table {{
+                    width: 100%;
+                    max-width: 100%;
+                    table-layout: fixed;
+                }}
                 .mod-virtual-mod-table .q-table,
                 .mod-virtual-mod-table tbody {{
                     background: #050507 !important;
@@ -3182,8 +3207,6 @@ class ModWebTheme:
                     color: var(--mod-dim);
                 }}
                 .mod-list-pagination {{ margin: 0.75rem auto 0; color: var(--mod-text); }}
-                .mod-row-disabled:hover {{ border-color: rgba(161, 161, 170, 0.82) !important; }}
-                .mod-row-client-only:hover {{ border-color: rgba(196, 181, 253, 0.86) !important; }}
                 .mod-row .q-checkbox__inner {{ color: var(--mod-purple) !important; }}
                 .mod-row-main {{
                     width: 100%;
@@ -4174,6 +4197,53 @@ class ModWebTheme:
                 .mod-metadata-review-actions {{
                     padding-top: 0.8rem;
                     border-top: 1px solid rgba(63, 63, 70, 0.72);
+                }}
+                .mod-bulk-metadata-dialog-card {{
+                    width: min(72rem, calc(100vw - 2rem)) !important;
+                    max-width: 72rem !important;
+                    padding: 1.25rem;
+                }}
+                .mod-bulk-metadata-table .q-table__middle {{
+                    max-height: min(62vh, 42rem);
+                    overflow-y: auto;
+                }}
+                .mod-bulk-metadata-table .q-table {{
+                    table-layout: fixed;
+                }}
+                .mod-bulk-metadata-table .q-table th:first-child,
+                .mod-bulk-metadata-table .q-table td:first-child {{
+                    width: 3rem;
+                    min-width: 3rem;
+                    max-width: 3rem;
+                    padding-right: 0.25rem !important;
+                    padding-left: 0.25rem !important;
+                    text-align: center;
+                }}
+                .mod-bulk-metadata-selection-checkbox {{
+                    display: inline-flex !important;
+                    width: 2.5rem;
+                    height: 2.5rem;
+                    margin: 0 auto;
+                    align-items: center;
+                    justify-content: center;
+                    vertical-align: middle;
+                }}
+                .mod-bulk-metadata-selection-checkbox .q-checkbox__inner {{
+                    margin: 0 !important;
+                }}
+                .mod-bulk-metadata-type-suggestion {{
+                    display: flex;
+                    min-height: 2.5rem;
+                    align-items: center;
+                    gap: 0.25rem;
+                }}
+                .mod-bulk-metadata-type-checkbox {{
+                    flex: 0 0 2.5rem;
+                    width: 2.5rem;
+                    height: 2.5rem;
+                    margin-left: -0.5rem;
+                    align-items: center;
+                    justify-content: center;
                 }}
                 .mod-app-details-layout {{
                     gap: 1rem;
@@ -5471,6 +5541,11 @@ class ModWebTheme:
                         width: 2.5rem;
                         min-width: 2.5rem;
                     }}
+                    .mod-mods-toolbar-actions .mod-toolbar-status-button {{
+                        flex: 0 0 auto;
+                        width: auto;
+                        min-width: 9.5rem;
+                    }}
                     .mod-mods-toolbar-actions .mod-list-button.danger {{
                         margin-left: 0;
                     }}
@@ -5633,6 +5708,10 @@ class ModWebTheme:
                         width: 2.5rem;
                         justify-self: end;
                     }}
+                    .mod-mods-toolbar-actions .mod-toolbar-status-button {{
+                        grid-column: 1;
+                        width: 100%;
+                    }}
                     .mod-mods-toolbar-actions .mod-list-button.danger {{
                         grid-column: 2;
                         width: 100%;
@@ -5715,6 +5794,10 @@ def apply_mod_web_theme(*, ui: Any, theme: ModWebTheme = DEFAULT_MOD_WEB_THEME) 
     if theme is DEFAULT_MOD_WEB_THEME:
         ui.add_head_html(
             f'<link rel="stylesheet" href="/mod-web/assets/theme.css?v={MOD_WEB_THEME_VERSION}">'
+            f'<script src="/mod-web/assets/toasts.js?v={MOD_WEB_TOAST_VERSION}"></script>'
         )
     else:
-        ui.add_head_html(theme.css())
+        ui.add_head_html(
+            theme.css()
+            + f'<script src="/mod-web/assets/toasts.js?v={MOD_WEB_TOAST_VERSION}"></script>'
+        )

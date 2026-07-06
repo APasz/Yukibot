@@ -18,6 +18,7 @@ from apps._config import (
     ModDownloadBlockReason,
     app_title_font_default_label,
     app_title_font_options,
+    launcher_provider_label,
     mod_capabilities_for_scope,
     normalise_app_title_font,
     resolve_app_title_font,
@@ -40,6 +41,7 @@ from .app_page_updates import ModWebAppPageUpdateMixin
 from .assets import extract_html_tag_contents
 from .constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+    _APP_MOD_SORT_QUERY_PARAM,
     _APP_RUNTIME_REFRESH_INTERVAL_SECONDS,
     _APP_SEARCH_QUERY_PARAM,
     _APP_SECTION_QUERY_PARAM,
@@ -61,6 +63,7 @@ from .runtime_imports import (
     AbstractEventLoop,
     Awaitable,
     BadgeTone,
+    BulkLauncherMetadataStatus,
     Button,
     Callable,
     Card,
@@ -110,8 +113,10 @@ from .runtime_imports import (
     quote,
     replace,
     required_app_mutation_level,
+    required_mod_mutation_level,
     urlencode,
     urlsplit,
+    uuid,
 )
 from .service_base import ModWebServiceSupport
 from .types import (
@@ -175,6 +180,16 @@ class _VirtualModRow(TypedDict):
     show_placement: bool
     show_policy: bool
     state_class: str
+
+
+class _BulkMetadataRow(TypedDict):
+    name: str
+    friendly: str
+    status: str
+    providers: str
+    suggested_type: str
+    suggested_type_selectable: bool
+    apply_suggested_type: bool
 
 
 type _VirtualModAction = Literal["details", "download"]
@@ -3302,22 +3317,49 @@ class ModWebAppPageMixin(
         return query_by_key.get(_APP_SEARCH_QUERY_PARAM, "").strip()
 
     @staticmethod
-    def _replace_browser_search_query(*, ui: ModWebUi, search_query: str) -> None:
-        encoded_query: str = json.dumps(search_query.strip())
-        encoded_param: str = json.dumps(_APP_SEARCH_QUERY_PARAM)
+    def _initial_page_mod_sort_order(current_url: str) -> ModWebModSortOrder:
+        query_by_key: dict[str, str] = {
+            key: value for key, value in parse_qsl(urlsplit(current_url).query, keep_blank_values=True)
+        }
+        raw_order: str = query_by_key.get(_APP_MOD_SORT_QUERY_PARAM, "").strip()
+        try:
+            return ModWebModSortOrder(raw_order)
+        except ValueError:
+            return ModWebModSortOrder.NEWEST
+
+    @staticmethod
+    def _replace_browser_query_value(*, ui: ModWebUi, param_name: str, value: str) -> None:
+        encoded_value: str = json.dumps(value.strip())
+        encoded_param: str = json.dumps(param_name)
         ui.run_javascript(
             f"""
             (() => {{
               const url = new URL(window.location.href);
-              const query = {encoded_query};
-              if (query) {{
-                url.searchParams.set({encoded_param}, query);
+              const value = {encoded_value};
+              if (value) {{
+                url.searchParams.set({encoded_param}, value);
               }} else {{
                 url.searchParams.delete({encoded_param});
               }}
               window.history.replaceState(window.history.state, '', `${{url.pathname}}${{url.search}}${{url.hash}}`);
             }})();
             """
+        )
+
+    @classmethod
+    def _replace_browser_search_query(cls, *, ui: ModWebUi, search_query: str) -> None:
+        cls._replace_browser_query_value(
+            ui=ui,
+            param_name=_APP_SEARCH_QUERY_PARAM,
+            value=search_query,
+        )
+
+    @classmethod
+    def _replace_browser_mod_sort_order(cls, *, ui: ModWebUi, order: ModWebModSortOrder) -> None:
+        cls._replace_browser_query_value(
+            ui=ui,
+            param_name=_APP_MOD_SORT_QUERY_PARAM,
+            value="" if order is ModWebModSortOrder.NEWEST else order.value,
         )
 
     @staticmethod
@@ -3364,6 +3406,7 @@ class ModWebAppPageMixin(
         section_model: ModWebBasePageModel = replace(
             model,
             search_query=self._initial_page_search_query(current_url),
+            mod_sort_order=self._initial_page_mod_sort_order(current_url),
         )
         tab_by_id: dict[str, Tab] = {}
         section_chrome_by_tab_id: dict[str, "Element"] = {}
@@ -3895,7 +3938,7 @@ class ModWebAppPageMixin(
         show_search: bool = len(mod_options) > 1
         show_sort: bool = len(mod_options) > 1
         current_search_query: str = model.search_query
-        current_sort_order: ModWebModSortOrder = ModWebModSortOrder.NEWEST
+        current_sort_order: ModWebModSortOrder = model.mod_sort_order
         downloadable_names: tuple[str, ...] = tuple[str, ...](
             entry.name for entry in model.mods.mods if entry.downloadable
         )
@@ -3945,6 +3988,126 @@ class ModWebAppPageMixin(
         download_button = None
         delete_control: _ModWebEnableableControl | None = None
         result_count_label: Label | None = None
+        delete_selected_button: Button | None = None
+        metadata_status_button: Button | None = None
+        metadata_ui_container: Card | None = None
+        metadata_operation_task: asyncio.Task[None] | None = None
+        metadata_operation_id: str | None = None
+        metadata_cancel_requested = False
+        metadata_active_status = ""
+
+        def set_metadata_status(text: str, *, running: bool) -> None:
+            nonlocal metadata_active_status
+            metadata_active_status = text
+            if metadata_status_button is not None:
+                metadata_status_button.set_text(f"Metadata: {text}")
+                metadata_status_button.set_visibility(True)
+                metadata_status_button.set_enabled(running)
+
+        def start_metadata_operation(
+            action: Callable[[str], Awaitable[None]],
+        ) -> None:
+            nonlocal metadata_operation_task, metadata_operation_id, metadata_cancel_requested
+            if metadata_operation_task is not None and not metadata_operation_task.done():
+                ui.notify("A metadata operation is already running.", type="warning")
+                return
+            operation_id = str(uuid.uuid4())
+            metadata_operation_id = operation_id
+            metadata_cancel_requested = False
+            container = metadata_ui_container
+            if container is None:
+                raise RuntimeError("Metadata UI container was not rendered.")
+
+            async def run() -> None:
+                nonlocal metadata_operation_task, metadata_operation_id, metadata_cancel_requested
+                with container:
+                    try:
+                        await action(operation_id)
+                    except asyncio.CancelledError:
+                        log.info(
+                            "Bulk mod metadata operation cancelled: node=%s app=%s operation=%s",
+                            model.node_name,
+                            model.app_name,
+                            operation_id,
+                        )
+                        set_metadata_status("Cancelled", running=False)
+                        ui.notify("Metadata operation cancelled.", type="warning")
+                    except Exception as xcp:
+                        log.exception(
+                            "Bulk mod metadata background task failed: node=%s app=%s "
+                            "operation=%s",
+                            model.node_name,
+                            model.app_name,
+                            operation_id,
+                        )
+                        set_metadata_status("Failed", running=False)
+                        ui.notify(f"Metadata operation failed: {xcp}", type="negative")
+                    finally:
+                        if metadata_operation_id == operation_id:
+                            metadata_operation_task = None
+                            metadata_operation_id = None
+                            metadata_cancel_requested = False
+
+            metadata_operation_task = asyncio.create_task(run())
+
+        def cancel_metadata_operation() -> None:
+            nonlocal metadata_cancel_requested
+            operation_task = metadata_operation_task
+            operation_id = metadata_operation_id
+            if operation_task is None or operation_task.done() or operation_id is None:
+                return
+            if metadata_cancel_requested:
+                return
+            metadata_cancel_requested = True
+            previous_status = metadata_active_status
+            set_metadata_status("Cancelling…", running=False)
+            log.info(
+                "Bulk mod metadata cancellation requested from dashboard: node=%s app=%s operation=%s",
+                model.node_name,
+                model.app_name,
+                operation_id,
+            )
+
+            async def cancel() -> None:
+                nonlocal metadata_cancel_requested
+                container = metadata_ui_container
+                if container is None:
+                    raise RuntimeError("Metadata UI container was not rendered.")
+                with container:
+                    try:
+                        cancelled = False
+                        for attempt in range(3):
+                            cancelled = await self._cancel_bulk_mod_metadata(
+                                model=model,
+                                operation_id=operation_id,
+                                user=user,
+                            )
+                            if cancelled or operation_task.done():
+                                break
+                            if attempt < 2:
+                                await asyncio.sleep(0.25)
+                    except Exception as xcp:
+                        log.warning(
+                            "Bulk mod metadata cancellation failed: node=%s app=%s operation=%s error=%s",
+                            model.node_name,
+                            model.app_name,
+                            operation_id,
+                            xcp,
+                        )
+                        metadata_cancel_requested = False
+                        if not operation_task.done():
+                            set_metadata_status(previous_status, running=True)
+                        ui.notify(f"Metadata cancellation failed: {xcp}", type="negative")
+                        return
+                    if cancelled:
+                        operation_task.cancel()
+                        return
+                    metadata_cancel_requested = False
+                    if not operation_task.done():
+                        set_metadata_status(previous_status, running=True)
+                        ui.notify("Metadata operation could not be cancelled yet.", type="warning")
+
+            asyncio.create_task(cancel())
 
         def update_result_count(visible_count: int) -> None:
             if result_count_label is None:
@@ -4032,7 +4195,21 @@ class ModWebAppPageMixin(
         async def download_selected() -> None:
             mod_names: tuple[str, ...] = selected_downloadable_mod_names_in_page_order()
             if mod_names:
-                query: str = urlencode({"selected_only": "true", "mod_name": list(mod_names)}, doseq=True)
+                excluded_names = tuple(
+                    mod_name for mod_name in downloadable_names if mod_name not in selected_mod_names
+                )
+                selected_query_length = len(urlencode({"mod_name": mod_names}, doseq=True))
+                excluded_query_length = len(urlencode({"mod_name": excluded_names}, doseq=True))
+                use_excluded_names = excluded_query_length < selected_query_length
+                query: str = urlencode(
+                    self._download_query(
+                        enabled_only=False,
+                        selected_only=True,
+                        excluded_only=use_excluded_names,
+                        mod_names=excluded_names if use_excluded_names else mod_names,
+                    ),
+                    doseq=True,
+                )
                 await self._start_download(
                     ui=ui,
                     user=user,
@@ -4065,7 +4242,7 @@ class ModWebAppPageMixin(
                 filenames=(f"{model.app_name}-mods.zip",),
             )
 
-        async def delete_selected() -> None:
+        async def _delete_selected() -> None:
             mod_names: tuple[str, ...] = selected_deletable_mod_names_in_page_order()
             if not mod_names:
                 ui.notify("Select at least one deletable mod first.", type="warning")
@@ -4085,6 +4262,14 @@ class ModWebAppPageMixin(
             mod_label: str = "mod" if len(mod_names) == 1 else "mods"
             ui.notify(f"Deleted {len(mod_names)} {mod_label}.", type="positive")
             ui.navigate.reload()
+
+        async def delete_selected() -> None:
+            if delete_selected_button is None:
+                raise RuntimeError("Delete selected mods button was not rendered.")
+            await self._run_with_loading_button(
+                button=delete_selected_button,
+                action=_delete_selected,
+            )
 
         inline_upload_control: Upload | None = None
         direct_upload_transfer_id: int | None = None
@@ -4276,7 +4461,11 @@ class ModWebAppPageMixin(
             if not mod_names:
                 ui.notify("Select at least one mod for the client pack.", type="warning")
                 return
-            await start_client_pack_download(mod_names=mod_names)
+            explicitly_selected_names = optional_names.union(choice_names.values())
+            selected_choice_names = tuple(
+                mod_name for mod_name in mod_names if mod_name in explicitly_selected_names
+            )
+            await start_client_pack_download(mod_names=selected_choice_names)
 
         configurable_client_entries: tuple[NodeModEntry, ...] = tuple(
             entry
@@ -4296,6 +4485,8 @@ class ModWebAppPageMixin(
         client_pack_filename_template_input: Input | None = None
         client_pack_changelog_draft: str = model.client_pack_changelog or ""
         client_pack_changelog_input: Textarea | None = None
+        client_pack_config_save_button: Button | None = None
+        client_pack_publish_button: Button | None = None
         config_default_names: dict[str, str] = {
             entry.client_pack.choice_group: entry.name
             for entry in configurable_client_entries
@@ -4428,7 +4619,7 @@ class ModWebAppPageMixin(
                 changelog=client_pack_changelog_draft,
             )
 
-        async def save_client_pack_configuration() -> None:
+        async def _save_client_pack_configuration() -> None:
             try:
                 await persist_client_pack_configuration()
             except Exception as xcp:
@@ -4440,7 +4631,15 @@ class ModWebAppPageMixin(
             ui.notify("Saved client-pack configuration.", type="positive")
             ui.navigate.reload()
 
-        async def publish_client_pack_configuration() -> None:
+        async def save_client_pack_configuration() -> None:
+            if client_pack_config_save_button is None:
+                raise RuntimeError("Client-pack Save button was not rendered.")
+            await self._run_with_loading_button(
+                button=client_pack_config_save_button,
+                action=_save_client_pack_configuration,
+            )
+
+        async def _publish_client_pack_configuration() -> None:
             changelog = client_pack_changelog_draft.strip()
             if not changelog:
                 ui.notify("Add a changelog before publishing the client pack.", type="warning")
@@ -4469,6 +4668,14 @@ class ModWebAppPageMixin(
             ui.notify(str(result.get("message") or "Published client pack."), type="positive")
             ui.navigate.reload()
 
+        async def publish_client_pack_configuration() -> None:
+            if client_pack_publish_button is None:
+                raise RuntimeError("Client-pack Publish button was not rendered.")
+            await self._run_with_loading_button(
+                button=client_pack_publish_button,
+                action=_publish_client_pack_configuration,
+            )
+
         client_pack_config_dialog = ui.dialog()
         can_configure_client_pack: bool = supports_client_pack and self._user_has_level(
             user,
@@ -4479,7 +4686,8 @@ class ModWebAppPageMixin(
         def ensure_client_pack_config_dialog() -> None:
             nonlocal client_pack_changelog_input, client_pack_config_rendered
             nonlocal client_pack_description_input, client_pack_filename_template_input
-            nonlocal client_pack_name_input
+            nonlocal client_pack_config_save_button, client_pack_name_input
+            nonlocal client_pack_publish_button
             if client_pack_config_rendered:
                 return
             if not can_configure_client_pack:
@@ -4716,11 +4924,11 @@ class ModWebAppPageMixin(
                             ui.button("Cancel", on_click=client_pack_config_dialog.close).classes(
                                 "mod-list-button secondary"
                             )
-                            ui.button(
+                            client_pack_config_save_button = ui.button(
                                 "Save",
                                 on_click=save_client_pack_configuration,
                             ).classes("mod-list-button secondary")
-                            ui.button(
+                            client_pack_publish_button = ui.button(
                                 "Publish",
                                 on_click=publish_client_pack_configuration,
                             ).classes("mod-list-button")
@@ -5022,6 +5230,336 @@ class ModWebAppPageMixin(
                         ui.button("Copy", on_click=copy_modlist).classes("mod-list-button")
                         ui.button("Close", on_click=modlist_dialog.close).classes("mod-list-button secondary")
 
+        async def find_bulk_mod_metadata(operation_id: str) -> None:
+            set_metadata_status("Scanning…", running=True)
+            log.info(
+                "Bulk mod metadata discovery started from dashboard: node=%s app=%s operation=%s",
+                model.node_name,
+                model.app_name,
+                operation_id,
+            )
+            try:
+                ui.notify("Scanning local mod identities and provider metadata…", type="info")
+                discovery = await self._discover_bulk_mod_metadata(
+                    model=model,
+                    operation_id=operation_id,
+                    user=user,
+                )
+            except Exception as xcp:
+                if metadata_cancel_requested:
+                    raise asyncio.CancelledError() from xcp
+                log.warning(
+                    "Bulk mod metadata discovery failed: node=%s app=%s operation=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    operation_id,
+                    xcp,
+                )
+                set_metadata_status("Failed", running=False)
+                ui.notify(f"Bulk metadata discovery failed: {xcp}", type="negative")
+                return
+
+            entry_by_name = {entry.mod_name: entry for entry in discovery.entries}
+            rows: list[_BulkMetadataRow] = [
+                {
+                    "name": entry.mod_name,
+                    "friendly": entry.friendly_name,
+                    "status": entry.status.label,
+                    "providers": ", ".join(
+                        launcher_provider_label(provider)
+                        for provider in entry.matched_providers
+                    ) or "—",
+                    "suggested_type": (
+                        "—" if entry.suggested_mod_type is None else entry.suggested_mod_type.label
+                    ),
+                    "suggested_type_selectable": (
+                        entry.status is BulkLauncherMetadataStatus.EXACT
+                        and entry.suggested_mod_type is not None
+                        and entry.suggested_mod_type is not ModType.REGULAR
+                    ),
+                    "apply_suggested_type": False,
+                }
+                for entry in discovery.entries
+            ]
+            exact_rows = [
+                row
+                for row in rows
+                if entry_by_name[row["name"]].status is BulkLauncherMetadataStatus.EXACT
+            ]
+            set_metadata_status(
+                f"{len(exact_rows)} exact"
+                if exact_rows
+                else "No exact matches",
+                running=False,
+            )
+            log.info(
+                "Bulk mod metadata discovery ready for review: node=%s app=%s operation=%s "
+                "exact=%s unmatched=%s provider_errors=%s",
+                model.node_name,
+                model.app_name,
+                operation_id,
+                len(exact_rows),
+                len(rows) - len(exact_rows),
+                len(discovery.provider_errors),
+            )
+            review_dialog = ui.dialog()
+            apply_button: Button | None = None
+            result_table: Table | None = None
+            apply_suggested_type_mod_names: set[str] = set()
+
+            def update_type_selection(event: ModWebEventArgumentsContainer) -> None:
+                raw_args = event.args
+                if not isinstance(raw_args, Mapping):
+                    raise ValueError("Bulk metadata type selection event must contain a mapping.")
+                args = cast(Mapping[str, object], raw_args)
+                mod_name = args.get("name")
+                selected = args.get("selected")
+                if not isinstance(mod_name, str) or not mod_name:
+                    raise ValueError("Bulk metadata type selection requires a mod name.")
+                if not isinstance(selected, bool):
+                    raise ValueError("Bulk metadata type selection requires a boolean state.")
+                entry = entry_by_name.get(mod_name)
+                if (
+                    entry is None
+                    or entry.status is not BulkLauncherMetadataStatus.EXACT
+                    or entry.suggested_mod_type is None
+                    or entry.suggested_mod_type is ModType.REGULAR
+                ):
+                    raise ValueError(
+                        "Only non-Regular type suggestions for exact matches can be selected."
+                    )
+                row = next((candidate for candidate in rows if candidate["name"] == mod_name), None)
+                if row is None:
+                    raise RuntimeError("Bulk metadata type selection row was not rendered.")
+                row["apply_suggested_type"] = selected
+                if selected:
+                    apply_suggested_type_mod_names.add(mod_name)
+                else:
+                    apply_suggested_type_mod_names.discard(mod_name)
+                log.info(
+                    "Bulk mod metadata type selection changed: node=%s app=%s "
+                    "discovery_operation=%s mod=%s selected=%s suggested_type=%s",
+                    model.node_name,
+                    model.app_name,
+                    operation_id,
+                    mod_name,
+                    selected,
+                    entry.suggested_mod_type.value,
+                )
+
+            def enforce_exact_metadata_selection(
+                event: "TableSelectionEventArguments",
+            ) -> None:
+                if result_table is None:
+                    return
+                raw_selection = cast(list[object], cast(object, event.selection))
+                exact_selection: list[_BulkMetadataRow] = []
+                for raw_row in raw_selection:
+                    row = cast(Mapping[str, object], raw_row)
+                    mod_name = str(row.get("name", ""))
+                    entry = entry_by_name.get(mod_name)
+                    if entry is None or entry.status is not BulkLauncherMetadataStatus.EXACT:
+                        continue
+                    exact_selection.append(cast(_BulkMetadataRow, raw_row))
+                result_table.selected = cast(
+                    list[dict[object, object]],
+                    cast(object, exact_selection),
+                )
+                result_table.update()
+                if apply_button is not None:
+                    apply_button.set_text(
+                        f"Apply {len(exact_selection)} Exact Matches"
+                    )
+                    apply_button.set_enabled(bool(exact_selection))
+
+            def apply_selected_metadata() -> None:
+                if result_table is None or apply_button is None:
+                    raise RuntimeError("Bulk metadata review controls were not rendered.")
+                selected_names = tuple(
+                    str(row["name"])
+                    for row in result_table.selected
+                    if entry_by_name[str(row["name"])].status
+                    is BulkLauncherMetadataStatus.EXACT
+                )
+                selected_name_set = frozenset(selected_names)
+                selected_type_names = tuple(
+                    row["name"]
+                    for row in rows
+                    if row["name"] in selected_name_set
+                    and row["name"] in apply_suggested_type_mod_names
+                )
+
+                async def apply(apply_operation_id: str) -> None:
+                    set_metadata_status("Applying…", running=True)
+                    log.info(
+                        "Bulk mod metadata apply started from dashboard: node=%s app=%s "
+                        "operation=%s selected=%s type_selections=%s",
+                        model.node_name,
+                        model.app_name,
+                        apply_operation_id,
+                        len(selected_names),
+                        len(selected_type_names),
+                    )
+                    try:
+                        result = await self._apply_bulk_mod_metadata(
+                            model=model,
+                            operation_id=apply_operation_id,
+                            discovery_operation_id=operation_id,
+                            mod_names=selected_names,
+                            apply_suggested_type_mod_names=selected_type_names,
+                            user=user,
+                        )
+                    except Exception as xcp:
+                        if metadata_cancel_requested:
+                            raise asyncio.CancelledError() from xcp
+                        log.warning(
+                            "Bulk mod metadata apply failed: node=%s app=%s operation=%s error=%s",
+                            model.node_name,
+                            model.app_name,
+                            apply_operation_id,
+                            xcp,
+                        )
+                        set_metadata_status("Apply failed", running=False)
+                        ui.notify(f"Bulk metadata update failed: {xcp}", type="negative")
+                        return
+                    review_dialog.close()
+                    applied_count = len(result.applied_mod_names)
+                    applied_type_count = len(result.applied_type_mod_names)
+                    set_metadata_status(
+                        f"Applied {applied_count} / {applied_type_count} types",
+                        running=False,
+                    )
+                    log.info(
+                        "Bulk mod metadata apply completed in dashboard: node=%s app=%s "
+                        "operation=%s applied=%s types_updated=%s",
+                        model.node_name,
+                        model.app_name,
+                        apply_operation_id,
+                        applied_count,
+                        applied_type_count,
+                    )
+                    ui.notify(
+                        f"Applied exact metadata to {applied_count} mod"
+                        f"{'s' if applied_count != 1 else ''}; updated "
+                        f"{applied_type_count} type"
+                        f"{'s' if applied_type_count != 1 else ''}.",
+                        type="positive",
+                    )
+                    ui.navigate.reload()
+
+                async def run_apply(operation_id: str) -> None:
+                    await self._run_with_loading_button(
+                        button=apply_button,
+                        action=lambda: apply(operation_id),
+                    )
+
+                start_metadata_operation(run_apply)
+
+            with review_dialog:
+                with ui.card().classes(
+                    "mod-card mod-dialog-card mod-bulk-metadata-dialog-card"
+                ):
+                    with ui.column().classes("w-full gap-4"):
+                        with ui.column().classes("gap-1 w-full"):
+                            ui.label("Bulk Metadata Review").classes(
+                                "text-xl font-black mod-title-small"
+                            )
+                            ui.label(
+                                f"{len(exact_rows)} exact matches; "
+                                f"{len(rows) - len(exact_rows)} unmatched. "
+                                "Only exact file identities are selectable. Type changes are optional "
+                                "and unchecked by default."
+                            ).classes("mod-subtitle text-sm")
+                        for provider_error in discovery.provider_errors:
+                            ui.label(
+                                f"{launcher_provider_label(provider_error.provider)}: "
+                                f"{provider_error.message}"
+                            ).classes("mod-subtitle text-sm text-warning")
+                        result_table = (
+                            ui.table(
+                                rows=rows,
+                                columns=[
+                                    {
+                                        "name": "friendly",
+                                        "label": "Mod",
+                                        "field": "friendly",
+                                        "align": "left",
+                                    },
+                                    {
+                                        "name": "status",
+                                        "label": "Match",
+                                        "field": "status",
+                                        "align": "left",
+                                    },
+                                    {
+                                        "name": "providers",
+                                        "label": "Providers",
+                                        "field": "providers",
+                                        "align": "left",
+                                    },
+                                    {
+                                        "name": "suggested_type",
+                                        "label": "Type suggestion",
+                                        "field": "suggested_type",
+                                        "align": "left",
+                                    },
+                                ],
+                                row_key="name",
+                                selection="multiple",
+                                pagination=0,
+                                on_select=enforce_exact_metadata_selection,
+                            )
+                            .props(
+                                'flat dark virtual-scroll virtual-scroll-item-size=48 '
+                                ':rows-per-page-options="[0]"'
+                            )
+                            .classes("mod-bulk-metadata-table w-full")
+                        )
+                        result_table.selected = cast(
+                            list[dict[object, object]],
+                            cast(object, exact_rows),
+                        )
+                        result_table.add_slot(
+                            "header-selection",
+                            """
+                            <q-checkbox v-model="props.selected"
+                                        class="mod-bulk-metadata-selection-checkbox" />
+                            """,
+                        )
+                        result_table.add_slot(
+                            "body-selection",
+                            """
+                            <q-checkbox v-model="props.selected" @click.stop
+                                        class="mod-bulk-metadata-selection-checkbox" />
+                            """,
+                        )
+                        result_table.add_slot(
+                            "body-cell-suggested_type",
+                            """
+                            <q-td :props="props">
+                              <div class="mod-bulk-metadata-type-suggestion">
+                                <q-checkbox v-if="props.row.suggested_type_selectable"
+                                            v-model="props.row.apply_suggested_type"
+                                            @click.stop
+                                            @update:model-value="$parent.$emit('bulk-type-selection', {name: props.row.name, selected: $event})"
+                                            class="mod-bulk-metadata-type-checkbox" />
+                                <span>{{ props.row.suggested_type }}</span>
+                              </div>
+                            </q-td>
+                            """,
+                        )
+                        result_table.on("bulk-type-selection", update_type_selection)
+                        with ui.row().classes("w-full justify-end gap-2"):
+                            ui.button("Cancel", on_click=review_dialog.close).classes(
+                                "mod-list-button secondary"
+                            )
+                            apply_button = ui.button(
+                                f"Apply {len(exact_rows)} Exact Matches",
+                                on_click=apply_selected_metadata,
+                            ).classes("mod-list-button")
+                            apply_button.set_enabled(bool(exact_rows))
+            review_dialog.open()
+
         with ui.dialog() as delete_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
@@ -5033,9 +5571,13 @@ class ModWebAppPageMixin(
                     ui.label("Built-in mods are excluded automatically.").classes("mod-subtitle text-sm")
                     with ui.row().classes("w-full justify-end gap-2"):
                         ui.button("Cancel", on_click=delete_dialog.close).classes("mod-list-button secondary")
-                        ui.button("Delete", on_click=delete_selected).classes("mod-list-button danger")
+                        delete_selected_button = ui.button(
+                            "Delete",
+                            on_click=delete_selected,
+                        ).classes("mod-list-button danger")
 
-        with ui.card().classes(self._flat_tab_card_classes()):
+        with ui.card().classes(self._flat_tab_card_classes()) as rendered_metadata_container:
+            metadata_ui_container = rendered_metadata_container
             with ui.column().classes(self._tab_section_body_classes()):
                 mods_description: str | None = self._mods_card_description(model.mods.summary)
                 if mods_description is not None:
@@ -5193,7 +5735,7 @@ class ModWebAppPageMixin(
                                 on_select=sync_virtual_selection,
                             )
                             .props(
-                                'flat dark hide-header virtual-scroll virtual-scroll-item-size=76 '
+                                'flat dark hide-header hide-bottom virtual-scroll virtual-scroll-item-size=76 '
                                 ':rows-per-page-options="[0]"'
                             )
                             .classes("mod-virtual-list mod-virtual-mod-table w-full")
@@ -5261,6 +5803,11 @@ class ModWebAppPageMixin(
                             }
                             """,
                         )
+                        self._restore_virtual_mod_scroll_position(
+                            ui=ui,
+                            node_name=model.node_name,
+                            app_name=model.app_name,
+                        )
                         return
 
                     with ui.column().classes("w-full mod-list"):
@@ -5299,6 +5846,7 @@ class ModWebAppPageMixin(
                 def _sort_mod_rows(event: ModWebValueContainer) -> None:
                     nonlocal current_sort_order
                     current_sort_order = ModWebModSortOrder(_value_as_text(event))
+                    self._replace_browser_mod_sort_order(ui=ui, order=current_sort_order)
                     _mod_download_rows.refresh(current_search_query)
 
                 toolbar_bindings: _ModWebModToolbarBindings = self._render_mod_toolbar(
@@ -5314,18 +5862,30 @@ class ModWebAppPageMixin(
                         if supports_client_pack and self._user_has_level(user, Power_Level.admin)
                         else None
                     ),
+                    find_metadata=(
+                        (lambda: start_metadata_operation(find_bulk_mod_metadata))
+                        if is_minecraft_app
+                        and self._user_has_level(
+                            user,
+                            required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
+                        )
+                        else None
+                    ),
+                    cancel_metadata=cancel_metadata_operation,
                     delete_selected=delete_dialog.open,
                     upload_mod=upload_picker_action,
                     show_search=show_search,
                     search_query=current_search_query,
                     on_search=_submit_mod_search if show_search else None,
                     show_sort=show_sort,
+                    sort_order=current_sort_order,
                     on_sort=_sort_mod_rows if show_sort else None,
                 )
                 selection_button: Button | None = toolbar_bindings.selection_button
                 download_button: Button | None = toolbar_bindings.download_button
                 delete_control = toolbar_bindings.delete_control
                 result_count_label = toolbar_bindings.result_count_label
+                metadata_status_button = toolbar_bindings.metadata_status_button
                 update_count()
 
                 if can_upload_mod:
@@ -5357,6 +5917,56 @@ class ModWebAppPageMixin(
                     _mod_download_rows(current_search_query)
         return
 
+    @staticmethod
+    def _restore_virtual_mod_scroll_position(
+        *,
+        ui: ModWebUi,
+        node_name: str,
+        app_name: str,
+    ) -> None:
+        storage_key: str = f"mod-web:mods-scroll:{node_name}:{app_name}"
+        encoded_storage_key: str = json.dumps(storage_key)
+        ui.run_javascript(
+            f"""
+            (() => {{
+              const storageKey = {encoded_storage_key};
+              const selector = '.mod-virtual-mod-table .q-table__middle';
+              const readPosition = () => {{
+                try {{
+                  const stored = window.sessionStorage.getItem(storageKey);
+                  const position = stored === null ? 0 : Number(stored);
+                  return Number.isFinite(position) && position >= 0 ? position : 0;
+                }} catch (_error) {{
+                  return 0;
+                }}
+              }};
+              const writePosition = (position) => {{
+                try {{
+                  window.sessionStorage.setItem(storageKey, String(position));
+                }} catch (_error) {{
+                  // Storage can be unavailable in privacy-restricted browser contexts.
+                }}
+              }};
+              const restore = () => {{
+                const scroller = document.querySelector(selector);
+                if (!(scroller instanceof HTMLElement)) return false;
+                if (scroller.dataset.modScrollStorageKey !== storageKey) {{
+                  scroller.dataset.modScrollStorageKey = storageKey;
+                  scroller.addEventListener(
+                    'scroll',
+                    () => writePosition(scroller.scrollTop),
+                    {{ passive: true }},
+                  );
+                }}
+                scroller.scrollTop = readPosition();
+                return true;
+              }};
+              if (!restore()) requestAnimationFrame(restore);
+              setTimeout(restore, 120);
+            }})();
+            """
+        )
+
     def _render_global_app_toolbar(
         self,
         *,
@@ -5384,6 +5994,7 @@ class ModWebAppPageMixin(
         kill_button: Button | None = None
         details_dialog: Dialog | None = None
         details_enable_disable_button: Button | None = None
+        details_save_button: Button | None = None
         friendly_name_input: Input | None = None
         title_font_select: Select | None = None
         notes_input: Input | None = None
@@ -5523,7 +6134,12 @@ class ModWebAppPageMixin(
             return _handle_app_action
 
         async def _handle_details_enable_disable(_: object | None = None) -> None:
-            await run_app_action(self._app_enable_disable_action(current_runtime_model))
+            if details_enable_disable_button is None:
+                raise RuntimeError("App enable/disable button was not rendered.")
+            await self._run_with_loading_button(
+                button=details_enable_disable_button,
+                action=lambda: run_app_action(self._app_enable_disable_action(current_runtime_model)),
+            )
 
         def _parse_required_non_negative_int(*, raw_value: str, field_label: str) -> int:
             value = raw_value.strip()
@@ -5567,7 +6183,7 @@ class ModWebAppPageMixin(
         ) -> Checkbox:
             return ui.checkbox(label, value=value, on_change=on_change).props("dense").classes("mod-app-details-toggle")
 
-        async def _handle_details_submit(_: object | None = None) -> None:
+        async def _submit_details() -> None:
             if (
                 friendly_name_input is None
                 or title_font_select is None
@@ -5685,10 +6301,19 @@ class ModWebAppPageMixin(
             ui.notify(result.message, type="positive")
             ui.navigate.reload()
 
+        async def _handle_details_submit(_: object | None = None) -> None:
+            if details_save_button is None:
+                raise RuntimeError("App details Save button was not rendered.")
+            await self._run_with_loading_button(
+                button=details_save_button,
+                action=_submit_details,
+            )
+
         details_dialog_rendered = False
 
         def ensure_details_dialog() -> None:
             nonlocal details_dialog, details_dialog_rendered, details_enable_disable_button
+            nonlocal details_save_button
             nonlocal friendly_name_input, lifecycle_crashed_checkbox, lifecycle_started_checkbox
             nonlocal lifecycle_stopped_checkbox, notes_input, relay_advancements_checkbox
             nonlocal relay_notice_player_death_checkbox, relay_notice_player_session_checkbox
@@ -5881,7 +6506,10 @@ class ModWebAppPageMixin(
                         with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
                             ui.button("Cancel", on_click=details_dialog.close).classes("mod-list-button secondary")
                             if can_edit_app_details:
-                                ui.button("Save", on_click=_handle_details_submit).classes("mod-list-button")
+                                details_save_button = ui.button(
+                                    "Save",
+                                    on_click=_handle_details_submit,
+                                ).classes("mod-list-button")
 
         def open_details_dialog() -> None:
             ensure_details_dialog()
@@ -5957,11 +6585,14 @@ class ModWebAppPageMixin(
         open_client_pack: Callable[[], None] | None = None,
         open_modlist: Callable[[], None] | None = None,
         open_client_pack_config: Callable[[], None] | None = None,
+        find_metadata: Callable[[], None] | None = None,
+        cancel_metadata: Callable[[], None] | None = None,
         upload_mod: Callable[[], object] | None = None,
         show_search: bool = False,
         search_query: str = "",
         on_search: Callable[[ModWebValueContainer], None] | None = None,
         show_sort: bool = False,
+        sort_order: ModWebModSortOrder = ModWebModSortOrder.NEWEST,
         on_sort: Callable[[ModWebValueContainer], None] | None = None,
     ) -> _ModWebModToolbarBindings:
         can_upload_mod: bool = upload_mod is not None and self._user_has_level(user, Power_Level.user)
@@ -5975,12 +6606,14 @@ class ModWebAppPageMixin(
                 download_button=None,
                 delete_control=None,
                 result_count_label=None,
+                metadata_status_button=None,
             )
 
         selection_button: Button | None = None
         download_button: Button | None = None
         delete_control: _ModWebEnableableControl | None = None
         result_count_label: Label | None = None
+        metadata_status_button: Button | None = None
 
         with ui.row().classes("mod-tab-toolbar mod-mods-toolbar w-full"):
             with ui.row().classes("mod-mods-toolbar-filters w-full"):
@@ -5996,14 +6629,19 @@ class ModWebAppPageMixin(
                     def _submit_search() -> None:
                         on_search(search_input)
 
+                    def _clear_search() -> None:
+                        search_input.set_value("")
+                        on_search(search_input)
+
                     search_input.on("keydown.enter", _submit_search)
+                    search_input.on("clear", _clear_search)
                 if show_sort:
                     if on_sort is None:
                         raise ValueError("Mod sort handler is not available.")
                     (
                         ui.select(
                             {order.value: order.label for order in ModWebModSortOrder},
-                            value=ModWebModSortOrder.NEWEST.value,
+                            value=sort_order.value,
                             on_change=on_sort,
                         )
                         .props("filled square dense hide-bottom-space color=accent options-dark")
@@ -6016,6 +6654,18 @@ class ModWebAppPageMixin(
                     )
                 ).classes("mod-mods-toolbar-result-count")
             with ui.row().classes("mod-tab-toolbar-actions mod-mods-toolbar-actions"):
+                if find_metadata is not None:
+                    if cancel_metadata is None:
+                        raise ValueError("Metadata cancellation handler is not available.")
+                    metadata_status_button = (
+                        ui.button("Metadata: Running", on_click=cancel_metadata)
+                        .props("flat no-caps aria-live=polite")
+                        .classes(
+                            "mod-list-button secondary mod-toolbar-button "
+                            "mod-toolbar-status-button"
+                        )
+                    )
+                    metadata_status_button.set_visibility(False)
                 if show_bulk_mod_actions:
                     selection_button = ui.button("", on_click=toggle_selection).classes(
                         "mod-list-button secondary mod-toolbar-button mod-toolbar-selection-button"
@@ -6032,7 +6682,12 @@ class ModWebAppPageMixin(
                         ui.button("Modlist", on_click=open_modlist).classes(
                             "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                         )
-                has_menu_actions = can_upload_mod or open_client_pack_config is not None or can_delete_mods
+                has_menu_actions = (
+                    can_upload_mod
+                    or open_client_pack_config is not None
+                    or find_metadata is not None
+                    or can_delete_mods
+                )
                 if has_menu_actions:
                     configure_label = "Configure <!>" if model.client_pack_content_dirty else "Configure"
                     menu_supported = callable(getattr(ui, "menu", None)) and callable(getattr(ui, "menu_item", None))
@@ -6049,6 +6704,10 @@ class ModWebAppPageMixin(
                                     )
                                 if open_client_pack_config is not None:
                                     ui.menu_item(configure_label, on_click=open_client_pack_config).classes(
+                                        "mod-chat-entry-menu-item mod-toolbar-menu-item"
+                                    )
+                                if find_metadata is not None:
+                                    ui.menu_item("Find Metadata", on_click=find_metadata).classes(
                                         "mod-chat-entry-menu-item mod-toolbar-menu-item"
                                     )
                                 if can_delete_mods:
@@ -6071,6 +6730,10 @@ class ModWebAppPageMixin(
                             ui.button(configure_label, on_click=open_client_pack_config).classes(
                                 "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                             )
+                        if find_metadata is not None:
+                            ui.button("Find Metadata", on_click=find_metadata).classes(
+                                "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                            )
                         if can_delete_mods:
                             delete_control = ui.button("Delete", on_click=delete_selected).classes(
                                 "mod-list-button danger mod-toolbar-button mod-toolbar-button-fill"
@@ -6080,6 +6743,7 @@ class ModWebAppPageMixin(
             download_button=download_button,
             delete_control=delete_control,
             result_count_label=result_count_label,
+            metadata_status_button=metadata_status_button,
         )
 
     @staticmethod
