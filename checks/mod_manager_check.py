@@ -541,15 +541,59 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.version, "2.4.0")
         self.assertEqual(updated.origin, "curated")
         self.assertIs(manager.get("Example Client Mod"), updated)
+        self.assertIs(updated.cfg.placement, ModPlacement.CLIENT_ONLY)
+        self.assertEqual(updated.storage_path, self.mods_dir / "example.zip.client")
+        self.assertTrue(updated.storage_path.exists())
+        self.assertFalse((self.mods_dir / "example.zip").exists())
 
         await manager.reload_mods()
 
         reloaded = manager.get("example.zip")
         self.assertEqual(reloaded.mod_type, ModType.CLIENT)
+        self.assertIs(reloaded.cfg.placement, ModPlacement.CLIENT_ONLY)
+        self.assertEqual(reloaded.storage_path, self.mods_dir / "example.zip.client")
         self.assertEqual(reloaded.download_block_reason, ModDownloadBlockReason.ARTIFACT)
         self.assertEqual(reloaded.cfg.metadata_overrides.friendly_name, "Example Client Mod")
         self.assertEqual(reloaded.version, "2.4.0")
         self.assertEqual(reloaded.origin, "curated")
+
+    async def test_update_properties_restores_server_placement_for_non_client_type(self) -> None:
+        manager = self._build_manager()
+        mod = await manager.add(
+            self._write_source_file(),
+            placement=ModPlacement.CLIENT_ONLY,
+        )
+
+        updated = await manager.update_properties(
+            mod,
+            mod_type=ModType.REGULAR,
+            download_block_reason=None,
+            metadata_overrides=ModMetadataOverrides(),
+        )
+
+        self.assertIs(updated.cfg.placement, ModPlacement.SERVER_ENABLED)
+        self.assertEqual(updated.storage_path, self.mods_dir / "example.zip")
+        self.assertTrue(updated.storage_path.exists())
+        self.assertFalse((self.mods_dir / "example.zip.client").exists())
+
+    async def test_update_properties_rejects_conflicting_client_representation(self) -> None:
+        manager = self._build_manager()
+        mod = await manager.add(self._write_source_file())
+        client_path = self.mods_dir / "example.zip.client"
+        client_path.write_text("conflict", encoding="utf-8")
+
+        with self.assertRaisesRegex(RuntimeError, "multiple placements"):
+            await manager.update_properties(
+                mod,
+                mod_type=ModType.CLIENT,
+                download_block_reason=None,
+                metadata_overrides=ModMetadataOverrides(),
+            )
+
+        self.assertIs(mod.mod_type, ModType.REGULAR)
+        self.assertIs(mod.cfg.placement, ModPlacement.SERVER_ENABLED)
+        self.assertEqual((self.mods_dir / "example.zip").read_text(encoding="utf-8"), "payload")
+        self.assertEqual(client_path.read_text(encoding="utf-8"), "conflict")
 
     async def test_update_properties_persists_mod_page_links(self) -> None:
         manager = self._build_manager()
@@ -632,6 +676,35 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.reload_mods()
 
         self.assertIs(manager.get(mod.name).mod_type, ModType.SERVER)
+
+    async def test_apply_discovered_client_type_moves_mod_to_client_placement(self) -> None:
+        manager = self._build_manager()
+        mod = await manager.add(self._write_source_file())
+        metadata = ModrinthModMetadata(
+            page_url="https://modrinth.com/mod/example/version/version-id",
+            project_id="project-id",
+            version_id="version-id",
+            download_url="https://cdn.modrinth.com/example.zip",
+        )
+        discovery = BulkLauncherMetadataEntry(
+            mod_name=mod.name,
+            friendly_name=mod.friendly,
+            status=BulkLauncherMetadataStatus.EXACT,
+            platforms=ModPlatformMetadata(modrinth=metadata),
+            suggested_mod_type=ModType.CLIENT,
+            matched_providers=(Provider.MODRINTH,),
+        )
+
+        updated = await manager.apply_discovered_launcher_metadata(
+            mod,
+            discovery,
+            apply_suggested_mod_type=True,
+        )
+
+        self.assertIs(updated.mod_type, ModType.CLIENT)
+        self.assertIs(updated.cfg.placement, ModPlacement.CLIENT_ONLY)
+        self.assertEqual(updated.storage_path, self.mods_dir / "example.zip.client")
+        self.assertTrue(updated.storage_path.exists())
 
     async def test_apply_discovered_metadata_rejects_regular_type_suggestion(self) -> None:
         manager = self._build_manager()

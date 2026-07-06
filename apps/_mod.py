@@ -114,7 +114,10 @@ class Mod(ABC):
 
     @property
     def storage_path(self) -> Path:
-        match self.cfg.placement:
+        return self.path_for_placement(self.cfg.placement)
+
+    def path_for_placement(self, placement: ModPlacement) -> Path:
+        match placement:
             case ModPlacement.SERVER_ENABLED:
                 return self.enabled_path
             case ModPlacement.SERVER_DISABLED:
@@ -278,6 +281,45 @@ class Mod(ABC):
         else:
             self.cfg.set_placement(self.cfg.placement)
 
+    def sync_classification_placement(self) -> None:
+        desired_placement = (
+            ModPlacement.CLIENT_ONLY
+            if self.mod_type is ModType.CLIENT
+            else (
+                ModPlacement.SERVER_ENABLED
+                if self.cfg.placement is ModPlacement.CLIENT_ONLY
+                else self.cfg.placement
+            )
+        )
+        if desired_placement is self.cfg.placement:
+            return
+
+        source_path = self.storage_path
+        if not source_path.exists():
+            return
+        self.move_to_placement(desired_placement)
+
+    def move_to_placement(self, placement: ModPlacement) -> None:
+        if placement is self.cfg.placement:
+            return
+        source_path = self.storage_path
+        if not source_path.exists():
+            raise FileNotFoundError(f"Cannot move missing mod representation: {source_path}")
+        target_path = self.path_for_placement(placement)
+        if target_path.exists():
+            raise FileExistsError(
+                f"Cannot move mod to {placement.label}: target already exists: {target_path}"
+            )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        File_Utils.move(source_path, target_path, overwrite=False)
+        self.cfg.set_placement(placement)
+        log.info(
+            "Moved mod for %s classification: %s -> %s",
+            self.mod_type.label,
+            source_path,
+            target_path,
+        )
+
     def detect_version(self) -> str | None:
         return None
 
@@ -349,6 +391,7 @@ class Mod(ABC):
 
     def sync_metadata(self) -> None:
         self.sync_enabled_state()
+        self.sync_classification_placement()
         if self.cfg.placement is not ModPlacement.CLIENT_ONLY:
             self.cfg.set_placement(
                 ModPlacement.SERVER_ENABLED if self.cfg.enabled else ModPlacement.SERVER_DISABLED
@@ -904,6 +947,7 @@ class Mod_Manager:
         previous_metadata_overrides = mod.cfg.metadata_overrides
         previous_client_pack = mod.cfg.client_pack
         previous_platforms = mod.cfg.platforms
+        previous_placement = mod.cfg.placement
         previous_friendly = mod.friendly
         previous_shared_identities = mod.metadata_identities(scope=self.scope)
         previous_shared = self.shared_metadata.resolve(previous_shared_identities)
@@ -935,6 +979,8 @@ class Mod_Manager:
             mod.cfg.client_pack = previous_client_pack
             mod.cfg.platforms = previous_platforms
             mod.friendly = previous_friendly
+            if mod.cfg.placement is not previous_placement:
+                mod.move_to_placement(previous_placement)
             self._rebuild_lookup()
             raise
         return mod
@@ -962,6 +1008,7 @@ class Mod_Manager:
         previous_classification_override = mod.cfg.classification_override
         previous_mod_pages = mod.cfg.mod_pages
         previous_platforms = mod.cfg.platforms
+        previous_placement = mod.cfg.placement
         previous_friendly = mod.friendly
         previous_shared_identities = mod.metadata_identities(scope=self.scope)
         previous_shared = self.shared_metadata.resolve(previous_shared_identities)
@@ -996,6 +1043,8 @@ class Mod_Manager:
             mod.cfg.mod_pages = previous_mod_pages
             mod.cfg.platforms = previous_platforms
             mod.friendly = previous_friendly
+            if mod.cfg.placement is not previous_placement:
+                mod.move_to_placement(previous_placement)
             self._rebuild_lookup()
             raise
         return mod
