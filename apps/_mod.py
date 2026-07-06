@@ -114,6 +114,10 @@ class Mod(ABC):
 
     @property
     def storage_path(self) -> Path:
+        return self.placement_path
+
+    @property
+    def placement_path(self) -> Path:
         return self.path_for_placement(self.cfg.placement)
 
     def path_for_placement(self, placement: ModPlacement) -> Path:
@@ -294,7 +298,7 @@ class Mod(ABC):
         if desired_placement is self.cfg.placement:
             return
 
-        source_path = self.storage_path
+        source_path = self.placement_path
         if not source_path.exists():
             return
         self.move_to_placement(desired_placement)
@@ -302,7 +306,7 @@ class Mod(ABC):
     def move_to_placement(self, placement: ModPlacement) -> None:
         if placement is self.cfg.placement:
             return
-        source_path = self.storage_path
+        source_path = self.placement_path
         if not source_path.exists():
             raise FileNotFoundError(f"Cannot move missing mod representation: {source_path}")
         target_path = self.path_for_placement(placement)

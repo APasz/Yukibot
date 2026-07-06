@@ -33,6 +33,7 @@ from apps._config import (
     KnownModPageProvider,
     Mod_Config,
     ModPageLink,
+    ModPlacement,
     ModType,
     known_mod_page_provider_for_url,
 )
@@ -920,11 +921,24 @@ _SEVENDAYS_BUILTIN_MOD_NAMES = frozenset(
         "Xample_MarkersMod",
     }
 )
+_SEVENDAYS_MOD_INFO_FILENAMES: Mapping[ModPlacement, str] = {
+    ModPlacement.SERVER_ENABLED: "ModInfo.xml",
+    ModPlacement.SERVER_DISABLED: "ModInfo.xml.disabled",
+    ModPlacement.CLIENT_ONLY: "ModInfo.xml.client",
+}
 
 
 class Mod_7D2D(Mod):
     def __init__(self, cfg: Mod_Config):
         super().__init__(cfg)
+
+    @staticmethod
+    def _existing_mod_info_placements(mod_directory: Path) -> tuple[ModPlacement, ...]:
+        return tuple(
+            placement
+            for placement, filename in _SEVENDAYS_MOD_INFO_FILENAMES.items()
+            if (mod_directory / filename).exists()
+        )
 
     @classmethod
     def iter_candidates(cls, folder: Path) -> tuple[Path, ...]:
@@ -932,7 +946,7 @@ class Mod_7D2D(Mod):
         for pointer in sorted(folder.iterdir(), key=lambda item: item.name.casefold()):
             if not pointer.is_dir():
                 continue
-            if (pointer / "ModInfo.xml").exists() or (pointer / "ModInfo.xml.disabled").exists():
+            if cls._existing_mod_info_placements(pointer):
                 candidates.append(pointer)
         return tuple(candidates)
 
@@ -944,16 +958,31 @@ class Mod_7D2D(Mod):
         *,
         folder: Path,
     ) -> Mod_Config | None:
-        enabled = (candidate / "ModInfo.xml").exists() and not (candidate / "ModInfo.xml.disabled").exists()
-        return modcf_cls(name=candidate.name, directory=folder, enabled=enabled)
+        placements = cls._existing_mod_info_placements(candidate)
+        if len(placements) != 1:
+            raise RuntimeError(f"7D2D mod has conflicting ModInfo.xml placements: {candidate}")
+        placement = placements[0]
+        return modcf_cls(
+            name=candidate.name,
+            directory=folder,
+            placement=placement,
+            mod_type=ModType.CLIENT if placement is ModPlacement.CLIENT_ONLY else ModType.REGULAR,
+        )
 
     @property
     def mod_info_enabled_path(self) -> Path:
-        return self.enabled_path / "ModInfo.xml"
+        return self.path_for_placement(ModPlacement.SERVER_ENABLED)
 
     @property
     def mod_info_disabled_path(self) -> Path:
-        return self.enabled_path / "ModInfo.xml.disabled"
+        return self.path_for_placement(ModPlacement.SERVER_DISABLED)
+
+    @property
+    def mod_info_client_path(self) -> Path:
+        return self.path_for_placement(ModPlacement.CLIENT_ONLY)
+
+    def path_for_placement(self, placement: ModPlacement) -> Path:
+        return self.enabled_path / _SEVENDAYS_MOD_INFO_FILENAMES[placement]
 
     @property
     def path(self) -> Path:
@@ -970,17 +999,18 @@ class Mod_7D2D(Mod):
         return ModType.REGULAR
 
     def exists(self) -> bool:
-        return self.enabled_path.is_dir() and (
-            self.mod_info_enabled_path.exists() or self.mod_info_disabled_path.exists()
+        return self.enabled_path.is_dir() and bool(
+            self._existing_mod_info_placements(self.enabled_path)
         )
 
     def sync_enabled_state(self) -> None:
-        enabled_exists = self.mod_info_enabled_path.exists()
-        disabled_exists = self.mod_info_disabled_path.exists()
-        if enabled_exists and not disabled_exists:
-            self.cfg.enabled = True
-        elif disabled_exists and not enabled_exists:
-            self.cfg.enabled = False
+        placements = self._existing_mod_info_placements(self.enabled_path)
+        if len(placements) > 1:
+            raise RuntimeError(f"7D2D mod has files in multiple placements: {self.name}")
+        if placements:
+            self.cfg.set_placement(placements[0])
+        else:
+            self.cfg.set_placement(self.cfg.placement)
 
     def _current_mod_info_path(self) -> Path | None:
         self.sync_enabled_state()
@@ -988,6 +1018,8 @@ class Mod_7D2D(Mod):
             return self.mod_info_enabled_path
         if self.mod_info_disabled_path.exists():
             return self.mod_info_disabled_path
+        if self.mod_info_client_path.exists():
+            return self.mod_info_client_path
         return None
 
     def _mod_info_value(self, field_name: str) -> str | None:
@@ -1029,14 +1061,14 @@ class Mod_7D2D(Mod):
         if not override_coremod:
             self.is_coremod()
         await asyncio.to_thread(File_Utils.move, self.mod_info_disabled_path, self.mod_info_enabled_path)
-        self.cfg.enabled = True
+        self.cfg.set_placement(ModPlacement.SERVER_ENABLED)
         return self.enabled_path
 
     async def _disable_file(self, override_coremod: bool = False) -> Path:
         if not override_coremod:
             self.is_coremod()
         await asyncio.to_thread(File_Utils.move, self.mod_info_enabled_path, self.mod_info_disabled_path)
-        self.cfg.enabled = False
+        self.cfg.set_placement(ModPlacement.SERVER_DISABLED)
         return self.enabled_path
 
 

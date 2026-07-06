@@ -12,7 +12,15 @@ from _mod_ops import download_entries
 from _discord import Fileish, OutboundRelayFormatter, RelayMessageReferenceKind, RelayOutboundFormatOptions
 from _security import Power_Level
 from _utils import Utilities
-from apps._config import App_Config, AppVersion, Mod_Config, ModDownloadBlockReason, ModPageLink, ModType
+from apps._config import (
+    App_Config,
+    AppVersion,
+    Mod_Config,
+    ModDownloadBlockReason,
+    ModPageLink,
+    ModPlacement,
+    ModType,
+)
 from apps._console import ConsoleResponseSource, execute_console_action
 from apps._mod import Mod_Manager
 from apps.sevendays import (
@@ -129,6 +137,30 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             self.assertFalse(mod_info.exists())
             self.assertTrue((mod_dir / "ModInfo.xml.disabled").exists())
             self.assertFalse(mod.cfg.enabled)
+
+    def test_client_classification_renames_modinfo_xml_instead_of_the_mod_folder(self) -> None:
+        with TemporaryDirectory() as tmp:
+            mods_dir = Path(tmp) / "Mods"
+            mod_dir = mods_dir / "ExampleMod"
+            mod_dir.mkdir(parents=True)
+            mod_info = mod_dir / "ModInfo.xml"
+            mod_info.write_text("<mod />", encoding="utf-8")
+            mod = Mod_7D2D(
+                Mod_Config(
+                    name="ExampleMod",
+                    directory=mods_dir,
+                    mod_type=ModType.CLIENT,
+                )
+            )
+
+            mod.sync_metadata()
+
+            self.assertTrue(mod_dir.exists())
+            self.assertFalse(mod_info.exists())
+            self.assertTrue((mod_dir / "ModInfo.xml.client").exists())
+            self.assertFalse((mods_dir / "ExampleMod.client").exists())
+            self.assertIs(mod.cfg.placement, ModPlacement.CLIENT_ONLY)
+            self.assertEqual(mod.storage_path, mod_dir)
 
     def test_detect_version_reads_modinfo_xml(self) -> None:
         with TemporaryDirectory() as tmp:
