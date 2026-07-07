@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import tarfile
 import unittest
@@ -20,17 +21,28 @@ from apps._config import (
     KnownModPageProvider,
     Mod_Config,
 )
+from apps._console import ConsoleResponseSource, execute_console_action
 from apps._mod import Mod_Manager
 from apps._updater import AppUpdateOperationKind, AppUpdateProviderKind, AppUpdateState
 from apps.factorio import (
     Factorio,
     Factorio_Updater,
+    FactorioModPortalCredentials,
     Matchers,
     Mod_Factorio,
     _ensure_factorio_binary_executable,
     _factorio_download_archive_path,
     _factorio_latest_headless_versions,
+    _factorio_mod_portal_release_from_mapping,
+    _select_factorio_mod_portal_release,
     detect_factorio_version,
+    download_factorio_mod_from_portal,
+    ensure_factorio_config_files,
+    factorio_config_path,
+    factorio_mod_portal_credentials_from_server_settings,
+    factorio_mod_settings_path,
+    parse_factorio_mod_portal_url,
+    resolve_factorio_mod_portal_candidates,
 )
 
 
@@ -65,6 +77,28 @@ class _FakeFactorioUpdateApp:
 
 
 class FactorioVersionDetectionTests(unittest.TestCase):
+    def test_detect_description_reads_info_json_from_factorio_archive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            mods_dir = Path(temp_dir)
+            archive_path = mods_dir / "example_1.0.0.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr(
+                    "example_1.0.0/info.json",
+                    json.dumps(
+                        {
+                            "name": "example",
+                            "version": "1.0.0",
+                            "title": "Example Mod",
+                            "description": "Adds example logistics helpers.",
+                        }
+                    ),
+                )
+            mod = Mod_Factorio(Mod_Config(name=archive_path.name, directory=mods_dir))
+
+            mod.sync_metadata()
+
+        self.assertEqual(mod.description, "Adds example logistics helpers.")
+
     def test_delete_save_file_removes_save_archive(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -80,6 +114,307 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
             self.assertEqual(deleted.id, "saves/alpha.zip")
             self.assertFalse(save_path.exists())
+
+    def test_parse_factorio_mod_portal_url_accepts_canonical_mod_page(self) -> None:
+        mod_id = parse_factorio_mod_portal_url("https://mods.factorio.com/mod/invincible-construction-bots")
+
+        self.assertEqual(mod_id, "invincible-construction-bots")
+
+    def test_parse_factorio_mod_portal_url_rejects_non_portal_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mods.factorio.com"):
+            parse_factorio_mod_portal_url("https://example.com/mod/invincible-construction-bots")
+
+    def test_select_factorio_mod_portal_release_prefers_matching_major_minor(self) -> None:
+        old_release = _factorio_mod_portal_release_from_mapping(
+            {
+                "download_url": "/download/example/1.0.0",
+                "file_name": "example_1.0.0.zip",
+                "version": "1.0.0",
+                "sha1": "0" * 40,
+                "released_at": "2026-01-01T00:00:00.000000Z",
+                "info_json": {"factorio_version": "1.1"},
+            }
+        )
+        matching_release = _factorio_mod_portal_release_from_mapping(
+            {
+                "download_url": "/download/example/2.0.0",
+                "file_name": "example_2.0.0.zip",
+                "version": "2.0.0",
+                "sha1": "1" * 40,
+                "released_at": "2025-01-01T00:00:00.000000Z",
+                "info_json": {"factorio_version": "2.0"},
+            }
+        )
+
+        selected = _select_factorio_mod_portal_release(
+            (old_release, matching_release),
+            factorio_version=AppVersion(main="2.0.68"),
+        )
+
+        self.assertEqual(selected.file_name, "example_2.0.0.zip")
+
+    def test_factorio_mod_portal_release_extracts_required_dependencies(self) -> None:
+        release = _factorio_mod_portal_release_from_mapping(
+            {
+                "download_url": "/download/example/1.0.0",
+                "file_name": "example_1.0.0.zip",
+                "version": "1.0.0",
+                "sha1": "0" * 40,
+                "released_at": "2026-01-01T00:00:00.000000Z",
+                "info_json": {
+                    "factorio_version": "2.0",
+                    "dependencies": [
+                        "base >= 2.0.0",
+                        "required-lib >= 1.0.0",
+                        "? optional-lib",
+                        "! incompatible-lib",
+                        "~ hidden-required-lib >= 1.0.0",
+                        "required-lib >= 1.0.0",
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(release.dependencies, ("required-lib", "hidden-required-lib"))
+
+    def test_factorio_mod_portal_resolution_includes_required_dependencies(self) -> None:
+        def release_payload(mod_id: str, dependencies: list[str]) -> dict[str, object]:
+            return {
+                "download_url": f"/download/{mod_id}/1.0.0",
+                "file_name": f"{mod_id}_1.0.0.zip",
+                "version": "1.0.0",
+                "sha1": "0" * 40,
+                "released_at": "2026-01-01T00:00:00.000000Z",
+                "info_json": {"factorio_version": "2.0", "dependencies": dependencies},
+            }
+
+        class _FakeResponse:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.status = 200
+                self._payload = payload
+
+            async def __aenter__(self) -> "_FakeResponse":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        class _FakeSession:
+            async def __aenter__(self) -> "_FakeSession":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            def get(self, url: str, **_kwargs: object) -> _FakeResponse:
+                mod_id = url.split("/api/mods/", maxsplit=1)[1].removesuffix("/full")
+                root_payload: dict[str, object] = {
+                    "name": "root",
+                    "title": "Root Mod",
+                    "releases": [release_payload("root", ["dep-one"])],
+                }
+                dep_one_payload: dict[str, object] = {
+                    "name": "dep-one",
+                    "title": "Dependency One",
+                    "releases": [release_payload("dep-one", ["dep-two"])],
+                }
+                dep_two_payload: dict[str, object] = {
+                    "name": "dep-two",
+                    "title": "Dependency Two",
+                    "releases": [release_payload("dep-two", [])],
+                }
+                payloads: dict[str, dict[str, object]] = {
+                    "root": root_payload,
+                    "dep-one": dep_one_payload,
+                    "dep-two": dep_two_payload,
+                }
+                return _FakeResponse(payloads[mod_id])
+
+        with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+            resolution = asyncio.run(
+                resolve_factorio_mod_portal_candidates(
+                    page_url="https://mods.factorio.com/mod/root",
+                    factorio_version=AppVersion(main="2.0.68"),
+                )
+            )
+
+        self.assertEqual(tuple(candidate.mod_id for candidate in resolution.candidates), ("root", "dep-one", "dep-two"))
+        self.assertEqual(resolution.candidates[1].required_by, ("root",))
+        self.assertEqual(resolution.candidates[2].required_by, ("dep-one",))
+
+    def test_factorio_mod_portal_credentials_read_server_settings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "server-settings.json"
+            settings_path.write_text(
+                json.dumps({"username": "user", "token": "token"}),
+                encoding="utf-8",
+            )
+
+            credentials = factorio_mod_portal_credentials_from_server_settings(settings_path)
+
+        self.assertEqual(credentials.username, "user")
+        self.assertEqual(credentials.token, "token")
+
+    def test_ensure_factorio_config_files_copies_missing_examples(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            data_dir = directory / "data"
+            data_dir.mkdir()
+            for filename in ("server-settings", "map-settings", "map-gen-settings"):
+                (data_dir / f"{filename}.example.json").write_text(
+                    json.dumps({"source": filename}),
+                    encoding="utf-8",
+                )
+
+            copied = ensure_factorio_config_files(directory)
+
+            self.assertEqual(
+                tuple(path.name for path in copied),
+                ("server-settings.json", "map-settings.json", "map-gen-settings.json"),
+            )
+            self.assertEqual(
+                json.loads(factorio_config_path(directory, "map-gen-settings.json").read_text(encoding="utf-8")),
+                {"source": "map-gen-settings"},
+            )
+
+    def test_ensure_factorio_config_files_does_not_overwrite_existing_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            data_dir = directory / "data"
+            data_dir.mkdir()
+            config_path = data_dir / "server-settings.json"
+            config_path.write_text(json.dumps({"source": "custom"}), encoding="utf-8")
+            (data_dir / "server-settings.example.json").write_text(
+                json.dumps({"source": "example"}),
+                encoding="utf-8",
+            )
+
+            copied = ensure_factorio_config_files(directory)
+
+            self.assertNotIn(config_path, copied)
+            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8")), {"source": "custom"})
+
+    def test_factorio_mod_settings_path_uses_mods_directory(self) -> None:
+        self.assertEqual(
+            factorio_mod_settings_path(Path("/srv/factorio")),
+            Path("/srv/factorio/mods/mod-settings.dat"),
+        )
+
+    def test_factorio_exposes_raw_console_command_action(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.cfg = App_Config(
+            name="factorio_alpha",
+            instance_key="alpha",
+            friendly_name="Factorio",
+            directory=Path("."),
+            apps_dir=Path("."),
+            scope="factorio",
+        )
+
+        actions = app.console_actions
+
+        self.assertEqual(tuple(action.key for action in actions), ("raw_command",))
+        self.assertEqual(actions[0].label, "Run Command")
+        self.assertEqual(actions[0].power_level.name, "sudo")
+
+    def test_factorio_raw_console_command_sends_rcon_command(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.friendly = "Factorio"
+        app.cfg = App_Config(
+            name="factorio_alpha",
+            instance_key="alpha",
+            friendly_name="Factorio",
+            directory=Path("."),
+            apps_dir=Path("."),
+            scope="factorio",
+        )
+        app.check_running = lambda: True
+        app._relay = SimpleNamespace(send=AsyncMock(return_value="command output"))
+        action = next(action for action in app.console_actions if action.key == "raw_command")
+
+        result = asyncio.run(
+            execute_console_action(
+                app=app,
+                is_running=app.check_running,
+                action=action,
+                raw_value="/help",
+            )
+        )
+
+        app._relay.send.assert_awaited_once_with("/help")
+        self.assertEqual(result.source, ConsoleResponseSource.RCON)
+        self.assertEqual(result.text, "command output")
+
+    def test_factorio_mod_portal_download_follows_archive_redirects(self) -> None:
+        archive_bytes = b"factorio-mod-archive"
+        expected_sha1 = hashlib.sha1(archive_bytes).hexdigest()
+        get_calls: list[dict[str, object]] = []
+
+        class _FakeContent:
+            async def iter_chunked(self, _chunk_size: int):
+                yield archive_bytes
+
+        class _FakeResponse:
+            def __init__(self, *, status: int, payload: dict[str, object] | None = None) -> None:
+                self.status = status
+                self._payload = payload
+                self.content = _FakeContent()
+
+            async def __aenter__(self) -> "_FakeResponse":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def json(self) -> dict[str, object]:
+                if self._payload is None:
+                    raise ValueError("No JSON payload")
+                return self._payload
+
+        class _FakeSession:
+            async def __aenter__(self) -> "_FakeSession":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            def get(self, url: str, **kwargs: object) -> _FakeResponse:
+                get_calls.append({"url": url, **kwargs})
+                if url.endswith("/api/mods/example/full"):
+                    return _FakeResponse(
+                        status=200,
+                        payload={
+                            "name": "example",
+                            "releases": [
+                                {
+                                    "download_url": "/download/example/1.0.0",
+                                    "file_name": "example_1.0.0.zip",
+                                    "version": "1.0.0",
+                                    "sha1": expected_sha1,
+                                    "released_at": "2026-01-01T00:00:00.000000Z",
+                                    "info_json": {"factorio_version": "2.0"},
+                                },
+                            ],
+                        },
+                    )
+                return _FakeResponse(status=200)
+
+        with TemporaryDirectory() as temp_dir:
+            with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+                result = asyncio.run(
+                    download_factorio_mod_from_portal(
+                        page_url="https://mods.factorio.com/mod/example",
+                        destination_dir=Path(temp_dir),
+                        factorio_version=AppVersion(main="2.0.68"),
+                        credentials=FactorioModPortalCredentials(username="user", token="token"),
+                    )
+                )
+
+        self.assertEqual(result.file_name, "example_1.0.0.zip")
+        self.assertTrue(get_calls[-1]["allow_redirects"])
 
     def test_detect_factorio_version_from_local_log(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -8,8 +8,8 @@ from typing import Any, Never, cast
 from unittest.mock import AsyncMock, patch
 
 import config
-from _mod_ops import download_entries
 from _discord import Fileish, OutboundRelayFormatter, RelayMessageReferenceKind, RelayOutboundFormatOptions
+from _mod_ops import download_entries
 from _security import Power_Level
 from _utils import Utilities
 from apps._config import (
@@ -195,6 +195,22 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             mod.sync_metadata()
 
             self.assertEqual(mod.friendly, "Better Loot")
+
+    def test_detect_description_reads_description_from_modinfo_xml(self) -> None:
+        with TemporaryDirectory() as tmp:
+            mods_dir = Path(tmp) / "Mods"
+            mod_dir = mods_dir / "ExampleMod"
+            mod_dir.mkdir(parents=True)
+            (mod_dir / "ModInfo.xml").write_text(
+                """<?xml version="1.0" encoding="UTF-8" ?>
+<xml>
+    <Description value="Adds better loot to world containers." />
+</xml>""",
+                encoding="utf-8",
+            )
+            mod = Mod_7D2D(Mod_Config(name="ExampleMod", directory=mods_dir))
+
+            self.assertEqual(mod.description, "Adds better loot to world containers.")
 
     def test_sync_metadata_adds_supported_modinfo_website_as_mod_page(self) -> None:
         cases = (

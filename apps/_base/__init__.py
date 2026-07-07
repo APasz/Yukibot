@@ -48,6 +48,10 @@ class Base(App):
         self.process = None
         super().__init__(bot, am, cfg, Base_Settings(Path(), version_getter=lambda: cfg.version), Mod_Base)
         self.act_err_threshold = 100
+        self.support_nt = False
+        "Supports Windows"
+        self.support_unix = True
+        "Supports Linux"
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")

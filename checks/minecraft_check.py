@@ -14,8 +14,8 @@ from unittest.mock import patch
 
 import config
 from _relay_embeds import build_app_lifecycle_embed
-from apps._config import Mod_Config, ModType
 from apps import minecraft
+from apps._config import Mod_Config, ModType
 from apps.minecraft import (
     Activities as MinecraftActivities,
 )
@@ -32,10 +32,10 @@ from apps.minecraft import (
     MinecraftRecipeKind,
     MinecraftRecipeRemoval,
     MinecraftRecipeRemovalFilter,
+    MinecraftRecipeUnificationMode,
     MinecraftShapedRecipe,
     MinecraftShapelessRecipe,
     MinecraftStonecuttingRecipe,
-    MinecraftRecipeUnificationMode,
     Mod_MC,
     _detect_minecraft_mod_version,
     _load_squaremap_web_address,
@@ -209,6 +209,54 @@ class MinecraftModVersionDetectionTests(unittest.TestCase):
                     self.assertEqual(mod.version, version)
                     self.assertEqual(len(mod.cfg.mod_pages), 1)
                     self.assertEqual(mod.cfg.mod_pages[0].url, homepage)
+
+    def test_reads_description_across_supported_loaders(self) -> None:
+        metadata_cases = {
+            "forge.jar": (
+                "META-INF/mods.toml",
+                'modLoader="javafml"\n[[mods]]\nmodId="example"\ndescription="Forge example description."\n',
+                "Forge example description.",
+            ),
+            "fabric.jar": (
+                "fabric.mod.json",
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "id": "example",
+                        "name": "Fabric Example",
+                        "description": "Fabric example description.",
+                    }
+                ),
+                "Fabric example description.",
+            ),
+            "quilt.jar": (
+                "quilt.mod.json",
+                json.dumps(
+                    {
+                        "quilt_loader": {
+                            "id": "example",
+                            "metadata": {
+                                "name": "Quilt Example",
+                                "description": "Quilt example description.",
+                            },
+                        }
+                    }
+                ),
+                "Quilt example description.",
+            ),
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            for filename, (metadata_path, metadata_text, description) in metadata_cases.items():
+                with self.subTest(filename=filename):
+                    with zipfile.ZipFile(directory / filename, "w") as archive:
+                        archive.writestr(metadata_path, metadata_text)
+                    mod = Mod_MC(Mod_Config(name=filename, directory=directory))
+
+                    mod.sync_metadata()
+
+                    self.assertEqual(mod.description, description)
 
     def test_resolves_forge_version_placeholder_from_jar_manifest(self) -> None:
         with TemporaryDirectory() as temp_dir:

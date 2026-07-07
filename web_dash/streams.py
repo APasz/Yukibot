@@ -239,6 +239,22 @@ class ModWebStreamsMixin(ModWebServiceSupport):
         user: ModWebUser,
         on_update: Callable[[NodeConsoleStdoutSnapshot], None],
     ) -> None:
+        try:
+            on_update(
+                await self._remote_console_stdout_async(
+                    node,
+                    app_name,
+                    max_lines=max_lines,
+                    user=user,
+                )
+            )
+        except Exception as xcp:
+            log.warning(
+                "Remote console stdout initial snapshot failed: node=%s app=%s error=%s",
+                node.node_name,
+                app_name,
+                xcp,
+            )
         while True:
             try:
                 token = self._remote_token(

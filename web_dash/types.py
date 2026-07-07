@@ -21,8 +21,8 @@ from .runtime_imports import (
     Enum,
     Label,
     Literal,
-    NodeAppMutationAction,
     NodeAppActivityProviderEntry,
+    NodeAppMutationAction,
     NodeAppResourcePointSummary,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
@@ -30,6 +30,7 @@ from .runtime_imports import (
     NodeChatRoomSnapshot,
     NodeConfigList,
     NodeConsoleActionList,
+    NodeFactorioModSettings,
     NodeModList,
     NodeSaveList,
     NodeSettingList,
@@ -751,6 +752,7 @@ class ModWebBasePageModel:
     minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = field(default=None, kw_only=True)
     minecraft_item_icon_api_url: str | None = field(default=None, kw_only=True)
     sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = field(default=None, kw_only=True)
+    factorio_mod_settings: NodeFactorioModSettings | None = field(default=None, kw_only=True)
     tabs: tuple["ModWebAppTabDefinition", ...] = field(default=(), kw_only=True)
 
 

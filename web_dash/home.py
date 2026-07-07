@@ -14,6 +14,8 @@ from .constants import (
 from .links import mod_web_node_system_path
 from .nicegui_protocols import ModWebUi, _value_as_bool, _value_as_text
 from .runtime_imports import (
+    MAX_RESTART_INTERVAL_MINUTES,
+    MIN_RESTART_INTERVAL_MINUTES,
     AbstractEventLoop,
     AppUpdateInfo,
     AppUpdateStatus,
@@ -27,37 +29,35 @@ from .runtime_imports import (
     Html,
     Input,
     Label,
-    Select,
+    MaintenanceService,
     ModWebUser,
     NodeAppEntry,
     NodeAppRuntimeSummary,
     NodeAppTransitionState,
     NodeDiskManagementState,
-    NodeStateStreamEvent,
     NodeRestartScheduleEntry,
     NodeRestartScheduleState,
-    NodeSystemHistory,
+    NodeStateStreamEvent,
     NodeSystemAction,
+    NodeSystemHistory,
     NodeSystemSample,
     NodeSystemSummary,
     Power_Level,
     Request,
-    asyncio,
+    RestartTarget,
+    Select,
+    Tooltip,
     app_scope_from_name,
+    asyncio,
     cast,
     config,
-    MaintenanceService,
-    MAX_RESTART_INTERVAL_MINUTES,
-    MIN_RESTART_INTERVAL_MINUTES,
     dataclass,
     escape,
     mod_web_badge_class,
     quote,
     replace,
-    RestartTarget,
-    Tooltip,
 )
-from .utils import _format_uptime_seconds
+from .utils import _format_player_capacity, _format_uptime_seconds
 
 _KEEP_PAGE_MODEL_VALUE = object()
 _CLIENT_TIMEZONE_VALUE = "client"
@@ -164,7 +164,6 @@ def _format_restart_timestamp(timestamp: int, timezone_name: str) -> str:
     scheduled_at = datetime.fromtimestamp(timestamp, ZoneInfo(timezone_name))
     return scheduled_at.strftime("%a, %d %b %Y · %H:%M %Z")
 from .service_base import ModWebServiceSupport
-from .ui_helpers import ModWebUiHelpersMixin
 from .types import (
     ModWebAppLink,
     ModWebAppTabDefinition,
@@ -180,6 +179,7 @@ from .types import (
     _ModWebLinkSpec,
     _ModWebNodePresenceBadgeSpec,
 )
+from .ui_helpers import ModWebUiHelpersMixin
 
 if TYPE_CHECKING:
     from nicegui.element import Element
@@ -2599,7 +2599,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
     def _player_count_snapshot_text(*, player_count: int | None, player_capacity: int | None) -> str | None:
         if player_count is None or player_capacity is None:
             return None
-        return f"{player_count} / {player_capacity}"
+        player_capacity_text: str | None = _format_player_capacity(player_capacity)
+        if player_capacity_text is None:
+            return None
+        return f"{player_count} / {player_capacity_text}"
 
     @classmethod
     def _chat_player_count_badge(cls, app_stats: NodeAppRuntimeSummary | None) -> _ModWebBadgeSpec | None:

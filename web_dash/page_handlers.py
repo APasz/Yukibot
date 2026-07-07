@@ -4,8 +4,8 @@ from .constants import (
     _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
     log,
 )
-from .nicegui_protocols import ModWebUi
 from .links import mod_web_node_system_path
+from .nicegui_protocols import ModWebUi
 from .runtime_imports import (
     Awaitable,
     Callable,
@@ -16,9 +16,10 @@ from .runtime_imports import (
     NodeBlueprintList,
     NodeConfigList,
     NodeConsoleActionList,
+    NodeDiskManagementState,
+    NodeFactorioModSettings,
     NodeModList,
     NodeModSummary,
-    NodeDiskManagementState,
     NodeRestartScheduleState,
     NodeSaveList,
     NodeSettingList,
@@ -50,7 +51,6 @@ from .types import (
     ModWebPageModel,
     ModWebSevenDaysSandboxOptionsSummary,
 )
-
 
 PageSection = TypeVar("PageSection")
 _NODE_RECONNECT_PROBE_INTERVAL_SECONDS = 2.0
@@ -341,7 +341,21 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 load_warnings=load_warnings,
                 operation=lambda: self._remote_config_list_async(node, app_name, user),
             )
-            loaded_model = replace(loaded_model, configs=configs)
+            factorio_mod_settings: NodeFactorioModSettings | None = None
+            if app_entry.scope == config.AppScopes.factorio.value:
+                factorio_mod_settings = await self._safe_remote_optional_page_section(
+                    node=node,
+                    app_name=app_name,
+                    section_label="Factorio mod settings",
+                    fallback=None,
+                    load_warnings=load_warnings,
+                    operation=lambda: self._remote_factorio_mod_settings_async(node, app_name, user),
+                )
+            loaded_model = replace(
+                loaded_model,
+                configs=configs,
+                factorio_mod_settings=factorio_mod_settings,
+            )
         elif normalized_tab_id == "saves" and model.saves is not None:
             saves = await self._safe_remote_optional_page_section(
                 node=node,
@@ -373,15 +387,25 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             )
             loaded_model = replace(loaded_model, settings=settings)
         elif normalized_tab_id == "console" and model.console_actions is not None:
-            console_actions = await self._safe_remote_optional_page_section(
-                node=node,
-                app_name=app_name,
-                section_label="Console",
-                fallback=self._empty_remote_console_action_list(app_entry=app_entry, node=node),
-                load_warnings=load_warnings,
-                operation=lambda: self._remote_console_action_list_async(node, app_name, user),
+            console_actions, app_stats = await asyncio.gather(
+                self._safe_remote_optional_page_section(
+                    node=node,
+                    app_name=app_name,
+                    section_label="Console",
+                    fallback=self._empty_remote_console_action_list(app_entry=app_entry, node=node),
+                    load_warnings=load_warnings,
+                    operation=lambda: self._remote_console_action_list_async(node, app_name, user),
+                ),
+                self._safe_remote_optional_page_section(
+                    node=node,
+                    app_name=app_name,
+                    section_label="Runtime",
+                    fallback=model.app_stats,
+                    load_warnings=load_warnings,
+                    operation=lambda: self._remote_app_runtime_summary_async(node, app_name, user),
+                ),
             )
-            loaded_model = replace(loaded_model, console_actions=console_actions)
+            loaded_model = replace(loaded_model, console_actions=console_actions, app_stats=app_stats)
         elif normalized_tab_id == "mods" and isinstance(model, ModWebPageModel):
             mods = await self._remote_mod_list_async(node, app_name, user)
             app_api_url: str = model.download_all_url.partition("/mods/download")[0]
@@ -610,6 +634,20 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 if can_read_configs and active_tab_id == "configs"
                 else asyncio.sleep(0, result=empty_configs)
             )
+            factorio_mod_settings_job = (
+                self._safe_remote_optional_page_section(
+                    node=node,
+                    app_name=app_name,
+                    section_label="Factorio mod settings",
+                    fallback=None,
+                    load_warnings=load_warnings,
+                    operation=lambda: self._remote_factorio_mod_settings_async(node, app_name, user),
+                )
+                if app_entry.scope == config.AppScopes.factorio.value
+                and can_read_configs
+                and active_tab_id == "configs"
+                else asyncio.sleep(0, result=None)
+            )
             if app_entry.supports_mods:
                 empty_mods = self._empty_remote_mod_list(app_entry=app_entry, node=node)
                 load_mods = active_tab_id in {"mods", "recipes"} or resolved_app_scope == "minecraft"
@@ -698,6 +736,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     blueprints_job,
                     settings_job,
                     console_actions_job,
+                    factorio_mod_settings_job,
                     self._remote_node_system_summary_or_none_async(
                         node,
                         user,
@@ -711,9 +750,10 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 blueprints = cast(NodeBlueprintList | None, remote_results[3])
                 settings = cast(NodeSettingList | None, remote_results[4])
                 console_actions = cast(NodeConsoleActionList | None, remote_results[5])
-                system_summary = cast(NodeSystemSummary | None, remote_results[6])
-                if mods.app_stats is None and remote_results[7] is not None:
-                    mods = replace(mods, app_stats=cast(NodeAppRuntimeSummary, remote_results[7]))
+                factorio_mod_settings = cast(NodeFactorioModSettings | None, remote_results[6])
+                system_summary = cast(NodeSystemSummary | None, remote_results[7])
+                if remote_results[8] is not None:
+                    mods = replace(mods, app_stats=cast(NodeAppRuntimeSummary, remote_results[8]))
                 minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None
                 minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None
                 if resolved_app_scope == "minecraft" and active_tab_id == "recipes":
@@ -786,6 +826,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     minecraft_recipes=minecraft_recipes,
                     minecraft_item_registry=minecraft_item_registry,
                     sevendays_sandbox_options=sevendays_sandbox_options,
+                    factorio_mod_settings=factorio_mod_settings,
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=mods.app_name,
                         app_stats=mods.app_stats,
@@ -920,6 +961,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     blueprints_job,
                     settings_job,
                     console_actions_job,
+                    factorio_mod_settings_job,
                     self._remote_app_runtime_summary_async(node, app_name, user),
                     self._remote_node_system_summary_or_none_async(
                         node,
@@ -932,8 +974,9 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 blueprints = cast(NodeBlueprintList | None, remote_results[2])
                 settings = cast(NodeSettingList | None, remote_results[3])
                 console_actions = cast(NodeConsoleActionList | None, remote_results[4])
-                app_stats = cast(NodeAppRuntimeSummary | None, remote_results[5])
-                system_summary = cast(NodeSystemSummary | None, remote_results[6])
+                factorio_mod_settings = cast(NodeFactorioModSettings | None, remote_results[5])
+                app_stats = cast(NodeAppRuntimeSummary | None, remote_results[6])
+                system_summary = cast(NodeSystemSummary | None, remote_results[7])
                 model = self._remote_overview_page_model(
                     node=node,
                     app_name=app_entry.name,
@@ -977,6 +1020,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                     relay_advancement_term=app_entry.relay_advancement_term,
                     activity_providers=app_entry.activity_providers,
                     load_warnings=tuple(load_warnings),
+                    factorio_mod_settings=factorio_mod_settings,
                     app_start_blocked=self._app_start_blocked_remote(
                         app_name=app_entry.name,
                         app_stats=app_stats,

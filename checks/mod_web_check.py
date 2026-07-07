@@ -16,9 +16,9 @@ from urllib.parse import parse_qs, urlsplit
 import aiohttp
 import requests
 from aiohttp.client_reqrep import RequestInfo
+from modmux.models import Provider
 from multidict import CIMultiDict, CIMultiDictProxy
 from nicegui.elements.link import Link
-from modmux.models import Provider
 from yarl import URL
 
 import config
@@ -43,12 +43,14 @@ from apps._config import (
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPageCandidate,
-    ModPageLink,
     ModPageDiscovery,
+    ModPageLink,
     ModPageMatchConfidence,
     ModPageMatchReason,
     ModPageProviderCandidates,
     ModPlacement,
+    ModPlatformMetadata,
+    ModrinthModMetadata,
     ModType,
     is_client_pack_candidate,
 )
@@ -136,9 +138,9 @@ from node_api import (
     NodeSettingEntry,
     NodeSettingList,
     NodeStateStreamEvent,
+    NodeSystemAction,
     NodeSystemDiskSummary,
     NodeSystemHistory,
-    NodeSystemAction,
     NodeSystemSample,
     NodeSystemSummary,
 )
@@ -168,20 +170,18 @@ from web_dash.assets import AssetContentEncoding, CacheableTextAsset, extract_ht
 from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
-    _SEARCH_INPUT_DEBOUNCE_MILLISECONDS,
 )
 from web_dash.home import (
-    _ModWebNodeDiskChoice,
-    _RestartWeekday,
     _format_restart_hours_input,
     _format_restart_timestamp,
+    _ModWebNodeDiskChoice,
     _parse_restart_hours_input,
     _restart_anchor_timestamp,
     _restart_interval_from_parts,
     _restart_interval_parts,
+    _RestartWeekday,
 )
 from web_dash.links import current_node_app_url, mod_web_node_system_path
-from web_dash.models import _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS
 from web_dash.nicegui_protocols import ModWebUi
 from web_dash.service import ModWebService
 from web_dash.stream_broker import SharedAsyncStreamBroker
@@ -200,8 +200,8 @@ from web_dash.types import (
     ModWebHomeNodeSummary,
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
-    ModWebModSortOrder,
     ModWebModlistFormat,
+    ModWebModSortOrder,
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebNodeStatus,
@@ -1067,6 +1067,7 @@ class ModWebTests(unittest.TestCase):
         *,
         name: str,
         friendly: str | None = None,
+        description: str | None = None,
         enabled: bool = True,
         mod_type: ModType = ModType.REGULAR,
         coremod: bool = False,
@@ -1090,6 +1091,7 @@ class ModWebTests(unittest.TestCase):
         return NodeModEntry(
             name=name,
             friendly=friendly or name,
+            description=description,
             enabled=enabled,
             mod_type=mod_type,
             coremod=coremod,
@@ -1110,6 +1112,184 @@ class ModWebTests(unittest.TestCase):
             source_path=f"/mods/{name}",
             client_pack=resolved_client_pack,
         )
+
+    def _render_mod_info_dialog_labels(self, entry: NodeModEntry) -> list[str]:
+        class FakeContainer:
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                del exc_type, exc, tb
+                return False
+
+            def classes(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+        class FakeDialog(FakeContainer):
+            def open(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+            def clear(self) -> None:
+                return None
+
+        class FakeLabel:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def classes(self, value: str) -> "FakeLabel":
+                del value
+                return self
+
+        class FakeLink:
+            def props(self, value: str) -> "FakeLink":
+                del value
+                return self
+
+            def classes(self, value: str) -> "FakeLink":
+                del value
+                return self
+
+        class FakeButton:
+            def classes(self, value: str) -> "FakeButton":
+                del value
+                return self
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.labels: list[FakeLabel] = []
+
+            def dialog(self) -> FakeDialog:
+                return FakeDialog()
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def grid(self, *, columns: int) -> FakeContainer:
+                del columns
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeLabel:
+                label = FakeLabel(text)
+                self.labels.append(label)
+                return label
+
+            def link(self, text: str, target: str, *, new_tab: bool) -> FakeLink:
+                del text, target, new_tab
+                return FakeLink()
+
+            def button(self, text: str, on_click: object | None = None) -> FakeButton:
+                del text, on_click
+                return FakeButton()
+
+        service = ModWebService()
+        ui = FakeUi()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=NodeModList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                summary=NodeModSummary(
+                    total_count=1,
+                    enabled_count=1,
+                    disabled_count=0,
+                    coremod_count=0,
+                    downloadable_count=1,
+                    non_downloadable_count=0,
+                ),
+                mods=(entry,),
+                app_stats=None,
+            ),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={entry.name: f"/mods/download/{entry.name}"},
+            app_scope="minecraft",
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=False),
+            patch.object(service, "_available_mod_actions", return_value=()),
+        ):
+            service._render_mod_info_dialog(
+                ui=cast(Any, ui),
+                entry=entry,
+                model=model,
+                user=user,
+            )
+
+        return [label.text for label in ui.labels]
+
+    def test_render_mod_info_dialog_shows_description_below_mod_pages_when_available(self) -> None:
+        labels = self._render_mod_info_dialog_labels(
+            replace(
+                self._mod_entry(
+                    name="alpha-fabric.jar",
+                    friendly="Alpha Fabric",
+                    description="Client-side rendering and HUD improvements.",
+                ),
+                mod_pages=(ModPageLink(name="Modrinth", url="https://modrinth.com/mod/alpha-fabric"),),
+                platforms=ModPlatformMetadata(
+                    modrinth=ModrinthModMetadata(
+                        page_url="https://modrinth.com/mod/alpha-fabric/version/abc123",
+                        project_id="project-alpha",
+                        version_id="abc123",
+                        download_url=("https://cdn.modrinth.com/data/project-alpha/versions/abc123/alpha-fabric.jar"),
+                        description="Client-side rendering and HUD improvements.",
+                        filename="alpha-fabric.jar",
+                        sha1="0123456789abcdef0123456789abcdef01234567",
+                        sha512="0" * 128,
+                        size=123,
+                    )
+                ),
+            )
+        )
+
+        self.assertLess(labels.index("Mod pages"), labels.index("Description"))
+        self.assertIn("Client-side rendering and HUD improvements.", labels)
+
+    def test_render_mod_info_dialog_skips_description_section_when_unavailable(self) -> None:
+        labels = self._render_mod_info_dialog_labels(
+            replace(
+                self._mod_entry(
+                    name="beta-forge.jar",
+                    friendly="Beta Forge",
+                ),
+                mod_pages=(ModPageLink(name="Modrinth", url="https://modrinth.com/mod/beta-forge"),),
+            )
+        )
+
+        self.assertNotIn("Description", labels)
 
     @staticmethod
     def _save_list(*, app_name: str = "minecraft_alpha") -> NodeSaveList:
@@ -6865,6 +7045,10 @@ class ModWebTests(unittest.TestCase):
             ModWebService._player_count_snapshot_text(player_count=3, player_capacity=20),
             "3 / 20",
         )
+        self.assertEqual(
+            ModWebService._player_count_snapshot_text(player_count=3, player_capacity=-1),
+            "3 / ∞",
+        )
         self.assertIsNone(ModWebService._player_count_snapshot_text(player_count=3, player_capacity=None))
         self.assertIsNone(ModWebService._player_count_snapshot_text(player_count=None, player_capacity=20))
 
@@ -6886,6 +7070,10 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(
             ModWebService._chat_player_count_badge(active_stats),
             _ModWebBadgeSpec(text="3 / 20", tone="purple"),
+        )
+        self.assertEqual(
+            ModWebService._chat_player_count_badge(replace(active_stats, player_capacity=-1)),
+            _ModWebBadgeSpec(text="3 / ∞", tone="purple"),
         )
         self.assertEqual(
             ModWebService._chat_player_count_badge(empty_stats),
@@ -11408,6 +11596,24 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(details.status_text, "Running")
         self.assertEqual(details.status_tone, "purple")
 
+    def test_app_hero_runtime_details_render_unlimited_player_capacity(self) -> None:
+        stats = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version="1.20.4",
+            player_count=3,
+            player_capacity=-1,
+            relay_support=ChatRelaySupport.BIDIRECTIONAL,
+            storage_percent=58,
+            storage_free_bytes=120 * 1024**3,
+            storage_total_bytes=256 * 1024**3,
+            footprint_bytes=12 * 1024**3,
+        )
+
+        details = ModWebService()._app_hero_runtime_details(stats)
+
+        self.assertEqual(details.player_count_badge, _ModWebBadgeSpec(text="3 / ∞", tone="purple"))
+
     def test_app_hero_runtime_details_prefer_transition_status(self) -> None:
         stats = NodeAppRuntimeSummary(
             running=True,
@@ -15060,6 +15266,20 @@ class ModWebTests(unittest.TestCase):
                 app_stats=stopped_stats,
             ),
             "Minecraft Alpha must be running before this action can be used.",
+        )
+        live_action = replace(action, runtime_running=True)
+        self.assertEqual(
+            ModWebService._console_action_runtime_badge(action=live_action, app_stats=stopped_stats),
+            _ModWebBadgeSpec(text="Running", tone="grey"),
+        )
+        self.assertTrue(ModWebService._console_action_can_execute(action=live_action, app_stats=stopped_stats))
+        self.assertEqual(
+            ModWebService._console_action_status_text(
+                action=live_action,
+                app_friendly="Minecraft Alpha",
+                app_stats=stopped_stats,
+            ),
+            "Ready.",
         )
         self.assertEqual(
             ModWebService._console_action_runtime_badge(action=action, app_stats=starting_stats),

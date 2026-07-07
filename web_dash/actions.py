@@ -38,14 +38,14 @@ from .runtime_imports import (
     ClientPackPolicy,
     Column,
     Input,
+    Label,
     LauncherMetadataDiscovery,
     LauncherMetadataResolution,
-    Label,
     Literal,
     ModDownloadBlockReason,
     ModMetadataOverrides,
-    ModPageLink,
     ModPageDiscovery,
+    ModPageLink,
     ModPlacement,
     ModType,
     ModWebUser,
@@ -64,12 +64,12 @@ from .runtime_imports import (
     NodeModEntry,
     NodeModMutationAction,
     NodeModMutationResult,
+    NodeRestartScheduleState,
     NodeSystemAction,
     NodeSystemActionResult,
-    NodeRestartScheduleState,
+    Power_Level,
     RestartTarget,
     Select,
-    Power_Level,
     assert_never,
     asyncio,
     config,
@@ -2224,6 +2224,10 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         mod_page.url,
                                         new_tab=True,
                                     ).props('rel="noopener noreferrer"').classes("mod-mod-page-link")
+                    if entry.description is not None:
+                        with ui.column().classes("mod-detail-item gap-1"):
+                            ui.label("Description").classes("mod-stat-label")
+                            ui.label(entry.description).classes("mod-stat-value break-words")
                     if can_edit_properties:
                         with ui.column().classes(
                             "w-full gap-3 mod-app-details-section mod-mod-details-editor"

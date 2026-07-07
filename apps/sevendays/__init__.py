@@ -1032,6 +1032,9 @@ class Mod_7D2D(Mod):
     def detect_friendly(self) -> str | None:
         return self._mod_info_value("DisplayName")
 
+    def detect_description(self) -> str | None:
+        return self._mod_info_value("Description")
+
     def native_metadata_id(self) -> str | None:
         return self._mod_info_value("Name")
 

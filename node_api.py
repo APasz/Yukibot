@@ -21,7 +21,6 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 import hikari
 import psutil
 import requests
-from modmux.models import Provider
 from fastapi import (
     File,
     Form,
@@ -35,6 +34,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
+from modmux.models import Provider
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.middleware.cors import CORSMiddleware
 
@@ -45,8 +45,8 @@ from _file import File_Utils
 from _manager import App_Manager, AppDetailsUpdate, app_scope_from_name
 from _mod_ops import (
     ArchiveEntry,
-    ClientPackValidationError,
     ClientPackSelection,
+    ClientPackValidationError,
     ModArchiveEntry,
     NonDownloadableModError,
     RunningAppModMutationError,
@@ -55,9 +55,11 @@ from _mod_ops import (
     build_server_pack_entries,
     client_pack_content_hash,
     compress_mod_archive_entries,
-    download_entries as build_mod_download_entries,
     require_app_stopped_for_mod_mutation,
     require_downloadable,
+)
+from _mod_ops import (
+    download_entries as build_mod_download_entries,
 )
 from _security import Access_Control, Power_Level
 from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
@@ -72,41 +74,33 @@ from apps._blueprint_files import (
     classify_blueprint_upload_filenames,
 )
 from apps._config import (
+    CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     AppTitleFont,
     BulkLauncherMetadataDiscovery,
     BulkLauncherMetadataEntry,
     BulkLauncherMetadataStatus,
-    CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     ClientPackConfig,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
     ClientPackRelease,
+    KnownModPageProvider,
     LauncherMetadataDiscovery,
     LauncherMetadataResolution,
     LauncherProviderUrls,
-    KnownModPageProvider,
-    ModPageDiscovery,
     ModDownloadBlockReason,
     ModMetadataOverrides,
+    ModPageDiscovery,
     ModPageLink,
     ModPlacement,
     ModPlatformMetadata,
     ModType,
     is_client_pack_candidate,
     known_mod_page_provider_for_url,
-    normalise_client_pack_changelog,
     normalise_activity_provider_ids,
     normalise_app_title_font,
+    normalise_client_pack_changelog,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileRoot
-from apps._launcher_metadata import (
-    BulkLauncherMetadataTarget,
-    discover_bulk_launcher_metadata,
-    discover_mod_pages,
-    discover_launcher_metadata,
-    resolve_launcher_metadata,
-    resolve_launcher_metadata_resolution,
-)
 from apps._console import (
     ConsoleAction,
     ConsoleActionParameter,
@@ -114,10 +108,26 @@ from apps._console import (
     ConsoleResponseSource,
     execute_console_action,
 )
+from apps._launcher_metadata import (
+    BulkLauncherMetadataTarget,
+    discover_bulk_launcher_metadata,
+    discover_launcher_metadata,
+    discover_mod_pages,
+    resolve_launcher_metadata,
+    resolve_launcher_metadata_resolution,
+)
 from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
 from apps._updater import AppUpdateInfo, AppUpdateStatus
+from apps.factorio import (
+    download_factorio_mods_from_portal,
+    factorio_mod_portal_credentials_from_server_settings,
+    factorio_mod_settings_path,
+    factorio_server_settings_path,
+    parse_factorio_mod_portal_url,
+    resolve_factorio_mod_portal_candidates,
+)
 from apps.minecraft import (
     Minecraft,
     MinecraftRecipeBook,
@@ -138,6 +148,7 @@ from apps.minecraft.pack_export import (
 from apps.sevendays import SevenDays
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub, ChatRoomUpdate
 from font_assets import font_assets
+from maintenance import MAX_RESTART_INTERVAL_MINUTES, MIN_RESTART_INTERVAL_MINUTES, MaintenanceService
 from map_annotations import (
     AppMapAnnotationStore,
     MapAnnotationDraft,
@@ -147,7 +158,6 @@ from map_annotations import (
     MapWorldSummary,
 )
 from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
-from maintenance import MAX_RESTART_INTERVAL_MINUTES, MIN_RESTART_INTERVAL_MINUTES, MaintenanceService
 from mod_web_auth import ModWebAuthService, ModWebUser
 from node_auth import NodeAccessGrant, NodeApiScope, NodeTokenError, issue_node_token, verify_node_token
 from restart_targets import RestartTarget
@@ -1048,6 +1058,7 @@ class NodeModEntry:
     client_pack_eligible: bool
     archive_name: str
     source_path: str
+    description: str | None = None
     client_path: str | None = None
     mod_pages: tuple[ModPageLink, ...] = ()
     metadata_overrides: ModMetadataOverrides = field(default_factory=ModMetadataOverrides)
@@ -1148,6 +1159,7 @@ class NodeModEntry:
             client_pack_eligible=client_pack_eligible,
             archive_name=_optional_string(payload, "archive_name") or name,
             source_path=_optional_string(payload, "source_path") or client_path or name,
+            description=_optional_string(payload, "description"),
             mod_pages=tuple(
                 ModPageLink.model_validate(page)
                 for page in cast(list[object] | tuple[object, ...], raw_mod_pages)
@@ -1186,6 +1198,7 @@ class NodeModEntry:
             "client_pack_eligible": self.client_pack_eligible,
             "archive_name": self.archive_name,
             "source_path": self.source_path,
+            "description": self.description,
             "mod_pages": [page.model_dump(mode="json") for page in self.mod_pages],
             "metadata_overrides": self.metadata_overrides.model_dump(mode="json"),
             "client_pack": self.client_pack.model_dump(mode="json"),
@@ -1228,6 +1241,36 @@ def required_mod_mutation_level(
 
 class NodeModMutationRequest(BaseModel):
     action: NodeModMutationAction
+
+
+class NodeModPortalInstallRequest(BaseModel):
+    url: str
+    selected_mod_ids: tuple[str, ...] | None = None
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, raw: str) -> str:
+        parse_factorio_mod_portal_url(raw)
+        return raw
+
+    @field_validator("selected_mod_ids")
+    @classmethod
+    def validate_selected_mod_ids(cls, raw: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if raw is None:
+            return None
+        selected: list[str] = []
+        seen: set[str] = set()
+        for mod_id in raw:
+            if not mod_id.strip():
+                raise ValueError("Selected Factorio mod ID must not be empty.")
+            parse_factorio_mod_portal_url(f"https://mods.factorio.com/mod/{mod_id}")
+            if mod_id in seen:
+                continue
+            seen.add(mod_id)
+            selected.append(mod_id)
+        return tuple(selected)
 
 
 class NodeModPropertiesUpdateRequest(BaseModel):
@@ -1458,6 +1501,90 @@ class NodeModUploadBatchResult:
             "node": self.node,
             "message": self.message,
             "mods": [mod.to_mapping() for mod in self.mods],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeModPortalDependencyEntry:
+    mod_id: str
+    title: str
+    page_url: str
+    version: str
+    file_name: str
+    required_by: tuple[str, ...]
+    selected_by_default: bool
+    installed: bool
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModPortalDependencyEntry":
+        raw_required_by = payload.get("required_by")
+        if isinstance(raw_required_by, str) or not isinstance(raw_required_by, Sequence):
+            raise ValueError("Node mod portal dependency required_by is invalid.")
+        required_by: list[str] = []
+        for raw_value in raw_required_by:
+            if not isinstance(raw_value, str):
+                raise ValueError("Node mod portal dependency required_by is invalid.")
+            required_by.append(raw_value)
+        return cls(
+            mod_id=_required_string(payload, "mod_id"),
+            title=_required_string(payload, "title"),
+            page_url=_required_string(payload, "page_url"),
+            version=_required_string(payload, "version"),
+            file_name=_required_string(payload, "file_name"),
+            required_by=tuple(required_by),
+            selected_by_default=_required_bool(payload, "selected_by_default"),
+            installed=_required_bool(payload, "installed"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "mod_id": self.mod_id,
+            "title": self.title,
+            "page_url": self.page_url,
+            "version": self.version,
+            "file_name": self.file_name,
+            "required_by": list(self.required_by),
+            "selected_by_default": self.selected_by_default,
+            "installed": self.installed,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeModPortalResolveResult:
+    app_name: str
+    app_friendly: str
+    node: str
+    url: str
+    requested_mod_id: str
+    dependencies: tuple[NodeModPortalDependencyEntry, ...]
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModPortalResolveResult":
+        raw_dependencies = payload.get("dependencies")
+        if isinstance(raw_dependencies, str) or not isinstance(raw_dependencies, Sequence):
+            raise ValueError("Node mod portal resolve dependencies are invalid.")
+        dependencies: list[NodeModPortalDependencyEntry] = []
+        for raw_dependency in raw_dependencies:
+            if not isinstance(raw_dependency, Mapping):
+                raise ValueError("Node mod portal resolve dependencies are invalid.")
+            dependencies.append(NodeModPortalDependencyEntry.from_mapping(raw_dependency))
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            url=_required_string(payload, "url"),
+            requested_mod_id=_required_string(payload, "requested_mod_id"),
+            dependencies=tuple(dependencies),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "url": self.url,
+            "requested_mod_id": self.requested_mod_id,
+            "dependencies": [dependency.to_mapping() for dependency in self.dependencies],
         }
 
 
@@ -2696,6 +2823,7 @@ class NodeConfigEntry:
     size_bytes: int
     size_text: str
     modified_at: str
+    write_power_level: Power_Level = _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigEntry:
@@ -2707,6 +2835,7 @@ class NodeConfigEntry:
             root_label=_required_string(payload, "root_label"),
             kind=_required_string(payload, "kind"),
             read_power_level=_power_level(payload, "read_power_level", default=_DEFAULT_REMOTE_CONFIG_READ_LEVEL),
+            write_power_level=_power_level(payload, "write_power_level", default=_DEFAULT_REMOTE_CONFIG_WRITE_LEVEL),
             size_bytes=_required_int(payload, "size_bytes"),
             size_text=_required_string(payload, "size_text"),
             modified_at=_required_string(payload, "modified_at"),
@@ -2721,6 +2850,7 @@ class NodeConfigEntry:
             "root_label": self.root_label,
             "kind": self.kind,
             "read_power_level": self.read_power_level.name,
+            "write_power_level": self.write_power_level.name,
             "size_bytes": self.size_bytes,
             "size_text": self.size_text,
             "modified_at": self.modified_at,
@@ -2789,6 +2919,43 @@ class NodeConfigContent:
             "node": self.node,
             "config": self.config.to_mapping(),
             "content": self.content,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeFactorioModSettings:
+    app_name: str
+    app_friendly: str
+    node: str
+    file_exists: bool
+    size_bytes: int | None = None
+    size_text: str | None = None
+    modified_at: str | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeFactorioModSettings:
+        raw_file_exists = payload.get("file_exists")
+        if not isinstance(raw_file_exists, bool):
+            raise ValueError("Factorio mod settings file_exists is invalid.")
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            file_exists=raw_file_exists,
+            size_bytes=_optional_int(payload, "size_bytes"),
+            size_text=_optional_string(payload, "size_text"),
+            modified_at=_optional_string(payload, "modified_at"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "file_exists": self.file_exists,
+            "size_bytes": self.size_bytes,
+            "size_text": self.size_text,
+            "modified_at": self.modified_at,
         }
 
 
@@ -3412,12 +3579,16 @@ class NodeConsoleActionEntry:
     requires_running: bool
     can_run: bool
     parameter: NodeConsoleActionParameter | None
+    runtime_running: bool | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleActionEntry":
         raw_parameter = payload.get("parameter")
         if raw_parameter is not None and not isinstance(raw_parameter, Mapping):
             raise ValueError("Node console action entry parameter is invalid.")
+        raw_runtime_running = payload.get("runtime_running")
+        if raw_runtime_running is not None and not isinstance(raw_runtime_running, bool):
+            raise ValueError("Node console action entry runtime_running is invalid.")
         return cls(
             key=_required_string(payload, "key"),
             label=_required_string(payload, "label"),
@@ -3431,6 +3602,7 @@ class NodeConsoleActionEntry:
                 if raw_parameter is not None
                 else None
             ),
+            runtime_running=raw_runtime_running,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -3443,6 +3615,7 @@ class NodeConsoleActionEntry:
             "requires_running": self.requires_running,
             "can_run": self.can_run,
             "parameter": self.parameter.to_mapping() if self.parameter is not None else None,
+            "runtime_running": self.runtime_running,
         }
 
 
@@ -5089,6 +5262,54 @@ class NodeApiService:
             )
             return result.to_mapping()
 
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/install-link")
+        async def _install_mod_link(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API mod link install request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+            install_request = NodeModPortalInstallRequest.model_validate(payload)
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            app = self._resolve_app(app_name)
+            result = await self.install_mod_from_link(
+                app=app,
+                url=install_request.url,
+                actor_user_id=actor_user_id,
+                selected_mod_ids=install_request.selected_mod_ids,
+            )
+            audit_log(
+                "mod.link_installed",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                mod_name=",".join(mod.name for mod in result.mods),
+                required_level=Power_Level.user.name,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/resolve-link")
+        async def _resolve_mod_link(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API mod link resolve request: node=%s app=%s", self.node_name, app_name)
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+            resolve_request = NodeModPortalInstallRequest.model_validate(payload)
+            app = self._resolve_app(app_name)
+            result = await self.resolve_mod_link_dependencies(app=app, url=resolve_request.url)
+            return result.to_mapping()
+
         @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/mutate")
         async def _mutate_mod(
             app_name: str,
@@ -5401,6 +5622,119 @@ class NodeApiService:
             )
             return self.build_config_list(app, actor_user_id=actor_user_id).to_mapping()
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/mod-settings")
+        async def _factorio_mod_settings_state(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Factorio mod settings state request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_READ,),
+                required_level=app.config_file_read_level,
+                verified_grant=grant,
+            )
+            return self.factorio_mod_settings_state(app=app).to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/mod-settings/download")
+        async def _download_factorio_mod_settings(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> FileResponse:
+            traffic_log.info("Node API Factorio mod settings download request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_READ,),
+                required_level=app.config_file_read_level,
+                verified_grant=grant,
+            )
+            return self.build_factorio_mod_settings_download_response(app=app)
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/mod-settings/upload")
+        async def _upload_factorio_mod_settings(
+            app_name: str,
+            request: Request,
+            upload: Annotated[UploadFile, File()],
+            filename: Annotated[str | None, Form()] = None,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Factorio mod settings upload request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_WRITE,),
+                required_level=app.config_file_write_level,
+                verified_grant=grant,
+            )
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_WRITE,),
+                verified_grant=grant,
+            )
+            result = await self.upload_factorio_mod_settings(
+                app=app,
+                upload=upload,
+                upload_name=filename or upload.filename or "",
+                actor_user_id=actor_user_id,
+            )
+            audit_log(
+                "factorio.mod_settings_uploaded",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                required_level=app.config_file_write_level.name,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.delete(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/mod-settings")
+        async def _delete_factorio_mod_settings(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Factorio mod settings delete request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_WRITE,),
+                required_level=app.config_file_write_level,
+                verified_grant=grant,
+            )
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_WRITE,),
+                verified_grant=grant,
+            )
+            result = self.delete_factorio_mod_settings(app=app)
+            audit_log(
+                "factorio.mod_settings_deleted",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                required_level=app.config_file_write_level.name,
+            )
+            return result.to_mapping()
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/configs/roots/{{root_id}}/download")
         async def _download_config_root(
             app_name: str,
@@ -5477,12 +5811,16 @@ class NodeApiService:
             grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
             write_request = NodeConfigWriteRequest.model_validate(payload)
             app = self._resolve_app(app_name)
+            try:
+                required_level = app.config_file_write_level_for_id(config_id)
+            except ValueError as xcp:
+                raise _http_exception(400, str(xcp)) from xcp
             await self._require_actor_level_for_request(
                 request=request,
                 access_token=access_token,
                 app_name=app_name,
                 scopes=(NodeApiScope.CONFIGS_WRITE,),
-                required_level=app.config_file_write_level,
+                required_level=required_level,
                 verified_grant=grant,
             )
             actor_user_id = self._request_actor_user_id(
@@ -5499,7 +5837,7 @@ class NodeApiService:
                 node_name=self.node_name,
                 app_name=app.name,
                 config_id=config_id,
-                required_level=app.config_file_write_level.name,
+                required_level=required_level.name,
             )
             return result.to_mapping()
 
@@ -8789,6 +9127,80 @@ class NodeApiService:
         self._invalidate_client_pack_content(app)
         return self._config_content(app=app, content=updated)
 
+    def _require_factorio_app(self, app: App) -> None:
+        if app.scope != config.AppScopes.factorio.value:
+            raise _http_exception(400, f"{app.friendly} does not support Factorio mod settings.")
+
+    def factorio_mod_settings_state(self, *, app: App) -> NodeFactorioModSettings:
+        self._require_factorio_app(app)
+        pointer = factorio_mod_settings_path(app.directory)
+        if not pointer.exists():
+            return NodeFactorioModSettings(
+                app_name=app.name,
+                app_friendly=app.friendly,
+                node=self.node_name,
+                file_exists=False,
+            )
+        if not pointer.is_file():
+            raise _http_exception(400, f"Factorio mod settings path is not a file: {pointer}")
+        stat = pointer.stat()
+        return NodeFactorioModSettings(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            file_exists=True,
+            size_bytes=stat.st_size,
+            size_text=Utilities.humanise_bytes(stat.st_size),
+            modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(sep=" ", timespec="seconds"),
+        )
+
+    def build_factorio_mod_settings_download_response(self, *, app: App) -> FileResponse:
+        self._require_factorio_app(app)
+        pointer = factorio_mod_settings_path(app.directory)
+        if not pointer.exists():
+            raise _http_exception(404, "Factorio mod settings file does not exist.")
+        if not pointer.is_file():
+            raise _http_exception(400, f"Factorio mod settings path is not a file: {pointer}")
+        return FileResponse(
+            path=pointer,
+            filename=pointer.name,
+            media_type="application/octet-stream",
+        )
+
+    async def upload_factorio_mod_settings(
+        self,
+        *,
+        app: App,
+        upload: UploadFile,
+        upload_name: str,
+        actor_user_id: int,
+    ) -> NodeFactorioModSettings:
+        del actor_user_id
+        self._require_factorio_app(app)
+        resolved_upload_name = self._validated_upload_filename(upload_name, kind="Factorio mod settings")
+        if resolved_upload_name != "mod-settings.dat":
+            raise _http_exception(400, "Factorio mod settings upload must be named mod-settings.dat.")
+        temp_path = await self._persist_upload_to_temp(upload)
+        try:
+            target = factorio_mod_settings_path(app.directory)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(File_Utils.copy, temp_path, target, True)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        traffic_log.info("Node API uploaded Factorio mod settings: node=%s app=%s", self.node_name, app.name)
+        self._invalidate_state_caches(app_name=app.name)
+        return self.factorio_mod_settings_state(app=app)
+
+    def delete_factorio_mod_settings(self, *, app: App) -> NodeFactorioModSettings:
+        self._require_factorio_app(app)
+        pointer = factorio_mod_settings_path(app.directory)
+        if pointer.exists() and not pointer.is_file():
+            raise _http_exception(400, f"Factorio mod settings path is not a file: {pointer}")
+        File_Utils.remove(pointer, silent=True, resolve=False)
+        traffic_log.info("Node API deleted Factorio mod settings: node=%s app=%s", self.node_name, app.name)
+        self._invalidate_state_caches(app_name=app.name)
+        return self.factorio_mod_settings_state(app=app)
+
     def _invalidate_client_pack_content(self, app: App) -> None:
         app.invalidate_client_pack_content()
         self._invalidate_state_caches(app_name=app.name)
@@ -9059,6 +9471,110 @@ class NodeApiService:
             placement=placement,
         )
         return self._single_mod_upload_result(result)
+
+    async def install_mod_from_link(
+        self,
+        *,
+        app: App,
+        url: str,
+        actor_user_id: int,
+        selected_mod_ids: Sequence[str] | None = None,
+    ) -> NodeModUploadBatchResult:
+        if app.scope != config.AppScopes.factorio.value:
+            raise _http_exception(400, f"{app.friendly} does not support Factorio mod portal links.")
+        try:
+            credentials = factorio_mod_portal_credentials_from_server_settings(
+                factorio_server_settings_path(app.directory)
+            )
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except OSError as xcp:
+            raise _http_exception(404, f"Factorio server settings could not be read: {xcp}") from xcp
+        with tempfile.TemporaryDirectory(prefix="yukibot-factorio-mod-link-") as temp_dir:
+            try:
+                downloads = await download_factorio_mods_from_portal(
+                    page_url=url,
+                    destination_dir=Path(temp_dir),
+                    factorio_version=app.detect_installed_version() or app.cfg.version,
+                    credentials=credentials,
+                    selected_mod_ids=selected_mod_ids,
+                )
+            except ValueError as xcp:
+                raise _http_exception(400, str(xcp)) from xcp
+            except RuntimeError as xcp:
+                raise _http_exception(502, str(xcp)) from xcp
+            return await self.upload_mod_paths(
+                app=app,
+                upload_sources=[
+                    NodeModUploadSource(source_path=download.archive_path, upload_name=download.file_name)
+                    for download in downloads
+                ],
+                actor_user_id=actor_user_id,
+                placement=ModPlacement.SERVER_ENABLED,
+            )
+
+    async def resolve_mod_link_dependencies(self, *, app: App, url: str) -> NodeModPortalResolveResult:
+        if app.scope != config.AppScopes.factorio.value:
+            raise _http_exception(400, f"{app.friendly} does not support Factorio mod portal links.")
+        try:
+            resolution = await resolve_factorio_mod_portal_candidates(
+                page_url=url,
+                factorio_version=app.detect_installed_version() or app.cfg.version,
+            )
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise _http_exception(502, str(xcp)) from xcp
+
+        installed_ids = self._factorio_installed_mod_ids(app)
+        return NodeModPortalResolveResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            url=url,
+            requested_mod_id=resolution.requested_mod_id,
+            dependencies=tuple(
+                NodeModPortalDependencyEntry(
+                    mod_id=candidate.mod_id,
+                    title=candidate.title,
+                    page_url=candidate.page_url,
+                    version=candidate.version,
+                    file_name=candidate.file_name,
+                    required_by=candidate.required_by,
+                    selected_by_default=(
+                        candidate.mod_id == resolution.requested_mod_id or candidate.mod_id not in installed_ids
+                    ),
+                    installed=candidate.mod_id in installed_ids,
+                )
+                for candidate in resolution.candidates
+            ),
+        )
+
+    @staticmethod
+    def _factorio_installed_mod_ids(app: App) -> frozenset[str]:
+        if app.mods is None:
+            return frozenset()
+        installed_ids: set[str] = set()
+        try:
+            mods = app.has_mod_manager.list_mods()
+        except Exception as xcp:
+            log.warning("Failed to inspect installed Factorio mods for dependencies: app=%s error=%s", app.name, xcp)
+            return frozenset()
+        for mod in mods:
+            try:
+                native_id = mod.native_metadata_id()
+            except Exception:
+                native_id = None
+            if native_id is not None:
+                installed_ids.add(native_id)
+                continue
+            try:
+                fallback_id = mod.metadata_fallback_id()
+            except Exception:
+                fallback_id = None
+            if fallback_id is not None:
+                installed_ids.add(fallback_id)
+        return frozenset(installed_ids)
 
     async def upload_mod_paths(
         self,
@@ -9496,12 +10012,18 @@ class NodeApiService:
 
     def build_console_action_list(self, *, app: App, actor_user_id: int) -> NodeConsoleActionList:
         acl: Access_Control = self._require_acl()
+        runtime_running: bool = app.check_running()
         return NodeConsoleActionList(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
             actions=tuple[NodeConsoleActionEntry, ...](
-                self._console_action_entry(action=action, actor_user_id=actor_user_id, acl=acl)
+                self._console_action_entry(
+                    action=action,
+                    actor_user_id=actor_user_id,
+                    acl=acl,
+                    runtime_running=runtime_running,
+                )
                 for action in app.console_actions
             ),
         )
@@ -10140,6 +10662,7 @@ class NodeApiService:
         action: ConsoleAction,
         actor_user_id: int,
         acl: Access_Control,
+        runtime_running: bool,
     ) -> NodeConsoleActionEntry:
         parameter: ConsoleActionParameter[object] | None = action.parameter
         can_run: bool = acl.can(actor_user_id, action.power_level)
@@ -10151,6 +10674,7 @@ class NodeApiService:
             power_level_label=action.power_level.name.title(),
             requires_running=action.requires_running,
             can_run=can_run,
+            runtime_running=runtime_running,
             parameter=(
                 self._console_action_parameter_entry(parameter, include_recent_inputs=can_run)
                 if parameter is not None
@@ -10886,6 +11410,7 @@ class NodeApiService:
             client_pack_eligible=mod.client_pack_eligible,
             archive_name=mod.logical_archive_name,
             source_path=str(mod.storage_path),
+            description=mod.description,
             mod_type=mod.mod_type,
             coremod=mod.is_coremod_type,
             downloadable=mod.downloadable,
@@ -10914,6 +11439,7 @@ class NodeApiService:
             root_label=config_file.root_label,
             kind=config_file.kind.value,
             read_power_level=config_file.read_power_level,
+            write_power_level=config_file.write_power_level,
             size_bytes=config_file.size_bytes,
             size_text=Utilities.humanise_bytes(config_file.size_bytes),
             modified_at=config_file.modified_at.isoformat(sep=" ", timespec="seconds"),

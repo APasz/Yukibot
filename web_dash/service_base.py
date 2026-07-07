@@ -4,13 +4,6 @@ from typing import TYPE_CHECKING, overload
 
 from .backend import ModWebDashboardBackend
 from .nicegui_protocols import AsyncRefresh, ModWebFastApiApp, ModWebRouteUi, WebChatRelayPublisher
-from .stream_broker import (
-    ConsoleStreamKey,
-    RemoteAppStreamKey,
-    RemoteChatStreamKey,
-    RemoteNodeStreamKey,
-    SharedAsyncStreamBroker,
-)
 from .runtime_imports import (
     AbstractEventLoop,
     Access_Control,
@@ -29,42 +22,44 @@ from .runtime_imports import (
     ModWebUser,
     NodeApiService,
     NodeAppEntry,
-    NodeAppStateStreamEvent,
     NodeAppMutationAction,
     NodeAppMutationResult,
     NodeAppRuntimeSummary,
+    NodeAppStateStreamEvent,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
     NodeBulkLauncherMetadataApplyResult,
     NodeCapacityMutationResult,
-    NodeDiskManagementState,
-    NodeDiskSettingsMutationResult,
     NodeConfigContent,
     NodeConfigList,
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
+    NodeDiskManagementState,
+    NodeDiskSettingsMutationResult,
+    NodeFactorioModSettings,
     NodeFontSourceSettingsMutationResult,
     NodeMinecraftRecipeMutationResult,
     NodeModEntry,
     NodeModList,
     NodeModMutationResult,
+    NodeModPortalResolveResult,
     NodeModUploadBatchResult,
+    NodeRestartScheduleState,
     NodeSaveList,
     NodeSaveMutationResult,
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
-    NodeSystemHistory,
+    NodeStateStreamEvent,
     NodeSystemAction,
     NodeSystemActionResult,
-    NodeRestartScheduleState,
+    NodeSystemHistory,
     NodeSystemSummary,
-    NodeStateStreamEvent,
     Path,
     Power_Level,
-    RestartTarget,
     RedirectResponse,
+    RestartTarget,
     StarletteResponse,
     Tooltip,
     aiohttp,
@@ -72,6 +67,13 @@ from .runtime_imports import (
     config,
     requests,
     threading,
+)
+from .stream_broker import (
+    ConsoleStreamKey,
+    RemoteAppStreamKey,
+    RemoteChatStreamKey,
+    RemoteNodeStreamKey,
+    SharedAsyncStreamBroker,
 )
 from .types import (
     ModWebAppLink,
@@ -90,9 +92,9 @@ from .types import (
     ModWebSearchOption,
     ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
+    RemoteChatBrokerEvent,
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
-    RemoteChatBrokerEvent,
     _ModWebKillControlState,
     _ModWebStartStopControlState,
     _ModWebStatusPageConfig,
@@ -577,6 +579,21 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(
+        self, name: Literal["_remote_factorio_mod_settings_async"]
+    ) -> Callable[..., Awaitable[NodeFactorioModSettings]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_factorio_mod_settings_upload"]
+    ) -> Callable[..., NodeFactorioModSettings]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_factorio_mod_settings_delete_async"]
+    ) -> Callable[..., Awaitable[NodeFactorioModSettings]]: ...
+
+    @overload
+    def __getattr__(
         self, name: Literal["_remote_console_action_list_async"]
     ) -> Callable[..., Awaitable[NodeConsoleActionList]]: ...
 
@@ -627,6 +644,12 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_mod_uploads"]) -> Callable[..., NodeModUploadBatchResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_mod_link_install"]) -> Callable[..., NodeModUploadBatchResult]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_remote_mod_link_resolve"]) -> Callable[..., NodeModPortalResolveResult]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_node_link"]) -> Callable[..., ModWebNodeLink]: ...
@@ -968,6 +991,14 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_upload_mods"]) -> Callable[..., Awaitable[NodeModUploadBatchResult]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_install_mod_link"]) -> Callable[..., Awaitable[NodeModUploadBatchResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_resolve_mod_link"]
+    ) -> Callable[..., Awaitable[NodeModPortalResolveResult]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_warn_page_section_load_failure"]) -> Callable[..., None]: ...

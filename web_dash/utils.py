@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+_UNLIMITED_PLAYER_CAPACITY_SENTINEL: int = -1
+_UNLIMITED_PLAYER_CAPACITY_TEXT: str = "∞"
+
+
+def _format_player_capacity(player_capacity: int | None) -> str | None:
+    if player_capacity is None:
+        return None
+    if player_capacity == _UNLIMITED_PLAYER_CAPACITY_SENTINEL:
+        return _UNLIMITED_PLAYER_CAPACITY_TEXT
+    return str(player_capacity)
+
 
 def _format_uptime_seconds(total_seconds: int) -> str:
     remaining = max(0, int(total_seconds))
@@ -29,6 +40,7 @@ def _http_exception(status_code: int, detail: str) -> Exception:
 
 
 __all__: tuple[str, ...] = (
+    "_format_player_capacity",
     "_format_uptime_seconds",
     "_http_exception",
     "_is_executor_shutdown_error",

@@ -1231,6 +1231,7 @@ class ModrinthModMetadata(BaseModel):
     project_id: str
     version_id: str
     download_url: str
+    description: str | None = None
     filename: str | None = None
     sha1: str | None = None
     sha512: str | None = None
@@ -1252,6 +1253,11 @@ class ModrinthModMetadata(BaseModel):
         if PurePosixPath(filename).name != filename or filename in {".", ".."}:
             raise ValueError("Modrinth filename must be a single file name")
         return filename
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def validate_description(cls, raw: object) -> str | None:
+        return normalise_optional_text(raw)
 
     @field_validator("sha1", "sha512", mode="before")
     @classmethod
@@ -1311,6 +1317,7 @@ class CurseForgeFileReference(BaseModel):
 
 class CurseForgeModMetadata(CurseForgeFileReference):
     page_url: str | None = None
+    description: str | None = None
 
     @field_validator("page_url", mode="before")
     @classmethod
@@ -1322,6 +1329,11 @@ class CurseForgeModMetadata(CurseForgeFileReference):
         if parsed.scheme.casefold() != "https" or parsed.hostname is None:
             raise ValueError("CurseForge URL must be an absolute HTTPS URL")
         return url
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def validate_description(cls, raw: object) -> str | None:
+        return normalise_optional_text(raw)
 
 
 class LauncherProviderUrls(BaseModel):
@@ -1481,6 +1493,14 @@ class LauncherMetadataDiscovery(BaseModel):
 class ModPlatformMetadata(BaseModel):
     modrinth: ModrinthModMetadata | None = None
     curseforge: CurseForgeModMetadata | None = None
+
+    @property
+    def description(self) -> str | None:
+        if self.modrinth is not None and self.modrinth.description is not None:
+            return self.modrinth.description
+        if self.curseforge is not None:
+            return self.curseforge.description
+        return None
 
     def page_url_for(self, provider: Provider) -> str | None:
         match provider:

@@ -904,8 +904,6 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> dict[str, object]:
             user = self._require_http_user(request=request, required_level=Power_Level.user)
             node = self._remote_node_link(node_name)
-            app_entry = await self._remote_app_entry_async(node, app_name, user)
-            self._require_user_level(user=user, required_level=app_entry.config_write_level)
             content = payload.get("content")
             if not isinstance(content, str):
                 raise _http_exception(400, "Config content is invalid.")

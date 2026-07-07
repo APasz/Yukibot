@@ -37,17 +37,28 @@ class ConfigFileTests(unittest.TestCase):
                 ),
             )
 
-            files = list_app_config_files(roots, default_read_level=Power_Level.user)
-            loaded = read_app_config_file(roots, "mods/example.toml", default_read_level=Power_Level.user)
+            files = list_app_config_files(
+                roots,
+                default_read_level=Power_Level.user,
+                default_write_level=Power_Level.sudo,
+            )
+            loaded = read_app_config_file(
+                roots,
+                "mods/example.toml",
+                default_read_level=Power_Level.user,
+                default_write_level=Power_Level.sudo,
+            )
             saved = write_app_config_file(
                 roots,
                 "mods/example.toml",
                 "enabled=false\n",
                 default_read_level=Power_Level.user,
+                default_write_level=Power_Level.sudo,
             )
 
         self.assertEqual([file.id for file in files], ["mods/example.toml"])
         self.assertEqual(files[0].read_power_level, Power_Level.user)
+        self.assertEqual(files[0].write_power_level, Power_Level.sudo)
         self.assertEqual(loaded.content, "enabled=true\n")
         self.assertEqual(saved.content, "enabled=false\n")
 
@@ -84,11 +95,15 @@ class ConfigFileTests(unittest.TestCase):
                 ),
             )
 
-            files = list_app_config_files(roots, default_read_level=Power_Level.user)
+            files = list_app_config_files(
+                roots,
+                default_read_level=Power_Level.user,
+                default_write_level=Power_Level.sudo,
+            )
 
         self.assertEqual(files, ())
 
-    def test_root_read_level_override_is_applied_to_file_metadata(self) -> None:
+    def test_root_power_level_overrides_are_applied_to_file_metadata(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root_path = Path(temp_dir) / "config"
             root_path.mkdir()
@@ -101,14 +116,26 @@ class ConfigFileTests(unittest.TestCase):
                     path=root_path,
                     kind=AppConfigFileKind.MOD,
                     read_power_level_override=Power_Level.visitor,
+                    write_power_level_override=Power_Level.admin,
                 ),
             )
 
-            files = list_app_config_files(roots, default_read_level=Power_Level.user)
-            loaded = read_app_config_file(roots, "mods/visitor.toml", default_read_level=Power_Level.user)
+            files = list_app_config_files(
+                roots,
+                default_read_level=Power_Level.user,
+                default_write_level=Power_Level.sudo,
+            )
+            loaded = read_app_config_file(
+                roots,
+                "mods/visitor.toml",
+                default_read_level=Power_Level.user,
+                default_write_level=Power_Level.sudo,
+            )
 
         self.assertEqual(files[0].read_power_level, Power_Level.visitor)
+        self.assertEqual(files[0].write_power_level, Power_Level.admin)
         self.assertEqual(loaded.file.read_power_level, Power_Level.visitor)
+        self.assertEqual(loaded.file.write_power_level, Power_Level.admin)
 
     def test_minecraft_exposes_server_properties_mod_config_and_world_serverconfig_roots(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -145,7 +172,17 @@ class ConfigFileTests(unittest.TestCase):
 
         self.assertEqual([(root.id, root.path.name) for root in beammp_roots], [("server", "ServerConfig.toml")])
         self.assertEqual([(root.id, root.path.name) for root in ets_roots], [("server", "server_config.sii")])
-        self.assertEqual([(root.id, root.path.name) for root in factorio_roots], [("server", "server-settings.json")])
+        self.assertEqual(
+            [(root.id, root.path.name) for root in factorio_roots],
+            [
+                ("server", "server-settings.json"),
+                ("map-settings", "map-settings.json"),
+                ("map-gen-settings", "map-gen-settings.json"),
+            ],
+        )
+        self.assertIsNone(factorio_roots[0].write_power_level_override)
+        self.assertEqual(factorio_roots[1].write_power_level_override, Power_Level.sudo)
+        self.assertEqual(factorio_roots[2].write_power_level_override, Power_Level.sudo)
         self.assertEqual(
             [(root.id, root.path.name) for root in sevendays_roots],
             [("server", "serverconfig.xml"), ("rwg-mixer", "rwgmixer.xml")],

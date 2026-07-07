@@ -27,29 +27,28 @@ from apps._config import (
     BulkLauncherMetadataStatus,
     CurseForgeFileReference,
     CurseForgeModMetadata,
+    KnownModPageProvider,
     LauncherMetadataCandidate,
     LauncherMetadataDiscovery,
     LauncherMetadataMatchReason,
-    LauncherMetadataProviderError,
     LauncherMetadataProviderCandidates,
+    LauncherMetadataProviderError,
     LauncherMetadataReleaseChannel,
     LauncherMetadataResolution,
     LauncherProviderUrls,
-    ModPageLink,
-    ModPlatformMetadata,
-    ModrinthModMetadata,
-    ModType,
-    KnownModPageProvider,
     ModPageCandidate,
     ModPageDiscovery,
+    ModPageLink,
     ModPageMatchConfidence,
     ModPageMatchReason,
     ModPageProviderCandidates,
+    ModPlatformMetadata,
+    ModrinthModMetadata,
+    ModType,
     known_mod_page_provider_for_url,
     launcher_provider_label,
     mod_capabilities_for_scope,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -636,6 +635,7 @@ async def _resolve_modrinth(
         project_id=_required_text(version, "project_id", label="Modrinth version"),
         version_id=_required_text(version, "id", label="Modrinth version"),
         download_url=_required_text(selected_file, "url", label="Modrinth file"),
+        description=_optional_text(project.get("description")),
         filename=_required_text(selected_file, "filename", label="Modrinth file"),
         sha1=_required_text(hashes, "sha1", label="Modrinth file hashes"),
         sha512=_required_text(hashes, "sha512", label="Modrinth file hashes"),
@@ -687,7 +687,11 @@ async def _curseforge_metadata_from_reference(
             "CurseForge returned a different project/file pair: "
             f"expected {reference.project_id}/{reference.file_id}, got {project_id}/{file_id}."
         )
-    return CurseForgeModMetadata(project_id=project_id, file_id=file_id)
+    return CurseForgeModMetadata(
+        project_id=project_id,
+        file_id=file_id,
+        description=await _curseforge_project_description(project_id, http=http),
+    )
 
 
 async def _resolve_curseforge(
@@ -704,6 +708,7 @@ async def _resolve_curseforge(
         page_url=page_url,
         project_id=project_id,
         file_id=int(file_reference),
+        description=await _curseforge_project_description(project_id, http=http),
     )
 
 
@@ -735,6 +740,25 @@ def _curseforge_sha1(file_payload: Mapping[str, object]) -> str | None:
         if file_hash.get("algo") == 1:
             return _optional_text(file_hash.get("value"))
     return None
+
+
+async def _curseforge_project_description(
+    project_id: int,
+    *,
+    http: httpx.AsyncClient,
+) -> str | None:
+    api_key = _curseforge_api_key()
+    if api_key is None:
+        return None
+    response = await http.get(
+        f"https://api.curseforge.com/v1/mods/{project_id}",
+        headers={"x-api-key": api_key},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = _required_mapping(cast(object, response.json()), label="CurseForge project response")
+    project = _required_mapping(payload.get("data"), label="CurseForge project")
+    return _optional_text(project.get("summary"))
 
 
 def _curseforge_release_channel(value: object) -> LauncherMetadataReleaseChannel:
@@ -1374,6 +1398,7 @@ async def _bulk_modrinth_exact_matches(
                 project_id=project_id,
                 version_id=version_id,
                 download_url=_required_text(selected_file, "url", label="Modrinth file"),
+                description=_optional_text(project.get("description")),
                 filename=_required_text(selected_file, "filename", label="Modrinth file"),
                 sha1=_required_text(hashes_payload, "sha1", label="Modrinth file hashes"),
                 sha512=_required_text(hashes_payload, "sha512", label="Modrinth file hashes"),
@@ -1485,6 +1510,7 @@ async def _bulk_curseforge_exact_matches(
                 page_url=file_page_url,
                 project_id=project_id,
                 file_id=file_id,
+                description=_optional_text(project.get("summary")),
             ),
         )
     log.info(

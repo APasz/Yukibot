@@ -25,10 +25,10 @@ import config
 from _security import Power_Level
 from apps._blueprint_files import AppBlueprintEntry
 from apps._config import (
+    CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     App_Config,
     AppModCapabilities,
     AppVersion,
-    CLIENT_PACK_CHANGELOG_MAX_LENGTH,
     ClientPackRelease,
     Mod_Config,
     RelayChannelSource,
@@ -41,6 +41,7 @@ from apps._config_files import (
     AppConfigFileContent,
     AppConfigFileRoot,
     effective_config_root_read_level,
+    effective_config_root_write_level,
     list_app_config_files,
     read_app_config_file,
     resolve_app_config_path,
@@ -896,12 +897,20 @@ class App(Generic[ConfigT], ABC):
         root, _, _ = resolve_app_config_path(self.config_file_roots, file_id)
         return effective_config_root_read_level(root=root, default=self.config_file_read_level)
 
+    def config_file_write_level_for_id(self, file_id: str) -> Power_Level:
+        root, _, _ = resolve_app_config_path(self.config_file_roots, file_id)
+        return effective_config_root_write_level(root=root, default=self.config_file_write_level)
+
     def resolve_config_root(self, root_id: str) -> AppConfigFileRoot:
         return resolve_app_config_root(self.config_file_roots, root_id)
 
     def config_file_read_level_for_root(self, root_id: str) -> Power_Level:
         root = self.resolve_config_root(root_id)
         return effective_config_root_read_level(root=root, default=self.config_file_read_level)
+
+    def config_file_write_level_for_root(self, root_id: str) -> Power_Level:
+        root = self.resolve_config_root(root_id)
+        return effective_config_root_write_level(root=root, default=self.config_file_write_level)
 
     def settings_save_level(self, actor_user_id: int) -> Power_Level:
         if self.settings is None:
@@ -1028,14 +1037,23 @@ class App(Generic[ConfigT], ABC):
         return bool(self.config_file_roots)
 
     def list_config_files(self) -> tuple[AppConfigFile, ...]:
-        return list_app_config_files(self.config_file_roots, default_read_level=self.config_file_read_level)
+        return list_app_config_files(
+            self.config_file_roots,
+            default_read_level=self.config_file_read_level,
+            default_write_level=self.config_file_write_level,
+        )
 
     def resolve_config_file(self, file_id: str) -> Path:
         _root, path, _relative_path = resolve_app_config_path(self.config_file_roots, file_id)
         return path
 
     def read_config_file(self, file_id: str) -> AppConfigFileContent:
-        return read_app_config_file(self.config_file_roots, file_id, default_read_level=self.config_file_read_level)
+        return read_app_config_file(
+            self.config_file_roots,
+            file_id,
+            default_read_level=self.config_file_read_level,
+            default_write_level=self.config_file_write_level,
+        )
 
     def write_config_file(self, file_id: str, content: str) -> AppConfigFileContent:
         return write_app_config_file(
@@ -1043,6 +1061,7 @@ class App(Generic[ConfigT], ABC):
             file_id,
             content,
             default_read_level=self.config_file_read_level,
+            default_write_level=self.config_file_write_level,
         )
 
     def read_stdout_tail(self, *, max_lines: int = 200) -> AppStdoutTail:

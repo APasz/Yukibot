@@ -91,6 +91,7 @@ from .runtime_imports import (
     NodeConsoleActionList,
     NodeModEntry,
     NodeModMutationAction,
+    NodeModPortalResolveResult,
     NodeModSummary,
     NodeSaveList,
     NodeSettingList,
@@ -144,6 +145,7 @@ from .types import (
     _ModWebTabActionSpec,
 )
 from .ui_helpers import ModWebUiHelpersMixin, copy_text_to_clipboard
+from .utils import _format_player_capacity
 
 if TYPE_CHECKING:
     from nicegui.element import Element
@@ -610,8 +612,11 @@ class ModWebAppPageMixin(
         player_count_badge: _ModWebBadgeSpec | None = None
         if app_stats.player_count is not None and app_stats.player_capacity is not None:
             player_tone = "purple" if app_stats.player_count > 0 else "grey"
+            player_capacity_text: str | None = _format_player_capacity(app_stats.player_capacity)
+            if player_capacity_text is None:
+                raise RuntimeError("Player capacity unexpectedly missing for runtime details badge.")
             player_count_badge = _ModWebBadgeSpec(
-                text=f"{app_stats.player_count} / {app_stats.player_capacity}",
+                text=f"{app_stats.player_count} / {player_capacity_text}",
                 tone=player_tone,
             )
         return _ModWebAppHeroRuntimeDetails(
@@ -1258,13 +1263,17 @@ class ModWebAppPageMixin(
         user: ModWebUser,
     ) -> tuple[_ModWebBadgeSpec, ...]:
         can_read: bool = self._user_has_level(user, model.config_read_level)
-        can_write: bool = self._user_has_level(user, model.config_write_level)
+        can_write: bool = (
+            any(self._user_has_level(user, entry.write_power_level) for entry in model.configs.configs)
+            if model.configs.configs
+            else self._user_has_level(user, model.config_write_level)
+        )
         if not can_read:
             return (_ModWebBadgeSpec(text="Locked", tone="grey"),)
         return (
             _ModWebBadgeSpec(text=f"{len(model.configs.configs)} files", tone="grey"),
             _ModWebBadgeSpec(
-                text=f"{model.config_write_level.name.title()} write" if can_write else "Read only",
+                text="Write" if can_write else "Read only",
                 tone="red" if can_write else "grey",
             ),
         )
@@ -3984,6 +3993,7 @@ class ModWebAppPageMixin(
         selectable_name_set: frozenset[str] = frozenset(selectable_names)
         downloadable_count: int = model.mods.summary.downloadable_count
         can_upload_mod: bool = self._user_has_level(user, Power_Level.user)
+        can_install_factorio_mod_link: bool = can_upload_mod and model.app_scope == "factorio"
         selection_button = None
         download_button = None
         delete_control: _ModWebEnableableControl | None = None
@@ -4274,6 +4284,10 @@ class ModWebAppPageMixin(
         inline_upload_control: Upload | None = None
         direct_upload_transfer_id: int | None = None
         upload_placement = ModPlacement.SERVER_ENABLED
+        mod_link_input: Input | None = None
+        mod_link_install_button: Button | None = None
+        mod_link_resolution: NodeModPortalResolveResult | None = None
+        mod_link_dependency_checkboxes: dict[str, Checkbox] = {}
 
         def ensure_direct_upload_transfer() -> int | None:
             nonlocal direct_upload_transfer_id
@@ -4368,6 +4382,69 @@ class ModWebAppPageMixin(
                 type="warning",
             )
 
+        def open_mod_link_dialog() -> None:
+            nonlocal mod_link_resolution
+            mod_link_resolution = None
+            mod_link_dependency_checkboxes.clear()
+            if mod_link_input is not None:
+                mod_link_input.set_value("")
+            mod_link_dialog_body.refresh()
+            mod_link_dialog.open()
+
+        async def _install_mod_link_from_dialog() -> None:
+            if mod_link_input is None:
+                raise RuntimeError("Mod link input was not rendered.")
+            raw_url = _value_as_text(mod_link_input)
+            if mod_link_resolution is None:
+                raise RuntimeError("Mod link dependencies were not resolved.")
+            selected_mod_ids: list[str] = [mod_link_resolution.requested_mod_id]
+            for dependency in mod_link_resolution.dependencies:
+                if dependency.mod_id == mod_link_resolution.requested_mod_id:
+                    continue
+                checkbox = mod_link_dependency_checkboxes.get(dependency.mod_id)
+                if checkbox is not None and bool(_value_as_object(checkbox)):
+                    selected_mod_ids.append(dependency.mod_id)
+            try:
+                result = await self._install_mod_link(
+                    model=model,
+                    url_to_install=raw_url,
+                    user=user,
+                    selected_mod_ids=tuple(selected_mod_ids),
+                )
+            except Exception as xcp:
+                ui.notify(f"Mod link install failed: {xcp}", type="negative", multi_line=True)
+                return
+            mod_link_dialog.close()
+            ui.notify(result.message, type="positive")
+            ui.navigate.reload()
+
+        async def _resolve_mod_link_from_dialog() -> None:
+            nonlocal mod_link_resolution
+            if mod_link_input is None:
+                raise RuntimeError("Mod link input was not rendered.")
+            raw_url = _value_as_text(mod_link_input)
+            try:
+                mod_link_resolution = await self._resolve_mod_link(
+                    model=model,
+                    url_to_install=raw_url,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Mod link resolve failed: {xcp}", type="negative", multi_line=True)
+                return
+            mod_link_dependency_checkboxes.clear()
+            mod_link_dialog_body.refresh()
+
+        async def install_mod_link_from_dialog() -> None:
+            if mod_link_install_button is None:
+                raise RuntimeError("Mod link install button was not rendered.")
+            await self._run_with_loading_button(
+                button=mod_link_install_button,
+                action=(
+                    _resolve_mod_link_from_dialog if mod_link_resolution is None else _install_mod_link_from_dialog
+                ),
+            )
+
         optional_client_checkboxes: dict[str, Checkbox] = {}
         client_choice_selects: dict[str, Select] = {}
         client_pack_format_select: Select | None = None
@@ -4391,6 +4468,78 @@ class ModWebAppPageMixin(
                         ui.button("Cancel", on_click=upload_placement_dialog.close).classes(
                             "mod-list-button secondary"
                         )
+
+        with ui.dialog() as mod_link_dialog:
+            with ui.card().classes("mod-card mod-dialog-card"):
+                with ui.column().classes("w-full gap-4 p-5"):
+                    ui.label("Add Factorio mod link").classes("text-xl font-black mod-title-small")
+
+                    def reset_mod_link_resolution(_event: object | None = None) -> None:
+                        nonlocal mod_link_resolution
+                        if mod_link_resolution is None:
+                            return
+                        mod_link_resolution = None
+                        mod_link_dependency_checkboxes.clear()
+                        mod_link_dialog_body.refresh()
+
+                    mod_link_input = (
+                        ui.input(placeholder="https://mods.factorio.com/mod/example")
+                        .props("filled square dense clearable hide-bottom-space color=accent")
+                        .classes("w-full mod-config-input")
+                    )
+                    mod_link_input.on("update:model-value", reset_mod_link_resolution)
+                    mod_link_input.on("keydown.enter", install_mod_link_from_dialog)
+
+                    @ui.refreshable
+                    def mod_link_dialog_body() -> None:
+                        if mod_link_resolution is None:
+                            ui.label(
+                                "Paste a Factorio mod portal URL to inspect required dependencies before installing."
+                            ).classes("mod-subtitle text-sm")
+                            if mod_link_install_button is not None:
+                                mod_link_install_button.set_text("Check Dependencies")
+                            return
+                        dependencies = mod_link_resolution.dependencies
+                        installable_count = sum(
+                            1
+                            for dependency in dependencies
+                            if dependency.mod_id == mod_link_resolution.requested_mod_id or not dependency.installed
+                        )
+                        ui.label(
+                            f"{installable_count} mod{'s' if installable_count != 1 else ''} selected for download."
+                        ).classes("mod-subtitle text-sm")
+                        with ui.column().classes("w-full gap-2"):
+                            for dependency in dependencies:
+                                is_requested = dependency.mod_id == mod_link_resolution.requested_mod_id
+                                checked = is_requested or dependency.selected_by_default
+                                if dependency.installed and not is_requested:
+                                    checked = False
+                                with ui.row().classes(
+                                    "w-full items-start justify-between gap-3 mod-tab-toolbar-surface"
+                                ):
+                                    checkbox = ui.checkbox(value=checked).props("dense color=accent")
+                                    if is_requested or dependency.installed:
+                                        checkbox.disable()
+                                    mod_link_dependency_checkboxes[dependency.mod_id] = checkbox
+                                    with ui.column().classes("gap-1 flex-1 min-w-0"):
+                                        label = f"{dependency.title} ({dependency.mod_id})"
+                                        ui.label(label).classes("mod-setting-name")
+                                        details = f"{dependency.version} | {dependency.file_name}"
+                                        if dependency.required_by:
+                                            details = f"{details} | required by {', '.join(dependency.required_by)}"
+                                        if dependency.installed:
+                                            details = f"{details} | installed"
+                                        ui.label(details).classes("mod-subtitle text-xs break-all")
+                        if mod_link_install_button is not None:
+                            mod_link_install_button.set_text("Install")
+
+                    mod_link_dialog_body()
+                    with ui.row().classes("w-full justify-end gap-2"):
+                        ui.button("Cancel", on_click=mod_link_dialog.close).classes("mod-list-button secondary")
+                        mod_link_install_button = ui.button(
+                            "Check Dependencies",
+                            on_click=install_mod_link_from_dialog,
+                        ).classes("mod-list-button")
 
         def selected_client_pack_format() -> PackFormat:
             return (
@@ -5874,6 +6023,7 @@ class ModWebAppPageMixin(
                     cancel_metadata=cancel_metadata_operation,
                     delete_selected=delete_dialog.open,
                     upload_mod=upload_picker_action,
+                    add_mod_link=open_mod_link_dialog if can_install_factorio_mod_link else None,
                     show_search=show_search,
                     search_query=current_search_query,
                     on_search=_submit_mod_search if show_search else None,
@@ -6588,6 +6738,7 @@ class ModWebAppPageMixin(
         find_metadata: Callable[[], None] | None = None,
         cancel_metadata: Callable[[], None] | None = None,
         upload_mod: Callable[[], object] | None = None,
+        add_mod_link: Callable[[], object] | None = None,
         show_search: bool = False,
         search_query: str = "",
         on_search: Callable[[ModWebValueContainer], None] | None = None,
@@ -6596,11 +6747,18 @@ class ModWebAppPageMixin(
         on_sort: Callable[[ModWebValueContainer], None] | None = None,
     ) -> _ModWebModToolbarBindings:
         can_upload_mod: bool = upload_mod is not None and self._user_has_level(user, Power_Level.user)
+        can_add_mod_link: bool = add_mod_link is not None and self._user_has_level(user, Power_Level.user)
         can_delete_mods: bool = self._user_has_level(user, Power_Level.sudo) and any(
             not self._is_builtin_mod(entry) for entry in model.mods.mods
         )
         show_bulk_mod_actions: bool = bool(model.mods.mods)
-        if not can_upload_mod and not show_bulk_mod_actions and not show_search and not show_sort:
+        if (
+            not can_upload_mod
+            and not can_add_mod_link
+            and not show_bulk_mod_actions
+            and not show_search
+            and not show_sort
+        ):
             return _ModWebModToolbarBindings(
                 selection_button=None,
                 download_button=None,
@@ -6682,6 +6840,10 @@ class ModWebAppPageMixin(
                         ui.button("Modlist", on_click=open_modlist).classes(
                             "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
                         )
+                if can_add_mod_link:
+                    ui.button("Add Link", on_click=add_mod_link).classes(
+                        "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                    )
                 has_menu_actions = (
                     can_upload_mod
                     or open_client_pack_config is not None

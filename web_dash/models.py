@@ -21,6 +21,7 @@ from apps.sevendays import SevenDays, SevenDaysSandboxOptionsSnapshot
 from .constants import (
     _REMOTE_NODE_GET_MAX_ATTEMPTS,
     _REMOTE_NODE_GET_RETRY_DELAY_SECONDS,
+    _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     _REMOTE_NODE_TOKEN_TTL_SECONDS,
     _SAME_ORIGIN_NODE_PROXY_BASE,
@@ -43,8 +44,8 @@ from .runtime_imports import (
     BadgeTone,
     BotMetadataModWeb,
     BotMetadataSnapshot,
-    Card,
     Callable,
+    Card,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
     ClientPackRelease,
@@ -68,19 +69,21 @@ from .runtime_imports import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
+    NodeFactorioModSettings,
     NodeMinecraftRecipeWorkspaceState,
     NodeModList,
+    NodeModPortalResolveResult,
     NodeModUploadBatchResult,
-    PackFormat,
-    PackPurpose,
     NodeSaveList,
     NodeSaveMutationResult,
-    NodeSevenDaysSandboxOptionsState,
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
+    NodeSevenDaysSandboxOptionsState,
     NodeSystemHistory,
     NodeSystemSummary,
+    PackFormat,
+    PackPurpose,
     Path,
     Power_Level,
     RedirectResponse,
@@ -97,8 +100,8 @@ from .runtime_imports import (
     json,
     quote,
     read_json_object,
-    requests,
     replace,
+    requests,
     tempfile,
     time,
     urlencode,
@@ -109,16 +112,16 @@ from .service_base import ModWebServiceSupport
 from .types import (
     ModWebBasePageModel,
     ModWebDirectUploadTarget,
+    ModWebHomeNodeSummary,
     ModWebMinecraftItemRegistrySummary,
     ModWebMinecraftRecipeBookSummary,
     ModWebMinecraftRecipeEntry,
     ModWebMinecraftRecipeOperationKind,
-    ModWebHomeNodeSummary,
     ModWebNodeAppSection,
     ModWebNodeLink,
     ModWebOverviewPageModel,
-    ModWebPageModel,
     ModWebPageLoadWarning,
+    ModWebPageModel,
     ModWebSevenDaysSandboxOptionEntry,
     ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
@@ -145,6 +148,7 @@ class _LocalAppPageData:
     minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None
     minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None
     sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None
+    factorio_mod_settings: NodeFactorioModSettings | None = None
     load_warnings: tuple[ModWebPageLoadWarning, ...] = ()
 
 
@@ -635,6 +639,17 @@ class ModWebModelsMixin(ModWebServiceSupport):
         minecraft_recipes = self._minecraft_recipe_summary(app)
         minecraft_item_registry = self._minecraft_item_registry_summary(app)
         sevendays_sandbox_options = self._sevendays_sandbox_options_summary(app)
+        factorio_mod_settings: NodeFactorioModSettings | None = None
+        if app_entry.scope == config.AppScopes.factorio.value and self._user_has_level(user, config_read_level):
+            try:
+                factorio_mod_settings = self._node_api.factorio_mod_settings_state(app=app)
+            except Exception as xcp:
+                self._warn_page_section_load_failure(
+                    context=context,
+                    section_label="Factorio mod settings",
+                    error=xcp,
+                    load_warnings=load_warnings,
+                )
         return _LocalAppPageData(
             app=app,
             app_entry=app_entry,
@@ -649,6 +664,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             minecraft_recipes=minecraft_recipes,
             minecraft_item_registry=minecraft_item_registry,
             sevendays_sandbox_options=sevendays_sandbox_options,
+            factorio_mod_settings=factorio_mod_settings,
             load_warnings=tuple(load_warnings),
         )
 
@@ -721,6 +737,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             minecraft_recipes=page_data.minecraft_recipes,
             minecraft_item_registry=page_data.minecraft_item_registry,
             sevendays_sandbox_options=page_data.sevendays_sandbox_options,
+            factorio_mod_settings=page_data.factorio_mod_settings,
         )
 
     def _overview_model_from_local_page_data(
@@ -777,6 +794,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
+            factorio_mod_settings=page_data.factorio_mod_settings,
         )
 
     async def _build_page_model(self, app: App, *, user: ModWebUser) -> ModWebPageModel:
@@ -845,6 +863,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None,
         minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None,
         sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None,
+        factorio_mod_settings: NodeFactorioModSettings | None = None,
     ) -> ModWebPageModel:
         app_api_url: str = self._node_app_api_url(node, mods.app_name)
         shared_changelog_draft = self._backend.client_pack_changelog_draft(
@@ -908,6 +927,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     minecraft_recipes=minecraft_recipes,
                     minecraft_item_registry=minecraft_item_registry,
                     sevendays_sandbox_options=sevendays_sandbox_options,
+                    factorio_mod_settings=factorio_mod_settings,
                     download_all_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'false'})}",
                     download_enabled_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'true'})}",
                     mod_download_urls={
@@ -965,6 +985,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_advancement_term: str | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
+        factorio_mod_settings: NodeFactorioModSettings | None = None,
     ) -> ModWebOverviewPageModel:
         app_api_url: str = self._node_app_api_url(node, app_name)
         return cast(
@@ -1014,6 +1035,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_advancement_term=relay_advancement_term,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
+                    factorio_mod_settings=factorio_mod_settings,
                 ),
             ),
         )
@@ -1317,6 +1339,77 @@ class ModWebModelsMixin(ModWebServiceSupport):
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
         return NodeModUploadBatchResult.from_mapping(_json_object(payload, context="Remote node response"))
 
+    def _remote_mod_link_install(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        url_to_install: str,
+        user: ModWebUser,
+        selected_mod_ids: tuple[str, ...] | None = None,
+    ) -> NodeModUploadBatchResult:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+        )
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/install-link"
+        try:
+            response: Response = self._remote_sync_http_client().post(
+                url,
+                json={"url": url_to_install, "selected_mod_ids": selected_mod_ids},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return NodeModUploadBatchResult.from_mapping(_json_object(payload, context="Remote node response"))
+
+    def _remote_mod_link_resolve(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        url_to_install: str,
+        user: ModWebUser,
+    ) -> NodeModPortalResolveResult:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+        )
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/resolve-link"
+        try:
+            response: Response = self._remote_sync_http_client().post(
+                url,
+                json={"url": url_to_install},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return NodeModPortalResolveResult.from_mapping(_json_object(payload, context="Remote node response"))
+
     def _direct_mod_upload_target(
         self,
         *,
@@ -1399,6 +1492,75 @@ class ModWebModelsMixin(ModWebServiceSupport):
             user=user,
         )
         return NodeConfigList.from_mapping(payload)
+
+    async def _remote_factorio_mod_settings_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeFactorioModSettings:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/factorio/mod-settings",
+            scopes=(NodeApiScope.CONFIGS_READ,),
+            user=user,
+        )
+        return NodeFactorioModSettings.from_mapping(payload)
+
+    def _remote_factorio_mod_settings_upload(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        upload_path: Path,
+        upload_name: str,
+        user: ModWebUser,
+    ) -> NodeFactorioModSettings:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            user=user,
+        )
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/factorio/mod-settings/upload"
+        try:
+            with upload_path.open("rb") as handle:
+                response: Response = self._remote_sync_http_client().post(
+                    url,
+                    data={"filename": upload_name},
+                    files={"upload": (upload_name, handle, "application/octet-stream")},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+                )
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return NodeFactorioModSettings.from_mapping(_json_object(payload, context="Remote node response"))
+
+    async def _remote_factorio_mod_settings_delete_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeFactorioModSettings:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/factorio/mod-settings",
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            user=user,
+            method="DELETE",
+        )
+        return NodeFactorioModSettings.from_mapping(payload)
 
     async def _remote_save_list_async(
         self,

@@ -39,6 +39,7 @@ class AppConfigFileRoot:
     recursive: bool = True
     suffixes: frozenset[str] = DEFAULT_CONFIG_FILE_SUFFIXES
     read_power_level_override: Power_Level | None = None
+    write_power_level_override: Power_Level | None = None
 
     def __post_init__(self) -> None:
         if not self.id or "/" in self.id or self.id in {".", ".."}:
@@ -60,6 +61,7 @@ class AppConfigFile:
     root_label: str
     kind: AppConfigFileKind
     read_power_level: Power_Level
+    write_power_level: Power_Level
     size_bytes: int
     modified_at: datetime
 
@@ -76,10 +78,17 @@ def effective_config_root_read_level(*, root: AppConfigFileRoot, default: Power_
     return default
 
 
+def effective_config_root_write_level(*, root: AppConfigFileRoot, default: Power_Level) -> Power_Level:
+    if root.write_power_level_override is not None:
+        return root.write_power_level_override
+    return default
+
+
 def list_app_config_files(
     roots: tuple[AppConfigFileRoot, ...],
     *,
     default_read_level: Power_Level,
+    default_write_level: Power_Level,
 ) -> tuple[AppConfigFile, ...]:
     files: list[AppConfigFile] = []
     for root in roots:
@@ -91,6 +100,7 @@ def list_app_config_files(
                     path=root_path,
                     relative_path=root_path.name,
                     default_read_level=default_read_level,
+                    default_write_level=default_write_level,
                 )
             )
             continue
@@ -110,6 +120,7 @@ def list_app_config_files(
                     path=path,
                     relative_path=path.relative_to(root_path).as_posix(),
                     default_read_level=default_read_level,
+                    default_write_level=default_write_level,
                 )
             )
     return tuple(
@@ -122,6 +133,7 @@ def read_app_config_file(
     file_id: str,
     *,
     default_read_level: Power_Level,
+    default_write_level: Power_Level,
 ) -> AppConfigFileContent:
     root, path, relative_path = resolve_app_config_path(roots, file_id)
     _validate_readable_config_file(path)
@@ -130,7 +142,13 @@ def read_app_config_file(
     except UnicodeDecodeError as xcp:
         raise ValueError(f"Config file is not valid {config.STR_ENCODE}: {file_id}") from xcp
     return AppConfigFileContent(
-        file=_file_metadata(root=root, path=path, relative_path=relative_path, default_read_level=default_read_level),
+        file=_file_metadata(
+            root=root,
+            path=path,
+            relative_path=relative_path,
+            default_read_level=default_read_level,
+            default_write_level=default_write_level,
+        ),
         content=content,
     )
 
@@ -141,6 +159,7 @@ def write_app_config_file(
     content: str,
     *,
     default_read_level: Power_Level,
+    default_write_level: Power_Level,
 ) -> AppConfigFileContent:
     root, path, relative_path = resolve_app_config_path(roots, file_id)
     _validate_readable_config_file(path)
@@ -149,7 +168,13 @@ def write_app_config_file(
         raise ValueError(f"Config file content exceeds {MAX_CONFIG_FILE_BYTES} bytes.")
     path.write_text(content, config.STR_ENCODE)
     return AppConfigFileContent(
-        file=_file_metadata(root=root, path=path, relative_path=relative_path, default_read_level=default_read_level),
+        file=_file_metadata(
+            root=root,
+            path=path,
+            relative_path=relative_path,
+            default_read_level=default_read_level,
+            default_write_level=default_write_level,
+        ),
         content=content,
     )
 
@@ -211,6 +236,7 @@ def _file_metadata(
     path: Path,
     relative_path: str,
     default_read_level: Power_Level,
+    default_write_level: Power_Level,
 ) -> AppConfigFile:
     stat = path.stat()
     return AppConfigFile(
@@ -221,6 +247,7 @@ def _file_metadata(
         root_label=root.label,
         kind=root.kind,
         read_power_level=effective_config_root_read_level(root=root, default=default_read_level),
+        write_power_level=effective_config_root_write_level(root=root, default=default_write_level),
         size_bytes=stat.st_size,
         modified_at=datetime.fromtimestamp(stat.st_mtime),
     )

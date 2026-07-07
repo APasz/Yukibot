@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -15,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from re import Match, Pattern
 from typing import Generic, TypeAlias, TypeVar, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
 import hikari
@@ -47,6 +48,7 @@ from apps._config import (
     known_mod_page_provider_for_url,
 )
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
+from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
 from apps._mod import Mod, humanise_mod_identifier
 from apps._rcon import RconClient
 from apps._save_files import (
@@ -100,6 +102,16 @@ _FACTORIO_MOD_VERSION_RE: Pattern[str] = re.compile(
     r"_(?P<version>v?\d+(?:\.\d+)+(?:[-+._][A-Za-z0-9]+)*)$",
     re.IGNORECASE,
 )
+_FACTORIO_MOD_PORTAL_HOST = "mods.factorio.com"
+_FACTORIO_MOD_PORTAL_BASE_URL = f"https://{_FACTORIO_MOD_PORTAL_HOST}"
+_FACTORIO_MOD_PORTAL_ID_RE: Pattern[str] = re.compile(r"^[A-Za-z0-9_-]+$")
+_FACTORIO_MOD_DEPENDENCY_RE: Pattern[str] = re.compile(r"^(?P<mod_id>[A-Za-z0-9_-]+)(?:\s|$)")
+_FACTORIO_CONFIG_FILENAMES: tuple[str, ...] = (
+    "server-settings.json",
+    "map-settings.json",
+    "map-gen-settings.json",
+)
+_FACTORIO_MOD_SETTINGS_FILENAME = "mod-settings.dat"
 _FACTORIO_RESEARCH_FINISHED_RE: Pattern[str] = re.compile(r"\[RESEARCH FINISHED\]\s+(?P<research>.+)$", re.IGNORECASE)
 _FACTORIO_ERROR_RE: Pattern[str] = re.compile(r"^\s*\d+\.\d+\s+Error\s+(?P<source>\S+:\d+):\s+(?P<message>.+)$")
 _FACTORIO_LINE_MATCHER = Callable[[str], Awaitable[None]]
@@ -147,6 +159,7 @@ class FactorioModMetadata:
     version: str | None = None
     title: str | None = None
     homepage: str | None = None
+    description: str | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object], *, label: str) -> "FactorioModMetadata":
@@ -155,7 +168,103 @@ class FactorioModMetadata:
             version=_optional_factorio_metadata_text(payload, "version", label=label),
             title=_optional_factorio_metadata_text(payload, "title", label=label),
             homepage=_optional_factorio_metadata_text(payload, "homepage", label=label),
+            description=_optional_factorio_metadata_text(payload, "description", label=label),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioModPortalCredentials:
+    username: str
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioModPortalRelease:
+    download_url: str
+    file_name: str
+    version: str
+    sha1: str
+    released_at: str | None
+    factorio_version: str | None
+    dependencies: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioModPortalDownload:
+    mod_id: str
+    page_url: str
+    file_name: str
+    version: str
+    archive_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioModPortalCandidate:
+    mod_id: str
+    title: str
+    page_url: str
+    file_name: str
+    version: str
+    required_by: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioModPortalResolution:
+    requested_mod_id: str
+    candidates: tuple[FactorioModPortalCandidate, ...]
+
+
+def _is_non_empty_text(text: str) -> bool:
+    return bool(text.strip())
+
+
+def factorio_server_settings_path(directory: Path) -> Path:
+    return directory.absolute() / "data" / "server-settings.json"
+
+
+def factorio_mod_settings_path(directory: Path) -> Path:
+    return directory.absolute() / "mods" / _FACTORIO_MOD_SETTINGS_FILENAME
+
+
+def factorio_config_path(directory: Path, filename: str) -> Path:
+    if filename not in _FACTORIO_CONFIG_FILENAMES:
+        raise ValueError(f"Unsupported Factorio config filename: {filename}")
+    return directory.absolute() / "data" / filename
+
+
+def _factorio_example_config_path(config_path: Path) -> Path:
+    if config_path.suffix != ".json":
+        raise ValueError(f"Factorio config file must be JSON: {config_path}")
+    return config_path.with_name(f"{config_path.stem}.example{config_path.suffix}")
+
+
+def ensure_factorio_config_files(directory: Path) -> tuple[Path, ...]:
+    copied: list[Path] = []
+    for filename in _FACTORIO_CONFIG_FILENAMES:
+        config_path = factorio_config_path(directory, filename)
+        if config_path.exists():
+            continue
+        example_path = _factorio_example_config_path(config_path)
+        if not example_path.exists():
+            continue
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(example_path, config_path)
+        copied.append(config_path)
+        log.info("Created Factorio config from example: %s -> %s", example_path, config_path)
+    return tuple(copied)
+
+
+def factorio_mod_portal_credentials_from_server_settings(settings_path: Path) -> FactorioModPortalCredentials:
+    settings = _load_json_object(settings_path.read_text(config.STR_ENCODE), label="Factorio server settings")
+    raw_username = settings.get("username")
+    raw_token = settings.get("token")
+    if not isinstance(raw_username, str) or not isinstance(raw_token, str):
+        raise ValueError("Factorio server settings username and token are required to download mods.")
+    username = raw_username.strip()
+    token = raw_token.strip()
+    if not username or not token:
+        raise ValueError("Factorio server settings username and token are required to download mods.")
+    return FactorioModPortalCredentials(username=username, token=token)
 
 
 def detect_factorio_version(*, directory: Path) -> AppVersion | None:
@@ -201,6 +310,330 @@ def _factorio_download_url(branch: FactorioUpdateBranch) -> str:
     if branch is FactorioUpdateBranch.STABLE:
         return "https://factorio.com/get-download/stable/headless/linux64"
     return "https://factorio.com/get-download/experimental/headless/linux64"
+
+
+def parse_factorio_mod_portal_url(raw_url: str) -> str:
+    url = raw_url.strip()
+    if not url:
+        raise ValueError("Factorio mod portal URL must not be empty.")
+    parsed = urlsplit(url)
+    if parsed.scheme.casefold() != "https" or (parsed.hostname or "").casefold() != _FACTORIO_MOD_PORTAL_HOST:
+        raise ValueError("Factorio mod links must use https://mods.factorio.com/mod/{name}.")
+    path_parts = tuple(part for part in parsed.path.split("/") if part)
+    if len(path_parts) != 2 or path_parts[0] != "mod":
+        raise ValueError("Factorio mod links must use https://mods.factorio.com/mod/{name}.")
+    mod_id = path_parts[1]
+    if not _FACTORIO_MOD_PORTAL_ID_RE.fullmatch(mod_id):
+        raise ValueError(f"Factorio mod ID is invalid: {mod_id!r}")
+    return mod_id
+
+
+def _normalise_factorio_mod_portal_path(raw_path: object, *, field_name: str) -> str:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError(f"Factorio mod portal release {field_name} is invalid.")
+    path = raw_path.strip()
+    parsed = urlsplit(path)
+    if parsed.scheme or parsed.netloc or not path.startswith("/"):
+        raise ValueError(f"Factorio mod portal release {field_name} must be a relative absolute path.")
+    pure_path = PurePosixPath(parsed.path)
+    if pure_path.is_absolute() and ".." not in pure_path.parts:
+        return path
+    raise ValueError(f"Factorio mod portal release {field_name} is invalid.")
+
+
+def _normalise_factorio_mod_portal_file_name(raw_name: object) -> str:
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        raise ValueError("Factorio mod portal release file_name is invalid.")
+    file_name = raw_name.strip()
+    if PurePosixPath(file_name).name != file_name or file_name in {".", ".."}:
+        raise ValueError("Factorio mod portal release file_name must be a single file name.")
+    if not file_name.endswith(".zip"):
+        raise ValueError("Factorio mod portal release file_name must be a zip archive.")
+    return file_name
+
+
+def _normalise_factorio_mod_portal_sha1(raw_sha1: object) -> str:
+    if not isinstance(raw_sha1, str):
+        raise ValueError("Factorio mod portal release sha1 is invalid.")
+    sha1 = raw_sha1.strip().casefold()
+    if len(sha1) != 40 or any(character not in "0123456789abcdef" for character in sha1):
+        raise ValueError("Factorio mod portal release sha1 must be a 40-character hexadecimal digest.")
+    return sha1
+
+
+def _factorio_required_dependency_mod_id(raw_dependency: object) -> str | None:
+    if not isinstance(raw_dependency, str):
+        raise ValueError("Factorio mod portal release dependency is invalid.")
+    dependency = raw_dependency.strip()
+    if not dependency:
+        return None
+    if dependency.startswith(("?", "!", "(?)")):
+        return None
+    if dependency.startswith("~"):
+        dependency = dependency.removeprefix("~").strip()
+    match = _FACTORIO_MOD_DEPENDENCY_RE.match(dependency)
+    if match is None:
+        raise ValueError(f"Factorio mod portal release dependency is invalid: {raw_dependency!r}")
+    mod_id = match.group("mod_id")
+    if mod_id == "base":
+        return None
+    return mod_id
+
+
+def _factorio_required_dependencies(info_json: Mapping[str, object]) -> tuple[str, ...]:
+    raw_dependencies = info_json.get("dependencies")
+    if raw_dependencies is None:
+        return ()
+    if not isinstance(raw_dependencies, list):
+        raise ValueError("Factorio mod portal release dependencies are invalid.")
+    dependencies: list[str] = []
+    seen: set[str] = set()
+    for raw_dependency in raw_dependencies:
+        mod_id = _factorio_required_dependency_mod_id(raw_dependency)
+        if mod_id is None or mod_id in seen:
+            continue
+        seen.add(mod_id)
+        dependencies.append(mod_id)
+    return tuple(dependencies)
+
+
+def _factorio_mod_portal_release_from_mapping(payload: object) -> FactorioModPortalRelease:
+    release = _json_object(payload, label="Factorio mod portal release")
+    raw_version = release.get("version")
+    if not isinstance(raw_version, str) or not raw_version.strip():
+        raise ValueError("Factorio mod portal release version is invalid.")
+    info_json = _json_object(release.get("info_json", {}), label="Factorio mod portal release info_json")
+    raw_factorio_version = info_json.get("factorio_version")
+    if raw_factorio_version is not None and not isinstance(raw_factorio_version, str):
+        raise ValueError("Factorio mod portal release info_json factorio_version is invalid.")
+    raw_released_at = release.get("released_at")
+    if raw_released_at is not None and not isinstance(raw_released_at, str):
+        raise ValueError("Factorio mod portal release released_at is invalid.")
+    return FactorioModPortalRelease(
+        download_url=_normalise_factorio_mod_portal_path(release.get("download_url"), field_name="download_url"),
+        file_name=_normalise_factorio_mod_portal_file_name(release.get("file_name")),
+        version=raw_version.strip(),
+        sha1=_normalise_factorio_mod_portal_sha1(release.get("sha1")),
+        released_at=raw_released_at.strip() if isinstance(raw_released_at, str) and raw_released_at.strip() else None,
+        factorio_version=(
+            raw_factorio_version.strip()
+            if isinstance(raw_factorio_version, str) and raw_factorio_version.strip()
+            else None
+        ),
+        dependencies=_factorio_required_dependencies(info_json),
+    )
+
+
+def _factorio_mod_portal_releases(payload: Mapping[str, object]) -> tuple[FactorioModPortalRelease, ...]:
+    raw_releases = payload.get("releases")
+    if not isinstance(raw_releases, list):
+        raise ValueError("Factorio mod portal response releases are invalid.")
+    releases = tuple(_factorio_mod_portal_release_from_mapping(item) for item in cast(list[object], raw_releases))
+    if not releases:
+        raise ValueError("Factorio mod portal response contains no releases.")
+    return releases
+
+
+def _factorio_mod_release_matches_game_version(
+    release: FactorioModPortalRelease,
+    factorio_version: AppVersion | None,
+) -> bool:
+    if factorio_version is None or release.factorio_version is None:
+        return True
+    installed_parts = factorio_version.main.split(".")
+    if len(installed_parts) < 2:
+        return True
+    return release.factorio_version == ".".join(installed_parts[:2])
+
+
+def _select_factorio_mod_portal_release(
+    releases: Iterable[FactorioModPortalRelease],
+    *,
+    factorio_version: AppVersion | None,
+) -> FactorioModPortalRelease:
+    release_list = tuple(releases)
+    compatible = tuple(
+        release for release in release_list if _factorio_mod_release_matches_game_version(release, factorio_version)
+    )
+    candidates = compatible or release_list
+    return max(candidates, key=lambda release: release.released_at or "")
+
+
+def _factorio_mod_download_url(release: FactorioModPortalRelease, credentials: FactorioModPortalCredentials) -> str:
+    query = urlencode({"username": credentials.username, "token": credentials.token})
+    separator = "&" if "?" in release.download_url else "?"
+    return f"{_FACTORIO_MOD_PORTAL_BASE_URL}{release.download_url}{separator}{query}"
+
+
+async def _factorio_mod_portal_metadata(session: aiohttp.ClientSession, mod_id: str) -> Mapping[str, object]:
+    metadata_url = f"{_FACTORIO_MOD_PORTAL_BASE_URL}/api/mods/{quote(mod_id, safe='')}/full"
+    async with session.get(metadata_url) as response:
+        if response.status != 200:
+            raise RuntimeError(f"Factorio mod portal metadata fetch failed for {mod_id} with HTTP {response.status}.")
+        payload = _json_object(cast(object, await response.json()), label="Factorio mod portal response")
+    portal_mod_name = payload.get("name")
+    if portal_mod_name != mod_id:
+        raise ValueError("Factorio mod portal response did not match the requested mod.")
+    return payload
+
+
+def _factorio_mod_portal_candidate(
+    *,
+    payload: Mapping[str, object],
+    release: FactorioModPortalRelease,
+    required_by: Iterable[str],
+) -> FactorioModPortalCandidate:
+    raw_mod_id = payload.get("name")
+    if not isinstance(raw_mod_id, str) or not raw_mod_id.strip():
+        raise ValueError("Factorio mod portal response name is invalid.")
+    mod_id = raw_mod_id.strip()
+    raw_title = payload.get("title")
+    title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else mod_id
+    return FactorioModPortalCandidate(
+        mod_id=mod_id,
+        title=title,
+        page_url=f"{_FACTORIO_MOD_PORTAL_BASE_URL}/mod/{quote(mod_id, safe='')}",
+        file_name=release.file_name,
+        version=release.version,
+        required_by=tuple(required_by),
+    )
+
+
+async def _resolve_factorio_mod_portal_candidates_with_session(
+    *,
+    session: aiohttp.ClientSession,
+    requested_mod_id: str,
+    factorio_version: AppVersion | None,
+) -> tuple[FactorioModPortalResolution, dict[str, FactorioModPortalRelease]]:
+    pending: deque[tuple[str, tuple[str, ...]]] = deque([(requested_mod_id, ())])
+    seen: set[str] = set()
+    candidates: list[FactorioModPortalCandidate] = []
+    releases: dict[str, FactorioModPortalRelease] = {}
+
+    while pending:
+        mod_id, required_by = pending.popleft()
+        if mod_id in seen:
+            continue
+        seen.add(mod_id)
+        payload = await _factorio_mod_portal_metadata(session, mod_id)
+        release = _select_factorio_mod_portal_release(
+            _factorio_mod_portal_releases(payload),
+            factorio_version=factorio_version,
+        )
+        releases[mod_id] = release
+        candidates.append(_factorio_mod_portal_candidate(payload=payload, release=release, required_by=required_by))
+        for dependency_id in release.dependencies:
+            if dependency_id not in seen:
+                pending.append((dependency_id, (mod_id,)))
+
+    return FactorioModPortalResolution(requested_mod_id=requested_mod_id, candidates=tuple(candidates)), releases
+
+
+async def resolve_factorio_mod_portal_candidates(
+    *,
+    page_url: str,
+    factorio_version: AppVersion | None,
+) -> FactorioModPortalResolution:
+    mod_id = parse_factorio_mod_portal_url(page_url)
+    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=300)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        resolution, _releases = await _resolve_factorio_mod_portal_candidates_with_session(
+            session=session,
+            requested_mod_id=mod_id,
+            factorio_version=factorio_version,
+        )
+    return resolution
+
+
+def _verify_factorio_mod_download_sha1(archive_path: Path, expected_sha1: str) -> None:
+    digest = hashlib.sha1()
+    with archive_path.open("rb") as archive_file:
+        for chunk in iter(lambda: archive_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual_sha1 = digest.hexdigest()
+    if actual_sha1 != expected_sha1:
+        raise ValueError(
+            f"Downloaded Factorio mod checksum mismatch for {archive_path.name}: "
+            f"expected {expected_sha1}, got {actual_sha1}."
+        )
+
+
+async def download_factorio_mod_from_portal(
+    *,
+    page_url: str,
+    destination_dir: Path,
+    factorio_version: AppVersion | None,
+    credentials: FactorioModPortalCredentials,
+) -> FactorioModPortalDownload:
+    downloads = await download_factorio_mods_from_portal(
+        page_url=page_url,
+        destination_dir=destination_dir,
+        factorio_version=factorio_version,
+        credentials=credentials,
+        selected_mod_ids=None,
+    )
+    if len(downloads) != 1:
+        raise RuntimeError("Single Factorio mod download unexpectedly resolved multiple archives.")
+    return downloads[0]
+
+
+async def download_factorio_mods_from_portal(
+    *,
+    page_url: str,
+    destination_dir: Path,
+    factorio_version: AppVersion | None,
+    credentials: FactorioModPortalCredentials,
+    selected_mod_ids: Iterable[str] | None,
+) -> tuple[FactorioModPortalDownload, ...]:
+    mod_id = parse_factorio_mod_portal_url(page_url)
+    selected_ids: set[str] | None = None if selected_mod_ids is None else set(selected_mod_ids)
+    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=300)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        resolution, releases = await _resolve_factorio_mod_portal_candidates_with_session(
+            session=session,
+            requested_mod_id=mod_id,
+            factorio_version=factorio_version,
+        )
+        if selected_ids is None:
+            selected_ids = {mod_id}
+        if mod_id not in selected_ids:
+            raise ValueError("The requested Factorio mod must be included in the selected downloads.")
+        available_ids = {candidate.mod_id for candidate in resolution.candidates}
+        unknown_ids = selected_ids - available_ids
+        if unknown_ids:
+            raise ValueError(f"Unknown Factorio mod dependency selection: {', '.join(sorted(unknown_ids))}")
+
+        downloads: list[FactorioModPortalDownload] = []
+        for candidate in resolution.candidates:
+            if candidate.mod_id not in selected_ids:
+                continue
+            release = releases[candidate.mod_id]
+            archive_path = destination_dir / release.file_name
+            try:
+                async with session.get(
+                    _factorio_mod_download_url(release, credentials), allow_redirects=True
+                ) as response:
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"Factorio mod download failed for {candidate.mod_id} with HTTP {response.status}."
+                        )
+                    with archive_path.open("wb") as archive_file:
+                        async for chunk in response.content.iter_chunked(262_144):
+                            archive_file.write(chunk)
+                _verify_factorio_mod_download_sha1(archive_path, release.sha1)
+            except Exception:
+                File_Utils.remove(archive_path, silent=True, resolve=False)
+                raise
+            downloads.append(
+                FactorioModPortalDownload(
+                    mod_id=candidate.mod_id,
+                    page_url=candidate.page_url,
+                    file_name=release.file_name,
+                    version=release.version,
+                    archive_path=archive_path,
+                )
+            )
+    return tuple(downloads)
 
 
 def _normalise_factorio_archive_member_path(member_name: str) -> Path:
@@ -409,6 +842,9 @@ class Mod_Factorio(Mod):
         if self._detected_metadata.title is not None:
             return self._detected_metadata.title
         return humanise_mod_identifier(self.factorio_mod_id, split_single_camel=True)
+
+    def detect_description(self) -> str | None:
+        return self._detected_metadata.description
 
     def native_metadata_id(self) -> str:
         return self.factorio_mod_id
@@ -762,6 +1198,53 @@ class Factorio_Settings(App_Settings):
         return data
 
 
+async def _run_factorio_console_command(
+    app: "Factorio",
+    command: str,
+    *,
+    success_text: str,
+) -> ConsoleActionResult:
+    response = await app._relay.send(command)
+    if response:
+        return ConsoleActionResult(
+            summary=success_text,
+            text=response,
+            source=ConsoleResponseSource.RCON,
+        )
+    return ConsoleActionResult(summary=success_text, source=ConsoleResponseSource.RCON)
+
+
+async def _console_raw_command(app_obj: object, value: object | None) -> ConsoleActionResult:
+    app = cast(Factorio, app_obj)
+    command = cast(str, value)
+    return await _run_factorio_console_command(
+        app,
+        command,
+        success_text=f"{app.friendly}: console command sent.",
+    )
+
+
+_FACTORIO_RAW_COMMAND_PARAMETER = ConsoleActionParameter[str](
+    key="command",
+    label="Command",
+    value_type=str,
+    validator=_is_non_empty_text,
+    desc="Raw Factorio console command sent through RCON.",
+    max_length=500,
+    multiline=True,
+)
+_FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
+    ConsoleAction(
+        key="raw_command",
+        label="Run Command",
+        description="Send a raw command to the Factorio console.",
+        power_level=Power_Level.sudo,
+        execute=_console_raw_command,
+        parameter=_FACTORIO_RAW_COMMAND_PARAMETER,
+    ),
+)
+
+
 class Factorio(App[App_Config]):
     _instance = None
     chat_relay_outbound = True
@@ -774,7 +1257,8 @@ class Factorio(App[App_Config]):
         self.manage_embed_color = 0xDC6B0F
         self.proc_name = "factorio"
         self.proc_cmd = [self.proc_name, "--start-server"]
-        file_settings: Path = cfg.directory.absolute() / "data" / "server-settings.json"
+        ensure_factorio_config_files(cfg.directory)
+        file_settings: Path = factorio_server_settings_path(cfg.directory)
         self.cmd_start = cfg.cmd_start or [
             "bin/x64/factorio",
             "--start-server-load-latest",
@@ -821,15 +1305,37 @@ class Factorio(App[App_Config]):
         log.debug(f"{__name__}.Created")
 
     @property
+    def console_actions(self) -> tuple[ConsoleAction, ...]:
+        return self.available_console_actions(_FACTORIO_CONSOLE_ACTIONS)
+
+    @property
     def config_file_roots(self) -> tuple[AppConfigFileRoot, ...]:
         return (
             AppConfigFileRoot(
                 id="server",
                 label="Server Settings",
-                path=self.directory / "data" / "server-settings.json",
+                path=factorio_config_path(self.directory, "server-settings.json"),
                 kind=AppConfigFileKind.GAME,
                 recursive=False,
                 suffixes=frozenset[str]({".json"}),
+            ),
+            AppConfigFileRoot(
+                id="map-settings",
+                label="Map Settings",
+                path=factorio_config_path(self.directory, "map-settings.json"),
+                kind=AppConfigFileKind.GAME,
+                recursive=False,
+                suffixes=frozenset[str]({".json"}),
+                write_power_level_override=Power_Level.sudo,
+            ),
+            AppConfigFileRoot(
+                id="map-gen-settings",
+                label="Map Gen Settings",
+                path=factorio_config_path(self.directory, "map-gen-settings.json"),
+                kind=AppConfigFileKind.GAME,
+                recursive=False,
+                suffixes=frozenset[str]({".json"}),
+                write_power_level_override=Power_Level.sudo,
             ),
         )
 

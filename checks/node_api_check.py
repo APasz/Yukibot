@@ -44,7 +44,6 @@ from apps._config import (
     ClientPackMetadataConfig,
     ClientPackPolicy,
     ClientPackRelease,
-    ModrinthModMetadata,
     LauncherMetadataDiscovery,
     LauncherMetadataResolution,
     LauncherProviderUrls,
@@ -52,10 +51,11 @@ from apps._config import (
     ModClassificationOverride,
     ModDownloadBlockReason,
     ModMetadataOverrides,
-    ModPageLink,
     ModPageDiscovery,
+    ModPageLink,
     ModPlacement,
     ModPlatformMetadata,
+    ModrinthModMetadata,
     ModType,
 )
 from apps._config_files import AppConfigFile, AppConfigFileContent, AppConfigFileKind, AppConfigFileRoot
@@ -82,6 +82,7 @@ from apps._updater import (
     AppUpdateStatus,
     Update_Manager,
 )
+from apps.factorio import FactorioModPortalCandidate, FactorioModPortalResolution
 from apps.minecraft import (
     Minecraft,
     MinecraftItemRegistrySnapshot,
@@ -107,8 +108,8 @@ from node_api import (
     NodeAppTransitionState,
     NodeBlueprintList,
     NodeBlueprintMutationResult,
-    NodeBulkLauncherMetadataRequest,
     NodeBulkLauncherMetadataApplyRequest,
+    NodeBulkLauncherMetadataRequest,
     NodeCapacityMutationResult,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
@@ -127,6 +128,7 @@ from node_api import (
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
     NodeDownloadRequest,
+    NodeFactorioModSettings,
     NodeFontSourceSettingsMutationResult,
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationRequest,
@@ -135,9 +137,11 @@ from node_api import (
     NodeModList,
     NodeModMetadataFetchRequest,
     NodeModMetadataResolveRequest,
-    NodeModPageResolveRequest,
     NodeModMutationAction,
     NodeModMutationResult,
+    NodeModPageResolveRequest,
+    NodeModPortalInstallRequest,
+    NodeModPortalResolveResult,
     NodeModPropertiesUpdateRequest,
     NodeModUploadBatchResult,
     NodeModUploadResult,
@@ -558,11 +562,30 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.actions[0].power_level_name, Power_Level.sudo.name)
         self.assertEqual(result.actions[0].power_level_label, Power_Level.sudo.name.title())
         self.assertFalse(result.actions[0].can_run)
+        self.assertFalse(result.actions[0].runtime_running)
         self.assertIsNotNone(result.actions[0].parameter)
         assert result.actions[0].parameter is not None
         self.assertEqual(result.actions[0].parameter.value_type_name, "str")
         self.assertEqual(result.actions[0].parameter.description, "Broadcast a message to every player.")
         self.assertEqual(result.actions[0].parameter.recent_inputs, ())
+
+    def test_build_console_action_list_marks_running_runtime(self) -> None:
+        action = ConsoleAction(
+            key="save_all",
+            label="Save All",
+            description="Flush world state to disk.",
+            power_level=Power_Level.user,
+            execute=AsyncMock(return_value=ConsoleActionResult(summary="ok")),
+        )
+        app = _build_console_action_app(actions=(action,), running=True)
+        acl = Mock()
+        acl.can = Mock(return_value=True)
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        result = service.build_console_action_list(app=app, actor_user_id=42)
+
+        self.assertTrue(result.actions[0].runtime_running)
 
     def test_build_console_action_list_includes_recent_inputs_for_authorised_users(self) -> None:
         parameter = ConsoleActionParameter[str](
@@ -2191,6 +2214,82 @@ class NodeApiTests(unittest.TestCase):
         manager.reload_mods.assert_awaited_once()
         self.assertEqual(manager.add.await_count, 2)
 
+    def test_mod_portal_install_request_deduplicates_selected_mod_ids(self) -> None:
+        request = NodeModPortalInstallRequest.model_validate(
+            {
+                "url": "https://mods.factorio.com/mod/root",
+                "selected_mod_ids": ["root", "dep-one", "dep-one"],
+            }
+        )
+
+        self.assertEqual(request.selected_mod_ids, ("root", "dep-one"))
+
+    def test_resolve_mod_link_dependencies_marks_installed_dependencies(self) -> None:
+        installed_mod = Mock()
+        installed_mod.native_metadata_id.return_value = "dep-installed"
+        manager = Mock()
+        manager.list_mods.return_value = (installed_mod,)
+        app = SimpleNamespace(
+            name="factorio_lab",
+            friendly="Factorio Lab",
+            scope="factorio",
+            directory=Path("."),
+            cfg=App_Config(
+                name="factorio_lab",
+                instance_key="lab",
+                friendly_name="Factorio Lab",
+                directory=Path("."),
+                apps_dir=Path("."),
+                scope="factorio",
+                version=AppVersion(main="2.0.68"),
+            ),
+            mods=manager,
+            has_mod_manager=manager,
+            detect_installed_version=Mock(return_value=AppVersion(main="2.0.68")),
+        )
+        resolution = FactorioModPortalResolution(
+            requested_mod_id="root",
+            candidates=(
+                FactorioModPortalCandidate(
+                    mod_id="root",
+                    title="Root Mod",
+                    page_url="https://mods.factorio.com/mod/root",
+                    file_name="root_1.0.0.zip",
+                    version="1.0.0",
+                    required_by=(),
+                ),
+                FactorioModPortalCandidate(
+                    mod_id="dep-new",
+                    title="New Dependency",
+                    page_url="https://mods.factorio.com/mod/dep-new",
+                    file_name="dep-new_1.0.0.zip",
+                    version="1.0.0",
+                    required_by=("root",),
+                ),
+                FactorioModPortalCandidate(
+                    mod_id="dep-installed",
+                    title="Installed Dependency",
+                    page_url="https://mods.factorio.com/mod/dep-installed",
+                    file_name="dep-installed_1.0.0.zip",
+                    version="1.0.0",
+                    required_by=("root",),
+                ),
+            ),
+        )
+
+        with patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+            result = asyncio.run(
+                NodeApiService().resolve_mod_link_dependencies(
+                    app=cast(App[Any], cast(object, app)),
+                    url="https://mods.factorio.com/mod/root",
+                )
+            )
+
+        self.assertIsInstance(result, NodeModPortalResolveResult)
+        self.assertEqual(tuple(entry.mod_id for entry in result.dependencies), ("root", "dep-new", "dep-installed"))
+        self.assertEqual(tuple(entry.selected_by_default for entry in result.dependencies), (True, True, False))
+        self.assertEqual(tuple(entry.installed for entry in result.dependencies), (False, False, True))
+
     def test_upload_mod_path_passes_client_only_placement_to_manager(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3304,6 +3403,51 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(entry.client_path, str(client_mod_path))
         self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()).client_path, str(client_mod_path))
 
+    def test_mod_entry_includes_launcher_description(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            mods_dir = root / "mods"
+            mods_dir.mkdir()
+            mod_path = mods_dir / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            mod = _TestMod(
+                Mod_Config(
+                    name=mod_path.name,
+                    directory=mods_dir,
+                    platforms=ModPlatformMetadata(
+                        modrinth=ModrinthModMetadata(
+                            page_url="https://modrinth.com/mod/example/version/abc123",
+                            project_id="example-project",
+                            version_id="abc123",
+                            download_url=("https://cdn.modrinth.com/data/example-project/versions/abc123/example.jar"),
+                            description="Example launcher description.",
+                            filename="example.jar",
+                        )
+                    ),
+                )
+            )
+
+            entry = NodeApiService._mod_entry(mod)
+
+        self.assertEqual(entry.description, "Example launcher description.")
+        self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()).description, entry.description)
+
+    def test_mod_entry_includes_local_mod_description(self) -> None:
+        class _DescriptionMod(_TestMod):
+            def detect_description(self) -> str | None:
+                return "Example local description."
+
+        with TemporaryDirectory() as temp_dir:
+            mods_dir = Path(temp_dir)
+            mod_path = mods_dir / "example.jar"
+            mod_path.write_bytes(b"mod-data")
+            mod = _DescriptionMod(Mod_Config(name="example.jar", directory=mods_dir))
+
+            entry = NodeApiService._mod_entry(mod)
+
+        self.assertEqual(entry.description, "Example local description.")
+        self.assertEqual(NodeModEntry.from_mapping(entry.to_mapping()).description, entry.description)
+
     def test_mod_entry_exposes_client_only_placement_and_artifact_paths(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4041,7 +4185,7 @@ class NodeApiTests(unittest.TestCase):
             client_pack_version="2026-07-04.2",
         )
 
-        self.assertEqual(archive_name, "Example_Pack-2026-07-04.2-modrinth.mrpack")
+        self.assertEqual(archive_name, "Example_Pack-2026-07-04.2.mrpack")
 
     def test_client_pack_changes_are_dirty_before_first_publication(self) -> None:
         app = _build_app(Mock())
@@ -5805,6 +5949,7 @@ class NodeApiTests(unittest.TestCase):
             root_label="Server Properties",
             kind=AppConfigFileKind.GAME,
             read_power_level=Power_Level.user,
+            write_power_level=Power_Level.sudo,
             size_bytes=14,
             modified_at=datetime(2026, 5, 26, 12, 0, 0),
         )
@@ -5820,6 +5965,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(model.configs[0].id, "server/server.properties")
         self.assertEqual(model.configs[0].kind, "game")
         self.assertEqual(model.configs[0].read_power_level, Power_Level.user)
+        self.assertEqual(model.configs[0].write_power_level, Power_Level.sudo)
         self.assertIn("B", model.configs[0].size_text)
 
     def test_build_config_list_filters_entries_above_actor_level(self) -> None:
@@ -5832,6 +5978,7 @@ class NodeApiTests(unittest.TestCase):
             root_label="Public Configs",
             kind=AppConfigFileKind.MOD,
             read_power_level=Power_Level.visitor,
+            write_power_level=Power_Level.sudo,
             size_bytes=12,
             modified_at=datetime(2026, 5, 26, 12, 0, 0),
         )
@@ -5843,6 +5990,7 @@ class NodeApiTests(unittest.TestCase):
             root_label="Private Configs",
             kind=AppConfigFileKind.GAME,
             read_power_level=Power_Level.user,
+            write_power_level=Power_Level.root,
             size_bytes=13,
             modified_at=datetime(2026, 5, 26, 12, 1, 0),
         )
@@ -5867,6 +6015,7 @@ class NodeApiTests(unittest.TestCase):
             root_label="Server Properties",
             kind=AppConfigFileKind.GAME,
             read_power_level=Power_Level.user,
+            write_power_level=Power_Level.sudo,
             size_bytes=11,
             modified_at=datetime(2026, 5, 26, 12, 0, 0),
         )
@@ -5920,6 +6069,60 @@ class NodeApiTests(unittest.TestCase):
             "Minecraft_Alpha_mod-configs_configs.zip",
             arc_base=root_path,
         )
+
+    def test_factorio_mod_settings_state_reports_missing_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app = SimpleNamespace(
+                name="factorio_lab",
+                friendly="Factorio Lab",
+                scope="factorio",
+                directory=Path(temp_dir),
+            )
+
+            state = NodeApiService().factorio_mod_settings_state(app=cast(App[Any], app))
+
+        self.assertIsInstance(state, NodeFactorioModSettings)
+        self.assertFalse(state.file_exists)
+        self.assertIsNone(state.size_bytes)
+
+    def test_factorio_mod_settings_state_reports_existing_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app_dir = Path(temp_dir)
+            settings_path = app_dir / "mods" / "mod-settings.dat"
+            settings_path.parent.mkdir()
+            settings_path.write_bytes(b"factorio-settings")
+            app = SimpleNamespace(
+                name="factorio_lab",
+                friendly="Factorio Lab",
+                scope="factorio",
+                directory=app_dir,
+            )
+
+            state = NodeApiService().factorio_mod_settings_state(app=cast(App[Any], app))
+
+        self.assertTrue(state.file_exists)
+        self.assertEqual(state.size_bytes, len(b"factorio-settings"))
+        self.assertIsNotNone(state.size_text)
+        self.assertIsNotNone(state.modified_at)
+
+    def test_delete_factorio_mod_settings_removes_file_and_reports_missing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            app_dir = Path(temp_dir)
+            settings_path = app_dir / "mods" / "mod-settings.dat"
+            settings_path.parent.mkdir()
+            settings_path.write_bytes(b"factorio-settings")
+            app = SimpleNamespace(
+                name="factorio_lab",
+                friendly="Factorio Lab",
+                scope="factorio",
+                directory=app_dir,
+            )
+
+            state = NodeApiService().delete_factorio_mod_settings(app=cast(App[Any], app))
+
+            self.assertFalse(settings_path.exists())
+
+        self.assertFalse(state.file_exists)
 
     def test_list_apps_uses_lowest_config_root_read_level(self) -> None:
         app = _build_app(Mock())

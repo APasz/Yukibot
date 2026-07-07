@@ -4,12 +4,13 @@ import logging
 import os
 import signal
 import traceback
-from contextlib import suppress
 from concurrent.futures import Future as ConcurrentFuture
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from logging import Logger
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import hikari
 import hikariwave
@@ -22,7 +23,7 @@ from _activity import Activity_Manager, Provider_CPU, Provider_DISK, Provider_RA
 from _authority_server import AuthorityServer
 from _discord import DC_Relay, Distils, Resolutator, cached_member_role_color, color_int_to_hex
 from _file import File_Utils
-from _manager import App_Manager, AppStartBlockerKind, Provider_Player, Provider_Process
+from _manager import App_Manager, AppStartBlocker, AppStartBlockerKind, ManagedApp, Provider_Player, Provider_Process
 from _security import Access_Control
 from _sys import Stats_System
 from _utils import File_Cleaner, Utilities
@@ -35,7 +36,7 @@ from cmd_music import MusicService, group_music
 from cmd_online import CMD_Online, OnlineEditorService
 from cmd_ops import available_maintenance_restart_targets, group_ops, reset_voice_runtime_services
 from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, VoiceTTSService, group_voice
-from config import Activity_Provider, Name_Cache
+from config import Activity_Provider, Name_Cache, NodeCapacityProfile
 from font_assets import font_assets
 from maintenance import MaintenanceService
 from node_api import NodeSystemAction, RemoteRelayTTSForwarder
@@ -52,7 +53,7 @@ from relay_notices import (
 from restart_targets import RestartTarget
 from web_dash.service import ModWebService
 
-log = logging.getLogger("system")
+log: Logger = logging.getLogger("system")
 
 if os.name != "nt":
     try:
@@ -69,9 +70,9 @@ activities: list[type[Activity_Provider]] = [
     Provider_Process,
     Provider_DISK,
 ]
-start_time = datetime.now()
-_RESTART_AUTO_LAUNCH_DELAY_SECONDS = 0.0
-_PORTAL_AUTHORITY_REFRESH_INTERVAL_SECONDS = 60.0
+start_time: datetime = datetime.now()
+_RESTART_AUTO_LAUNCH_DELAY_SECONDS: float = 0.0
+_PORTAL_AUTHORITY_REFRESH_INTERVAL_SECONDS: float = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,14 +82,14 @@ class RestartAutoLaunchSelection:
 
     @property
     def started_notice_lines(self) -> tuple[str, ...]:
-        return tuple(f"\tAuto-Launch Scheduled: {app.friendly}" for app in self.apps)
+        return tuple[str, ...](f"\tAuto-Launch Scheduled: {app.friendly}" for app in self.apps)
 
 
 def _consume_restart_auto_launch_selection(app_manager: App_Manager) -> RestartAutoLaunchSelection:
     selected_apps: list[App] = []
     error_lines: list[str] = []
     try:
-        auto_start_app_names = app_manager.consume_restart_auto_start_apps()
+        auto_start_app_names: tuple[str, ...] = app_manager.consume_restart_auto_start_apps()
     except Exception as xcp:
         return RestartAutoLaunchSelection(error_lines=(str(xcp),))
     for auto_start_app_name in auto_start_app_names:
@@ -96,11 +97,11 @@ def _consume_restart_auto_launch_selection(app_manager: App_Manager) -> RestartA
             selected_apps.append(app_manager.get(auto_start_app_name))
         except Exception as xcp:
             error_lines.append(str(xcp))
-    return RestartAutoLaunchSelection(apps=tuple(selected_apps), error_lines=tuple(error_lines))
+    return RestartAutoLaunchSelection(apps=tuple[App[Any], ...](selected_apps), error_lines=tuple(error_lines))
 
 
 def _restart_auto_launch_sort_key(app_manager: App_Manager, app: App) -> tuple[int, str]:
-    blocker = app_manager.start_blocker(app)
+    blocker: AppStartBlocker | None = app_manager.start_blocker(app)
     if blocker is None:
         return (0, app.friendly.casefold())
     if blocker.kind is AppStartBlockerKind.ALREADY_RUNNING:
@@ -131,9 +132,9 @@ def _restart_auto_launch_fits_after_ready(
     if any(active_app.scope == candidate.scope for active_app in active_apps):
         return False
 
-    capacity = app_manager.node_capacity()
-    active_cpu_points = sum(active_app.cfg.resource_points.running.cpu_points for active_app in active_apps)
-    active_ram_points = sum(active_app.cfg.resource_points.running.ram_points for active_app in active_apps)
+    capacity: NodeCapacityProfile = app_manager.node_capacity()
+    active_cpu_points: int = sum(active_app.cfg.resource_points.running.cpu_points for active_app in active_apps)
+    active_ram_points: int = sum(active_app.cfg.resource_points.running.ram_points for active_app in active_apps)
     startup_points = candidate.cfg.resource_points.startup_points
     return (
         active_cpu_points + startup_points.cpu_points <= capacity.cpu_points_available
@@ -142,11 +143,11 @@ def _restart_auto_launch_fits_after_ready(
 
 
 def _plan_restart_auto_launch_sequence(app_manager: App_Manager, auto_apps: tuple[App, ...]) -> tuple[App, ...]:
-    queued_apps = tuple(app for app in auto_apps if not app.check_running())
+    queued_apps: tuple[App[Any], ...] = tuple[App[Any], ...](app for app in auto_apps if not app.check_running())
     if not queued_apps:
         return ()
 
-    active_apps = app_manager.running_apps()
+    active_apps: tuple[ManagedApp, ...] = app_manager.running_apps()
 
     def _search(active: tuple[App, ...], remaining: tuple[App, ...]) -> tuple[App, ...]:
         best_sequence: tuple[App, ...] = ()

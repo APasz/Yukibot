@@ -54,7 +54,9 @@ from .runtime_imports import (
     NodeConsoleActionList,
     NodeConsoleActionParameter,
     NodeConsoleStdoutSnapshot,
+    NodeFactorioModSettings,
     NodeModEntry,
+    NodeModPortalResolveResult,
     NodeModUploadBatchResult,
     NodeSaveEntry,
     NodeSaveList,
@@ -93,15 +95,14 @@ from .types import (
     ModWebConfigEditorShape,
     ModWebDirectUploadTarget,
     ModWebFileSortOrder,
-    ModWebNodeLink,
     ModWebModSortOrder,
+    ModWebNodeLink,
     ModWebPageModel,
     ModWebSearchOption,
     ModWebSettingControlKind,
     _ModWebBadgeSpec,
     _SettingSecretConfig,
 )
-
 
 _SERVER_RENDERED_LIST_PAGE_SIZE = 40
 
@@ -1923,7 +1924,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return
 
         can_read = self._user_has_level(user, model.config_read_level)
-        can_write = self._user_has_level(user, model.config_write_level)
+        app_level_can_write = self._user_has_level(user, model.config_write_level)
         if not can_read:
             self._render_flat_tab_empty_state(
                 ui=ui,
@@ -1939,7 +1940,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return
 
         configs: tuple[NodeConfigEntry, ...] = model.configs.configs
-        if not configs:
+        can_write = (
+            any(self._user_has_level(user, entry.write_power_level) for entry in configs)
+            if configs
+            else app_level_can_write
+        )
+        is_factorio_app: bool = model.app_scope == config.AppScopes.factorio.value
+        if not configs and not is_factorio_app:
             self._render_flat_tab_empty_state(
                 ui=ui,
                 title="Configs",
@@ -1947,6 +1954,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 detail_text="Add a readable config root to populate this tab.",
                 notepad=True,
             )
+            return
+        if not configs:
+            self._render_factorio_mod_settings_panel(ui=ui, model=model, user=user, can_write=can_write)
             return
 
         layout: ModWebConfigEditorLayout = self._config_editor_layout(configs)
@@ -1997,17 +2007,18 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             await load_config(state["config_id"], notify=True)
 
         async def save_selected_config() -> None:
-            if not can_write:
-                ui.notify(
-                    f"{model.config_write_level.name.title()} access is required to save config files.",
-                    type="warning",
-                )
-                return
             if loaded_label is None or meta_label is None:
                 raise ValueError("Config tab header labels are not available.")
             config_id: str = state["config_id"]
             if not config_id:
                 ui.notify("Select a config file first.", type="warning")
+                return
+            required_level = self._config_write_level_for_id(model=model, config_id=config_id)
+            if not self._user_has_level(user, required_level):
+                ui.notify(
+                    f"{required_level.name.title()} access is required to save this config file.",
+                    type="warning",
+                )
                 return
             try:
                 saved: NodeConfigContent = await self._write_config_content(
@@ -2100,6 +2111,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 )
                 if loaded_label is None or meta_label is None:
                     raise ValueError("Config tab header labels are not available.")
+                if is_factorio_app:
+                    self._render_factorio_mod_settings_panel(ui=ui, model=model, user=user, can_write=can_write)
                 with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
                     if layout.shows_root_selector:
                         ui.select(
@@ -2146,6 +2159,90 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 load_timer: Timer = ui.timer(0.1, load_initial_config, once=True)
                 self._register_timer_cleanup(ui=ui, timer=load_timer)
 
+    def _render_factorio_mod_settings_panel(
+        self,
+        *,
+        ui: ModWebUi,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        can_write: bool,
+    ) -> None:
+        mod_settings: NodeFactorioModSettings | None = model.factorio_mod_settings
+
+        async def upload_mod_settings(event: "MultiUploadEventArguments") -> None:
+            upload_files = tuple(event.files)
+            if len(upload_files) != 1:
+                ui.notify("Choose one mod-settings.dat file.", type="warning")
+                return
+            upload_file = cast("FileUpload", upload_files[0])
+            try:
+                updated = await self._upload_factorio_mod_settings(model=model, upload_file=upload_file, user=user)
+            except Exception as xcp:
+                ui.notify(f"Mod settings upload failed: {xcp}", type="negative")
+                return
+            ui.notify(self._factorio_mod_settings_status_text(updated), type="positive")
+            ui.navigate.reload()
+
+        async def delete_mod_settings() -> None:
+            try:
+                updated = await self._delete_factorio_mod_settings(model=model, user=user)
+            except Exception as xcp:
+                ui.notify(f"Mod settings reset failed: {xcp}", type="negative")
+                return
+            ui.notify(self._factorio_mod_settings_status_text(updated), type="positive")
+            ui.navigate.reload()
+
+        async def download_mod_settings() -> None:
+            await self._start_download(
+                ui=ui,
+                user=user,
+                model=model,
+                url=self._factorio_mod_settings_download_url(model=model, user=user),
+                message=f"Preparing mod-settings.dat from {model.app_friendly}.",
+                filenames=("mod-settings.dat",),
+            )
+
+        with ui.row().classes("mod-tab-toolbar mod-tab-toolbar-surface w-full"):
+            with ui.column().classes("gap-0 grow min-w-0"):
+                ui.label("mod-settings.dat").classes("mod-setting-name")
+                ui.label(self._factorio_mod_settings_status_text(mod_settings)).classes("mod-subtitle text-sm")
+            with ui.row().classes("mod-tab-toolbar-actions"):
+                if mod_settings is not None and mod_settings.file_exists:
+                    ui.button("Download", on_click=download_mod_settings).classes("mod-list-button secondary")
+                upload_control = (
+                    ui.upload(
+                        label="Upload",
+                        auto_upload=True,
+                        multiple=True,
+                        max_files=1,
+                        on_multi_upload=upload_mod_settings,
+                    )
+                    .props("accept=.dat")
+                    .classes("mod-list-button")
+                )
+                if not can_write:
+                    upload_control.disable()
+                delete_button: Button = ui.button("Delete", on_click=delete_mod_settings).classes(
+                    "mod-list-button danger"
+                )
+                if not can_write or mod_settings is None or not mod_settings.file_exists:
+                    delete_button.disable()
+
+    @staticmethod
+    def _factorio_mod_settings_status_text(mod_settings: NodeFactorioModSettings | None) -> str:
+        if mod_settings is None:
+            return "Status unavailable."
+        if not mod_settings.file_exists:
+            return "Missing. Factorio will regenerate defaults on next launch."
+        details: list[str] = []
+        if mod_settings.size_text is not None:
+            details.append(mod_settings.size_text)
+        if mod_settings.modified_at is not None:
+            details.append(f"modified {mod_settings.modified_at}")
+        if not details:
+            return "Installed."
+        return "Installed: " + " · ".join(details)
+
     @staticmethod
     def _download_base_url(model: ModWebPageModel) -> str:
         return (
@@ -2175,6 +2272,17 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             scopes=(NodeApiScope.CONFIGS_READ,),
         )
 
+    def _factorio_mod_settings_download_url(self, *, model: ModWebBasePageModel, user: ModWebUser) -> str:
+        node: ModWebNodeLink = self._remote_node_link(model.node_name)
+        return self._remote_download_url(
+            node=node,
+            app_name=model.app_name,
+            path=f"/apps/{quote(model.app_name, safe='')}/factorio/mod-settings/download",
+            query={},
+            user=user,
+            scopes=(NodeApiScope.CONFIGS_READ,),
+        )
+
     async def _read_config_content(
         self,
         *,
@@ -2198,9 +2306,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         content: str,
         user: ModWebUser,
     ) -> NodeConfigContent:
-        if not self._user_has_level(user, model.config_write_level):
+        required_level: Power_Level = self._config_write_level_for_id(model=model, config_id=config_id)
+        if not self._user_has_level(user, required_level):
             raise PermissionError(
-                f"{model.config_write_level.name.title()} access is required to write config files for {model.app_friendly}."
+                f"{required_level.name.title()} access is required to write config files for {model.app_friendly}."
             )
         node: ModWebNodeLink = self._remote_node_link(model.node_name)
         return await self._remote_config_write_async(node, model.app_name, config_id, content, user)
@@ -2386,6 +2495,76 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         finally:
             temp_path.unlink(missing_ok=True)
 
+    async def _upload_factorio_mod_settings(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        upload_file: "FileUpload",
+        user: ModWebUser,
+    ) -> NodeFactorioModSettings:
+        if model.app_scope != config.AppScopes.factorio.value:
+            raise ValueError(f"{model.app_friendly} does not support Factorio mod settings.")
+        if not self._user_has_level(user, model.config_write_level):
+            raise PermissionError(
+                f"{model.config_write_level.name.title()} access is required to upload config files for {model.app_friendly}."
+            )
+        if upload_file.name != "mod-settings.dat":
+            raise ValueError("The uploaded file must be named mod-settings.dat.")
+        transfer_ids = self._backend.start_upload_transfers(
+            user_id=user.discord_id,
+            filenames=(upload_file.name,),
+            detail_text=f"Staging mod settings for {model.app_friendly}.",
+            node_color_hex=self._node_role_color_hex(node_name=model.node_name),
+            app_color_hex=model.app_color_hex,
+        )
+        temp_path: Path = await self._persist_uploaded_file_for_transfer(
+            upload_file=upload_file,
+            transfer_id=transfer_ids[0],
+            active_detail_text=f"Receiving mod settings for {model.app_friendly}.",
+        )
+        try:
+            self._mark_transfers_applying(
+                transfer_ids=transfer_ids,
+                detail_text=f"Applying mod settings to {model.app_friendly}.",
+            )
+            node = self._remote_node_link(model.node_name)
+            result = await asyncio.to_thread(
+                self._remote_factorio_mod_settings_upload,
+                node,
+                model.app_name,
+                temp_path,
+                upload_file.name,
+                user,
+            )
+        except Exception as xcp:
+            for transfer_id in transfer_ids:
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Mod settings upload failed: {xcp}")
+            raise
+        else:
+            for transfer_id in transfer_ids:
+                self._backend.complete_transfer(
+                    transfer_id=transfer_id,
+                    detail_text=f"Uploaded to {model.app_friendly}.",
+                )
+            return result
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    async def _delete_factorio_mod_settings(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+    ) -> NodeFactorioModSettings:
+        if model.app_scope != config.AppScopes.factorio.value:
+            raise ValueError(f"{model.app_friendly} does not support Factorio mod settings.")
+        if not self._user_has_level(user, model.config_write_level):
+            raise PermissionError(
+                f"{model.config_write_level.name.title()} access is required to delete config files for {model.app_friendly}."
+            )
+        node = self._remote_node_link(model.node_name)
+        return await self._remote_factorio_mod_settings_delete_async(node, model.app_name, user)
+
     async def _upload_blueprints(
         self,
         *,
@@ -2510,6 +2689,50 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             mods=uploaded_mods,
         )
 
+    async def _install_mod_link(
+        self,
+        *,
+        model: ModWebPageModel,
+        url_to_install: str,
+        user: ModWebUser,
+        selected_mod_ids: tuple[str, ...] | None = None,
+    ) -> NodeModUploadBatchResult:
+        if not self._user_has_level(user, Power_Level.user):
+            raise PermissionError(f"User access is required to install mods for {model.app_friendly}.")
+        url = url_to_install.strip()
+        if not url:
+            raise ValueError("A mod link is required.")
+        node = self._remote_node_link(model.node_name)
+        return await asyncio.to_thread(
+            self._remote_mod_link_install,
+            node,
+            model.app_name,
+            url,
+            user,
+            selected_mod_ids,
+        )
+
+    async def _resolve_mod_link(
+        self,
+        *,
+        model: ModWebPageModel,
+        url_to_install: str,
+        user: ModWebUser,
+    ) -> NodeModPortalResolveResult:
+        if not self._user_has_level(user, Power_Level.user):
+            raise PermissionError(f"User access is required to install mods for {model.app_friendly}.")
+        url = url_to_install.strip()
+        if not url:
+            raise ValueError("A mod link is required.")
+        node = self._remote_node_link(model.node_name)
+        return await asyncio.to_thread(
+            self._remote_mod_link_resolve,
+            node,
+            model.app_name,
+            url,
+            user,
+        )
+
     async def _rename_save(
         self,
         *,
@@ -2610,6 +2833,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if config_entry.id == config_id:
                 return config_entry.read_power_level
         return model.config_read_level
+
+    def _config_write_level_for_id(self, *, model: ModWebBasePageModel, config_id: str) -> Power_Level:
+        for config_entry in model.configs.configs:
+            if config_entry.id == config_id:
+                return config_entry.write_power_level
+        return model.config_write_level
 
     @staticmethod
     def _hex_color_to_rgba(color_hex: str, *, alpha: float) -> str:
@@ -3194,13 +3423,18 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     ) -> _ModWebBadgeSpec | None:
         if not action.requires_running:
             return None
+        runtime_running = ModWebEditorsMixin._console_action_runtime_running(action=action, app_stats=app_stats)
         if app_stats is None:
+            if runtime_running is True:
+                return _ModWebBadgeSpec(text="Running", tone="grey")
+            if runtime_running is False:
+                return _ModWebBadgeSpec(text="Stopped", tone="warn")
             return _ModWebBadgeSpec(text="Runtime Unknown", tone="warn")
         if app_stats.transition_state is NodeAppTransitionState.STOPPING:
             return _ModWebBadgeSpec(text="Stopping", tone="warn")
         if app_stats.transition_state is NodeAppTransitionState.STARTING:
             return _ModWebBadgeSpec(text="Starting", tone="purple")
-        if app_stats.running:
+        if runtime_running:
             return _ModWebBadgeSpec(text="Running", tone="grey")
         if not app_stats.enabled:
             return _ModWebBadgeSpec(text="Disabled", tone="red")
@@ -3218,11 +3452,18 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return False
         if not action.requires_running:
             return True
+        runtime_running = ModWebEditorsMixin._console_action_runtime_running(action=action, app_stats=app_stats)
+        if runtime_running is None:
+            return False
+        if runtime_running:
+            if app_stats is None:
+                return True
+            return app_stats.transition_state is NodeAppTransitionState.NONE
         if app_stats is None:
             return False
         if app_stats.transition_state is not NodeAppTransitionState.NONE:
             return False
-        return app_stats.running
+        return False
 
     @staticmethod
     def _console_action_status_text(
@@ -3235,19 +3476,36 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return f"Requires {action.power_level_label} access."
         if not action.requires_running:
             return "Ready."
+        runtime_running = ModWebEditorsMixin._console_action_runtime_running(action=action, app_stats=app_stats)
         if app_stats is None:
+            if runtime_running:
+                return "Ready."
             return "Runtime status unavailable. Refresh and try again."
         if app_stats.transition_state is NodeAppTransitionState.STARTING:
             return f"{app_friendly} is starting."
         if app_stats.transition_state is NodeAppTransitionState.STOPPING:
             return f"{app_friendly} is stopping."
-        if app_stats.running:
+        if runtime_running:
             return "Ready."
         if not app_stats.enabled:
             return f"{app_friendly} is disabled."
         if app_stats.runtime_fault is not None:
             return f"{app_friendly} crashed. Restart it before using this action."
         return f"{app_friendly} must be running before this action can be used."
+
+    @staticmethod
+    def _console_action_runtime_running(
+        *,
+        action: NodeConsoleActionEntry,
+        app_stats: NodeAppRuntimeSummary | None,
+    ) -> bool | None:
+        if app_stats is not None and app_stats.running:
+            return True
+        if action.runtime_running is True:
+            return True
+        if app_stats is not None:
+            return False
+        return action.runtime_running
 
     @staticmethod
     def _console_action_result_for_selection(

@@ -201,6 +201,10 @@ class Mod(ABC):
         return self.cfg.metadata_overrides.origin or self.cfg.origin
 
     @property
+    def description(self) -> str | None:
+        return self.cfg.platforms.description or self.detect_description()
+
+    @property
     def added(self) -> datetime:
         return self.cfg.metadata_overrides.added or self.cfg.added
 
@@ -328,6 +332,9 @@ class Mod(ABC):
         return None
 
     def detect_friendly(self) -> str | None:
+        return None
+
+    def detect_description(self) -> str | None:
         return None
 
     def native_metadata_id(self) -> str | None:

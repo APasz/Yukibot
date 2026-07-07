@@ -2033,6 +2033,7 @@ class MinecraftModMetadata:
     display_name: str | None = None
     version: str | None = None
     homepage: str | None = None
+    description: str | None = None
 
 
 def _usable_minecraft_mod_version(value: object) -> str | None:
@@ -2057,6 +2058,7 @@ def _forge_mod_metadata(payload: object) -> MinecraftModMetadata | None:
                 display_name=_nonempty_metadata_text(mod.get("displayName")),
                 version=_usable_minecraft_mod_version(mod.get("version")),
                 homepage=_nonempty_metadata_text(mod.get("displayURL")),
+                description=_nonempty_metadata_text(mod.get("description")),
             )
     return None
 
@@ -2071,6 +2073,7 @@ def _fabric_mod_metadata(payload: object) -> MinecraftModMetadata | None:
         display_name=_nonempty_metadata_text(metadata.get("name")),
         version=_usable_minecraft_mod_version(metadata.get("version")),
         homepage=None if contact is None else _nonempty_metadata_text(contact.get("homepage")),
+        description=_nonempty_metadata_text(metadata.get("description")),
     )
 
 
@@ -2086,6 +2089,7 @@ def _quilt_mod_metadata(payload: object) -> MinecraftModMetadata | None:
         display_name=None if quilt_metadata is None else _nonempty_metadata_text(quilt_metadata.get("name")),
         version=_usable_minecraft_mod_version(quilt_loader.get("version")),
         homepage=None if contact is None else _nonempty_metadata_text(contact.get("homepage")),
+        description=(None if quilt_metadata is None else _nonempty_metadata_text(quilt_metadata.get("description"))),
     )
 
 
@@ -2396,6 +2400,9 @@ class Mod_MC(Mod):
 
     def detect_friendly(self) -> str | None:
         return self._detected_metadata.display_name or _detect_minecraft_mod_friendly(self.name)
+
+    def detect_description(self) -> str | None:
+        return self._detected_metadata.description
 
     def native_metadata_id(self) -> str | None:
         return self._detected_metadata.mod_id
