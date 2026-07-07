@@ -1,12 +1,18 @@
 import asyncio
+import contextlib
 import json
 import logging
 import re
+import shutil
 import tarfile
+import tempfile
+import threading
+import time
 import zipfile
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
 from re import Match, Pattern
 from typing import Generic, TypeAlias, TypeVar, cast
 from urllib.parse import quote
@@ -28,11 +34,13 @@ from _discord import (
     render_plain_reference_prefix,
 )
 from _file import File_Utils
-from _security import Power_Level
+from _security import Power_Level, _owner_group
 from apps._app import AM_Receiver, App, RelayAdvancementTerms
 from apps._config import (
     App_Config,
     AppVersion,
+    FactorioUpdateBranch,
+    FactorioUpdateConfig,
     KnownModPageProvider,
     Mod_Config,
     ModPageLink,
@@ -61,7 +69,16 @@ from apps._settings import (
     StringSettingSpec,
 )
 from apps._tailer import Tailer
-from apps._updater import Update_Manager
+from apps._updater import (
+    AppUpdateBranchState,
+    AppUpdateInfo,
+    AppUpdateOperationKind,
+    AppUpdateOperationResult,
+    AppUpdateProviderKind,
+    AppUpdateState,
+    AppUpdateStatus,
+    Update_Manager,
+)
 from config import Activity_Manager
 from relay_notices import (
     GameDeathKind,
@@ -84,8 +101,13 @@ _FACTORIO_MOD_VERSION_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 _FACTORIO_RESEARCH_FINISHED_RE: Pattern[str] = re.compile(r"\[RESEARCH FINISHED\]\s+(?P<research>.+)$", re.IGNORECASE)
+_FACTORIO_ERROR_RE: Pattern[str] = re.compile(r"^\s*\d+\.\d+\s+Error\s+(?P<source>\S+:\d+):\s+(?P<message>.+)$")
 _FACTORIO_LINE_MATCHER = Callable[[str], Awaitable[None]]
 _FactorioSettingValue = TypeVar("_FactorioSettingValue", str, bool, int)
+_FACTORIO_UPDATE_BRANCHES: tuple[FactorioUpdateBranch, ...] = (
+    FactorioUpdateBranch.STABLE,
+    FactorioUpdateBranch.EXPERIMENTAL,
+)
 
 
 def _json_object(value: object, *, label: str) -> dict[str, object]:
@@ -149,6 +171,59 @@ def detect_factorio_version(*, directory: Path) -> AppVersion | None:
     return None
 
 
+def _parse_factorio_version_text(version_text: str, *, label: str) -> tuple[int, ...]:
+    text: str = version_text.strip()
+    if not text:
+        raise ValueError(f"{label} must not be empty.")
+    parts: list[str] = text.split(".")
+    if not all(part.isdecimal() for part in parts):
+        raise ValueError(f"{label} is invalid: {version_text!r}")
+    return tuple[int, ...](map(int, parts))
+
+
+def _factorio_latest_headless_versions(payload: Mapping[str, object]) -> dict[FactorioUpdateBranch, tuple[int, ...]]:
+    versions: dict[FactorioUpdateBranch, tuple[int, ...]] = {}
+    for branch in _FACTORIO_UPDATE_BRANCHES:
+        branch_payload: dict[str, object] = _json_object(
+            payload.get(branch.value), label=f"Factorio latest releases.{branch.value}"
+        )
+        raw_version: object | None = branch_payload.get("headless")
+        if not isinstance(raw_version, str):
+            raise ValueError(f"Factorio latest releases {branch.value}.headless version is invalid.")
+        versions[branch] = _parse_factorio_version_text(
+            raw_version,
+            label=f"Factorio latest releases {branch.value}.headless version",
+        )
+    return versions
+
+
+def _factorio_download_url(branch: FactorioUpdateBranch) -> str:
+    if branch is FactorioUpdateBranch.STABLE:
+        return "https://factorio.com/get-download/stable/headless/linux64"
+    return "https://factorio.com/get-download/experimental/headless/linux64"
+
+
+def _normalise_factorio_archive_member_path(member_name: str) -> Path:
+    pure_path: PurePosixPath = PurePosixPath(member_name)
+    if not member_name or pure_path.is_absolute() or ".." in pure_path.parts:
+        raise ValueError(f"Factorio archive member path is invalid: {member_name}")
+    return Path(*pure_path.parts)
+
+
+def _factorio_download_archive_path(*, tmp_dir: Path, branch: FactorioUpdateBranch, version_text: str) -> Path:
+    return tmp_dir / f"factorio-{branch.value}-{version_text}.tar.xz"
+
+
+def _ensure_factorio_binary_executable(binary_path: Path) -> None:
+    if not binary_path.is_file():
+        raise FileNotFoundError(f"Factorio binary does not exist: {binary_path}")
+    current_mode = binary_path.stat().st_mode
+    if current_mode & 0o111:
+        return
+    binary_path.chmod(current_mode | 0o111)
+    log.warning("Restored execute permissions for Factorio binary: %s", binary_path)
+
+
 @dataclass(frozen=True, slots=True)
 class FactorioModListEntry:
     name: str
@@ -156,9 +231,9 @@ class FactorioModListEntry:
 
     @classmethod
     def from_mapping(cls, payload: object) -> "FactorioModListEntry":
-        entry = _json_object(payload, label="Factorio mod-list entry")
-        name = entry.get("name")
-        enabled = entry.get("enabled")
+        entry: dict[str, object] = _json_object(payload, label="Factorio mod-list entry")
+        name: object | None = entry.get("name")
+        enabled: object | None = entry.get("enabled")
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Factorio mod-list entry name is invalid.")
         if not isinstance(enabled, bool):
@@ -718,12 +793,13 @@ class Factorio(App[App_Config]):
         self.act_err_threshold = 100
         self._lock: Path = self.directory / ".lock"
 
-        self.updater = Factorio_Updater(self, base=config.INDEV)
+        self.updater = Factorio_Updater(self, base=True)
         self.apply_version(detect_factorio_version(directory=cfg.directory), persist=False)
 
         self._relay: RconClient = RconClient(self.check_running, 27015)
         self._tail: Tailer | None = None
         self._tail_machers: set[_FACTORIO_LINE_MATCHER] = set()
+        self._startup_error: str | None = None
         self._players: Players = Players(self)
         self.am_receiver = Receiver(self)
         self._matchers: Matchers = Matchers(self)
@@ -841,6 +917,8 @@ class Factorio(App[App_Config]):
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
+        _ensure_factorio_binary_executable(self.directory / "bin" / "x64" / "factorio")
+        self._startup_error = None
 
         for item in (self.directory / "saves").iterdir():
             if item.is_dir():
@@ -856,28 +934,50 @@ class Factorio(App[App_Config]):
 
         await self._std_launch()
 
-        while not self.check_running():
-            await asyncio.sleep(1)
-
-        await self._relay.setup()
-
         if self.server_log and self.server_log.exists():
             File_Utils.link(self.server_log, self.file_stdout.with_name(self.server_log.name))
 
         if self.process and self.process.stdout:
             log.debug(f"{self.name} Tailing: Process")
-            self._tail = Tailer(self.check_running, self.process.stdout, self.file_stdout)
+            self._tail = Tailer(self._startup_tail_ready, self.process.stdout, self.file_stdout)
         elif self.server_log:
             log.debug(f"{self.name} Tailing: server log")
-            self._tail = Tailer(self.check_running, self.server_log, self.file_stdout)
+            self._tail = Tailer(self._startup_tail_ready, self.server_log, self.file_stdout)
         else:
             raise SystemError("No Log to be passed to Tailer")
         await self._tail.start(self._tail_machers)
+
+        await self._wait_for_startup_ready()
 
         await self._players.start()
 
         self._running = True
         return True
+
+    async def _wait_for_startup_ready(self) -> None:
+        setup_task = asyncio.create_task(self._relay.setup())
+        try:
+            while not setup_task.done():
+                if self._startup_error is not None:
+                    raise RuntimeError(f"Factorio startup failed: {self._startup_error}")
+                if not self.check_running():
+                    await self._drain_stderr_task()
+                    detail = self._startup_error or "process exited before RCON became available"
+                    raise RuntimeError(f"Factorio startup failed: {detail}")
+                await asyncio.sleep(0.2)
+            await setup_task
+        except Exception:
+            if not setup_task.done():
+                setup_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await setup_task
+            if self._tail is not None:
+                await self._tail.stop()
+                self._tail = None
+            raise
+
+    def _startup_tail_ready(self) -> bool:
+        return self.process is not None
 
     async def stop(self) -> bool:
         log.info(f"{__name__}.stop")
@@ -914,89 +1014,387 @@ class Factorio(App[App_Config]):
     def connected_player_names(self) -> tuple[str, ...]:
         return self._players.connected_player_names()
 
+    def detect_installed_version(self) -> AppVersion | None:
+        return detect_factorio_version(directory=self.directory)
+
 
 class Factorio_Updater(Update_Manager):
     def __init__(self, app: Factorio, *, base: bool = False, mods: bool = False) -> None:
         super().__init__(app, base=base, mods=mods)
-        self.version: None | tuple[int, ...] = None
+        self.version: tuple[int, ...] | None = None
         app_version: AppVersion | None = detect_factorio_version(directory=app.directory)
         if app_version is not None:
-            self.version = tuple[int, ...](map(int, app_version.main.split(".")))
+            self.version = _parse_factorio_version_text(app_version.main, label="local Factorio version")
         if self.version:
             log.info(f"Factorio local version: {self.stringise(self.version)}")
         else:
             log.warning(f"Could not determine Factorio version: {app.directory / 'factorio-current.log'}")
+        self._state_lock = threading.Lock()
+        self._status: AppUpdateStatus = AppUpdateStatus(
+            state=AppUpdateState.IDLE,
+            summary="Ready",
+        )
+        self._log_tail: deque[str] = deque(maxlen=80)
+        self._operation_running: bool = False
+        self._active_task: asyncio.Task[AppUpdateOperationResult] | None = None
 
     @staticmethod
-    def extract_archive(src: Path, dst: Path) -> bool:
-        try:
-            with tarfile.open(src, mode="r:xz") as archive:
-                archive.extractall(path=dst)
-            return True
-        except Exception as e:
-            log.exception(f"Extraction error: {e}")
-            return False
+    def _unix_ms_now() -> int:
+        return int(time.time() * 1000)
 
-    @staticmethod
-    async def download(pointer: Path, version: str) -> Path | None:
-        url: str = f"https://www.factorio.com/get-download/{version}/headless/linux64"
-        archive_path: Path = pointer / f"factorio-{version}.tar.xz"
+    def info(self) -> AppUpdateInfo:
+        update_config = self._factorio_update_config()
+        selected_branch = update_config.selected_branch
+        installed_branch = update_config.installed_branch
+        return AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.FACTORIO,
+            provider_label="Factorio.com",
+            selected_branch_id=selected_branch.value,
+            selected_branch_label=selected_branch.display_label,
+            branches=tuple(
+                AppUpdateBranchState(
+                    branch_id=branch.value,
+                    label=branch.display_label,
+                    selected=branch is selected_branch,
+                )
+                for branch in _FACTORIO_UPDATE_BRANCHES
+            ),
+            supports_verify=True,
+            installed_branch_id=installed_branch.value if installed_branch is not None else None,
+        )
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        log.warning(f"Download failed: HTTP {resp.status}")
-                        return None
-                    with open(archive_path, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(8192):
-                            f.write(chunk)
+    def select_branch(self, branch_id: str) -> AppUpdateInfo:
+        if self.status().running:
+            raise RuntimeError(f"Cannot change the Factorio branch while {self.app.friendly} is updating.")
+        update_config = self._factorio_update_config()
+        branch = update_config.branch(branch_id)
+        if branch is update_config.selected_branch:
+            return self.info()
+        self.app.cfg.factorio_update = update_config.model_copy(update={"selected_branch": branch})
+        self.app.persist_instance_config_overrides()
+        log.info("Selected Factorio update branch for %s: %s", self.app.friendly, branch.value)
+        return self.info()
 
-            return archive_path
-        except Exception as xcp:
-            log.exception(f"Download error: {xcp}")
-            return None
+    def status(self) -> AppUpdateStatus:
+        with self._state_lock:
+            return self._status
 
-    @staticmethod
-    async def fetch_version() -> tuple[int, ...] | None:
-        url = "https://factorio.com/api/latest-releases"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status != 200:
-                        log.warning(f"Failed to fetch latest version: HTTP {response.status}")
-                        return None
-                    data = _json_object(cast(object, await response.json()), label="Factorio latest releases")
-                    log.debug(f"{data=}")
-                    stable = _json_object(data.get("stable"), label="Factorio latest releases.stable")
-                    string = stable.get("headless")
-                    if not isinstance(string, str):
-                        raise ValueError("Factorio latest release headless version is invalid.")
-                    return tuple[int, ...](map(int, string.split(".")))
-        except Exception as xcp:
-            log.exception(f"Error fetching latest version: {xcp}")
-            return None
+    async def start_selected_update(self) -> AppUpdateOperationResult:
+        return self._start_selected_operation(AppUpdateOperationKind.UPDATE)
+
+    async def start_selected_verify(self) -> AppUpdateOperationResult:
+        return self._start_selected_operation(AppUpdateOperationKind.VERIFY)
+
+    def _start_selected_operation(self, kind: AppUpdateOperationKind) -> AppUpdateOperationResult:
+        branch = self._begin_selected_operation(kind)
+        log.info("Starting Factorio %s task: app=%s branch=%s", kind.value, self.app.friendly, branch.value)
+        task: asyncio.Task[AppUpdateOperationResult] = asyncio.create_task(
+            self._run_started_operation(kind=kind, branch=branch)
+        )
+        with self._state_lock:
+            self._active_task = task
+        task.add_done_callback(self._log_background_task_outcome)
+        return AppUpdateOperationResult(
+            kind=kind,
+            message=f"Started {kind.value} for {self.app.friendly} on Factorio branch {branch.display_label}.",
+            selected_branch_id=branch.value,
+            selected_branch_label=branch.display_label,
+        )
+
+    async def update_selected(self) -> AppUpdateOperationResult:
+        branch = self._begin_selected_operation(AppUpdateOperationKind.UPDATE)
+        return await self._run_started_operation(kind=AppUpdateOperationKind.UPDATE, branch=branch)
+
+    async def verify_selected(self) -> AppUpdateOperationResult:
+        branch = self._begin_selected_operation(AppUpdateOperationKind.VERIFY)
+        return await self._run_started_operation(kind=AppUpdateOperationKind.VERIFY, branch=branch)
 
     async def base(self) -> str | None:
-        await super().base()
+        result = await self.update_selected()
+        return result.version_text
 
-        latest: tuple[int, ...] | None = await self.fetch_version()
-        if not latest:
-            return None
+    def _begin_selected_operation(self, kind: AppUpdateOperationKind) -> FactorioUpdateBranch:
+        if kind not in (AppUpdateOperationKind.UPDATE, AppUpdateOperationKind.VERIFY):
+            raise ValueError(f"Unsupported Factorio update operation: {kind.value}")
+        if self.app.check_running():
+            raise RuntimeError(f"{self.app.friendly} must be stopped before {kind.value}.")
+        branch = self._factorio_update_config().selected_branch
+        started_at_unix_ms = self._unix_ms_now()
+        with self._state_lock:
+            if self._operation_running:
+                raise RuntimeError(f"{self.app.friendly} already has an update operation in progress.")
+            self._operation_running = True
+            self._active_task = None
+            self._log_tail.clear()
+            self._status = AppUpdateStatus(
+                state=AppUpdateState.RUNNING,
+                summary=f"Starting {kind.value}...",
+                operation_kind=kind,
+                progress_percent=0.0,
+                started_at_unix_ms=started_at_unix_ms,
+            )
+        self._append_log(f"Selected branch: {branch.display_label} ({branch.value})")
+        return branch
 
-        if self.version:
-            if latest <= self.version:
-                return None
-            log.info(f"Latest stable version: {self.stringise(latest)}")
+    async def _run_started_operation(
+        self,
+        *,
+        kind: AppUpdateOperationKind,
+        branch: FactorioUpdateBranch,
+    ) -> AppUpdateOperationResult:
+        try:
+            self._update_running_status(
+                summary=f"Checking latest {branch.display_label.lower()} release...",
+                detail="Fetching Factorio release metadata.",
+                progress_percent=5.0,
+            )
+            latest_versions = await self.fetch_latest_versions()
+            latest = latest_versions[branch]
+            latest_version_text = self.stringise(latest)
+            if self.version is not None:
+                if latest < self.version:
+                    current_version_text = self.stringise(self.version)
+                    raise RuntimeError(
+                        f"Selected {branch.display_label.lower()} release {latest_version_text} is older than the "
+                        f"installed version {current_version_text}; downgrades are not supported."
+                    )
+                if latest == self.version and kind is AppUpdateOperationKind.UPDATE:
+                    message = f"No new {branch.display_label.lower()} update found for {self.app.friendly}."
+                    self._finish_operation(
+                        state=AppUpdateState.SUCCEEDED,
+                        summary=message,
+                        detail=f"{self.app.friendly} is already on {latest_version_text}.",
+                        progress_percent=100.0,
+                    )
+                    return AppUpdateOperationResult(
+                        kind=kind,
+                        message=message,
+                        version_text=latest_version_text,
+                        selected_branch_id=branch.value,
+                        selected_branch_label=branch.display_label,
+                    )
 
-        ver_str: str = self.stringise(latest)
-        pointer: Path | None = await self.download(config.DIR_TMP / "factorio", ver_str)
-        if not pointer:
-            raise FileNotFoundError("The download has gone walkabouts")
-        return ver_str
+            self._append_log(f"Latest {branch.display_label.lower()} version: {latest_version_text}")
+            archive_path = await self.download_release(branch=branch, version_text=latest_version_text)
+            try:
+                self._update_running_status(
+                    summary="Installing update...",
+                    detail=f"Extracting {archive_path.name}.",
+                    progress_percent=80.0,
+                )
+                await asyncio.to_thread(self._install_release_archive, archive_path)
+            finally:
+                File_Utils.remove(archive_path, silent=True, resolve=False)
+
+            self.version = latest
+            self.app.apply_version(AppVersion(main=latest_version_text), persist=False)
+            update_config = self._factorio_update_config().model_copy(update={"installed_branch": branch})
+            self.app.cfg.factorio_update = update_config
+            self.app.persist_instance_config_overrides()
+
+            if kind is AppUpdateOperationKind.VERIFY:
+                message = (
+                    f"Verified {self.app.friendly} on Factorio branch {branch.display_label} "
+                    f"by reinstalling {latest_version_text}."
+                )
+            else:
+                message = f"Updated {self.app.friendly} on Factorio branch {branch.display_label} to {latest_version_text}."
+            self._finish_operation(
+                state=AppUpdateState.SUCCEEDED,
+                summary=message,
+                detail="Factorio release installed successfully.",
+                progress_percent=100.0,
+            )
+            return AppUpdateOperationResult(
+                kind=kind,
+                message=message,
+                version_text=latest_version_text,
+                selected_branch_id=branch.value,
+                selected_branch_label=branch.display_label,
+            )
+        except Exception as xcp:
+            self._finish_operation(
+                state=AppUpdateState.FAILED,
+                summary=f"{kind.value.title()} failed for {self.app.friendly}.",
+                detail=str(xcp),
+            )
+            log.warning(
+                "Factorio %s failed: app=%s branch=%s error=%s",
+                kind.value,
+                self.app.friendly,
+                branch.value,
+                xcp,
+            )
+            raise
+        finally:
+            with self._state_lock:
+                self._operation_running = False
+                self._active_task = None
+
+    async def download_release(self, *, branch: FactorioUpdateBranch, version_text: str) -> Path:
+        url = _factorio_download_url(branch)
+        archive_path = _factorio_download_archive_path(
+            tmp_dir=config.DIR_TMP,
+            branch=branch,
+            version_text=version_text,
+        )
+        self._append_log(f"Downloading {url}")
+        timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=300)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        raise RuntimeError(f"Factorio download failed with HTTP {response.status}.")
+                    total_bytes = response.content_length
+                    downloaded_bytes = 0
+                    with open(archive_path, "wb") as archive_file:
+                        async for chunk in response.content.iter_chunked(262_144):
+                            archive_file.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            progress_percent = 40.0
+                            detail = f"Downloaded {downloaded_bytes} bytes."
+                            if total_bytes is not None and total_bytes > 0:
+                                ratio = min(1.0, downloaded_bytes / total_bytes)
+                                progress_percent = 15.0 + (ratio * 55.0)
+                                detail = f"Downloaded {downloaded_bytes} of {total_bytes} bytes ({ratio * 100.0:.2f}%)."
+                            self._update_running_status(
+                                summary=f"Downloading {branch.display_label.lower()} release...",
+                                detail=detail,
+                                progress_percent=progress_percent,
+                            )
+        except Exception:
+            File_Utils.remove(archive_path, silent=True, resolve=False)
+            raise
+        self._append_log(f"Downloaded archive: {archive_path.name}")
+        return archive_path
+
+    @staticmethod
+    async def fetch_latest_versions() -> dict[FactorioUpdateBranch, tuple[int, ...]]:
+        url = "https://factorio.com/api/latest-releases"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"Failed to fetch Factorio latest versions: HTTP {response.status}.")
+                data = _json_object(cast(object, await response.json()), label="Factorio latest releases")
+        return _factorio_latest_headless_versions(data)
+
+    @staticmethod
+    def _extract_archive_root(archive_path: Path, staging_dir: Path) -> Path:
+        with tarfile.open(archive_path, mode="r:xz") as archive:
+            for member in archive.getmembers():
+                relative_path = _normalise_factorio_archive_member_path(member.name)
+                target_path = staging_dir / relative_path
+                if member.isdir():
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    target_path.chmod(member.mode & 0o7777)
+                    continue
+                if member.issym() or member.islnk():
+                    raise ValueError(f"Factorio archive symlinks are not supported: {member.name}")
+                if not member.isfile():
+                    continue
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError(f"Factorio archive member could not be read: {member.name}")
+                with source, open(target_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                target_path.chmod(member.mode & 0o7777)
+        extracted_root = staging_dir / "factorio"
+        if not extracted_root.is_dir():
+            raise FileNotFoundError("Factorio archive did not contain the expected root directory.")
+        return extracted_root
+
+    @staticmethod
+    def _overlay_directory(source_root: Path, target_root: Path) -> None:
+        for source in source_root.iterdir():
+            target = target_root / source.name
+            if source.is_dir():
+                shutil.copytree(source, target, dirs_exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+    def _install_release_archive(self, archive_path: Path) -> None:
+        with tempfile.TemporaryDirectory(prefix="yukibot-factorio-update-") as temp_dir:
+            staging_dir = Path(temp_dir)
+            extracted_root = self._extract_archive_root(archive_path, staging_dir)
+            self._overlay_directory(extracted_root, self.app.directory)
+        _ensure_factorio_binary_executable(self.app.directory / "bin" / "x64" / "factorio")
+        self._apply_directory_ownership(self.app.directory)
+        self._append_log(f"Installed archive into {self.app.directory}")
 
     async def mods(self) -> list[str] | None:
         await super().mods()
+
+    def _factorio_update_config(self) -> FactorioUpdateConfig:
+        update_config = self.app.cfg.factorio_update
+        if update_config is None:
+            return FactorioUpdateConfig()
+        return update_config
+
+    def _append_log(self, line: str) -> None:
+        clean_line = line.strip()
+        if not clean_line:
+            return
+        with self._state_lock:
+            self._log_tail.append(clean_line)
+            if self._status.state is AppUpdateState.RUNNING:
+                self._status = replace(self._status, log_lines=tuple(self._log_tail))
+
+    def _update_running_status(self, *, summary: str, detail: str | None, progress_percent: float | None) -> None:
+        with self._state_lock:
+            if self._status.state is not AppUpdateState.RUNNING:
+                return
+            self._status = replace(
+                self._status,
+                summary=summary,
+                detail=detail,
+                progress_percent=progress_percent,
+                log_lines=tuple(self._log_tail),
+            )
+
+    def _finish_operation(
+        self,
+        *,
+        state: AppUpdateState,
+        summary: str,
+        detail: str | None,
+        progress_percent: float | None = None,
+    ) -> None:
+        finished_at_unix_ms = self._unix_ms_now()
+        with self._state_lock:
+            self._status = replace(
+                self._status,
+                state=state,
+                summary=summary,
+                detail=detail,
+                progress_percent=progress_percent,
+                log_lines=tuple(self._log_tail),
+                finished_at_unix_ms=finished_at_unix_ms,
+            )
+
+    def _log_background_task_outcome(self, task: asyncio.Task[AppUpdateOperationResult]) -> None:
+        try:
+            result = task.result()
+        except asyncio.CancelledError:
+            log.info("Factorio update task cancelled: app=%s", self.app.friendly)
+        except Exception:
+            log.exception("Factorio update task failed in background: app=%s", self.app.friendly)
+        else:
+            log.info(
+                "Factorio update task completed: app=%s branch=%s version=%s",
+                self.app.friendly,
+                result.selected_branch_id,
+                result.version_text,
+            )
+
+    @staticmethod
+    def _apply_directory_ownership(root: Path) -> None:
+        username, group_name = _owner_group()
+        for pointer in (root, *root.rglob("*")):
+            if pointer.is_symlink():
+                continue
+            shutil.chown(pointer, user=username, group=group_name)
 
 
 class Receiver(AM_Receiver):
@@ -1026,6 +1424,7 @@ class Matchers:
         self.app = app
         app._tail_machers.add(self.match_chat)
         app._tail_machers.add(self.match_death)
+        app._tail_machers.add(self.match_error)
         app._tail_machers.add(self.match_research)
 
     async def match_chat(self, line: str):
@@ -1073,6 +1472,13 @@ class Matchers:
                     notice=notice,
                 )
             )
+
+    async def match_error(self, line: str) -> None:
+        if match := _FACTORIO_ERROR_RE.search(line):
+            source = match.group("source").strip()
+            message = match.group("message").strip()
+            self.app._startup_error = f"{source}: {message}"
+            log.warning("Factorio error detected for %s: %s", self.app.name, self.app._startup_error)
 
     async def match_research(self, line: str) -> None:
         if self.app.relay_notice_progress_enabled is False:

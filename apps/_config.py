@@ -487,6 +487,50 @@ class SteamUpdateConfig(BaseModel):
         return self.branch(self.selected_branch)
 
 
+class FactorioUpdateBranch(enum.StrEnum):
+    STABLE = "stable"
+    EXPERIMENTAL = "experimental"
+
+    @property
+    def display_label(self) -> str:
+        if self is FactorioUpdateBranch.STABLE:
+            return "Stable"
+        return "Experimental"
+
+
+class FactorioUpdateConfig(BaseModel):
+    selected_branch: FactorioUpdateBranch = FactorioUpdateBranch.STABLE
+    installed_branch: FactorioUpdateBranch | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    @field_validator("selected_branch", "installed_branch", mode="before")
+    @classmethod
+    def validate_branch(cls, raw: object, info: ValidationInfo) -> FactorioUpdateBranch | None:
+        if isinstance(raw, FactorioUpdateBranch):
+            return raw
+        text = normalise_optional_text(raw)
+        if text is None:
+            if info.field_name == "installed_branch":
+                return None
+            raise ValueError("selected Factorio branch must not be empty")
+        try:
+            return FactorioUpdateBranch(text.casefold())
+        except ValueError as xcp:
+            raise ValueError(f"unknown Factorio branch: {text}") from xcp
+
+    def branch(self, branch_id: str) -> FactorioUpdateBranch:
+        text = _normalise_required_text(branch_id, field_name="Factorio branch id")
+        try:
+            return FactorioUpdateBranch(text.casefold())
+        except ValueError as xcp:
+            raise ValueError(f"Unknown Factorio branch: {branch_id}") from xcp
+
+    @property
+    def selected_branch_label(self) -> str:
+        return self.selected_branch.display_label
+
+
 @dataclass(frozen=True, slots=True)
 class SteamUpdatePreset:
     app_id: int
@@ -1791,6 +1835,7 @@ class App_Config(BaseModel):
     provider_alt_text: str | None = None
     version: AppVersion | None = None
     steam_update: SteamUpdateConfig | None = None
+    factorio_update: FactorioUpdateConfig | None = None
     resource_points: AppResourcePointProfile = Field(default_factory=AppResourcePointProfile)
     config_file_read_level_override: Power_Level | None = None
     config_file_write_level_override: Power_Level | None = None
@@ -1981,6 +2026,16 @@ class App_Config(BaseModel):
         if not isinstance(raw, dict):
             raise TypeError("steam_update must be a mapping")
         return SteamUpdateConfig.model_validate(raw)
+
+    @field_validator("factorio_update", mode="before")
+    def validate_factorio_update(cls, raw: object) -> FactorioUpdateConfig | None:
+        if raw is None:
+            return None
+        if isinstance(raw, FactorioUpdateConfig):
+            return raw
+        if not isinstance(raw, dict):
+            raise TypeError("factorio_update must be a mapping")
+        return FactorioUpdateConfig.model_validate(raw)
 
     @field_validator(
         "config_file_read_level_override",

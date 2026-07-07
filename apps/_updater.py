@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 
 class AppUpdateProviderKind(enum.StrEnum):
     STEAMCMD = "steamcmd"
+    FACTORIO = "factorio"
 
 
 class AppUpdateOperationKind(enum.StrEnum):

@@ -471,6 +471,8 @@ class App(Generic[ConfigT], ABC):
             overrides["client_pack_metadata"] = self.cfg.client_pack_metadata.model_dump(mode="json")
         if self.cfg.steam_update is not None:
             overrides["steam_update"] = self.cfg.steam_update.model_dump(mode="json", exclude_none=True)
+        if self.cfg.factorio_update is not None:
+            overrides["factorio_update"] = self.cfg.factorio_update.model_dump(mode="json", exclude_none=True)
         if self.config_file_read_level_override is not None:
             overrides["config_file_read_level_override"] = self.config_file_read_level_override.name
         if self.config_file_write_level_override is not None:

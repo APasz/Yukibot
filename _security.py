@@ -1,4 +1,7 @@
+import grp
 import logging
+import os
+import pwd
 from collections.abc import Iterable, Mapping
 from enum import IntEnum
 from pathlib import Path
@@ -9,6 +12,10 @@ from _audit import audit_log
 
 log = logging.getLogger(__name__)
 
+def _owner_group() -> tuple[str, str]:
+    user: str = pwd.getpwuid(os.geteuid()).pw_name
+    group: str = grp.getgrgid(os.getegid()).gr_name
+    return user, group
 
 class Power_Level(IntEnum):
     guest = 0
