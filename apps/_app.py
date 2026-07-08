@@ -198,6 +198,9 @@ class AppActivityProvider(ABC, Generic[AppProviderT]):
     async def get(self) -> str | None:
         raise NotImplementedError
 
+    async def detail(self) -> str | None:
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class AppActivityProviderEntry:
@@ -205,6 +208,7 @@ class AppActivityProviderEntry:
     label: str
     enabled: bool
     current_value: str | None = None
+    detail_value: str | None = None
 
     def __post_init__(self) -> None:
         if not self.provider_id.strip():
@@ -213,6 +217,8 @@ class AppActivityProviderEntry:
             raise ValueError("App activity provider label must not be empty.")
         if self.current_value is not None and not self.current_value.strip():
             raise ValueError("App activity provider current value must not be blank.")
+        if self.detail_value is not None and not self.detail_value.strip():
+            raise ValueError("App activity provider detail value must not be blank.")
 
 
 class App(Generic[ConfigT], ABC):
@@ -643,14 +649,18 @@ class App(Generic[ConfigT], ABC):
         current_values = await asyncio.gather(
             *(self._activity_provider_current_value(provider) for provider in self.activity_providers)
         )
+        detail_values = await asyncio.gather(
+            *(self._activity_provider_detail_value(provider) for provider in self.activity_providers)
+        )
         return tuple(
             AppActivityProviderEntry(
                 provider_id=entry.provider_id,
                 label=entry.label,
                 enabled=entry.enabled,
                 current_value=current_value,
+                detail_value=detail_value,
             )
-            for entry, current_value in zip(base_entries, current_values, strict=True)
+            for entry, current_value, detail_value in zip(base_entries, current_values, detail_values, strict=True)
         )
 
     async def _activity_provider_current_value(self, provider: AppActivityProvider[Any]) -> str | None:
@@ -670,6 +680,24 @@ class App(Generic[ConfigT], ABC):
             return None
         current_value = raw_value.strip()
         return current_value or None
+
+    async def _activity_provider_detail_value(self, provider: AppActivityProvider[Any]) -> str | None:
+        if not self.activity_provider_enabled(provider):
+            return None
+        try:
+            raw_value = await provider.detail()
+        except Exception as xcp:
+            log.warning(
+                "App activity provider detail failed: app=%s provider=%s error=%s",
+                self.name,
+                provider.provider_id,
+                xcp,
+            )
+            return None
+        if raw_value is None:
+            return None
+        detail_value = raw_value.strip()
+        return detail_value or None
 
     def register_enabled_activity_providers(self) -> None:
         for provider in self.activity_providers:

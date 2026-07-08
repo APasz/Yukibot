@@ -26,14 +26,28 @@ from apps._mod import Mod_Manager
 from apps._updater import AppUpdateOperationKind, AppUpdateProviderKind, AppUpdateState
 from apps.factorio import (
     Factorio,
+    FactorioActivities,
+    FactorioEvolution,
+    FactorioMapAge,
+    FactorioModMetadata,
+    FactorioSurfaceEvolution,
     Factorio_Updater,
     FactorioModPortalCredentials,
     Matchers,
+    Provider_FactorioEvolution,
+    Provider_FactorioMapAge,
+    Receiver,
     Mod_Factorio,
     _ensure_factorio_binary_executable,
     _factorio_download_archive_path,
     _factorio_latest_headless_versions,
+    _format_factorio_bridge_say_command,
+    _format_factorio_console_message,
     _factorio_mod_portal_release_from_mapping,
+    _parse_factorio_bridge_evolution_snapshot,
+    _parse_factorio_evolution,
+    _parse_factorio_map_age,
+    _parse_factorio_surface_evolutions,
     _select_factorio_mod_portal_release,
     detect_factorio_version,
     download_factorio_mod_from_portal,
@@ -119,6 +133,18 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         mod_id = parse_factorio_mod_portal_url("https://mods.factorio.com/mod/invincible-construction-bots")
 
         self.assertEqual(mod_id, "invincible-construction-bots")
+
+    def test_parse_factorio_mod_portal_url_accepts_mod_subpage(self) -> None:
+        mod_id = parse_factorio_mod_portal_url("https://mods.factorio.com/mod/space-exploration/dependencies")
+
+        self.assertEqual(mod_id, "space-exploration")
+
+    def test_parse_factorio_mod_portal_url_accepts_query_and_fragment(self) -> None:
+        mod_id = parse_factorio_mod_portal_url(
+            "https://mods.factorio.com/mod/even-distribution?from=downloaded#downloads"
+        )
+
+        self.assertEqual(mod_id, "even-distribution")
 
     def test_parse_factorio_mod_portal_url_rejects_non_portal_url(self) -> None:
         with self.assertRaisesRegex(ValueError, "mods.factorio.com"):
@@ -242,8 +268,79 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             )
 
         self.assertEqual(tuple(candidate.mod_id for candidate in resolution.candidates), ("root", "dep-one", "dep-two"))
+        self.assertEqual(resolution.candidates[0].dependency_ids, ("dep-one",))
         self.assertEqual(resolution.candidates[1].required_by, ("root",))
+        self.assertEqual(resolution.candidates[1].dependency_ids, ("dep-two",))
         self.assertEqual(resolution.candidates[2].required_by, ("dep-one",))
+
+    def test_factorio_mod_portal_resolution_tracks_shared_dependency_parents(self) -> None:
+        def release_payload(mod_id: str, dependencies: list[str]) -> dict[str, object]:
+            return {
+                "download_url": f"/download/{mod_id}/1.0.0",
+                "file_name": f"{mod_id}_1.0.0.zip",
+                "version": "1.0.0",
+                "sha1": "0" * 40,
+                "released_at": "2026-01-01T00:00:00.000000Z",
+                "info_json": {"factorio_version": "2.0", "dependencies": dependencies},
+            }
+
+        class _FakeResponse:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.status = 200
+                self._payload = payload
+
+            async def __aenter__(self) -> "_FakeResponse":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        class _FakeSession:
+            async def __aenter__(self) -> "_FakeSession":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            def get(self, url: str, **_kwargs: object) -> _FakeResponse:
+                mod_id = url.split("/api/mods/", maxsplit=1)[1].removesuffix("/full")
+                payloads: dict[str, dict[str, object]] = {
+                    "root": {
+                        "name": "root",
+                        "title": "Root Mod",
+                        "releases": [release_payload("root", ["dep-one", "dep-two"])],
+                    },
+                    "dep-one": {
+                        "name": "dep-one",
+                        "title": "Dependency One",
+                        "releases": [release_payload("dep-one", ["shared"])],
+                    },
+                    "dep-two": {
+                        "name": "dep-two",
+                        "title": "Dependency Two",
+                        "releases": [release_payload("dep-two", ["shared"])],
+                    },
+                    "shared": {
+                        "name": "shared",
+                        "title": "Shared Dependency",
+                        "releases": [release_payload("shared", [])],
+                    },
+                }
+                return _FakeResponse(payloads[mod_id])
+
+        with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+            resolution = asyncio.run(
+                resolve_factorio_mod_portal_candidates(
+                    page_url="https://mods.factorio.com/mod/root",
+                    factorio_version=AppVersion(main="2.0.68"),
+                )
+            )
+
+        shared = next(candidate for candidate in resolution.candidates if candidate.mod_id == "shared")
+        self.assertEqual(shared.required_by, ("dep-one", "dep-two"))
 
     def test_factorio_mod_portal_credentials_read_server_settings(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -303,7 +400,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             Path("/srv/factorio/mods/mod-settings.dat"),
         )
 
-    def test_factorio_exposes_raw_console_command_action(self) -> None:
+    def test_factorio_exposes_curated_console_actions(self) -> None:
         app = cast(Any, object.__new__(Factorio))
         app.cfg = App_Config(
             name="factorio_alpha",
@@ -316,9 +413,11 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
         actions = app.console_actions
 
-        self.assertEqual(tuple(action.key for action in actions), ("raw_command",))
-        self.assertEqual(actions[0].label, "Run Command")
-        self.assertEqual(actions[0].power_level.name, "sudo")
+        self.assertEqual(tuple(action.key for action in actions), ("admins", "raw_command", "promote", "demote"))
+        self.assertEqual(actions[0].label, "List Admins")
+        self.assertEqual(actions[0].power_level.name, "user")
+        self.assertEqual(actions[1].label, "Run Command")
+        self.assertEqual(actions[1].power_level.name, "sudo")
 
     def test_factorio_raw_console_command_sends_rcon_command(self) -> None:
         app = cast(Any, object.__new__(Factorio))
@@ -347,6 +446,90 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         app._relay.send.assert_awaited_once_with("/help")
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
         self.assertEqual(result.text, "command output")
+
+    def test_factorio_admins_console_action_requests_admin_list(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.friendly = "Factorio"
+        app.cfg = App_Config(
+            name="factorio_alpha",
+            instance_key="alpha",
+            friendly_name="Factorio",
+            directory=Path("."),
+            apps_dir=Path("."),
+            scope="factorio",
+        )
+        app.check_running = lambda: True
+        app._relay = SimpleNamespace(send=AsyncMock(return_value="Admins: Alice, Bob"))
+        action = next(action for action in app.console_actions if action.key == "admins")
+
+        result = asyncio.run(
+            execute_console_action(
+                app=app,
+                is_running=app.check_running,
+                action=action,
+                raw_value=None,
+            )
+        )
+
+        app._relay.send.assert_awaited_once_with("/admins")
+        self.assertEqual(result.source, ConsoleResponseSource.RCON)
+        self.assertEqual(result.text, "Admins: Alice, Bob")
+
+    def test_factorio_promote_console_action_sends_rcon_command(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.friendly = "Factorio"
+        app.cfg = App_Config(
+            name="factorio_alpha",
+            instance_key="alpha",
+            friendly_name="Factorio",
+            directory=Path("."),
+            apps_dir=Path("."),
+            scope="factorio",
+        )
+        app.check_running = lambda: True
+        app._relay = SimpleNamespace(send=AsyncMock(return_value="Promoted Alice"))
+        action = next(action for action in app.console_actions if action.key == "promote")
+
+        result = asyncio.run(
+            execute_console_action(
+                app=app,
+                is_running=app.check_running,
+                action=action,
+                raw_value="Alice",
+            )
+        )
+
+        app._relay.send.assert_awaited_once_with("/promote Alice")
+        self.assertEqual(result.source, ConsoleResponseSource.RCON)
+        self.assertEqual(result.text, "Promoted Alice")
+
+    def test_factorio_demote_console_action_sends_rcon_command(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.friendly = "Factorio"
+        app.cfg = App_Config(
+            name="factorio_alpha",
+            instance_key="alpha",
+            friendly_name="Factorio",
+            directory=Path("."),
+            apps_dir=Path("."),
+            scope="factorio",
+        )
+        app.check_running = lambda: True
+        app._relay = SimpleNamespace(send=AsyncMock(return_value="Demoted Alice"))
+        action = next(action for action in app.console_actions if action.key == "demote")
+
+        result = asyncio.run(
+            execute_console_action(
+                app=app,
+                is_running=app.check_running,
+                action=action,
+                raw_value="Alice",
+            )
+        )
+
+        app._relay.send.assert_awaited_once_with("/demote Alice")
+        self.assertEqual(result.source, ConsoleResponseSource.RCON)
+        self.assertEqual(result.text, "Demoted Alice")
 
     def test_factorio_mod_portal_download_follows_archive_redirects(self) -> None:
         archive_bytes = b"factorio-mod-archive"
@@ -851,6 +1034,310 @@ class FactorioUpdaterTests(unittest.TestCase):
             self.assertEqual(installed_binary.stat().st_mode & 0o777, 0o755)
 
 
+class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
+    def test_parse_factorio_map_age_from_human_readable_output(self) -> None:
+        map_age = _parse_factorio_map_age("Map age: 3 days 5 hours 17 minutes 42 seconds.")
+
+        self.assertEqual(map_age, FactorioMapAge(total_seconds=(3 * 86_400) + (5 * 3_600) + (17 * 60) + 42))
+        assert map_age is not None
+        self.assertEqual(map_age.activity_text(), "D3/H05")
+
+    def test_parse_factorio_evolution_from_console_output(self) -> None:
+        evolution = _parse_factorio_evolution(
+            "Evolution factor: 0.9066. (Time 20%) (Pollution 45%) (Spawner kills: 33%)"
+        )
+
+        self.assertEqual(evolution, FactorioEvolution(factor=0.9066))
+        assert evolution is not None
+        self.assertEqual(evolution.activity_text(), "90.7%")
+
+    def test_parse_factorio_surface_evolutions_from_full_list_output(self) -> None:
+        surface_evolutions = _parse_factorio_surface_evolutions(
+            "\n".join(
+                (
+                    "Gleba:",
+                    "Evolution factor: 0.245. (Time 10%) (Pollution 15%) (Spawner kills: 0%)",
+                    "Nauvis:",
+                    "Evolution factor: 0.9066. (Time 20%) (Pollution 45%) (Spawner kills: 33%)",
+                    "Vulcanus: Evolution factor: 0",
+                )
+            )
+        )
+
+        self.assertEqual(
+            surface_evolutions,
+            (
+                FactorioSurfaceEvolution("Nauvis", FactorioEvolution(factor=0.9066)),
+                FactorioSurfaceEvolution("Gleba", FactorioEvolution(factor=0.245)),
+                FactorioSurfaceEvolution("Vulcanus", FactorioEvolution(factor=0.0)),
+            ),
+        )
+
+    def test_parse_factorio_bridge_evolution_from_json_output(self) -> None:
+        snapshot = _parse_factorio_bridge_evolution_snapshot(
+            json.dumps(
+                {
+                    "kind": "evolution",
+                    "tick": 120,
+                    "force": "player",
+                    "surfaces": [
+                        {
+                            "surface": {"name": "gleba", "planet": "gleba"},
+                            "evolution": {"total": 0.125, "pollution": 0.0, "time": 0.125, "spawner_kills": 0.0},
+                        },
+                        {
+                            "surface": {"name": "nauvis", "planet": "nauvis"},
+                            "evolution": {"total": 0.375, "pollution": 0.1, "time": 0.2, "spawner_kills": 0.075},
+                        },
+                    ],
+                }
+            )
+        )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.primary_evolution, FactorioEvolution(factor=0.375))
+        self.assertEqual(
+            snapshot.surface_evolutions,
+            (
+                FactorioSurfaceEvolution("Nauvis", FactorioEvolution(factor=0.375)),
+                FactorioSurfaceEvolution("Gleba", FactorioEvolution(factor=0.125)),
+            ),
+        )
+
+    async def test_activity_providers_read_cached_factorio_snapshot(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app._factorio_yuki_bridge_enabled = True
+        app._activities = SimpleNamespace(
+            snapshot=SimpleNamespace(
+                map_age=FactorioMapAge(total_seconds=(2 * 86_400) + (7 * 3_600)),
+                primary_evolution=FactorioEvolution(factor=0.375),
+                surface_evolutions=(
+                    FactorioSurfaceEvolution("Nauvis", FactorioEvolution(factor=0.375)),
+                    FactorioSurfaceEvolution("Gleba", FactorioEvolution(factor=0.125)),
+                ),
+            )
+        )
+
+        self.assertEqual(await Provider_FactorioMapAge(app).get(), "D2/H07")
+        self.assertEqual(await Provider_FactorioEvolution(app).get(), "37.5%")
+        self.assertEqual(
+            await Provider_FactorioEvolution(app).detail(),
+            "Nauvis: 37.5%\nGleba: 12.5%",
+        )
+
+    async def test_factorio_evolution_provider_requires_yuki_bridge(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app._factorio_yuki_bridge_enabled = False
+        app._activities = SimpleNamespace(
+            snapshot=SimpleNamespace(
+                primary_evolution=FactorioEvolution(factor=0.375),
+                surface_evolutions=(FactorioSurfaceEvolution("Nauvis", FactorioEvolution(factor=0.375)),),
+            )
+        )
+
+        self.assertIsNone(await Provider_FactorioEvolution(app).get())
+        self.assertIsNone(await Provider_FactorioEvolution(app).detail())
+
+    def test_yuki_bridge_enabled_detects_factorio_mod_by_native_mod_id(self) -> None:
+        class _BridgeMod(Mod_Factorio):
+            @property
+            def server_loadable(self) -> bool:
+                return True
+
+        bridge_mod = object.__new__(_BridgeMod)
+        bridge_mod.cfg = SimpleNamespace(enabled=True)
+        bridge_mod._detected_metadata = FactorioModMetadata(name="yuki-bridge")
+        bridge_mod.name = "yuki-bridge_1.2.3.zip"
+        bridge_mod.friendly = "Yuki Bridge"
+        app = cast(Any, object.__new__(Factorio))
+        app.mods = SimpleNamespace(list_mods=lambda state=None: [bridge_mod])
+
+        self.assertTrue(app.yuki_bridge_enabled)
+
+    async def test_receiver_prefers_shout_without_script_fallback(self) -> None:
+        relay = SimpleNamespace(send=AsyncMock(return_value=None))
+        app = cast(Any, object.__new__(Factorio))
+        app._relay = relay
+        app._factorio_yuki_bridge_enabled = False
+        receiver = Receiver(app)
+        payload = SimpleNamespace(
+            alias="DiscordUser",
+            content="Hello \"factory\"",
+            urls=(),
+            files=(),
+            content_for_app=lambda _app: "Hello \"factory\"",
+        )
+
+        await receiver.send(payload)
+
+        relay.send.assert_awaited_once_with("/shout DiscordUser: Hello 'factory'")
+
+    async def test_receiver_prefers_yuki_bridge_say_without_shout_fallback(self) -> None:
+        relay = SimpleNamespace(send=AsyncMock(return_value=None))
+        app = cast(Any, object.__new__(Factorio))
+        app._relay = relay
+        app._factorio_yuki_bridge_enabled = True
+        receiver = Receiver(app)
+        payload = SimpleNamespace(
+            alias="DiscordUser",
+            content="Hello \"factory\"",
+            urls=(),
+            files=(),
+            content_for_app=lambda _app: "Hello \"factory\"",
+        )
+
+        await receiver.send(payload)
+
+        relay.send.assert_awaited_once_with('/yuki say DiscordUser|Hello "factory"')
+
+    async def test_receiver_falls_back_to_silent_command_for_failed_shout(self) -> None:
+        relay = SimpleNamespace(send=AsyncMock(side_effect=("Unknown command: /shout", None)))
+        app = cast(Any, object.__new__(Factorio))
+        app._relay = relay
+        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=True)
+        app._factorio_yuki_bridge_enabled = False
+        receiver = Receiver(app)
+        payload = SimpleNamespace(
+            alias="DiscordUser",
+            content="Line one\nLine two",
+            urls=(),
+            files=(),
+            content_for_app=lambda _app: "Line one\nLine two",
+        )
+
+        await receiver.send(payload)
+
+        self.assertEqual(relay.send.await_count, 2)
+        self.assertEqual(relay.send.await_args_list[0].args, ("/shout DiscordUser: Line one Line two",))
+        self.assertEqual(
+            relay.send.await_args_list[1].args,
+            ('/silent-command game.print("DiscordUser: Line one Line two")',),
+        )
+
+    async def test_receiver_falls_back_to_shout_for_failed_yuki_bridge_say(self) -> None:
+        relay = SimpleNamespace(send=AsyncMock(side_effect=("Usage: /yuki say Speaker|message", None)))
+        app = cast(Any, object.__new__(Factorio))
+        app._relay = relay
+        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=True)
+        app._factorio_yuki_bridge_enabled = True
+        receiver = Receiver(app)
+        payload = SimpleNamespace(
+            alias="DiscordUser",
+            content="Line one\nLine two",
+            urls=(),
+            files=(),
+            content_for_app=lambda _app: "Line one\nLine two",
+        )
+
+        await receiver.send(payload)
+
+        self.assertEqual(relay.send.await_count, 2)
+        self.assertEqual(relay.send.await_args_list[0].args, ("/yuki say DiscordUser|Line one Line two",))
+        self.assertEqual(relay.send.await_args_list[1].args, ("/shout DiscordUser: Line one Line two",))
+
+    async def test_receiver_uses_silent_command_when_shout_disabled(self) -> None:
+        relay = SimpleNamespace(send=AsyncMock(return_value=None))
+        app = cast(Any, object.__new__(Factorio))
+        app._relay = relay
+        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=False)
+        receiver = Receiver(app)
+        payload = SimpleNamespace(
+            alias="DiscordUser",
+            content="Line one\nLine two",
+            urls=(),
+            files=(),
+            content_for_app=lambda _app: "Line one\nLine two",
+        )
+
+        await receiver.send(payload)
+
+        relay.send.assert_awaited_once_with('/silent-command game.print("DiscordUser: Line one Line two")')
+
+    async def test_factorio_activities_poll_updates_snapshot(self) -> None:
+        relay = SimpleNamespace(
+            send=AsyncMock(
+                return_value={
+                    "time": "Map age: 4 days 2 hours 0 minutes 0 seconds.",
+                    "evolution": json.dumps(
+                        {
+                            "kind": "evolution",
+                            "tick": 120,
+                            "force": "player",
+                            "surfaces": [
+                                {"surface": {"name": "Nauvis"}, "evolution": {"total": 0.245}},
+                                {"surface": {"name": "Gleba"}, "evolution": {"total": 0.125}},
+                            ],
+                        }
+                    ),
+                }
+            )
+        )
+        app = cast(Any, object.__new__(Factorio))
+        app._relay = relay
+        app.check_running = lambda: True
+        app.name = "factorio_demo"
+        app._factorio_yuki_bridge_enabled = True
+        app.register_enabled_activity_providers = MagicMock()
+        app.deregister_activity_providers = MagicMock()
+        app.set_activity_providers = MagicMock()
+        app._cancel_background_task = AsyncMock()
+
+        activities = FactorioActivities(app)
+        self.assertEqual(len(app.set_activity_providers.call_args.args[0]), 2)
+
+        with patch("apps.factorio.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError())):
+            with self.assertRaises(asyncio.CancelledError):
+                await activities._poll()
+
+        self.assertEqual(activities.snapshot.map_age, FactorioMapAge(total_seconds=(4 * 86_400) + (2 * 3_600)))
+        self.assertEqual(activities.snapshot.primary_evolution, FactorioEvolution(factor=0.245))
+        self.assertEqual(
+            activities.snapshot.surface_evolutions,
+            (
+                FactorioSurfaceEvolution("Nauvis", FactorioEvolution(factor=0.245)),
+                FactorioSurfaceEvolution("Gleba", FactorioEvolution(factor=0.125)),
+            ),
+        )
+        relay.send.assert_awaited_once_with({"time": "/time", "evolution": "/yuki evolution player"})
+
+    async def test_factorio_activities_skip_evolution_without_yuki_bridge(self) -> None:
+        relay = SimpleNamespace(send=AsyncMock(return_value={"time": "Map age: 4 days 2 hours 0 minutes 0 seconds."}))
+        app = cast(Any, object.__new__(Factorio))
+        app._relay = relay
+        app.check_running = lambda: True
+        app.name = "factorio_demo"
+        app._factorio_yuki_bridge_enabled = False
+        app.register_enabled_activity_providers = MagicMock()
+        app.deregister_activity_providers = MagicMock()
+        app.set_activity_providers = MagicMock()
+        app._cancel_background_task = AsyncMock()
+
+        activities = FactorioActivities(app)
+        self.assertEqual(len(app.set_activity_providers.call_args.args[0]), 1)
+
+        with patch("apps.factorio.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError())):
+            with self.assertRaises(asyncio.CancelledError):
+                await activities._poll()
+
+        self.assertEqual(activities.snapshot.map_age, FactorioMapAge(total_seconds=(4 * 86_400) + (2 * 3_600)))
+        self.assertIsNone(activities.snapshot.primary_evolution)
+        self.assertEqual(activities.snapshot.surface_evolutions, ())
+        relay.send.assert_awaited_once_with({"time": "/time"})
+
+    def test_format_factorio_console_message_sanitises_quotes_and_newlines(self) -> None:
+        message = _format_factorio_console_message(alias="Yuki\nBot", content='One "two"\nthree')
+
+        self.assertEqual(message, "Yuki Bot: One 'two' three")
+
+    def test_format_factorio_bridge_say_command_uses_speaker_message_separator(self) -> None:
+        command = _format_factorio_bridge_say_command(alias="Yuki|Bot", content='One "two"\nthree')
+
+        self.assertEqual(command, '/yuki say Yuki/Bot|One "two" three')
+
+
 class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
     async def test_match_error_records_factorio_startup_failure(self) -> None:
         app = cast(Any, object.__new__(Factorio))
@@ -911,6 +1398,7 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         app.name = "factorio_demo"
         app.scope = "factorio"
         app.manage_embed_color = 0xDC6B0F
+        app._factorio_yuki_bridge_enabled = True
         app._tail_machers = set()
         matcher = Matchers(app)
 
@@ -927,6 +1415,36 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         assert relayed_message.relay_embed is not None
         self.assertEqual(relayed_message.relay_embed.title, "Research")
         self.assertEqual(relayed_message.relay_embed.description, "Electronics 1")
+
+    async def test_match_research_requires_yuki_bridge(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.scope = "factorio"
+        app.manage_embed_color = 0xDC6B0F
+        app._factorio_yuki_bridge_enabled = False
+        app._tail_machers = set()
+        matcher = Matchers(app)
+
+        with patch("apps.factorio.DC_Relay.add") as add_mock:
+            await matcher.match_research(
+                "891.725 Script @__events-logger__/events/research.lua:23: [RESEARCH FINISHED] electronics 1"
+            )
+
+        add_mock.assert_not_called()
+
+    async def test_match_death_requires_yuki_bridge(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.scope = "factorio"
+        app.manage_embed_color = 0xDC6B0F
+        app._factorio_yuki_bridge_enabled = False
+        app._tail_machers = set()
+        matcher = Matchers(app)
+
+        with patch("apps.factorio.DC_Relay.add") as add_mock:
+            await matcher.match_death("[DIED] PVE:Yuki biter")
+
+        add_mock.assert_not_called()
 
 
 if __name__ == "__main__":

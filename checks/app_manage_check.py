@@ -2030,6 +2030,25 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
         check_running.assert_called_once_with()
         self.assertEqual(app.act_err_counts["_manager"], 25)
 
+    async def test_provider_player_renders_unlimited_capacity_with_infinity_symbol(self) -> None:
+        manager = object.__new__(App_Manager)
+        app = _build_dummy_app()
+        app.act_err_threshold = 25
+        app.act_err_counts = {"_manager": 3}
+        app._running = True
+        app.player_count = AsyncMock(return_value=(2, -1))
+        app.check_running = Mock(return_value=True)
+        manager.current = app.name
+        manager.apps = {app.name: app}
+
+        provider = Provider_Player(manager)
+
+        value = await provider.get()
+
+        self.assertEqual(value, "2/∞")
+        app.player_count.assert_awaited_once()
+        self.assertEqual(app.act_err_counts["_manager"], 25)
+
     async def test_provider_player_skips_error_budget_until_app_has_started(self) -> None:
         manager = object.__new__(App_Manager)
         app = _build_dummy_app()

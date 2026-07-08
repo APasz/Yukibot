@@ -1,15 +1,6 @@
 from __future__ import annotations
 
-_UNLIMITED_PLAYER_CAPACITY_SENTINEL: int = -1
-_UNLIMITED_PLAYER_CAPACITY_TEXT: str = "∞"
-
-
-def _format_player_capacity(player_capacity: int | None) -> str | None:
-    if player_capacity is None:
-        return None
-    if player_capacity == _UNLIMITED_PLAYER_CAPACITY_SENTINEL:
-        return _UNLIMITED_PLAYER_CAPACITY_TEXT
-    return str(player_capacity)
+from _utils import format_player_capacity as _format_player_capacity
 
 
 def _format_uptime_seconds(total_seconds: int) -> str:

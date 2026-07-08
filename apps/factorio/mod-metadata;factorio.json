@@ -945,6 +945,546 @@
           "url": "https://mods.factorio.com/mod/yemtositemcount"
         }
       ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "shield-projector"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "shield-projector"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "shield-projector"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/shield-projector"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "black-rubber-belts-remastered"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "black-rubber-belts-remastered"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "black-rubber-belts-remastered"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/black-rubber-belts-remastered"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "textplates"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "textplates"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "textplates"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/textplates"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "valves-lib"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "valves-lib"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "valves-lib"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/valves-lib"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "valves"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "valves"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "valves"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/valves"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "nixie-tubes"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "nixie-tubes"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "nixie-tubes"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/nixie-tubes"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "inventory-repair"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "inventory-repair"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "inventory-repair"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/inventory-repair"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "Automatic_Train_Painter"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "Automatic_Train_Painter"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "automatic_train_painter"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/Automatic_Train_Painter"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "FluidWagonColorMask"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "FluidWagonColorMask"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "fluidwagoncolormask"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/FluidWagonColorMask"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "ChangeInserterDropLane"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "ChangeInserterDropLane"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "changeinserterdroplane"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/ChangeInserterDropLane"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "AutoDeconstruct"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "AutoDeconstruct"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "autodeconstruct"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/AutoDeconstruct"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "bullet-trails"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "bullet-trails"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "bullet-trails"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/bullet-trails"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "invincible-construction-bots"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "invincible-construction-bots"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "invincible-construction-bots"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/invincible-construction-bots"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "simpleadjustableinserters"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "simpleadjustableinserters"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "simpleadjustableinserters"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/simpleadjustableinserters"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "faster-robots"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "faster-robots"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "faster-robots"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/faster-robots"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "efficient-robots"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "efficient-robots"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "efficient-robots"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/efficient-robots"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "better-robots"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "better-robots"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "better-robots"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/better-robots"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "pushbutton"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "pushbutton"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "pushbutton"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/pushbutton"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "vtk-cannon-turret"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "vtk-cannon-turret"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "vtk-cannon-turret"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/vtk-cannon-turret"
+        }
+      ]
+    },
+    {
+      "identities": [
+        {
+          "kind": "provider",
+          "namespace": "WUBE",
+          "value": "yuki-bridge"
+        },
+        {
+          "kind": "native",
+          "namespace": "factorio",
+          "value": "yuki-bridge"
+        },
+        {
+          "kind": "filename",
+          "namespace": "factorio",
+          "value": "yuki-bridge"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": null,
+      "mod_pages": [
+        {
+          "name": "FactorioMods",
+          "url": "https://mods.factorio.com/mod/yuki-bridge"
+        }
+      ]
     }
   ],
   "schema_version": 1

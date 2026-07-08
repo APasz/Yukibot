@@ -91,7 +91,8 @@ from .runtime_imports import (
     NodeConsoleActionList,
     NodeModEntry,
     NodeModMutationAction,
-    NodeModPortalResolveResult,
+    NodeModDependencyEntry,
+    NodeModDependencyResolutionResult,
     NodeModSummary,
     NodeSaveList,
     NodeSettingList,
@@ -192,6 +193,13 @@ class _BulkMetadataRow(TypedDict):
     suggested_type: str
     suggested_type_selectable: bool
     apply_suggested_type: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebDependencySelectionSummary:
+    dependency_count: int
+    selected_count: int
+    installed_count: int
 
 
 type _VirtualModAction = Literal["details", "download"]
@@ -683,8 +691,11 @@ class ModWebAppPageMixin(
     ) -> str:
         current_value: str = provider.current_value or "Unavailable"
         lines: list[str] = [provider.label]
+        detail_value: str | None = provider.detail_value
         provider_id: str = provider.provider_id.casefold()
-        if provider_id == "day" and current_value.startswith("D") and current_value[1:].isdigit():
+        if detail_value is not None:
+            lines.extend(tuple(line for line in detail_value.splitlines() if line.strip()))
+        elif provider_id == "day" and current_value.startswith("D") and current_value[1:].isdigit():
             lines.append(f"Current day: {int(current_value[1:])}")
         elif provider_id == "stage":
             tier_text, separator, schematic_name = current_value.partition(":")
@@ -718,6 +729,8 @@ class ModWebAppPageMixin(
     def _app_activity_provider_badge_markup(*, provider_id: str, label: str, current_value: str) -> str:
         if provider_id.casefold() == "day" and current_value.startswith("D") and current_value[1:].isdigit():
             return escape(f"Day {int(current_value[1:])}")
+        if provider_id.casefold() == "map_age":
+            return escape(current_value)
         if provider_id.casefold() == "stage":
             tier_prefix = current_value
             schematic_name = ""
@@ -1069,19 +1082,20 @@ class ModWebAppPageMixin(
                     app_stats=initial_app_stats,
                     activity_providers=activity_providers,
                 )
-                activity_badge_labels: tuple[Html, ...] = tuple(
-                    cast(
-                        Html,
-                        ui.html(initial_activity_badges[index] if index < len(initial_activity_badges) else "").classes(
-                            self._badge_class_name(tone="black")
-                        ),
-                    )
-                    for index, _provider in enumerate(activity_providers)
-                )
+                activity_badge_bindings: list[tuple[Element, Html]] = []
+                for index, _provider in enumerate(activity_providers):
+                    with ui.element("span").classes(self._badge_class_name(tone="black")) as activity_badge_wrapper:
+                        activity_badge_content = cast(
+                            Html,
+                            ui.html(initial_activity_badges[index] if index < len(initial_activity_badges) else ""),
+                        )
+                    activity_badge_bindings.append((activity_badge_wrapper, activity_badge_content))
+                activity_badges: tuple[Element, ...] = tuple(binding[0] for binding in activity_badge_bindings)
+                activity_badge_contents: tuple[Html, ...] = tuple(binding[1] for binding in activity_badge_bindings)
                 activity_badge_tooltips = tuple(
                     self._attach_html_tooltip(
                         ui=ui,
-                        target=activity_badge_label,
+                        target=activity_badge,
                         html=(
                             self._app_activity_provider_tooltip_html(
                                 provider=initial_visible_activity_providers[index],
@@ -1095,7 +1109,7 @@ class ModWebAppPageMixin(
                             else ""
                         ),
                     )
-                    for index, activity_badge_label in enumerate(activity_badge_labels)
+                    for index, activity_badge in enumerate(activity_badges)
                 )
 
         current_runtime_details: _ModWebAppHeroRuntimeDetails = initial_runtime_details
@@ -1137,16 +1151,17 @@ class ModWebAppPageMixin(
                 app_stats=app_stats,
                 activity_providers=activity_providers,
             )
-            for index, (activity_badge_label, activity_badge, activity_provider) in enumerate(
+            for index, (activity_badge, activity_badge_content, activity_badge_markup, activity_provider) in enumerate(
                 zip(
-                    activity_badge_labels,
+                    activity_badges,
+                    activity_badge_contents,
                     visible_activity_badges,
                     visible_activity_providers,
                     strict=False,
                 )
             ):
-                activity_badge_label.set_content(activity_badge)
-                activity_badge_label.update()
+                activity_badge_content.set_content(activity_badge_markup)
+                activity_badge_content.update()
                 activity_tooltip, activity_tooltip_content = activity_badge_tooltips[index]
                 self._set_html_tooltip_state(
                     activity_tooltip,
@@ -1156,14 +1171,14 @@ class ModWebAppPageMixin(
                         connected_player_names=app_stats.connected_player_names if app_stats is not None else (),
                     ),
                 )
-                self._set_element_visibility(activity_badge_label, visible=True)
-            for index, activity_badge_label in enumerate(
-                activity_badge_labels[len(visible_activity_badges) :],
+                self._set_element_visibility(activity_badge, visible=True)
+            for index, activity_badge in enumerate(
+                activity_badges[len(visible_activity_badges) :],
                 start=len(visible_activity_badges),
             ):
                 activity_tooltip, activity_tooltip_content = activity_badge_tooltips[index]
                 self._set_html_tooltip_state(activity_tooltip, activity_tooltip_content, "")
-                self._set_element_visibility(activity_badge_label, visible=False)
+                self._set_element_visibility(activity_badge, visible=False)
             self._set_element_visibility(
                 runtime_badge_row,
                 visible=runtime_details.player_count_badge is not None or bool(visible_activity_badges),
@@ -1276,6 +1291,50 @@ class ModWebAppPageMixin(
                 text="Write" if can_write else "Read only",
                 tone="red" if can_write else "grey",
             ),
+        )
+
+    @staticmethod
+    def _mod_dependency_entries_by_id(
+        resolution: NodeModDependencyResolutionResult,
+    ) -> dict[str, NodeModDependencyEntry]:
+        return {entry.mod_id: entry for entry in resolution.dependencies}
+
+    @staticmethod
+    def _mod_dependency_selected_ids(
+        *,
+        resolution: NodeModDependencyResolutionResult,
+        dependency_checkboxes: Mapping[str, Checkbox],
+    ) -> tuple[str, ...]:
+        selected_ids: list[str] = [resolution.root_mod_id]
+        for entry in resolution.dependencies:
+            if entry.is_root:
+                continue
+            checkbox = dependency_checkboxes.get(entry.mod_id)
+            if checkbox is not None and bool(_value_as_object(checkbox)):
+                selected_ids.append(entry.mod_id)
+        return tuple(selected_ids)
+
+    @staticmethod
+    def _mod_dependency_selection_summary(
+        *,
+        resolution: NodeModDependencyResolutionResult,
+        dependency_checkboxes: Mapping[str, Checkbox],
+    ) -> _ModWebDependencySelectionSummary:
+        dependency_entries = tuple(entry for entry in resolution.dependencies if not entry.is_root)
+        selected_count = sum(
+            1
+            for entry in dependency_entries
+            if (
+                bool(_value_as_object(checkbox))
+                if (checkbox := dependency_checkboxes.get(entry.mod_id)) is not None
+                else entry.selected_by_default and not entry.installed
+            )
+        )
+        installed_count = sum(1 for entry in dependency_entries if entry.installed)
+        return _ModWebDependencySelectionSummary(
+            dependency_count=len(dependency_entries),
+            selected_count=selected_count,
+            installed_count=installed_count,
         )
 
     @staticmethod
@@ -4286,7 +4345,7 @@ class ModWebAppPageMixin(
         upload_placement = ModPlacement.SERVER_ENABLED
         mod_link_input: Input | None = None
         mod_link_install_button: Button | None = None
-        mod_link_resolution: NodeModPortalResolveResult | None = None
+        mod_link_resolution: NodeModDependencyResolutionResult | None = None
         mod_link_dependency_checkboxes: dict[str, Checkbox] = {}
 
         def ensure_direct_upload_transfer() -> int | None:
@@ -4397,19 +4456,15 @@ class ModWebAppPageMixin(
             raw_url = _value_as_text(mod_link_input)
             if mod_link_resolution is None:
                 raise RuntimeError("Mod link dependencies were not resolved.")
-            selected_mod_ids: list[str] = [mod_link_resolution.requested_mod_id]
-            for dependency in mod_link_resolution.dependencies:
-                if dependency.mod_id == mod_link_resolution.requested_mod_id:
-                    continue
-                checkbox = mod_link_dependency_checkboxes.get(dependency.mod_id)
-                if checkbox is not None and bool(_value_as_object(checkbox)):
-                    selected_mod_ids.append(dependency.mod_id)
             try:
                 result = await self._install_mod_link(
                     model=model,
                     url_to_install=raw_url,
                     user=user,
-                    selected_mod_ids=tuple(selected_mod_ids),
+                    selected_mod_ids=self._mod_dependency_selected_ids(
+                        resolution=mod_link_resolution,
+                        dependency_checkboxes=mod_link_dependency_checkboxes,
+                    ),
                 )
             except Exception as xcp:
                 ui.notify(f"Mod link install failed: {xcp}", type="negative", multi_line=True)
@@ -4472,7 +4527,7 @@ class ModWebAppPageMixin(
         with ui.dialog() as mod_link_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
-                    ui.label("Add Factorio mod link").classes("text-xl font-black mod-title-small")
+                    ui.label("Add Mod Link").classes("text-xl font-black mod-title-small")
 
                     def reset_mod_link_resolution(_event: object | None = None) -> None:
                         nonlocal mod_link_resolution
@@ -4494,42 +4549,109 @@ class ModWebAppPageMixin(
                     def mod_link_dialog_body() -> None:
                         if mod_link_resolution is None:
                             ui.label(
-                                "Paste a Factorio mod portal URL to inspect required dependencies before installing."
+                                "Paste a mod page URL to inspect the dependency graph before installing."
                             ).classes("mod-subtitle text-sm")
                             if mod_link_install_button is not None:
                                 mod_link_install_button.set_text("Check Dependencies")
                             return
-                        dependencies = mod_link_resolution.dependencies
-                        installable_count = sum(
-                            1
-                            for dependency in dependencies
-                            if dependency.mod_id == mod_link_resolution.requested_mod_id or not dependency.installed
+
+                        entries_by_id = self._mod_dependency_entries_by_id(mod_link_resolution)
+                        root_entry = entries_by_id.get(mod_link_resolution.root_mod_id)
+                        if root_entry is None:
+                            raise ValueError("Resolved mod dependency graph is missing the root mod.")
+                        summary = self._mod_dependency_selection_summary(
+                            resolution=mod_link_resolution,
+                            dependency_checkboxes=mod_link_dependency_checkboxes,
                         )
-                        ui.label(
-                            f"{installable_count} mod{'s' if installable_count != 1 else ''} selected for download."
-                        ).classes("mod-subtitle text-sm")
-                        with ui.column().classes("w-full gap-2"):
-                            for dependency in dependencies:
-                                is_requested = dependency.mod_id == mod_link_resolution.requested_mod_id
-                                checked = is_requested or dependency.selected_by_default
-                                if dependency.installed and not is_requested:
-                                    checked = False
-                                with ui.row().classes(
-                                    "w-full items-start justify-between gap-3 mod-tab-toolbar-surface"
-                                ):
-                                    checkbox = ui.checkbox(value=checked).props("dense color=accent")
-                                    if is_requested or dependency.installed:
+
+                        def render_dependency_tree(mod_id: str, rendered_mod_ids: set[str]) -> None:
+                            entry = entries_by_id.get(mod_id)
+                            if entry is None:
+                                return
+                            repeated = mod_id in rendered_mod_ids and not entry.is_root
+                            if not repeated:
+                                rendered_mod_ids.add(mod_id)
+                            child_ids = tuple(
+                                child_id for child_id in entry.dependency_mod_ids if child_id in entries_by_id
+                            )
+                            with ui.row().classes("w-full items-start gap-3 mod-tab-toolbar-surface"):
+                                if entry.is_root:
+                                    root_icon = ui.icon("link").classes("text-lg text-white/80 mt-1")
+                                    with root_icon:
+                                        ui.tooltip("Requested mod from the link. This is always included.")
+                                elif repeated:
+                                    repeated_icon = ui.icon("share").classes("text-lg text-white/60 mt-1")
+                                    with repeated_icon:
+                                        ui.tooltip("Shared dependency already shown elsewhere in the tree.")
+                                else:
+                                    checkbox = ui.checkbox(value=entry.selected_by_default and not entry.installed)
+                                    checkbox.props("dense color=accent")
+                                    if entry.installed:
                                         checkbox.disable()
-                                    mod_link_dependency_checkboxes[dependency.mod_id] = checkbox
-                                    with ui.column().classes("gap-1 flex-1 min-w-0"):
-                                        label = f"{dependency.title} ({dependency.mod_id})"
-                                        ui.label(label).classes("mod-setting-name")
-                                        details = f"{dependency.version} | {dependency.file_name}"
-                                        if dependency.required_by:
-                                            details = f"{details} | required by {', '.join(dependency.required_by)}"
-                                        if dependency.installed:
-                                            details = f"{details} | installed"
-                                        ui.label(details).classes("mod-subtitle text-xs break-all")
+                                        with checkbox:
+                                            ui.tooltip("Already installed. Left deselected to avoid re-downloading.")
+                                    else:
+                                        with checkbox:
+                                            ui.tooltip("Download this dependency.")
+                                    mod_link_dependency_checkboxes[entry.mod_id] = checkbox
+                                with ui.column().classes("gap-1 flex-1 min-w-0"):
+                                    with ui.row().classes("w-full items-start justify-between gap-3"):
+                                        with ui.row().classes("items-center gap-2 min-w-0"):
+                                            ui.label(entry.title).classes("mod-setting-name break-all")
+                                            if len(entry.parent_mod_ids) > 1:
+                                                with ui.row().classes(
+                                                    "items-center gap-1 rounded px-2 py-0.5 text-[0.65rem] "
+                                                    "uppercase tracking-[0.18em] bg-white/5 text-white/55"
+                                                ):
+                                                    parent_icon = ui.icon("hub").classes("text-xs")
+                                                    with parent_icon:
+                                                        ui.tooltip(
+                                                            f"Required by {len(entry.parent_mod_ids)} parent mods."
+                                                        )
+                                                    ui.label(str(len(entry.parent_mod_ids)))
+                                        ui.label(entry.version).classes("mod-subtitle text-xs shrink-0 text-white/60")
+                                    with ui.row().classes("items-center gap-2 text-white/55 min-w-0 flex-wrap"):
+                                        ui.label(entry.mod_id).classes("mod-subtitle text-xs break-all")
+                                        if entry.installed:
+                                            installed_icon = ui.icon("check_circle").classes("text-sm")
+                                            with installed_icon:
+                                                ui.tooltip("Already installed on the server.")
+                                        elif repeated:
+                                            repeated_child_icon = ui.icon("subdirectory_arrow_right").classes("text-sm")
+                                            with repeated_child_icon:
+                                                ui.tooltip("Shown under another parent above.")
+                                        if child_ids and not repeated:
+                                            with ui.row().classes(
+                                                "items-center gap-1 rounded px-2 py-0.5 text-[0.65rem] "
+                                                "uppercase tracking-[0.18em] bg-white/5 text-white/55"
+                                            ):
+                                                child_icon = ui.icon("account_tree").classes("text-xs")
+                                                with child_icon:
+                                                    ui.tooltip(
+                                                        f"Has {len(child_ids)} direct dependencies."
+                                                    )
+                                                ui.label(str(len(child_ids)))
+                            if repeated or not child_ids:
+                                return
+                            with ui.column().classes("w-full gap-2 pl-5 ml-3 border-l border-white/10"):
+                                for child_id in child_ids:
+                                    render_dependency_tree(child_id, rendered_mod_ids)
+
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                            for icon_name, count, tooltip_text in (
+                                ("account_tree", summary.dependency_count, "Extra dependency mods in this graph."),
+                                ("download", summary.selected_count, "Dependency mods selected for download."),
+                                ("download_done", summary.installed_count, "Dependency mods already installed."),
+                            ):
+                                with ui.row().classes(
+                                    "items-center gap-2 rounded-md px-3 py-2 bg-white/5 text-white/75"
+                                ):
+                                    summary_icon = ui.icon(icon_name).classes("text-base")
+                                    with summary_icon:
+                                        ui.tooltip(tooltip_text)
+                                    ui.label(str(count)).classes("text-sm font-medium")
+                        with ui.column().classes("w-full gap-2"):
+                            render_dependency_tree(mod_link_resolution.root_mod_id, set())
                         if mod_link_install_button is not None:
                             mod_link_install_button.set_text("Install")
 
@@ -6161,6 +6283,7 @@ class ModWebAppPageMixin(
         relay_notice_player_death_checkbox: Checkbox | None = None
         relay_notice_progress_checkbox: Checkbox | None = None
         relay_advancements_checkbox: Checkbox | None = None
+        factorio_chat_relay_use_shout_checkbox: Checkbox | None = None
         activity_provider_checkboxes: list[tuple[str, Checkbox]] = []
         current_runtime_model: ModWebBasePageModel = model
         start_stop_control_state: _ModWebStartStopControlState | None = None
@@ -6431,6 +6554,11 @@ class ModWebAppPageMixin(
                         if relay_advancements_checkbox is None
                         else bool(_value_as_object(relay_advancements_checkbox))
                     ),
+                    factorio_chat_relay_use_shout=(
+                        None
+                        if factorio_chat_relay_use_shout_checkbox is None
+                        else bool(_value_as_object(factorio_chat_relay_use_shout_checkbox))
+                    ),
                     disabled_activity_provider_ids=disabled_activity_provider_ids,
                     running_cpu_points=next_running_cpu_points,
                     running_ram_points=next_running_ram_points,
@@ -6464,6 +6592,7 @@ class ModWebAppPageMixin(
         def ensure_details_dialog() -> None:
             nonlocal details_dialog, details_dialog_rendered, details_enable_disable_button
             nonlocal details_save_button
+            nonlocal factorio_chat_relay_use_shout_checkbox
             nonlocal friendly_name_input, lifecycle_crashed_checkbox, lifecycle_started_checkbox
             nonlocal lifecycle_stopped_checkbox, notes_input, relay_advancements_checkbox
             nonlocal relay_notice_player_death_checkbox, relay_notice_player_session_checkbox
@@ -6634,6 +6763,11 @@ class ModWebAppPageMixin(
                                         relay_advancements_checkbox = _details_toggle_checkbox(
                                             label=f"{relay_advancement_term}",
                                             value=model.relay_advancements_enabled,
+                                        )
+                                    if model.factorio_chat_relay_use_shout is not None:
+                                        factorio_chat_relay_use_shout_checkbox = _details_toggle_checkbox(
+                                            label="Chat via /say or /shout",
+                                            value=model.factorio_chat_relay_use_shout,
                                         )
                                 if model.activity_providers:
                                     with ui.column().classes("mod-app-details-subsection"):

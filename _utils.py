@@ -16,6 +16,8 @@ import config
 from _file import File_Utils
 
 log = logging.getLogger(__name__)
+_UNLIMITED_PLAYER_CAPACITY_SENTINEL: int = -1
+_UNLIMITED_PLAYER_CAPACITY_TEXT: str = "∞"
 
 
 class File_Cleaner(metaclass=config.Singleton):
@@ -41,9 +43,9 @@ class File_Cleaner(metaclass=config.Singleton):
                 removed.add(paths)
             return removed
 
-        invalid = {p for p in paths if not (p.is_file() or p.is_symlink())}
+        invalid = {p for p in paths if not File_Cleaner._is_clearable_path(p)}
         if invalid:
-            raise SystemError(f"All paths must be files/symlinks: {invalid}")
+            raise SystemError(f"All paths must be files, directories, or symlinks: {invalid}")
 
         for path in paths:
             if not path.exists():
@@ -56,6 +58,18 @@ class File_Cleaner(metaclass=config.Singleton):
                     removed.add(path)
 
         return paths - removed
+
+    @staticmethod
+    def _is_clearable_path(path: Path) -> bool:
+        return not path.exists() or path.is_file() or path.is_dir() or path.is_symlink()
+
+
+def format_player_capacity(player_capacity: int | None) -> str | None:
+    if player_capacity is None:
+        return None
+    if player_capacity == _UNLIMITED_PLAYER_CAPACITY_SENTINEL:
+        return _UNLIMITED_PLAYER_CAPACITY_TEXT
+    return str(player_capacity)
 
 
 class Utilities:

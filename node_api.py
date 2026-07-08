@@ -393,6 +393,7 @@ class NodeAppActivityProviderEntry:
     label: str
     enabled: bool
     current_value: str | None = None
+    detail_value: str | None = None
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeAppActivityProviderEntry":
@@ -401,6 +402,7 @@ class NodeAppActivityProviderEntry:
             label=_required_string(payload, "label"),
             enabled=_required_bool(payload, "enabled"),
             current_value=_optional_string(payload, "current_value"),
+            detail_value=_optional_string(payload, "detail_value"),
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -409,6 +411,7 @@ class NodeAppActivityProviderEntry:
             "label": self.label,
             "enabled": self.enabled,
             "current_value": self.current_value,
+            "detail_value": self.detail_value,
         }
 
 
@@ -464,6 +467,7 @@ class NodeAppEntry:
     relay_notice_progress_label: str | None = None
     relay_advancements_enabled: bool | None = None
     relay_advancement_term: str | None = None
+    factorio_chat_relay_use_shout: bool | None = None
     activity_providers: tuple[NodeAppActivityProviderEntry, ...] = ()
 
     @classmethod
@@ -518,6 +522,7 @@ class NodeAppEntry:
         relay_notice_progress_label = payload.get("relay_notice_progress_label")
         relay_advancements_enabled = payload.get("relay_advancements_enabled")
         relay_advancement_term = payload.get("relay_advancement_term")
+        factorio_chat_relay_use_shout = payload.get("factorio_chat_relay_use_shout")
         raw_activity_providers = payload.get("activity_providers", ())
         if not isinstance(name, str) or not name:
             raise ValueError("Node app entry name is invalid.")
@@ -641,6 +646,8 @@ class NodeAppEntry:
             raise ValueError("Node app entry relay_advancement_term is invalid.")
         if (relay_advancements_enabled is None) != (relay_advancement_term is None):
             raise ValueError("Node app entry relay advancement metadata is inconsistent.")
+        if factorio_chat_relay_use_shout is not None and not isinstance(factorio_chat_relay_use_shout, bool):
+            raise ValueError("Node app entry factorio_chat_relay_use_shout is invalid.")
         if not isinstance(raw_activity_providers, list | tuple):
             raise ValueError("Node app entry activity_providers is invalid.")
         if any(not isinstance(provider_payload, Mapping) for provider_payload in raw_activity_providers):
@@ -706,6 +713,7 @@ class NodeAppEntry:
             relay_notice_progress_label=relay_notice_progress_label,
             relay_advancements_enabled=relay_advancements_enabled,
             relay_advancement_term=relay_advancement_term,
+            factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
             activity_providers=tuple(
                 NodeAppActivityProviderEntry.from_mapping(cast(Mapping[str, object], provider_payload))
                 for provider_payload in raw_activity_providers
@@ -772,6 +780,7 @@ class NodeAppEntry:
             "relay_notice_progress_label": self.relay_notice_progress_label,
             "relay_advancements_enabled": self.relay_advancements_enabled,
             "relay_advancement_term": self.relay_advancement_term,
+            "factorio_chat_relay_use_shout": self.factorio_chat_relay_use_shout,
             "activity_providers": [provider.to_mapping() for provider in self.activity_providers],
         }
 
@@ -1505,35 +1514,47 @@ class NodeModUploadBatchResult:
 
 
 @dataclass(frozen=True, slots=True)
-class NodeModPortalDependencyEntry:
+class NodeModDependencyEntry:
     mod_id: str
     title: str
     page_url: str
     version: str
     file_name: str
-    required_by: tuple[str, ...]
+    parent_mod_ids: tuple[str, ...]
+    dependency_mod_ids: tuple[str, ...]
     selected_by_default: bool
     installed: bool
+    is_root: bool = False
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModPortalDependencyEntry":
-        raw_required_by = payload.get("required_by")
-        if isinstance(raw_required_by, str) or not isinstance(raw_required_by, Sequence):
-            raise ValueError("Node mod portal dependency required_by is invalid.")
-        required_by: list[str] = []
-        for raw_value in raw_required_by:
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModDependencyEntry":
+        raw_parent_mod_ids = payload.get("parent_mod_ids", payload.get("required_by", ()))
+        if isinstance(raw_parent_mod_ids, str) or not isinstance(raw_parent_mod_ids, Sequence):
+            raise ValueError("Node mod dependency parent_mod_ids are invalid.")
+        parent_mod_ids: list[str] = []
+        for raw_value in raw_parent_mod_ids:
             if not isinstance(raw_value, str):
-                raise ValueError("Node mod portal dependency required_by is invalid.")
-            required_by.append(raw_value)
+                raise ValueError("Node mod dependency parent_mod_ids are invalid.")
+            parent_mod_ids.append(raw_value)
+        raw_dependency_mod_ids = payload.get("dependency_mod_ids", ())
+        if isinstance(raw_dependency_mod_ids, str) or not isinstance(raw_dependency_mod_ids, Sequence):
+            raise ValueError("Node mod dependency dependency_mod_ids are invalid.")
+        dependency_mod_ids: list[str] = []
+        for raw_value in raw_dependency_mod_ids:
+            if not isinstance(raw_value, str):
+                raise ValueError("Node mod dependency dependency_mod_ids are invalid.")
+            dependency_mod_ids.append(raw_value)
         return cls(
             mod_id=_required_string(payload, "mod_id"),
             title=_required_string(payload, "title"),
             page_url=_required_string(payload, "page_url"),
             version=_required_string(payload, "version"),
             file_name=_required_string(payload, "file_name"),
-            required_by=tuple(required_by),
+            parent_mod_ids=tuple(parent_mod_ids),
+            dependency_mod_ids=tuple(dependency_mod_ids),
             selected_by_default=_required_bool(payload, "selected_by_default"),
             installed=_required_bool(payload, "installed"),
+            is_root=_required_bool(payload, "is_root") if "is_root" in payload else False,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -1543,37 +1564,52 @@ class NodeModPortalDependencyEntry:
             "page_url": self.page_url,
             "version": self.version,
             "file_name": self.file_name,
-            "required_by": list(self.required_by),
+            "parent_mod_ids": list(self.parent_mod_ids),
+            "dependency_mod_ids": list(self.dependency_mod_ids),
+            "required_by": list(self.parent_mod_ids),
             "selected_by_default": self.selected_by_default,
             "installed": self.installed,
+            "is_root": self.is_root,
         }
+
+    @property
+    def required_by(self) -> tuple[str, ...]:
+        return self.parent_mod_ids
+
+
+NodeModPortalDependencyEntry = NodeModDependencyEntry
 
 
 @dataclass(frozen=True, slots=True)
-class NodeModPortalResolveResult:
+class NodeModDependencyResolutionResult:
     app_name: str
     app_friendly: str
     node: str
     url: str
-    requested_mod_id: str
-    dependencies: tuple[NodeModPortalDependencyEntry, ...]
+    root_mod_id: str
+    dependencies: tuple[NodeModDependencyEntry, ...]
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModPortalResolveResult":
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModDependencyResolutionResult":
         raw_dependencies = payload.get("dependencies")
         if isinstance(raw_dependencies, str) or not isinstance(raw_dependencies, Sequence):
             raise ValueError("Node mod portal resolve dependencies are invalid.")
-        dependencies: list[NodeModPortalDependencyEntry] = []
+        dependencies: list[NodeModDependencyEntry] = []
         for raw_dependency in raw_dependencies:
             if not isinstance(raw_dependency, Mapping):
                 raise ValueError("Node mod portal resolve dependencies are invalid.")
-            dependencies.append(NodeModPortalDependencyEntry.from_mapping(raw_dependency))
+            dependencies.append(NodeModDependencyEntry.from_mapping(raw_dependency))
+        root_mod_id = (
+            _required_string(payload, "root_mod_id")
+            if "root_mod_id" in payload
+            else _required_string(payload, "requested_mod_id")
+        )
         return cls(
             app_name=_required_string(payload, "app_name"),
             app_friendly=_required_string(payload, "app_friendly"),
             node=_required_string(payload, "node"),
             url=_required_string(payload, "url"),
-            requested_mod_id=_required_string(payload, "requested_mod_id"),
+            root_mod_id=root_mod_id,
             dependencies=tuple(dependencies),
         )
 
@@ -1583,9 +1619,17 @@ class NodeModPortalResolveResult:
             "app_friendly": self.app_friendly,
             "node": self.node,
             "url": self.url,
-            "requested_mod_id": self.requested_mod_id,
+            "root_mod_id": self.root_mod_id,
+            "requested_mod_id": self.root_mod_id,
             "dependencies": [dependency.to_mapping() for dependency in self.dependencies],
         }
+
+    @property
+    def requested_mod_id(self) -> str:
+        return self.root_mod_id
+
+
+NodeModPortalResolveResult = NodeModDependencyResolutionResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -1659,6 +1703,7 @@ class NodeAppMutationRequest(BaseModel):
     relay_notice_player_death: bool | None = None
     relay_notice_progress: bool | None = None
     relay_advancements_enabled: bool | None = None
+    factorio_chat_relay_use_shout: bool | None = None
     disabled_activity_provider_ids: tuple[str, ...] | None = None
     running_cpu_points: int | None = None
     running_ram_points: int | None = None
@@ -6435,12 +6480,16 @@ class NodeApiService:
             relay_advancement_term=(
                 getattr(app, "relay_advancement_term", None) if relay_advancements_enabled is not None else None
             ),
+            factorio_chat_relay_use_shout=(
+                getattr(app.cfg, "factorio_chat_relay_use_shout", True) if app.scope == "factorio" else None
+            ),
             activity_providers=tuple(
                 NodeAppActivityProviderEntry(
                     provider_id=entry.provider_id,
                     label=entry.label,
                     enabled=entry.enabled,
                     current_value=entry.current_value,
+                    detail_value=entry.detail_value,
                 )
                 for entry in activity_provider_entries
             ),
@@ -7229,6 +7278,7 @@ class NodeApiService:
                     label=entry.label,
                     enabled=entry.enabled,
                     current_value=entry.current_value,
+                    detail_value=entry.detail_value,
                 )
                 for entry in await app.activity_provider_entries_with_values()
             )
@@ -8429,6 +8479,7 @@ class NodeApiService:
         relay_notice_player_death: bool | None = None,
         relay_notice_progress: bool | None = None,
         relay_advancements_enabled: bool | None = None,
+        factorio_chat_relay_use_shout: bool | None = None,
         disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
@@ -8508,6 +8559,7 @@ class NodeApiService:
                     relay_notice_player_death=relay_notice_player_death,
                     relay_notice_progress=relay_notice_progress,
                     relay_advancements_enabled=relay_advancements_enabled,
+                    factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
                     disabled_activity_provider_ids=disabled_activity_provider_ids,
                     running_cpu_points=running_cpu_points,
                     running_ram_points=running_ram_points,
@@ -8560,7 +8612,11 @@ class NodeApiService:
             raise ValueError(f"Unsupported app mutation action: {action}")
 
         self._invalidate_state_caches(app_name=app.name)
-        app_stats: NodeAppRuntimeSummary = await self.build_app_runtime_summary(app)
+        app_stats: NodeAppRuntimeSummary
+        if action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP, NodeAppMutationAction.KILL}:
+            app_stats = await self.build_live_app_runtime_summary(app)
+        else:
+            app_stats = await self.build_app_runtime_summary(app)
         traffic_log.info(
             "Node API app mutated: node=%s app=%s action=%s actor=%s",
             self.node_name,
@@ -9513,7 +9569,7 @@ class NodeApiService:
                 placement=ModPlacement.SERVER_ENABLED,
             )
 
-    async def resolve_mod_link_dependencies(self, *, app: App, url: str) -> NodeModPortalResolveResult:
+    async def resolve_mod_link_dependencies(self, *, app: App, url: str) -> NodeModDependencyResolutionResult:
         if app.scope != config.AppScopes.factorio.value:
             raise _http_exception(400, f"{app.friendly} does not support Factorio mod portal links.")
         try:
@@ -9527,24 +9583,26 @@ class NodeApiService:
             raise _http_exception(502, str(xcp)) from xcp
 
         installed_ids = self._factorio_installed_mod_ids(app)
-        return NodeModPortalResolveResult(
+        return NodeModDependencyResolutionResult(
             app_name=app.name,
             app_friendly=app.friendly,
             node=self.node_name,
             url=url,
-            requested_mod_id=resolution.requested_mod_id,
+            root_mod_id=resolution.requested_mod_id,
             dependencies=tuple(
-                NodeModPortalDependencyEntry(
+                NodeModDependencyEntry(
                     mod_id=candidate.mod_id,
                     title=candidate.title,
                     page_url=candidate.page_url,
                     version=candidate.version,
                     file_name=candidate.file_name,
-                    required_by=candidate.required_by,
+                    parent_mod_ids=candidate.required_by,
+                    dependency_mod_ids=candidate.dependency_ids,
                     selected_by_default=(
                         candidate.mod_id == resolution.requested_mod_id or candidate.mod_id not in installed_ids
                     ),
                     installed=candidate.mod_id in installed_ids,
+                    is_root=candidate.mod_id == resolution.requested_mod_id,
                 )
                 for candidate in resolution.candidates
             ),

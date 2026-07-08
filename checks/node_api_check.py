@@ -2257,6 +2257,7 @@ class NodeApiTests(unittest.TestCase):
                     file_name="root_1.0.0.zip",
                     version="1.0.0",
                     required_by=(),
+                    dependency_ids=("dep-new", "dep-installed"),
                 ),
                 FactorioModPortalCandidate(
                     mod_id="dep-new",
@@ -2265,6 +2266,7 @@ class NodeApiTests(unittest.TestCase):
                     file_name="dep-new_1.0.0.zip",
                     version="1.0.0",
                     required_by=("root",),
+                    dependency_ids=(),
                 ),
                 FactorioModPortalCandidate(
                     mod_id="dep-installed",
@@ -2273,6 +2275,7 @@ class NodeApiTests(unittest.TestCase):
                     file_name="dep-installed_1.0.0.zip",
                     version="1.0.0",
                     required_by=("root",),
+                    dependency_ids=(),
                 ),
             ),
         )
@@ -2289,6 +2292,9 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(tuple(entry.mod_id for entry in result.dependencies), ("root", "dep-new", "dep-installed"))
         self.assertEqual(tuple(entry.selected_by_default for entry in result.dependencies), (True, True, False))
         self.assertEqual(tuple(entry.installed for entry in result.dependencies), (False, False, True))
+        self.assertTrue(result.dependencies[0].is_root)
+        self.assertEqual(result.dependencies[0].dependency_mod_ids, ("dep-new", "dep-installed"))
+        self.assertEqual(result.dependencies[1].parent_mod_ids, ("root",))
 
     def test_upload_mod_path_passes_client_only_placement_to_manager(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -5051,7 +5057,7 @@ class NodeApiTests(unittest.TestCase):
         )
 
         async def _run_test() -> NodeAppMutationResult:
-            with patch.object(service, "build_app_runtime_summary", new=AsyncMock(return_value=runtime_summary)):
+            with patch.object(service, "build_live_app_runtime_summary", new=AsyncMock(return_value=runtime_summary)):
                 result = await service.mutate_app(
                     app=app,
                     action=NodeAppMutationAction.START,
@@ -5075,6 +5081,54 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.action, NodeAppMutationAction.START)
         self.assertNotIn(app.name.casefold(), service._app_mutation_tasks)
 
+    def test_mutate_app_stop_uses_manager_end_and_live_summary(self) -> None:
+        app = _build_app(Mock())
+        app.cfg.enabled = True
+        manager = Mock()
+        manager.start_blocker = Mock(return_value=None)
+        manager.end = AsyncMock(return_value={app.name.title()})
+        service = NodeApiService()
+        service.set_manager(cast(Any, manager))
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service.set_acl(cast(Any, acl))
+        runtime_summary = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version=None,
+            transition_state=NodeAppTransitionState.STOPPING,
+            player_count=None,
+            player_capacity=None,
+            relay_support=app.chat_relay_support,
+            storage_percent=None,
+            storage_free_bytes=None,
+            storage_total_bytes=None,
+        )
+
+        with (
+            patch.object(service, "build_live_app_runtime_summary", new=AsyncMock(return_value=runtime_summary)),
+            patch.object(service, "build_app_runtime_summary", new=AsyncMock()) as full_summary_mock,
+        ):
+            async def _run_test() -> NodeAppMutationResult:
+                result = await service.mutate_app(
+                    app=app,
+                    action=NodeAppMutationAction.STOP,
+                    actor_user_id=42,
+                )
+                pending_task = service._app_mutation_tasks.get(app.name.casefold())
+                self.assertIsNotNone(pending_task)
+                if pending_task is not None:
+                    await pending_task
+                return result
+
+            result = asyncio.run(_run_test())
+
+        manager.end.assert_awaited_once_with(app.name)
+        full_summary_mock.assert_not_awaited()
+        self.assertEqual(result.action, NodeAppMutationAction.STOP)
+        self.assertEqual(result.message, "Stop requested for Minecraft Alpha.")
+        self.assertEqual(result.app_stats, runtime_summary)
+
     def test_mutate_app_kill_uses_manager_kill(self) -> None:
         app = _build_app(Mock())
         app.cfg.enabled = True
@@ -5089,7 +5143,7 @@ class NodeApiTests(unittest.TestCase):
 
         with patch.object(
             service,
-            "build_app_runtime_summary",
+            "build_live_app_runtime_summary",
             new=AsyncMock(
                 return_value=NodeAppRuntimeSummary(
                     running=False,

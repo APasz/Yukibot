@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from logging import Logger
@@ -15,6 +15,7 @@ from apps._config import App_Config, AppVersion, normalise_app_version
 log: Logger = logging.getLogger(__name__)
 HideRevealLevel: TypeAlias = Power_Level | None
 DraftSettingValue: TypeAlias = object | hikari.UndefinedType
+SettingStateValue: TypeAlias = str | bool | int | float
 
 
 class Setting_Label(StrEnum):
@@ -86,6 +87,29 @@ class ChoiceSpec:
 
     def raw_values(self) -> frozenset[str]:
         return frozenset[str](option.value for option in self.options)
+
+
+@dataclass(frozen=True, slots=True)
+class ForcedSettingState:
+    setting_key: str
+    value: SettingStateValue
+
+    def __post_init__(self) -> None:
+        if not self.setting_key.strip():
+            raise ValueError("ForcedSettingState requires a setting_key.")
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class SettingStateForceRule:
+    when_value: SettingStateValue
+    forced_states: tuple[ForcedSettingState, ...]
+
+    def __init__(self, when_value: SettingStateValue, *forced_states: ForcedSettingState) -> None:
+        if not forced_states:
+            raise ValueError("SettingStateForceRule requires at least one forced state.")
+
+        object.__setattr__(self, "when_value", when_value)
+        object.__setattr__(self, "forced_states", tuple[ForcedSettingState, ...](forced_states))
 
 
 class SettingSpec(Generic[T]):
@@ -338,6 +362,7 @@ class Setting(Generic[T]):
     paragraph: bool
     min_app_version: AppVersion | None
     max_app_version: AppVersion | None
+    forced_state_rules: tuple[SettingStateForceRule, ...]
     _recent_inputs: list[str]
 
     def __init__(
@@ -354,6 +379,7 @@ class Setting(Generic[T]):
         paragraph: bool = False,
         min_app_version: AppVersion | str | None = None,
         max_app_version: AppVersion | str | None = None,
+        forced_state_rules: Sequence[SettingStateForceRule] = (),
     ) -> None:
         self.spec = value_type
         self.path = tuple(path)
@@ -371,6 +397,7 @@ class Setting(Generic[T]):
         self.paragraph = paragraph
         self.min_app_version = normalise_app_version(min_app_version)
         self.max_app_version = normalise_app_version(max_app_version)
+        self.forced_state_rules = tuple(forced_state_rules)
         if (
             self.min_app_version is not None
             and self.max_app_version is not None
@@ -526,6 +553,7 @@ class Setting(Generic[T]):
 
 class App_Settings:
     _lookup: dict[str, Setting[Any]]
+    _settings_by_key: dict[str, Setting[Any]]
 
     def __init__(
         self,
@@ -538,6 +566,7 @@ class App_Settings:
         if not pointer.exists():
             raise FileNotFoundError("App_Settings file missing")
         self._lookup = {}
+        self._settings_by_key = {}
         self._version_getter = version_getter
 
         self._options: list[Setting[Any]] = sorted(options)
@@ -545,6 +574,8 @@ class App_Settings:
             self._lookup.setdefault(setting.label.lower(), setting)
         for setting in self._options:
             self._lookup[setting.key.lower()] = setting
+            self._settings_by_key[setting.key.lower()] = setting
+        self._validate_forced_state_rules()
         self.load()
 
     def set_version_getter(self, version_getter: Callable[[], AppVersion | None] | None) -> None:
@@ -583,13 +614,123 @@ class App_Settings:
             return
         drafts[setting.key] = value
 
+    def _setting_for_exact_key(self, setting_key: str) -> Setting[Any] | None:
+        return self._settings_by_key.get(setting_key.casefold())
+
+    @staticmethod
+    def _normalise_declared_setting_value(
+        setting: Setting[Any],
+        value: SettingStateValue,
+        *,
+        context: str,
+    ) -> object:
+        try:
+            return setting.spec.parse_input(setting.spec.serialise_value(cast(Any, value)))
+        except Exception as xcp:
+            raise ValueError(f"{context}: {xcp}") from xcp
+
+    def _validate_forced_state_rules(self) -> None:
+        for setting in self._options:
+            for rule in setting.forced_state_rules:
+                self._normalise_declared_setting_value(
+                    setting,
+                    rule.when_value,
+                    context=f"Invalid forced-state trigger for {setting.key}",
+                )
+                seen_target_keys: set[str] = set[str]()
+                for forced_state in rule.forced_states:
+                    target_setting = self._setting_for_exact_key(forced_state.setting_key)
+                    if target_setting is None:
+                        raise ValueError(
+                            f"Forced-state rule for {setting.key} references unknown setting {forced_state.setting_key!r}."
+                        )
+                    target_key = target_setting.key.casefold()
+                    if target_key == setting.key.casefold():
+                        raise ValueError(f"Forced-state rule for {setting.key} cannot target itself.")
+                    if target_key in seen_target_keys:
+                        raise ValueError(
+                            f"Forced-state rule for {setting.key} targets {target_setting.key!r} more than once."
+                        )
+                    seen_target_keys.add(target_key)
+                    if setting.power_level < target_setting.power_level:
+                        raise ValueError(
+                            f"Forced-state rule for {setting.key} cannot target higher-permission setting "
+                            f"{target_setting.key}."
+                        )
+                    self._normalise_declared_setting_value(
+                        target_setting,
+                        forced_state.value,
+                        context=f"Invalid forced-state value for {setting.key} -> {target_setting.key}",
+                    )
+
+    def resolve_draft_values(self, drafts: Mapping[str, DraftSettingValue]) -> dict[str, object]:
+        resolved: dict[str, object] = {}
+        supported_settings = tuple(self.options)
+        for setting in supported_settings:
+            draft_value = drafts.get(setting.key, hikari.UNDEFINED)
+            if isinstance(draft_value, hikari.UndefinedType):
+                continue
+            resolved[setting.key] = draft_value
+
+        total_rule_count = sum(len(setting.forced_state_rules) for setting in supported_settings)
+        max_iterations = max(1, len(supported_settings) * max(1, total_rule_count))
+
+        for _ in range(max_iterations):
+            next_resolved = dict(resolved)
+            forced_assignments: dict[str, tuple[object, str]] = {}
+            for setting in supported_settings:
+                effective_value = resolved.get(setting.key, setting.value)
+                if isinstance(effective_value, hikari.UndefinedType):
+                    continue
+                for rule in setting.forced_state_rules:
+                    rule_value = self._normalise_declared_setting_value(
+                        setting,
+                        rule.when_value,
+                        context=f"Invalid forced-state trigger for {setting.key}",
+                    )
+                    if effective_value != rule_value:
+                        continue
+                    for forced_state in rule.forced_states:
+                        target_setting = self.get_setting(forced_state.setting_key)
+                        if target_setting is None:
+                            continue
+                        forced_value = self._normalise_declared_setting_value(
+                            target_setting,
+                            forced_state.value,
+                            context=f"Invalid forced-state value for {setting.key} -> {target_setting.key}",
+                        )
+                        existing_assignment = forced_assignments.get(target_setting.key)
+                        if existing_assignment is not None and existing_assignment[0] != forced_value:
+                            raise ValueError(
+                                "Conflicting forced-state rules for "
+                                f"{target_setting.key}: {existing_assignment[1]} vs {setting.key}."
+                            )
+                        forced_assignments[target_setting.key] = (forced_value, setting.key)
+
+            for target_key, (forced_value, _) in forced_assignments.items():
+                target_setting = self.get_setting(target_key)
+                if target_setting is None:
+                    continue
+                if forced_value == target_setting.value:
+                    next_resolved.pop(target_key, None)
+                    continue
+                next_resolved[target_key] = forced_value
+
+            if next_resolved == resolved:
+                return next_resolved
+            resolved = next_resolved
+
+        raise ValueError("Forced setting-state rules did not converge.")
+
     @property
     def friendly_options(self) -> list[str]:
         return [s.label for s in self.options]
 
     def get_setting(self, ident: str) -> Setting[Any] | None:
         ident = ident.lower()
-        setting = self._lookup.get(ident)
+        setting = self._setting_for_exact_key(ident)
+        if setting is None:
+            setting = self._lookup.get(ident)
         if setting is None or not setting.supports_app_version(self.app_version):
             return None
         return setting
@@ -644,30 +785,31 @@ class Settings_Manager:
     def _prune_redundant_drafts(self) -> None:
         self._prune_unsupported_drafts()
         for actor_key, drafts in tuple(self._drafts.items()):
+            resolved_drafts = self.app.resolve_draft_values(drafts)
             for setting in self.app.options:
                 draft_value = drafts.get(setting.key, hikari.UNDEFINED)
                 if isinstance(draft_value, hikari.UndefinedType):
                     continue
-                if draft_value == setting.value:
+                if resolved_drafts.get(setting.key, setting.value) == setting.value:
                     drafts.pop(setting.key, None)
             if not drafts:
                 self._drafts.pop(actor_key, None)
 
     def has_pending_changes(self, actor_user_id: int) -> bool:
         self._prune_unsupported_drafts()
-        return bool(self._drafts.get(self._actor_key(actor_user_id)))
+        return bool(self._resolved_drafts(actor_user_id))
 
     def pending_change_count(self, actor_user_id: int) -> int:
         self._prune_unsupported_drafts()
-        return len(self._drafts.get(self._actor_key(actor_user_id), {}))
+        return len(self._resolved_drafts(actor_user_id))
 
     def has_pending_value(self, actor_user_id: int, setting: Setting[Any]) -> bool:
         self._prune_unsupported_drafts()
-        return setting.key in self._drafts.get(self._actor_key(actor_user_id), {})
+        return setting.key in self._resolved_drafts(actor_user_id)
 
     def pending_change_level(self, actor_user_id: int) -> Power_Level | None:
         self._prune_unsupported_drafts()
-        drafts = self._drafts.get(self._actor_key(actor_user_id), {})
+        drafts = self._resolved_drafts(actor_user_id)
         if not drafts:
             return None
         highest_level: Power_Level | None = None
@@ -686,11 +828,14 @@ class Settings_Manager:
 
     def value_for(self, setting: Setting[T], actor_user_id: int) -> T | hikari.UndefinedType:
         self._prune_unsupported_drafts()
-        drafts = self._drafts.get(self._actor_key(actor_user_id), {})
+        drafts = self._resolved_drafts(actor_user_id)
         draft_value = drafts.get(setting.key, hikari.UNDEFINED)
         if isinstance(draft_value, hikari.UndefinedType):
             return setting.value
         return cast(T, draft_value)
+
+    def _resolved_drafts(self, actor_user_id: int) -> dict[str, object]:
+        return self.app.resolve_draft_values(self._drafts.get(self._actor_key(actor_user_id), {}))
 
     def current_input_value(self, setting: Setting[T], actor_user_id: int) -> str:
         value = self.value_for(setting, actor_user_id)
@@ -759,7 +904,7 @@ class Settings_Manager:
     def save(self, actor_user_id: int) -> None:
         self._prune_unsupported_drafts()
         actor_key = self._actor_key(actor_user_id)
-        drafts = dict(self._drafts.get(actor_key, {}))
+        drafts = self._resolved_drafts(actor_user_id)
         for setting in self.app.options:
             draft_value = drafts.get(setting.key, hikari.UNDEFINED)
             if isinstance(draft_value, hikari.UndefinedType):

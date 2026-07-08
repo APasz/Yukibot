@@ -5040,6 +5040,10 @@ class ModWebTests(unittest.TestCase):
             def row(self) -> FakeContainer:
                 return FakeContainer()
 
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
             def label(self, text: str) -> FakeLabel:
                 self.label_texts.append(text)
                 label = FakeLabel(text)
@@ -11814,6 +11818,16 @@ class ModWebTests(unittest.TestCase):
             "Tier 3: Schematic 3-2",
         )
 
+    def test_app_activity_provider_badge_markup_uses_raw_map_age_value(self) -> None:
+        self.assertEqual(
+            ModWebService._app_activity_provider_badge_markup(
+                provider_id="map_age",
+                label="Map Age",
+                current_value="D0/H04",
+            ),
+            "D0/H04",
+        )
+
     def test_app_activity_provider_badge_markup_formats_sevendays_time_and_blood_moon(self) -> None:
         self.assertEqual(
             ModWebService._app_activity_provider_badge_markup(
@@ -11857,6 +11871,18 @@ class ModWebTests(unittest.TestCase):
                 connected_player_names=("Yoko", "Bea"),
             ),
             "Player Count<br>Current value: 2/20<br>Connected players:<br>Yoko<br>Bea",
+        )
+        self.assertEqual(
+            service._app_activity_provider_tooltip_html(
+                provider=NodeAppActivityProviderEntry(
+                    provider_id="evolution",
+                    label="Evolution",
+                    enabled=True,
+                    current_value="37.5%",
+                    detail_value="Nauvis: 37.5%\nGleba: 12.5%",
+                )
+            ),
+            "Evolution<br>Nauvis: 37.5%<br>Gleba: 12.5%",
         )
 
     def test_app_title_font_style_resolves_auto_preset_from_app_scope(self) -> None:

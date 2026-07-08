@@ -13,9 +13,11 @@ from apps._settings import (
     BoolSettingSpec,
     ChoiceOption,
     ChoiceSpec,
+    ForcedSettingState,
     IntSettingSpec,
     Setting,
     Setting_Label,
+    SettingStateForceRule,
     Settings_Manager,
     StringSettingSpec,
 )
@@ -383,6 +385,140 @@ class SettingTests(unittest.TestCase):
             config.version = AppVersion(main="1.0.9")
 
             self.assertEqual(manager.pending_change_count(42), 0)
+
+    def test_settings_manager_applies_forced_setting_states(self) -> None:
+        class _JsonSettings(App_Settings):
+            def load(self) -> None:
+                data = json.loads(self.pointer.read_text(encoding="utf-8"))
+                for setting in self.options:
+                    setting.get(data)
+
+            def save(self) -> None:
+                data: dict[str, object] = {}
+                for setting in self.options:
+                    setting.set(data)
+                self.pointer.write_text(json.dumps(data, indent=4), encoding="utf-8")
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pointer = root / "settings.json"
+            pointer.write_text(
+                json.dumps(
+                    {
+                        "visibility": {"public": False},
+                        "require_user_verification": False,
+                    },
+                    indent=4,
+                ),
+                encoding="utf-8",
+            )
+            public_setting = Setting(
+                BoolSettingSpec(ChoiceSpec(ChoiceOption("true", "Public"), ChoiceOption("false", "Private"))),
+                Setting_Label.visibility,
+                "public",
+                ["visibility"],
+                default=False,
+                forced_state_rules=(
+                    SettingStateForceRule(
+                        True,
+                        ForcedSettingState("require_user_verification", True),
+                    ),
+                ),
+            )
+            verification_setting = Setting(
+                BoolSettingSpec(),
+                "Require User Verification",
+                "require_user_verification",
+                [],
+                default=False,
+            )
+            settings = _JsonSettings(pointer, [public_setting, verification_setting])
+            manager = Settings_Manager(
+                App_Config(
+                    name="dummy",
+                    instance_key="alpha",
+                    directory=root,
+                    apps_dir=root,
+                    scope="dummy",
+                ),
+                settings,
+            )
+
+            manager.update_setting(actor_user_id=42, setting=public_setting, value="Public")
+
+            self.assertEqual(manager.pending_change_count(42), 2)
+            self.assertTrue(manager.has_pending_value(42, public_setting))
+            self.assertTrue(manager.has_pending_value(42, verification_setting))
+            self.assertIs(manager.value_for(verification_setting, 42), True)
+
+            manager.save(42)
+
+            saved = json.loads(pointer.read_text(encoding="utf-8"))
+            self.assertIs(saved["visibility"]["public"], True)
+            self.assertIs(saved["require_user_verification"], True)
+
+    def test_forced_setting_state_is_removed_when_trigger_is_cleared(self) -> None:
+        class _JsonSettings(App_Settings):
+            def load(self) -> None:
+                data = json.loads(self.pointer.read_text(encoding="utf-8"))
+                for setting in self.options:
+                    setting.get(data)
+
+            def save(self) -> None:
+                return None
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pointer = root / "settings.json"
+            pointer.write_text(
+                json.dumps(
+                    {
+                        "visibility": {"public": False},
+                        "require_user_verification": False,
+                    },
+                    indent=4,
+                ),
+                encoding="utf-8",
+            )
+            public_setting = Setting(
+                BoolSettingSpec(ChoiceSpec(ChoiceOption("true", "Public"), ChoiceOption("false", "Private"))),
+                Setting_Label.visibility,
+                "public",
+                ["visibility"],
+                default=False,
+                forced_state_rules=(
+                    SettingStateForceRule(
+                        True,
+                        ForcedSettingState("require_user_verification", True),
+                    ),
+                ),
+            )
+            verification_setting = Setting(
+                BoolSettingSpec(),
+                "Require User Verification",
+                "require_user_verification",
+                [],
+                default=False,
+            )
+            settings = _JsonSettings(pointer, [public_setting, verification_setting])
+            manager = Settings_Manager(
+                App_Config(
+                    name="dummy",
+                    instance_key="alpha",
+                    directory=root,
+                    apps_dir=root,
+                    scope="dummy",
+                ),
+                settings,
+            )
+
+            manager.update_setting(actor_user_id=42, setting=public_setting, value="Public")
+            manager.update_setting(actor_user_id=42, setting=public_setting, value="Private")
+
+            self.assertEqual(manager.pending_change_count(42), 0)
+            self.assertFalse(manager.has_pending_value(42, public_setting))
+            self.assertFalse(manager.has_pending_value(42, verification_setting))
+            self.assertIs(manager.value_for(verification_setting, 42), False)
 
     def test_app_settings_exact_key_lookup_precedes_label_alias(self) -> None:
         class _LookupSettings(App_Settings):
@@ -1021,6 +1157,7 @@ class SettingTests(unittest.TestCase):
             self.assertIs(autosave_server_only.value, True)
 
             for key, value in {
+                "public": "Public",
                 "require_user_verification": "true",
                 "max_upload_slots": "9",
                 "max_heartbeats_per_second": "120",
@@ -1037,6 +1174,7 @@ class SettingTests(unittest.TestCase):
             settings.save()
 
             saved = json.loads(pointer.read_text(encoding="utf-8"))
+            self.assertIs(saved["visibility"]["public"], True)
             self.assertIs(saved["require_user_verification"], True)
             self.assertEqual(saved["max_upload_slots"], 9)
             self.assertEqual(saved["max_heartbeats_per_second"], 120)

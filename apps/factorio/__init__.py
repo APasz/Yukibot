@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from re import Match, Pattern
-from typing import Generic, TypeAlias, TypeVar, cast
+from typing import Any, Generic, TypeAlias, TypeVar, cast
 from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
@@ -36,7 +36,7 @@ from _discord import (
 )
 from _file import File_Utils
 from _security import Power_Level, _owner_group
-from apps._app import AM_Receiver, App, RelayAdvancementTerms
+from apps._app import AM_Receiver, App, AppActivityProvider, AppActivityProviderMetadata, RelayAdvancementTerms
 from apps._config import (
     App_Config,
     AppVersion,
@@ -64,9 +64,11 @@ from apps._settings import (
     BoolSettingSpec,
     ChoiceOption,
     ChoiceSpec,
+    ForcedSettingState,
     IntSettingSpec,
     Setting,
     Setting_Label,
+    SettingStateForceRule,
     SettingSpec,
     StringSettingSpec,
 )
@@ -114,6 +116,24 @@ _FACTORIO_CONFIG_FILENAMES: tuple[str, ...] = (
 _FACTORIO_MOD_SETTINGS_FILENAME = "mod-settings.dat"
 _FACTORIO_RESEARCH_FINISHED_RE: Pattern[str] = re.compile(r"\[RESEARCH FINISHED\]\s+(?P<research>.+)$", re.IGNORECASE)
 _FACTORIO_ERROR_RE: Pattern[str] = re.compile(r"^\s*\d+\.\d+\s+Error\s+(?P<source>\S+:\d+):\s+(?P<message>.+)$")
+_FACTORIO_MAP_AGE_PART_RE: Pattern[str] = re.compile(
+    r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
+    re.IGNORECASE,
+)
+_FACTORIO_EVOLUTION_FACTOR_RE: Pattern[str] = re.compile(
+    r"evolution factor:\s*(?P<value>\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_FACTORIO_SURFACE_HEADER_RE: Pattern[str] = re.compile(r"^(?P<surface>[^:]+):\s*$")
+_FACTORIO_INLINE_SURFACE_EVOLUTION_RE: Pattern[str] = re.compile(
+    r"^(?P<surface>.+?)\s*:\s*evolution factor:\s*(?P<value>\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_FACTORIO_COMMAND_FAILURE_RE: Pattern[str] = re.compile(
+    r"\b(?:unknown command|cannot execute command|unknown option|failed|error|usage)\b",
+    re.IGNORECASE,
+)
+_FACTORIO_YUKI_BRIDGE_MOD_ID = "yuki-bridge"
 _FACTORIO_LINE_MATCHER = Callable[[str], Awaitable[None]]
 _FactorioSettingValue = TypeVar("_FactorioSettingValue", str, bool, int)
 _FACTORIO_UPDATE_BRANCHES: tuple[FactorioUpdateBranch, ...] = (
@@ -206,12 +226,68 @@ class FactorioModPortalCandidate:
     file_name: str
     version: str
     required_by: tuple[str, ...]
+    dependency_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class FactorioModPortalResolution:
     requested_mod_id: str
     candidates: tuple[FactorioModPortalCandidate, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioMapAge:
+    total_seconds: int
+
+    def __post_init__(self) -> None:
+        if self.total_seconds < 0:
+            raise ValueError("Factorio map age total_seconds must be non-negative.")
+
+    @property
+    def days(self) -> int:
+        return self.total_seconds // 86_400
+
+    @property
+    def hours(self) -> int:
+        return (self.total_seconds % 86_400) // 3_600
+
+    def activity_text(self) -> str:
+        return f"D{self.days}/H{self.hours:02d}"
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioEvolution:
+    factor: float
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.factor <= 1.0:
+            raise ValueError("Factorio evolution factor must be between 0.0 and 1.0.")
+
+    def activity_text(self) -> str:
+        percentage = round(self.factor * 100.0, 1)
+        if percentage.is_integer():
+            return f"{int(percentage)}%"
+        return f"{percentage:.1f}%"
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioSurfaceEvolution:
+    surface_name: str
+    evolution: FactorioEvolution
+
+    def __post_init__(self) -> None:
+        if not self.surface_name.strip():
+            raise ValueError("Factorio surface evolution surface_name must not be blank.")
+
+    def detail_text(self) -> str:
+        return f"{self.surface_name}: {self.evolution.activity_text()}"
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioActivitySnapshot:
+    map_age: FactorioMapAge | None = None
+    primary_evolution: FactorioEvolution | None = None
+    surface_evolutions: tuple[FactorioSurfaceEvolution, ...] = ()
 
 
 def _is_non_empty_text(text: str) -> bool:
@@ -320,7 +396,7 @@ def parse_factorio_mod_portal_url(raw_url: str) -> str:
     if parsed.scheme.casefold() != "https" or (parsed.hostname or "").casefold() != _FACTORIO_MOD_PORTAL_HOST:
         raise ValueError("Factorio mod links must use https://mods.factorio.com/mod/{name}.")
     path_parts = tuple(part for part in parsed.path.split("/") if part)
-    if len(path_parts) != 2 or path_parts[0] != "mod":
+    if len(path_parts) < 2 or path_parts[0] != "mod":
         raise ValueError("Factorio mod links must use https://mods.factorio.com/mod/{name}.")
     mod_id = path_parts[1]
     if not _FACTORIO_MOD_PORTAL_ID_RE.fullmatch(mod_id):
@@ -496,6 +572,7 @@ def _factorio_mod_portal_candidate(
         file_name=release.file_name,
         version=release.version,
         required_by=tuple(required_by),
+        dependency_ids=release.dependencies,
     )
 
 
@@ -505,13 +582,15 @@ async def _resolve_factorio_mod_portal_candidates_with_session(
     requested_mod_id: str,
     factorio_version: AppVersion | None,
 ) -> tuple[FactorioModPortalResolution, dict[str, FactorioModPortalRelease]]:
-    pending: deque[tuple[str, tuple[str, ...]]] = deque([(requested_mod_id, ())])
+    pending: deque[str] = deque([requested_mod_id])
     seen: set[str] = set()
-    candidates: list[FactorioModPortalCandidate] = []
+    ordered_ids: list[str] = []
+    payloads: dict[str, Mapping[str, object]] = {}
     releases: dict[str, FactorioModPortalRelease] = {}
+    required_by_ids: dict[str, set[str]] = {requested_mod_id: set()}
 
     while pending:
-        mod_id, required_by = pending.popleft()
+        mod_id = pending.popleft()
         if mod_id in seen:
             continue
         seen.add(mod_id)
@@ -520,13 +599,24 @@ async def _resolve_factorio_mod_portal_candidates_with_session(
             _factorio_mod_portal_releases(payload),
             factorio_version=factorio_version,
         )
+        ordered_ids.append(mod_id)
+        payloads[mod_id] = payload
         releases[mod_id] = release
-        candidates.append(_factorio_mod_portal_candidate(payload=payload, release=release, required_by=required_by))
         for dependency_id in release.dependencies:
+            required_by_ids.setdefault(dependency_id, set()).add(mod_id)
             if dependency_id not in seen:
-                pending.append((dependency_id, (mod_id,)))
+                pending.append(dependency_id)
 
-    return FactorioModPortalResolution(requested_mod_id=requested_mod_id, candidates=tuple(candidates)), releases
+    candidates = tuple(
+        _factorio_mod_portal_candidate(
+            payload=payloads[mod_id],
+            release=releases[mod_id],
+            required_by=tuple(sorted(required_by_ids.get(mod_id, set()))),
+        )
+        for mod_id in ordered_ids
+    )
+
+    return FactorioModPortalResolution(requested_mod_id=requested_mod_id, candidates=candidates), releases
 
 
 async def resolve_factorio_mod_portal_candidates(
@@ -935,6 +1025,7 @@ class FactorioSettingDefinition(Generic[_FactorioSettingValue]):
     paragraph: bool = False
     comment_key: str | None = None
     prefer_comment_desc: bool = False
+    forced_state_rules: tuple[SettingStateForceRule, ...] = ()
 
     def create_setting(self) -> Setting[_FactorioSettingValue]:
         return Setting(
@@ -946,6 +1037,7 @@ class FactorioSettingDefinition(Generic[_FactorioSettingValue]):
             power_level=self.power_level,
             desc=self.desc,
             paragraph=self.paragraph,
+            forced_state_rules=self.forced_state_rules,
         )
 
     @property
@@ -1009,6 +1101,12 @@ _FACTORIO_SETTING_DEFINITIONS: tuple[_FactorioSettingDefinitionItem, ...] = (
         BoolSettingSpec(_FACTORIO_PUBLIC_VISIBILITY_CHOICES),
         False,
         comment_key="visibility",
+        forced_state_rules=(
+            SettingStateForceRule(
+                True,
+                ForcedSettingState("require_user_verification", True),
+            ),
+        ),
     ),
     FactorioSettingDefinition[str](
         Setting_Label.password,
@@ -1224,6 +1322,44 @@ async def _console_raw_command(app_obj: object, value: object | None) -> Console
     )
 
 
+async def _console_promote(app_obj: object, value: object | None) -> ConsoleActionResult:
+    app = cast(Factorio, app_obj)
+    player = cast(str, value)
+    return await _run_factorio_console_command(
+        app,
+        f"/promote {player}",
+        success_text=f"{app.friendly}: promotion requested for `{player}`.",
+    )
+
+
+async def _console_demote(app_obj: object, value: object | None) -> ConsoleActionResult:
+    app = cast(Factorio, app_obj)
+    player = cast(str, value)
+    return await _run_factorio_console_command(
+        app,
+        f"/demote {player}",
+        success_text=f"{app.friendly}: demotion requested for `{player}`.",
+    )
+
+
+async def _console_admins(app_obj: object, value: object | None) -> ConsoleActionResult:
+    del value
+    app = cast(Factorio, app_obj)
+    return await _run_factorio_console_command(
+        app,
+        "/admins",
+        success_text=f"{app.friendly}: admin list requested.",
+    )
+
+
+_FACTORIO_PLAYER_PARAMETER = ConsoleActionParameter[str](
+    key="player",
+    label="Player",
+    value_type=str,
+    validator=_is_non_empty_text,
+    desc="Factorio player name to target.",
+    max_length=100,
+)
 _FACTORIO_RAW_COMMAND_PARAMETER = ConsoleActionParameter[str](
     key="command",
     label="Command",
@@ -1235,12 +1371,35 @@ _FACTORIO_RAW_COMMAND_PARAMETER = ConsoleActionParameter[str](
 )
 _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
     ConsoleAction(
+        key="admins",
+        label="List Admins",
+        description="List the current game admins.",
+        power_level=Power_Level.user,
+        execute=_console_admins,
+    ),
+    ConsoleAction(
         key="raw_command",
         label="Run Command",
         description="Send a raw command to the Factorio console.",
         power_level=Power_Level.sudo,
         execute=_console_raw_command,
         parameter=_FACTORIO_RAW_COMMAND_PARAMETER,
+    ),
+    ConsoleAction(
+        key="promote",
+        label="Promote Player",
+        description="Grant admin access to a player.",
+        power_level=Power_Level.sudo,
+        execute=_console_promote,
+        parameter=_FACTORIO_PLAYER_PARAMETER,
+    ),
+    ConsoleAction(
+        key="demote",
+        label="Demote Player",
+        description="Remove admin access from a player.",
+        power_level=Power_Level.sudo,
+        execute=_console_demote,
+        parameter=_FACTORIO_PLAYER_PARAMETER,
     ),
 )
 
@@ -1285,6 +1444,7 @@ class Factorio(App[App_Config]):
         self._tail_machers: set[_FACTORIO_LINE_MATCHER] = set()
         self._startup_error: str | None = None
         self._players: Players = Players(self)
+        self._activities: FactorioActivities = FactorioActivities(self)
         self.am_receiver = Receiver(self)
         self._matchers: Matchers = Matchers(self)
 
@@ -1304,9 +1464,60 @@ class Factorio(App[App_Config]):
 
         log.debug(f"{__name__}.Created")
 
+    async def post_init(self) -> None:
+        await super().post_init()
+        self._activities.configure_providers()
+
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
         return self.available_console_actions(_FACTORIO_CONSOLE_ACTIONS)
+
+    @property
+    def yuki_bridge_enabled(self) -> bool:
+        override = getattr(self, "_factorio_yuki_bridge_enabled", None)
+        if isinstance(override, bool):
+            return override
+        mod_manager = getattr(self, "mods", None)
+        if mod_manager is None:
+            return False
+        for mod in mod_manager.list_mods():
+            if not isinstance(mod, Mod_Factorio):
+                continue
+            if mod.factorio_mod_id.casefold() != _FACTORIO_YUKI_BRIDGE_MOD_ID:
+                continue
+            return mod.server_loadable and mod.cfg.enabled
+        return False
+
+    @property
+    def activity_providers(self) -> tuple[AppActivityProvider[Any], ...]:
+        activities = getattr(self, "_activities", None)
+        if activities is not None:
+            activities.configure_providers()
+        return super().activity_providers
+
+    @property
+    def relay_notice_player_death_enabled(self) -> bool | None:
+        if not self.yuki_bridge_enabled:
+            return None
+        return super().relay_notice_player_death_enabled
+
+    def apply_relay_notice_player_death_enabled(self, enabled: bool) -> None:
+        if not self.yuki_bridge_enabled:
+            raise ValueError(f"{self.friendly} requires {_FACTORIO_YUKI_BRIDGE_MOD_ID} for death notices.")
+        super().apply_relay_notice_player_death_enabled(enabled)
+
+    @property
+    def relay_notice_progress_enabled(self) -> bool | None:
+        if not self.yuki_bridge_enabled:
+            return None
+        return super().relay_notice_progress_enabled
+
+    def apply_relay_notice_progress_enabled(self, enabled: bool) -> None:
+        if not self.yuki_bridge_enabled:
+            raise ValueError(
+                f"{self.friendly} requires {_FACTORIO_YUKI_BRIDGE_MOD_ID} for {self.relay_progress_notice_term.lower()} notices."
+            )
+        super().apply_relay_notice_progress_enabled(enabled)
 
     @property
     def config_file_roots(self) -> tuple[AppConfigFileRoot, ...]:
@@ -1456,6 +1667,7 @@ class Factorio(App[App_Config]):
         await self._wait_for_startup_ready()
 
         await self._players.start()
+        await self._activities.start()
 
         self._running = True
         return True
@@ -1488,12 +1700,15 @@ class Factorio(App[App_Config]):
     async def stop(self) -> bool:
         log.info(f"{__name__}.stop")
         self._running = False
+        await self._activities.stop()
         await self._players.stop()
-        ok: str | None = await self._relay.send("/server-save", reconnect_on_failure=False)
+        ok: str | None = None
+        if self._relay.is_connected:
+            ok = await self._relay.send("/server-save", reconnect_on_failure=False)
         if not ok:
             if self.process and self.process.stdin:
                 log.debug("Falling back to stdin")
-                self.process.stdin.write("/server-save")
+                self.process.stdin.write("/server-save\n")
                 self.process.stdin.flush()
         if self._tail:
             await self._tail.stop()
@@ -1505,6 +1720,7 @@ class Factorio(App[App_Config]):
 
     async def kill(self) -> bool:
         self._running = False
+        await self._activities.stop()
         await self._players.stop()
         if self._tail:
             await self._tail.stop()
@@ -1917,12 +2133,265 @@ class Receiver(AM_Receiver):
                 reference_renderer=render_plain_reference_prefix,
             ),
         )
-        txt: str = f'/silent-command game.print("{payload.alias}: {content}")'
-        await self.app._relay.send(txt)
+        message = _format_factorio_console_message(alias=payload.alias, content=content)
+        app_config = getattr(self.app, "cfg", None)
+        use_shout = getattr(app_config, "factorio_chat_relay_use_shout", True)
+        if not use_shout:
+            await self.app._relay.send(f"/silent-command game.print({json.dumps(message)})")
+            return
+        if self.app.yuki_bridge_enabled:
+            response = await self.app._relay.send(
+                _format_factorio_bridge_say_command(alias=payload.alias, content=content)
+            )
+            if not _factorio_command_failed(response):
+                return
+        response = await self.app._relay.send(f"/shout {message}")
+        if _factorio_command_failed(response):
+            await self.app._relay.send(f"/silent-command game.print({json.dumps(message)})")
 
 
 def _render_factorio_research_name(raw_name: str) -> str:
     return humanise_mod_identifier(raw_name.strip(), split_single_camel=True)
+
+
+def _parse_factorio_map_age(text: str) -> FactorioMapAge | None:
+    total_seconds = 0.0
+    found_any = False
+    for match in _FACTORIO_MAP_AGE_PART_RE.finditer(text):
+        value = float(match.group("value"))
+        unit = match.group("unit").casefold()
+        if unit.startswith("d"):
+            total_seconds += value * 86_400
+        elif unit.startswith("h"):
+            total_seconds += value * 3_600
+        elif unit.startswith("m"):
+            total_seconds += value * 60
+        else:
+            total_seconds += value
+        found_any = True
+    if not found_any:
+        return None
+    return FactorioMapAge(total_seconds=int(total_seconds))
+
+
+def _parse_factorio_evolution(text: str) -> FactorioEvolution | None:
+    match = _FACTORIO_EVOLUTION_FACTOR_RE.search(text)
+    if match is None:
+        return None
+    raw_factor = float(match.group("value"))
+    factor = raw_factor / 100.0 if raw_factor > 1.0 else raw_factor
+    return FactorioEvolution(factor=max(0.0, min(1.0, factor)))
+
+
+def _optional_mapping(value: object) -> Mapping[str, object] | None:
+    if isinstance(value, Mapping):
+        return cast(Mapping[str, object], value)
+    return None
+
+
+def _normalise_factorio_bridge_evolution(value: object) -> FactorioEvolution | None:
+    if not isinstance(value, int | float):
+        return None
+    return FactorioEvolution(factor=max(0.0, min(1.0, float(value))))
+
+
+def _factorio_bridge_surface_name(surface_payload: Mapping[str, object]) -> str | None:
+    raw_name = surface_payload.get("name")
+    if isinstance(raw_name, str) and raw_name.strip():
+        return humanise_mod_identifier(raw_name.strip(), split_single_camel=True)
+    raw_planet = surface_payload.get("planet")
+    if isinstance(raw_planet, str) and raw_planet.strip():
+        return humanise_mod_identifier(raw_planet.strip(), split_single_camel=True)
+    return None
+
+
+def _factorio_bridge_surface_evolution(entry: object) -> FactorioSurfaceEvolution | None:
+    surface_entry = _optional_mapping(entry)
+    if surface_entry is None:
+        return None
+    surface_payload = _optional_mapping(surface_entry.get("surface"))
+    evolution_payload = _optional_mapping(surface_entry.get("evolution"))
+    if surface_payload is None or evolution_payload is None:
+        return None
+    surface_name = _factorio_bridge_surface_name(surface_payload)
+    if surface_name is None:
+        return None
+    evolution = _normalise_factorio_bridge_evolution(evolution_payload.get("total"))
+    if evolution is None:
+        return None
+    return FactorioSurfaceEvolution(surface_name, evolution)
+
+
+def _parse_factorio_bridge_evolution_snapshot(text: str) -> FactorioActivitySnapshot | None:
+    try:
+        payload = _optional_mapping(json.loads(text))
+    except json.JSONDecodeError:
+        return None
+    if payload is None or payload.get("kind") != "evolution":
+        return None
+    raw_surfaces = payload.get("surfaces")
+    if not isinstance(raw_surfaces, list):
+        return None
+    surface_evolutions = tuple(
+        surface_evolution
+        for item in raw_surfaces
+        if (surface_evolution := _factorio_bridge_surface_evolution(item)) is not None
+    )
+    if not surface_evolutions:
+        return None
+    ordered_evolutions = tuple(sorted(surface_evolutions, key=_surface_evolution_sort_key))
+    return FactorioActivitySnapshot(
+        primary_evolution=ordered_evolutions[0].evolution,
+        surface_evolutions=ordered_evolutions,
+    )
+
+
+def _normalise_factorio_surface_name(raw_name: str) -> str:
+    return raw_name.strip().strip("\"'[]()")
+
+
+def _surface_evolution_sort_key(surface_evolution: FactorioSurfaceEvolution) -> tuple[int, str]:
+    surface_name = surface_evolution.surface_name.casefold()
+    return (0 if surface_name == "nauvis" else 1, surface_name)
+
+
+def _parse_factorio_surface_evolutions(text: str) -> tuple[FactorioSurfaceEvolution, ...]:
+    evolutions_by_surface: dict[str, FactorioSurfaceEvolution] = {}
+    pending_surface_name: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        inline_match = _FACTORIO_INLINE_SURFACE_EVOLUTION_RE.match(line)
+        if inline_match is not None:
+            surface_name = _normalise_factorio_surface_name(inline_match.group("surface"))
+            evolution = _parse_factorio_evolution(line)
+            if surface_name and evolution is not None:
+                evolutions_by_surface[surface_name.casefold()] = FactorioSurfaceEvolution(surface_name, evolution)
+            pending_surface_name = None
+            continue
+        header_match = _FACTORIO_SURFACE_HEADER_RE.match(line)
+        if header_match is not None:
+            surface_name = _normalise_factorio_surface_name(header_match.group("surface"))
+            pending_surface_name = surface_name or None
+            continue
+        if pending_surface_name is None:
+            continue
+        evolution = _parse_factorio_evolution(line)
+        if evolution is None:
+            continue
+        evolutions_by_surface[pending_surface_name.casefold()] = FactorioSurfaceEvolution(pending_surface_name, evolution)
+        pending_surface_name = None
+    return tuple(sorted(evolutions_by_surface.values(), key=_surface_evolution_sort_key))
+
+
+def _format_factorio_console_message(*, alias: str, content: str) -> str:
+    clean_alias = " ".join(alias.strip().splitlines()).replace('"', "'")
+    clean_content = " ".join(content.strip().splitlines()).replace('"', "'")
+    combined = f"{clean_alias}: {clean_content}".strip()
+    if not combined:
+        raise ValueError("Factorio outbound relay message must not be empty.")
+    return combined
+
+
+def _format_factorio_bridge_say_command(*, alias: str, content: str) -> str:
+    clean_alias = " ".join(alias.strip().splitlines()).replace("|", "/")
+    clean_content = " ".join(content.strip().splitlines())
+    if not clean_alias or not clean_content:
+        raise ValueError("Factorio bridge outbound relay message must not be empty.")
+    return f"/yuki say {clean_alias}|{clean_content}"
+
+
+def _factorio_command_failed(response: str | None) -> bool:
+    if response is None:
+        return False
+    return _FACTORIO_COMMAND_FAILURE_RE.search(response) is not None
+
+
+class FactorioActivities:
+    _POLL_INTERVAL_SECONDS = 15.0
+
+    def __init__(self, app: "Factorio") -> None:
+        self.app: Factorio = app
+        self.snapshot: FactorioActivitySnapshot = FactorioActivitySnapshot()
+        self._map_age_provider = Provider_FactorioMapAge(app)
+        self._evolution_provider = Provider_FactorioEvolution(app)
+        self.configure_providers()
+        self._task: asyncio.Task[None] | None = None
+
+    def configure_providers(self) -> None:
+        providers: list[AppActivityProvider["Factorio"]] = [self._map_age_provider]
+        if self.app.yuki_bridge_enabled:
+            providers.append(self._evolution_provider)
+        self.app.set_activity_providers(tuple(providers))
+
+    async def start(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self.snapshot = FactorioActivitySnapshot()
+        self.configure_providers()
+        self.app.register_enabled_activity_providers()
+        self._task = asyncio.create_task(self._poll())
+
+    async def stop(self) -> None:
+        self.app.deregister_activity_providers()
+        self.snapshot = FactorioActivitySnapshot()
+        await self.app._cancel_background_task(self._task, label="activity task")
+        self._task = None
+
+    async def _poll(self) -> None:
+        while self.app.check_running() and not config.IS_SHUTTINGDOWN:
+            self.configure_providers()
+            commands: dict[str, str] = {"time": "/time"}
+            bridge_enabled = self.app.yuki_bridge_enabled
+            if bridge_enabled:
+                commands["evolution"] = "/yuki evolution player"
+            responses = await self.app._relay.send(commands)
+            if isinstance(responses, dict):
+                map_age = _parse_factorio_map_age(responses.get("time") or "")
+                primary_evolution: FactorioEvolution | None = None
+                surface_evolutions: tuple[FactorioSurfaceEvolution, ...] = ()
+                if bridge_enabled:
+                    evolution_snapshot = _parse_factorio_bridge_evolution_snapshot(responses.get("evolution") or "")
+                    if evolution_snapshot is not None:
+                        primary_evolution = evolution_snapshot.primary_evolution
+                        surface_evolutions = evolution_snapshot.surface_evolutions
+                self.snapshot = FactorioActivitySnapshot(
+                    map_age=map_age or self.snapshot.map_age,
+                    primary_evolution=primary_evolution if bridge_enabled else None,
+                    surface_evolutions=surface_evolutions if bridge_enabled else (),
+                )
+            await asyncio.sleep(self._POLL_INTERVAL_SECONDS)
+
+
+class Provider_FactorioMapAge(AppActivityProvider["Factorio"]):
+    metadata = AppActivityProviderMetadata(provider_id="map_age", label="Map Age")
+
+    async def get(self) -> str | None:
+        map_age = self.app._activities.snapshot.map_age
+        if map_age is None:
+            return None
+        return map_age.activity_text()
+
+
+class Provider_FactorioEvolution(AppActivityProvider["Factorio"]):
+    metadata = AppActivityProviderMetadata(provider_id="evolution", label="Evolution")
+
+    async def get(self) -> str | None:
+        if not self.app.yuki_bridge_enabled:
+            return None
+        evolution = self.app._activities.snapshot.primary_evolution
+        if evolution is None:
+            return None
+        return evolution.activity_text()
+
+    async def detail(self) -> str | None:
+        if not self.app.yuki_bridge_enabled:
+            return None
+        surface_evolutions = self.app._activities.snapshot.surface_evolutions
+        if not surface_evolutions:
+            return None
+        return "\n".join(surface_evolution.detail_text() for surface_evolution in surface_evolutions)
 
 
 class Matchers:
@@ -1946,7 +2415,7 @@ class Matchers:
                 DC_Relay.add(DC_Bound(self.app, msg, player))
 
     async def match_death(self, line: str):
-        if self.app.relay_notice_player_death_enabled is False:
+        if self.app.relay_notice_player_death_enabled is not True:
             return
         match: Match[str] | None = re.search(r"\[DIED\]\s+(\w+):(\S+)\s+(.+)", line, re.IGNORECASE)
         if not config.SILENT_DEBUG:
@@ -1987,7 +2456,7 @@ class Matchers:
             log.warning("Factorio error detected for %s: %s", self.app.name, self.app._startup_error)
 
     async def match_research(self, line: str) -> None:
-        if self.app.relay_notice_progress_enabled is False:
+        if self.app.relay_notice_progress_enabled is not True:
             return
         if match := _FACTORIO_RESEARCH_FINISHED_RE.search(line):
             research_name: str = _render_factorio_research_name(match.group("research"))

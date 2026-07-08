@@ -1853,6 +1853,7 @@ class App_Config(BaseModel):
     disabled_activity_provider_ids: tuple[str, ...] = Field(default_factory=tuple)
     cmd_start: list[str] = Field(default_factory=list)
     provider_alt_text: str | None = None
+    factorio_chat_relay_use_shout: bool = True
     version: AppVersion | None = None
     steam_update: SteamUpdateConfig | None = None
     factorio_update: FactorioUpdateConfig | None = None

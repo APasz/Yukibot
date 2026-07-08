@@ -72,7 +72,7 @@ from .runtime_imports import (
     NodeFactorioModSettings,
     NodeMinecraftRecipeWorkspaceState,
     NodeModList,
-    NodeModPortalResolveResult,
+    NodeModDependencyResolutionResult,
     NodeModUploadBatchResult,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -732,6 +732,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_notice_progress_label=page_data.app_entry.relay_notice_progress_label,
             relay_advancements_enabled=page_data.app_entry.relay_advancements_enabled,
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
+            factorio_chat_relay_use_shout=page_data.app_entry.factorio_chat_relay_use_shout,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
             minecraft_recipes=page_data.minecraft_recipes,
@@ -792,6 +793,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_notice_progress_label=page_data.app_entry.relay_notice_progress_label,
             relay_advancements_enabled=page_data.app_entry.relay_advancements_enabled,
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
+            factorio_chat_relay_use_shout=page_data.app_entry.factorio_chat_relay_use_shout,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
             factorio_mod_settings=page_data.factorio_mod_settings,
@@ -858,6 +860,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_notice_progress_label: str | None = None,
         relay_advancements_enabled: bool | None = None,
         relay_advancement_term: str | None = None,
+        factorio_chat_relay_use_shout: bool | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
         minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None,
@@ -922,6 +925,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_notice_progress_label=relay_notice_progress_label,
                     relay_advancements_enabled=relay_advancements_enabled,
                     relay_advancement_term=relay_advancement_term,
+                    factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
                     minecraft_recipes=minecraft_recipes,
@@ -983,6 +987,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_notice_progress_label: str | None = None,
         relay_advancements_enabled: bool | None = None,
         relay_advancement_term: str | None = None,
+        factorio_chat_relay_use_shout: bool | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
         factorio_mod_settings: NodeFactorioModSettings | None = None,
@@ -1033,6 +1038,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_notice_progress_label=relay_notice_progress_label,
                     relay_advancements_enabled=relay_advancements_enabled,
                     relay_advancement_term=relay_advancement_term,
+                    factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
                     factorio_mod_settings=factorio_mod_settings,
@@ -1381,7 +1387,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         app_name: str,
         url_to_install: str,
         user: ModWebUser,
-    ) -> NodeModPortalResolveResult:
+    ) -> NodeModDependencyResolutionResult:
         token: str = self._remote_token(
             node=node,
             app_name=app_name,
@@ -1408,7 +1414,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             payload: object = cast(object, response.json())
         except ValueError as xcp:
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
-        return NodeModPortalResolveResult.from_mapping(_json_object(payload, context="Remote node response"))
+        return NodeModDependencyResolutionResult.from_mapping(_json_object(payload, context="Remote node response"))
 
     def _direct_mod_upload_target(
         self,

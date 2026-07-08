@@ -56,7 +56,7 @@ from .runtime_imports import (
     NodeConsoleStdoutSnapshot,
     NodeFactorioModSettings,
     NodeModEntry,
-    NodeModPortalResolveResult,
+    NodeModDependencyResolutionResult,
     NodeModUploadBatchResult,
     NodeSaveEntry,
     NodeSaveList,
@@ -2718,7 +2718,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         model: ModWebPageModel,
         url_to_install: str,
         user: ModWebUser,
-    ) -> NodeModPortalResolveResult:
+    ) -> NodeModDependencyResolutionResult:
         if not self._user_has_level(user, Power_Level.user):
             raise PermissionError(f"User access is required to install mods for {model.app_friendly}.")
         url = url_to_install.strip()

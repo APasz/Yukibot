@@ -295,6 +295,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         relay_notice_player_death: bool | None = None,
         relay_notice_progress: bool | None = None,
         relay_advancements_enabled: bool | None = None,
+        factorio_chat_relay_use_shout: bool | None = None,
         disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
@@ -326,6 +327,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload["relay_notice_progress"] = relay_notice_progress
         if relay_advancements_enabled is not None:
             json_payload["relay_advancements_enabled"] = relay_advancements_enabled
+        if factorio_chat_relay_use_shout is not None:
+            json_payload["factorio_chat_relay_use_shout"] = factorio_chat_relay_use_shout
         if disabled_activity_provider_ids is not None:
             json_payload["disabled_activity_provider_ids"] = list(disabled_activity_provider_ids)
         if action is NodeAppMutationAction.UPDATE_DETAILS:
@@ -878,6 +881,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         relay_notice_player_death: bool | None = None,
         relay_notice_progress: bool | None = None,
         relay_advancements_enabled: bool | None = None,
+        factorio_chat_relay_use_shout: bool | None = None,
         disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
@@ -907,6 +911,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             relay_notice_player_death=relay_notice_player_death,
             relay_notice_progress=relay_notice_progress,
             relay_advancements_enabled=relay_advancements_enabled,
+            factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
             disabled_activity_provider_ids=disabled_activity_provider_ids,
             running_cpu_points=running_cpu_points,
             running_ram_points=running_ram_points,

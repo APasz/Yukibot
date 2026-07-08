@@ -43,7 +43,7 @@ from .runtime_imports import (
     NodeModEntry,
     NodeModList,
     NodeModMutationResult,
-    NodeModPortalResolveResult,
+    NodeModDependencyResolutionResult,
     NodeModUploadBatchResult,
     NodeRestartScheduleState,
     NodeSaveList,
@@ -649,7 +649,7 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_mod_link_install"]) -> Callable[..., NodeModUploadBatchResult]: ...
 
     @overload
-    def __getattr__(self, name: Literal["_remote_mod_link_resolve"]) -> Callable[..., NodeModPortalResolveResult]: ...
+    def __getattr__(self, name: Literal["_remote_mod_link_resolve"]) -> Callable[..., NodeModDependencyResolutionResult]: ...
 
     @overload
     def __getattr__(self, name: Literal["_remote_node_link"]) -> Callable[..., ModWebNodeLink]: ...
@@ -998,7 +998,7 @@ class ModWebServiceSupport:
     @overload
     def __getattr__(
         self, name: Literal["_resolve_mod_link"]
-    ) -> Callable[..., Awaitable[NodeModPortalResolveResult]]: ...
+    ) -> Callable[..., Awaitable[NodeModDependencyResolutionResult]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_warn_page_section_load_failure"]) -> Callable[..., None]: ...

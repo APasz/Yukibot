@@ -14,6 +14,7 @@ import hikari
 import lightbulb
 
 import config
+from _utils import format_player_capacity
 from _discord import App_Bound, DC_Bound, DC_Relay, RelayEmbedPayload
 from apps._app import App, AppRuntimeFaultKind
 from apps._config import (
@@ -90,6 +91,7 @@ class AppDetailsUpdate:
     relay_notice_player_death: bool | None = None
     relay_notice_progress: bool | None = None
     relay_advancements_enabled: bool | None = None
+    factorio_chat_relay_use_shout: bool | None = None
     disabled_activity_provider_ids: tuple[str, ...] | None = None
     title_font_preset: str | None = None
     steam_update_enabled: bool | None = None
@@ -748,6 +750,7 @@ class App_Manager(metaclass=config.Singleton):
         previous_player_session_notice = app.relay_notice_player_session_enabled
         previous_player_death_notice = app.relay_notice_player_death_enabled
         previous_progress_notice = app.relay_notice_progress_enabled
+        previous_factorio_chat_relay_use_shout = getattr(app.cfg, "factorio_chat_relay_use_shout", True)
         previous_disabled_activity_provider_ids = app.disabled_activity_provider_ids
         next_friendly_name = _validate_required_friendly_name(details.friendly_name)
         next_title_font_preset = (
@@ -761,6 +764,7 @@ class App_Manager(metaclass=config.Singleton):
         next_player_session_notice = self._resolve_next_relay_notice_player_session(app=app, details=details)
         next_player_death_notice = self._resolve_next_relay_notice_player_death(app=app, details=details)
         next_progress_notice = self._resolve_next_relay_notice_progress(app=app, details=details)
+        next_factorio_chat_relay_use_shout = self._resolve_next_factorio_chat_relay_use_shout(app=app, details=details)
         next_disabled_activity_provider_ids = self._resolve_next_disabled_activity_provider_ids(app=app, details=details)
         self._validate_steam_update_change_allowed(
             app=app,
@@ -800,6 +804,7 @@ class App_Manager(metaclass=config.Singleton):
             and previous_player_session_notice == next_player_session_notice
             and previous_player_death_notice == next_player_death_notice
             and previous_progress_notice == next_progress_notice
+            and previous_factorio_chat_relay_use_shout == next_factorio_chat_relay_use_shout
             and previous_disabled_activity_provider_ids == next_disabled_activity_provider_ids
         ):
             if (
@@ -837,6 +842,8 @@ class App_Manager(metaclass=config.Singleton):
             next_payload["relay_notice_progress"] = next_progress_notice
         if next_relay_advancements is not None:
             next_payload["relay_advancements"] = next_relay_advancements
+        if app.scope == "factorio":
+            next_payload["factorio_chat_relay_use_shout"] = next_factorio_chat_relay_use_shout
         if next_disabled_activity_provider_ids:
             next_payload["disabled_activity_provider_ids"] = list(next_disabled_activity_provider_ids)
         else:
@@ -857,6 +864,7 @@ class App_Manager(metaclass=config.Singleton):
         app.cfg.lifecycle_notice_started = details.lifecycle_notice_started
         app.cfg.lifecycle_notice_stopped = details.lifecycle_notice_stopped
         app.cfg.lifecycle_notice_crashed = details.lifecycle_notice_crashed
+        app.cfg.factorio_chat_relay_use_shout = next_factorio_chat_relay_use_shout
         app.cfg.resource_points.running = running_points
         app.cfg.resource_points.startup = startup_points
         app.cfg.steam_update = next_steam_update
@@ -950,6 +958,15 @@ class App_Manager(metaclass=config.Singleton):
         if current_notice is None:
             raise ValueError(f"{app.friendly} does not support {app.relay_progress_notice_term.lower()} notices.")
         return details.relay_notice_progress
+
+    @staticmethod
+    def _resolve_next_factorio_chat_relay_use_shout(*, app: ManagedApp, details: AppDetailsUpdate) -> bool:
+        current_value = getattr(app.cfg, "factorio_chat_relay_use_shout", True)
+        if details.factorio_chat_relay_use_shout is None:
+            return current_value
+        if app.scope != "factorio":
+            raise ValueError(f"{app.friendly} does not support Factorio chat relay routing.")
+        return details.factorio_chat_relay_use_shout
 
     @staticmethod
     def _steam_update_runtime_rebuild_required(
@@ -1881,7 +1898,10 @@ class Provider_Player(Activity_Provider):
         if players := await app.player_count():
             app.act_err_counts[budget_key] = app.act_err_threshold
             app.act_err_counts.pop(recovery_key, None)
-            status = f"{players[0]}/{players[1]}"
+            player_capacity_text: str | None = format_player_capacity(players[1])
+            if player_capacity_text is None:
+                raise RuntimeError("Player capacity unexpectedly missing for activity provider.")
+            status = f"{players[0]}/{player_capacity_text}"
             if not self.silent:
                 log.debug("Provider_Player: %s -> %s", app.name, status)
             return status
