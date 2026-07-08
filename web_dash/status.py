@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from fastapi.exceptions import RequestValidationError
@@ -104,6 +105,16 @@ _LOGIN_ADMINISTRATOR_LEVELS: tuple[Power_Level, ...] = (
 )
 # Historical ACL members who cannot serve as active support contacts.
 _LOGIN_CONTACT_EXCLUDED_USER_IDS: frozenset[int] = frozenset({792_857_784_508_219_404})
+
+
+@dataclass(slots=True)
+class _AliasDialogDraft:
+    display_name: str = ""
+    add_alias: str = ""
+    app_aliases: dict[str, str] = field(default_factory=dict)
+    steam_id: str = ""
+    minecraft_uuid: str = ""
+
 
 class ModWebStatusMixin(ModWebServiceSupport):
     @staticmethod
@@ -989,7 +1000,474 @@ class ModWebStatusMixin(ModWebServiceSupport):
         ui.navigate.to(self.index_path())
         return True
 
+    def _alias_known_scopes(self) -> tuple[str, ...]:
+        scopes: set[str] = {scope.value for scope in config.AppScopes}
+        manager = self._manager
+        if manager is None:
+            return tuple(sorted(scopes, key=str.casefold))
+        list_known_scopes = getattr(manager, "list_known_scopes", None)
+        if callable(list_known_scopes):
+            known_scopes = list_known_scopes()
+            if isinstance(known_scopes, tuple) and all(isinstance(scope, str) for scope in known_scopes):
+                scopes.update(scope.strip().lower() for scope in known_scopes if scope.strip())
+                return tuple(sorted(scopes, key=str.casefold))
+        apps = getattr(manager, "apps", None)
+        if isinstance(apps, dict):
+            scopes.update(app.scope.strip().lower() for app in apps.values() if app.scope.strip())
+        list_create_scopes = getattr(manager, "list_create_scopes", None)
+        if callable(list_create_scopes):
+            create_scopes = list_create_scopes()
+            if isinstance(create_scopes, tuple) and all(isinstance(scope, str) for scope in create_scopes):
+                scopes.update(scope.strip().lower() for scope in create_scopes if scope.strip())
+        return tuple(sorted(scopes, key=str.casefold))
+
+    @staticmethod
+    def _alias_target_label(*, name_cache: config.Name_Cache, user_id: int, viewer: ModWebUser) -> str:
+        entry = name_cache.by_id.get(user_id)
+        username = entry.account if entry is not None else (viewer.username if user_id == viewer.discord_id else None)
+        global_name = entry.global_name if entry is not None else (viewer.global_name if user_id == viewer.discord_id else None)
+        primary = global_name or username
+        if primary is None:
+            return str(user_id)
+        return f"{primary} ({user_id})"
+
+    def _alias_target_options(self, *, name_cache: config.Name_Cache, viewer: ModWebUser) -> dict[str, str]:
+        user_ids: set[int] = {viewer.discord_id}
+        user_ids.update(user_id for user_id in name_cache.by_id if isinstance(user_id, int))
+        ordered_user_ids = sorted(
+            user_ids,
+            key=lambda user_id: self._alias_target_label(name_cache=name_cache, user_id=user_id, viewer=viewer).casefold(),
+        )
+        return {
+            str(user_id): self._alias_target_label(name_cache=name_cache, user_id=user_id, viewer=viewer)
+            for user_id in ordered_user_ids
+        }
+
+    def _build_alias_panel(self, *, ui: ModWebUi, user: ModWebUser) -> Callable[[], None]:
+        can_switch_user = self._user_has_level(user, Power_Level.sudo)
+        alias_dialog = None
+        alias_dialog_rendered = False
+
+        def _show_alias_panel() -> None:
+            nonlocal alias_dialog, alias_dialog_rendered
+            if alias_dialog_rendered:
+                if alias_dialog is None:
+                    raise RuntimeError("Alias dialog was not rendered.")
+                alias_dialog.open()
+                return
+
+            alias_dialog_rendered = True
+            name_cache = config.Name_Cache()
+            state: dict[str, int] = {"target_user_id": user.discord_id}
+            drafts_by_user: dict[int, _AliasDialogDraft] = {}
+            form_controls: dict[str, ModWebValueContainer] = {}
+            app_alias_controls: dict[str, ModWebValueContainer] = {}
+            refresh_alias_body: Callable[[], None] = lambda: None
+
+            def _target_user_id() -> int:
+                target_user_id = state.get("target_user_id", user.discord_id)
+                if not can_switch_user:
+                    return user.discord_id
+                return target_user_id
+
+            def _current_app_scopes() -> tuple[str, ...]:
+                return self._alias_known_scopes()
+
+            def _build_alias_draft(target_user_id: int) -> _AliasDialogDraft:
+                return _AliasDialogDraft(
+                    display_name=name_cache.get_display_override(
+                        target_user_id,
+                        config.DisplayNameCategory.WEB,
+                    )
+                    or "",
+                    app_aliases={
+                        scope: name_cache.get_game_alias(target_user_id, scope) or ""
+                        for scope in _current_app_scopes()
+                    },
+                    steam_id=name_cache.get_platform_id(target_user_id, "steam") or "",
+                    minecraft_uuid=name_cache.get_game_uuid(target_user_id, "minecraft") or "",
+                )
+
+            def _draft_for_user(target_user_id: int) -> _AliasDialogDraft:
+                draft = drafts_by_user.get(target_user_id)
+                if draft is None:
+                    draft = _build_alias_draft(target_user_id)
+                    drafts_by_user[target_user_id] = draft
+                return draft
+
+            def _set_control_value(control: object, value: str) -> None:
+                setattr(control, "value", value)
+
+            def _capture_alias_draft() -> None:
+                if not form_controls:
+                    return
+                draft = _draft_for_user(_target_user_id())
+                draft.display_name = _value_as_text(form_controls["display_name"])
+                draft.add_alias = _value_as_text(form_controls["add_alias"])
+                draft.steam_id = _value_as_text(form_controls["steam_id"])
+                draft.minecraft_uuid = _value_as_text(form_controls["minecraft_uuid"])
+                draft.app_aliases = {
+                    scope: _value_as_text(control)
+                    for scope, control in app_alias_controls.items()
+                }
+
+            def _save_alias_form() -> None:
+                _capture_alias_draft()
+                target_user_id = _target_user_id()
+                draft = _draft_for_user(target_user_id)
+                changed_fields: list[str] = []
+                try:
+                    if name_cache.set_display_override(
+                        target_user_id,
+                        config.DisplayNameCategory.WEB,
+                        draft.display_name,
+                    ):
+                        changed_fields.append("display name")
+                    for scope in _current_app_scopes():
+                        next_alias = draft.app_aliases.get(scope, "")
+                        current_alias = name_cache.get_game_alias(target_user_id, scope) or ""
+                        if next_alias:
+                            if next_alias != current_alias:
+                                name_cache.set_game_alias(target_user_id, scope, next_alias)
+                                changed_fields.append(f"{scope.title()} alias")
+                            continue
+                        if current_alias:
+                            name_cache.remove_game_alias(target_user_id, scope)
+                            changed_fields.append(f"{scope.title()} alias")
+                    if name_cache.set_platform_id(target_user_id, "steam", draft.steam_id):
+                        changed_fields.append("Steam ID")
+                    if name_cache.set_game_uuid(target_user_id, "minecraft", draft.minecraft_uuid):
+                        changed_fields.append("Minecraft UUID")
+                except ValueError as xcp:
+                    ui.notify(str(xcp), type="negative")
+                    return
+                drafts_by_user[target_user_id] = _build_alias_draft(target_user_id)
+                ui.notify("Saved alias changes." if changed_fields else "Alias values are unchanged.", type="positive")
+                refresh_alias_body()
+
+            def _handle_target_user_change(event: ModWebValueContainer) -> None:
+                if not can_switch_user:
+                    return
+                raw_value = str(_value_as_object(event) or "").strip()
+                if not raw_value.isdigit():
+                    ui.notify("Selected user is invalid.", type="negative")
+                    return
+                next_user_id = int(raw_value)
+                if next_user_id == state["target_user_id"]:
+                    return
+                _capture_alias_draft()
+                state["target_user_id"] = next_user_id
+                refresh_alias_body()
+
+            with ui.dialog() as alias_dialog:
+                with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
+                    with ui.column().classes("w-full gap-4 mod-app-details-layout"):
+                        with ui.column().classes("gap-1"):
+                            ui.label("Alias").classes("text-xl font-black mod-title-small")
+                            ui.label("Manage display names, aliases, game handles, and linked identities.").classes(
+                                "mod-subtitle text-sm"
+                            )
+                        target_select = (
+                            ui.select(
+                                self._alias_target_options(name_cache=name_cache, viewer=user),
+                                value=str(state["target_user_id"]),
+                                label="User",
+                                on_change=_handle_target_user_change,
+                            )
+                            .props("filled square dense hide-bottom-space color=accent options-dark")
+                            .classes("mod-app-details-field w-full")
+                        )
+                        if not can_switch_user:
+                            target_select.disable()
+
+                        def _render_inline_alias_input(
+                            *,
+                            label: str,
+                            value: str,
+                            clear_tooltip: str,
+                            clear_icon: str = "backspace",
+                            control_key: str,
+                        ) -> None:
+                            with ui.element("div").classes(
+                                "grid grid-cols-[minmax(0,1fr)_3rem] items-stretch gap-2 w-full min-w-0"
+                            ):
+                                control = (
+                                    ui.input(label, value=value)
+                                    .props("filled square dense hide-bottom-space color=accent")
+                                    .classes("mod-app-details-field min-w-0")
+                                )
+                                form_controls[control_key] = control
+                                def on_clear() -> None:
+                                    _set_control_value(control, "")
+                                    _capture_alias_draft()
+
+                                clear_button = ui.button("", on_click=lambda _: on_clear()).props(
+                                    f'icon={clear_icon} flat dense round aria-label="{clear_tooltip}"'
+                                ).classes("mod-list-button secondary w-full min-w-0 px-2 py-2")
+                                self._attach_text_tooltip(ui=ui, target=clear_button, text=clear_tooltip)
+
+                        def _render_alias_body() -> None:
+                            target_user_id = _target_user_id()
+                            form_controls.clear()
+                            app_alias_controls.clear()
+                            target_names = name_cache.by_id.get(target_user_id, config.UserNames())
+                            draft = _draft_for_user(target_user_id)
+                            current_aliases = tuple(sorted(target_names.nicknames, key=str.casefold))
+                            current_app_scopes = _current_app_scopes()
+                            with ui.column().classes("w-full gap-4"):
+                                with ui.column().classes("mod-app-details-section gap-3"):
+                                    ui.label("Display Name").classes("mod-stat-label")
+                                    _render_inline_alias_input(
+                                        label="Display Name",
+                                        value=draft.display_name,
+                                        clear_tooltip="Clear display name",
+                                        control_key="display_name",
+                                    )
+
+                                with ui.column().classes("mod-app-details-section gap-3"):
+                                    ui.label("General Aliases").classes("mod-stat-label")
+                                    def _add_general_alias() -> None:
+                                        _capture_alias_draft()
+                                        draft = _draft_for_user(target_user_id)
+                                        value = draft.add_alias
+                                        draft.add_alias = ""
+                                        self._add_alias_general_name(
+                                            ui=ui,
+                                            name_cache=name_cache,
+                                            user_id=target_user_id,
+                                            value=value,
+                                            refresh=refresh_alias_body,
+                                        )
+
+                                    with ui.element("div").classes(
+                                        "grid grid-cols-[minmax(0,1fr)_3rem_3rem] items-stretch gap-2 w-full min-w-0"
+                                    ):
+                                        add_alias_control = (
+                                            ui.input("Add General Alias", value=draft.add_alias)
+                                            .props("filled square dense hide-bottom-space color=accent")
+                                            .classes("mod-app-details-field min-w-0")
+                                        )
+                                        form_controls["add_alias"] = add_alias_control
+                                        reset_alias_button = ui.button(
+                                            "",
+                                            on_click=lambda _:
+                                            (
+                                                _set_control_value(add_alias_control, ""),
+                                                _capture_alias_draft(),
+                                            ),
+                                        ).props('icon=restart_alt flat dense round aria-label="Reset alias input"').classes(
+                                            "mod-list-button secondary w-full min-w-0 px-2 py-2"
+                                        )
+                                        add_alias_button = ui.button(
+                                            "",
+                                            on_click=lambda _: _add_general_alias(),
+                                        ).props('icon=add flat dense round aria-label="Add general alias"').classes(
+                                            "mod-list-button w-full min-w-0 px-2 py-2"
+                                        )
+                                        self._attach_text_tooltip(
+                                            ui=ui,
+                                            target=reset_alias_button,
+                                            text="Reset alias input",
+                                        )
+                                        self._attach_text_tooltip(
+                                            ui=ui,
+                                            target=add_alias_button,
+                                            text="Add general alias",
+                                        )
+                                    if current_aliases:
+                                        for alias in current_aliases:
+                                            with ui.row().classes("w-full items-center justify-between gap-2"):
+                                                ui.label(alias).classes("mod-subtitle text-sm break-all")
+                                                remove_button = ui.button(
+                                                    "",
+                                                    on_click=lambda _, alias=alias:
+                                                    (
+                                                        _capture_alias_draft(),
+                                                        self._remove_alias_general_name(
+                                                            ui=ui,
+                                                            name_cache=name_cache,
+                                                            user_id=target_user_id,
+                                                            alias=alias,
+                                                            refresh=refresh_alias_body,
+                                                        ),
+                                                    ),
+                                                ).props('icon=delete flat dense round aria-label="Remove alias"').classes(
+                                                    "mod-list-button secondary shrink-0 px-2 py-2"
+                                                )
+                                                self._attach_text_tooltip(ui=ui, target=remove_button, text="Remove alias")
+                                    else:
+                                        ui.label("No general aliases set.").classes("mod-subtitle text-xs")
+
+                                with ui.column().classes("mod-app-details-section gap-3"):
+                                    ui.label("App Aliases").classes("mod-stat-label")
+                                    if current_app_scopes:
+                                        for scope in current_app_scopes:
+                                            _render_inline_alias_input(
+                                                label=f"{scope.title()} Alias",
+                                                value=draft.app_aliases.get(scope, ""),
+                                                clear_tooltip=f"Clear {scope.title()} alias",
+                                                control_key=f"app_alias:{scope}",
+                                            )
+                                            app_alias_controls[scope] = form_controls[f"app_alias:{scope}"]
+                                    else:
+                                        ui.label("No app scopes are available on this node.").classes(
+                                            "mod-subtitle text-xs"
+                                        )
+
+                                with ui.column().classes("mod-app-details-section gap-3"):
+                                    ui.label("Linked Accounts").classes("mod-stat-label")
+                                    _render_inline_alias_input(
+                                        label="Steam ID",
+                                        value=draft.steam_id,
+                                        clear_tooltip="Clear Steam ID",
+                                        control_key="steam_id",
+                                    )
+                                    _render_inline_alias_input(
+                                        label="Minecraft UUID",
+                                        value=draft.minecraft_uuid,
+                                        clear_tooltip="Clear Minecraft UUID",
+                                        control_key="minecraft_uuid",
+                                    )
+
+                        refreshable = getattr(ui, "refreshable", None)
+                        if callable(refreshable):
+                            render_alias_body = ui.refreshable(_render_alias_body)
+                            refresh_alias_body = render_alias_body.refresh
+                        else:
+                            render_alias_body = _render_alias_body
+                            refresh_alias_body = _render_alias_body
+
+                        render_alias_body()
+                        with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
+                            ui.button("Save", on_click=lambda _: _save_alias_form()).classes("mod-list-button")
+                            ui.button("Close", on_click=alias_dialog.close).classes("mod-list-button secondary")
+
+            alias_dialog.open()
+
+        return _show_alias_panel
+
+    @staticmethod
+    def _save_alias_display_override(
+        *,
+        ui: ModWebUi,
+        name_cache: config.Name_Cache,
+        user_id: int,
+        value: str | None,
+        refresh: Callable[[], None],
+    ) -> None:
+        try:
+            changed = name_cache.set_display_override(user_id, config.DisplayNameCategory.WEB, value)
+        except ValueError as xcp:
+            ui.notify(str(xcp), type="negative")
+            return
+        ui.notify("Saved display name." if changed else "Display name is unchanged.", type="positive")
+        refresh()
+
+    @staticmethod
+    def _add_alias_general_name(
+        *,
+        ui: ModWebUi,
+        name_cache: config.Name_Cache,
+        user_id: int,
+        value: str,
+        refresh: Callable[[], None],
+    ) -> None:
+        try:
+            name_cache.add_name(user_id, value, False)
+        except ValueError as xcp:
+            ui.notify(str(xcp), type="negative")
+            return
+        ui.notify("Added general alias.", type="positive")
+        refresh()
+
+    @staticmethod
+    def _remove_alias_general_name(
+        *,
+        ui: ModWebUi,
+        name_cache: config.Name_Cache,
+        user_id: int,
+        alias: str,
+        refresh: Callable[[], None],
+    ) -> None:
+        name_cache.remove_name(user_id, alias)
+        ui.notify(f"Removed `{alias}`.", type="positive")
+        refresh()
+
+    @staticmethod
+    def _save_alias_game_name(
+        *,
+        ui: ModWebUi,
+        name_cache: config.Name_Cache,
+        user_id: int,
+        scope: str,
+        value: str,
+        refresh: Callable[[], None],
+    ) -> None:
+        try:
+            name_cache.set_game_alias(user_id, scope, value)
+        except ValueError as xcp:
+            ui.notify(str(xcp), type="negative")
+            return
+        ui.notify(f"Saved {scope.title()} alias.", type="positive")
+        refresh()
+
+    @staticmethod
+    def _clear_alias_game_name(
+        *,
+        ui: ModWebUi,
+        name_cache: config.Name_Cache,
+        user_id: int,
+        scope: str,
+        refresh: Callable[[], None],
+    ) -> None:
+        name_cache.remove_game_alias(user_id, scope)
+        ui.notify(f"Cleared {scope.title()} alias.", type="positive")
+        refresh()
+
+    @staticmethod
+    def _save_alias_platform_id(
+        *,
+        ui: ModWebUi,
+        name_cache: config.Name_Cache,
+        user_id: int,
+        platform: str,
+        value: str | None,
+        refresh: Callable[[], None],
+    ) -> None:
+        try:
+            changed = name_cache.set_platform_id(user_id, platform, value)
+        except ValueError as xcp:
+            ui.notify(str(xcp), type="negative")
+            return
+        ui.notify(
+            f"Saved {platform.title()} identity." if changed else f"{platform.title()} identity is unchanged.",
+            type="positive",
+        )
+        refresh()
+
+    @staticmethod
+    def _save_alias_game_uuid(
+        *,
+        ui: ModWebUi,
+        name_cache: config.Name_Cache,
+        user_id: int,
+        scope: str,
+        value: str | None,
+        refresh: Callable[[], None],
+    ) -> None:
+        try:
+            changed = name_cache.set_game_uuid(user_id, scope, value)
+        except ValueError as xcp:
+            ui.notify(str(xcp), type="negative")
+            return
+        ui.notify(
+            f"Saved {scope.title()} UUID." if changed else f"{scope.title()} UUID is unchanged.",
+            type="positive",
+        )
+        refresh()
+
     def _render_user_utility_launcher(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+        open_alias_panel = self._build_alias_panel(ui=ui, user=user)
         open_discord_settings = (
             self._build_discord_settings_panel(ui=ui, user=user) if self._user_can_manage_discord_settings(user) else None
         )
@@ -1034,6 +1512,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     ("Clear Transfers", _clear_transfers),
                 )
             )
+        action_specs.append(("Alias", open_alias_panel))
         if open_discord_settings is not None:
             action_specs.append(("Discord", open_discord_settings))
         if open_fake_chat_preview is not None:

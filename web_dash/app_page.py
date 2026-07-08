@@ -5917,13 +5917,9 @@ class ModWebAppPageMixin(
                                     "blocked"
                                     if not entry.downloadable
                                     else (
-                                        "mod-row-client-only"
-                                        if entry.placement is ModPlacement.CLIENT_ONLY
-                                        else (
-                                            "mod-row-disabled"
-                                            if entry.placement is ModPlacement.SERVER_DISABLED
-                                            else ""
-                                        )
+                                        "mod-row-disabled"
+                                        if entry.placement is ModPlacement.SERVER_DISABLED
+                                        else ""
                                     )
                                 ),
                             }

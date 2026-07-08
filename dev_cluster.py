@@ -13,10 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from tempfile import gettempdir
 from time import monotonic, sleep
 
 _STOP_TIMEOUT_SECONDS = 10.0
 _TERMINAL_WIDTH = 88
+_STATE_DIRECTORY = Path(gettempdir()) / "yukibot-dev-cluster"
 
 
 class ClusterMember(StrEnum):
@@ -66,6 +68,27 @@ class RunningProcess:
     env: dict[str, str]
     process: subprocess.Popen[str]
     output_thread: threading.Thread
+
+
+@dataclass(frozen=True, slots=True)
+class ClusterProcessRecord:
+    member: ClusterMember
+    pid: int
+
+    def to_json(self) -> dict[str, object]:
+        return {"member": self.member.value, "pid": self.pid}
+
+    @classmethod
+    def from_json(cls, payload: object) -> "ClusterProcessRecord":
+        if not isinstance(payload, dict):
+            raise ValueError("Process record must be a JSON object.")
+        raw_member = payload.get("member")
+        raw_pid = payload.get("pid")
+        if not isinstance(raw_member, str):
+            raise ValueError("Process record member must be a string.")
+        if not isinstance(raw_pid, int):
+            raise ValueError("Process record pid must be an integer.")
+        return cls(member=ClusterMember(raw_member), pid=raw_pid)
 
 
 def load_dotenv_values(path: Path) -> dict[str, str]:
@@ -253,6 +276,7 @@ class DevClusterManager:
         self._processes: dict[ClusterMember, RunningProcess] = {}
 
     def start(self, member: ClusterMember) -> None:
+        self._cleanup_member_record(member)
         current = self._processes.get(member)
         if current is not None and current.process.poll() is None:
             self._printer.line(f"{member.value} is already running (pid {current.process.pid}).")
@@ -277,35 +301,28 @@ class DevClusterManager:
         )
         output_thread.start()
         self._processes[member] = RunningProcess(member=member, env=env, process=process, output_thread=output_thread)
+        self._write_process_record(ClusterProcessRecord(member=member, pid=process.pid))
         self._printer.line(f"Started {member.value} (pid {process.pid}).")
 
     def stop(self, member: ClusterMember) -> None:
         running = self._processes.get(member)
         if running is None or running.process.poll() is not None:
+            if self._stop_recorded_member(member):
+                self._processes.pop(member, None)
+                return
             self._printer.line(f"{member.value} is not running.")
             return
 
         process = running.process
         self._printer.line(f"Stopping {member.value} (pid {process.pid}).")
+        self._terminate_process_group(member=member, pid=process.pid)
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            running.output_thread.join(timeout=1.0)
-            return
-
-        deadline = monotonic() + _STOP_TIMEOUT_SECONDS
-        while monotonic() < deadline:
-            if process.poll() is not None:
-                break
-            sleep(0.1)
-        if process.poll() is None:
-            self._printer.line(f"{member.value} did not exit in time; killing it.")
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        process.wait(timeout=5.0)
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self._printer.line(f"{member.value} process {process.pid} did not exit after group termination.")
         running.output_thread.join(timeout=1.0)
+        self._clear_process_record(member, expected_pid=process.pid)
+        self._processes.pop(member, None)
 
     def restart(self, member: ClusterMember) -> None:
         self.stop(member)
@@ -339,7 +356,93 @@ class DevClusterManager:
             self._printer.process_line(member, raw_line.rstrip())
         process.stdout.close()
         return_code = process.wait()
+        self._clear_process_record(member, expected_pid=process.pid)
         self._printer.line(f"[{member.value.upper().ljust(6)}] exited with code {return_code}")
+
+    def _record_path(self, member: ClusterMember) -> Path:
+        return _STATE_DIRECTORY / f"{member.value}.json"
+
+    def _load_process_record(self, member: ClusterMember) -> ClusterProcessRecord | None:
+        path = self._record_path(member)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            record = ClusterProcessRecord.from_json(payload)
+        except (OSError, ValueError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+            return None
+        if record.member is not member:
+            path.unlink(missing_ok=True)
+            return None
+        return record
+
+    def _write_process_record(self, record: ClusterProcessRecord) -> None:
+        _STATE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        self._record_path(record.member).write_text(
+            json.dumps(record.to_json(), sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def _clear_process_record(self, member: ClusterMember, *, expected_pid: int | None = None) -> None:
+        path = self._record_path(member)
+        if expected_pid is not None:
+            record = self._load_process_record(member)
+            if record is None or record.pid != expected_pid:
+                return
+        path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _pid_exists(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def _terminate_process_group(self, *, member: ClusterMember, pid: int) -> None:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = monotonic() + _STOP_TIMEOUT_SECONDS
+        while monotonic() < deadline:
+            if not self._pid_exists(pid):
+                return
+            sleep(0.1)
+        self._printer.line(f"{member.value} did not exit in time; killing it.")
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+
+    def _stop_recorded_member(self, member: ClusterMember) -> bool:
+        record = self._load_process_record(member)
+        if record is None:
+            return False
+        if not self._pid_exists(record.pid):
+            self._clear_process_record(member, expected_pid=record.pid)
+            return False
+        self._printer.line(f"Stopping stale {member.value} process group (pid {record.pid}).")
+        self._terminate_process_group(member=member, pid=record.pid)
+        self._clear_process_record(member, expected_pid=record.pid)
+        return True
+
+    def _cleanup_member_record(self, member: ClusterMember) -> None:
+        record = self._load_process_record(member)
+        if record is None:
+            return
+        tracked = self._processes.get(member)
+        if tracked is not None and tracked.process.poll() is None and tracked.process.pid == record.pid:
+            return
+        if not self._pid_exists(record.pid):
+            self._clear_process_record(member, expected_pid=record.pid)
+            return
+        self._printer.line(f"Found stale {member.value} process from an earlier run (pid {record.pid}); stopping it.")
+        self._terminate_process_group(member=member, pid=record.pid)
+        self._clear_process_record(member, expected_pid=record.pid)
 
 
 def _parse_command_target(token: str) -> tuple[ClusterMember, ...]:
@@ -362,6 +465,26 @@ def _print_banner(printer: _ConsolePrinter, settings: ClusterSettings) -> None:
     printer.line(f"node api: erin={settings.ports.node_api_base_url(ClusterMember.ERIN)}")
     printer.line("commands: status | start <name|all> | stop <name|all> | restart <name|all> | quit")
     printer.line("=" * _TERMINAL_WIDTH)
+
+
+def _install_signal_handlers(manager: DevClusterManager, printer: _ConsolePrinter) -> None:
+    handled_signals: list[signal.Signals] = [signal.SIGTERM, signal.SIGINT]
+    if hasattr(signal, "SIGHUP"):
+        handled_signals.append(signal.SIGHUP)
+    shutting_down = False
+
+    def _handle_signal(signum: int, _frame: object | None) -> None:
+        nonlocal shutting_down
+        if shutting_down:
+            raise SystemExit(128 + signum)
+        shutting_down = True
+        signal_name = signal.Signals(signum).name
+        printer.line(f"{signal_name} received; stopping all processes.")
+        manager.stop_all()
+        raise SystemExit(128 + signum)
+
+    for signum in handled_signals:
+        signal.signal(signum, _handle_signal)
 
 
 def _run_repl(manager: DevClusterManager, printer: _ConsolePrinter) -> int:
@@ -430,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     printer = _ConsolePrinter()
     _print_banner(printer, settings)
     manager = DevClusterManager(base_env=base_env, settings=settings, printer=printer)
+    _install_signal_handlers(manager, printer)
     if not args.no_start:
         manager.start_all()
     return _run_repl(manager, printer)

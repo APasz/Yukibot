@@ -3133,12 +3133,6 @@ class ModWebTheme:
                         inset 3px 0 0 rgba(113, 113, 122, 0.7),
                         inset 0 0 0 1px rgba(161, 161, 170, 0.12);
                 }}
-                .mod-row-client-only {{
-                    border-color: rgba(139, 92, 246, 0.72) !important;
-                    box-shadow:
-                        inset 3px 0 0 rgba(139, 92, 246, 0.82),
-                        inset 0 0 0 1px rgba(196, 181, 253, 0.14);
-                }}
                 .mod-row-clickable {{ cursor: pointer; }}
                 .mod-virtual-mod-table {{
                     max-height: min(70vh, 54rem);

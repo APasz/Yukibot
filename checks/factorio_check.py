@@ -194,6 +194,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
                         "base >= 2.0.0",
                         "required-lib >= 1.0.0",
                         "? optional-lib",
+                        "+ recommended-lib",
                         "! incompatible-lib",
                         "~ hidden-required-lib >= 1.0.0",
                         "required-lib >= 1.0.0",
@@ -203,6 +204,70 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
 
         self.assertEqual(release.dependencies, ("required-lib", "hidden-required-lib"))
+
+    def test_factorio_mod_portal_resolution_ignores_recommended_dependencies(self) -> None:
+        def release_payload(mod_id: str, dependencies: list[str]) -> dict[str, object]:
+            return {
+                "download_url": f"/download/{mod_id}/1.0.0",
+                "file_name": f"{mod_id}_1.0.0.zip",
+                "version": "1.0.0",
+                "sha1": "0" * 40,
+                "released_at": "2026-01-01T00:00:00.000000Z",
+                "info_json": {"factorio_version": "2.0", "dependencies": dependencies},
+            }
+
+        class _FakeResponse:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.status = 200
+                self._payload = payload
+
+            async def __aenter__(self) -> "_FakeResponse":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        class _FakeSession:
+            def __init__(self) -> None:
+                self.requested_mod_ids: list[str] = []
+
+            async def __aenter__(self) -> "_FakeSession":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            def get(self, url: str, **_kwargs: object) -> _FakeResponse:
+                mod_id = url.split("/api/mods/", maxsplit=1)[1].removesuffix("/full")
+                self.requested_mod_ids.append(mod_id)
+                payloads: dict[str, dict[str, object]] = {
+                    "root": {
+                        "name": "root",
+                        "title": "Root Mod",
+                        "releases": [release_payload("root", ["+ recommended-lib"])],
+                    },
+                    "recommended-lib": {
+                        "name": "recommended-lib",
+                        "title": "Recommended Library",
+                        "releases": [release_payload("recommended-lib", [])],
+                    },
+                }
+                return _FakeResponse(payloads[mod_id])
+
+        session = _FakeSession()
+        with patch("apps.factorio.aiohttp.ClientSession", return_value=session):
+            resolution = asyncio.run(
+                resolve_factorio_mod_portal_candidates(
+                    page_url="https://mods.factorio.com/mod/root",
+                    factorio_version=AppVersion(main="2.0.68"),
+                )
+            )
+
+        self.assertEqual(tuple(candidate.mod_id for candidate in resolution.candidates), ("root",))
+        self.assertEqual(session.requested_mod_ids, ["root"])
 
     def test_factorio_mod_portal_resolution_includes_required_dependencies(self) -> None:
         def release_payload(mod_id: str, dependencies: list[str]) -> dict[str, object]:

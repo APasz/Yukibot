@@ -2585,8 +2585,6 @@ class ModWebActionsMixin(ModWebServiceSupport):
         row_classes = ["mod-row", "w-full"]
         if not entry.downloadable:
             row_classes.append("blocked")
-        elif entry.placement is ModPlacement.CLIENT_ONLY:
-            row_classes.append("mod-row-client-only")
         elif entry.placement is ModPlacement.SERVER_DISABLED:
             row_classes.append("mod-row-disabled")
         dialog: Dialog | None = None

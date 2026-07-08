@@ -122,8 +122,11 @@ class ModWebService(
 
     @staticmethod
     def _web_display_name(user: ModWebUser) -> str:
-        override = config.Name_Cache().get_display_override(user.discord_id, config.DisplayNameCategory.WEB)
-        return override or user.display_name
+        return config.Name_Cache().cached_display_name(
+            user.discord_id,
+            user.display_name,
+            category=config.DisplayNameCategory.WEB,
+        )
 
     @staticmethod
     def _web_chat_author_display_name(

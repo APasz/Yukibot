@@ -243,8 +243,8 @@ class NameCacheTests(unittest.TestCase):
                 cache.cached_display_name(1, category=config.DisplayNameCategory.DISCORD, preferred_guild_id=100),
                 "Relay Name",
             )
-            self.assertEqual(cache.cached_display_name(1, preferred_guild_id=100), "global-name [user-name]")
-            self.assertEqual(cache.relay_mention_name(1, preferred_guild_id=100), "global-name")
+            self.assertEqual(cache.cached_display_name(1, preferred_guild_id=100), "Relay Name")
+            self.assertEqual(cache.relay_mention_name(1, preferred_guild_id=100), "Relay Name")
 
     def test_relay_mention_name_prefers_scope_alias(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -332,6 +332,13 @@ class NameCacheTests(unittest.TestCase):
             resolved = cache.web_display_name(1, scope="minecraft", platforms=("steam",))
 
         self.assertEqual(resolved, "Portal Name")
+
+    def test_display_overrides_migrate_legacy_web_and_discord_fields(self) -> None:
+        overrides = config.DisplayNameOverrides.model_validate({"discord": "Relay Name", "web": "Portal Name"})
+
+        self.assertEqual(overrides.value, "Portal Name")
+        self.assertEqual(overrides.get_for_category(config.DisplayNameCategory.DISCORD), "Portal Name")
+        self.assertEqual(overrides.get_for_category(config.DisplayNameCategory.WEB), "Portal Name")
 
     def test_relay_display_name_prefers_platform_alias_after_scope(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -495,6 +502,7 @@ class NameCacheTests(unittest.TestCase):
 
             self.assertTrue(changed)
             self.assertEqual(cache.get_display_override(123, config.DisplayNameCategory.WEB), "Portal Alice")
+            self.assertEqual(cache.get_display_override(123, config.DisplayNameCategory.DISCORD), "Portal Alice")
 
     def test_add_name_rejects_alias_used_by_another_user(self) -> None:
         with TemporaryDirectory() as tmp:

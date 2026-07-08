@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import signal
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from dev_cluster import (
     ClusterMember,
     ClusterPorts,
+    ClusterProcessRecord,
+    DevClusterManager,
+    _install_signal_handlers,
     build_process_environment,
     load_dotenv_values,
     settings_from_environment,
@@ -144,6 +150,90 @@ class DevClusterEnvironmentTests(unittest.TestCase):
         self.assertEqual(ports.node_api_base_url(ClusterMember.ERIN), "http://127.0.0.1:8083")
         with self.assertRaisesRegex(ValueError, "does not expose"):
             ports.node_api_base_url(ClusterMember.PORTAL)
+
+
+class _RecordingPrinter:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def line(self, text: str) -> None:
+        self.lines.append(text)
+
+    def process_line(self, member: ClusterMember, line: str) -> None:
+        self.lines.append(f"{member.value}:{line}")
+
+
+class DevClusterManagerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.base_env = {
+            "DATA_AUTHORITY_TOKEN": "authority-token",
+            "BOT_TOKEN": "yuki-token",
+            "ERIN_BOT_TOKEN": "erin-token",
+        }
+        self.settings = settings_from_environment(env=self.base_env, env_file=Path(".env"))
+
+    def test_stop_uses_recorded_stale_process_when_member_is_untracked(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            printer = _RecordingPrinter()
+            manager = DevClusterManager(base_env=self.base_env, settings=self.settings, printer=printer)
+            record = ClusterProcessRecord(member=ClusterMember.PORTAL, pid=4321)
+
+            with patch("dev_cluster._STATE_DIRECTORY", Path(temp_dir)):
+                manager._write_process_record(record)
+                with (
+                    patch.object(manager, "_pid_exists", side_effect=[True, False]),
+                    patch("dev_cluster.os.killpg") as killpg_mock,
+                ):
+                    manager.stop(ClusterMember.PORTAL)
+
+        killpg_mock.assert_called_once_with(4321, signal.SIGTERM)
+        self.assertIn("Stopping stale portal process group (pid 4321).", printer.lines)
+
+    def test_start_cleans_stale_record_before_launching_new_process(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            printer = _RecordingPrinter()
+            manager = DevClusterManager(base_env=self.base_env, settings=self.settings, printer=printer)
+            stale_record = ClusterProcessRecord(member=ClusterMember.PORTAL, pid=1111)
+            fake_process = SimpleNamespace(pid=2222, stdout=[], poll=lambda: None)
+            fake_thread = SimpleNamespace(start=lambda: None)
+
+            with patch("dev_cluster._STATE_DIRECTORY", Path(temp_dir)):
+                manager._write_process_record(stale_record)
+                with (
+                    patch.object(manager, "_pid_exists", side_effect=[True, True, False]),
+                    patch("dev_cluster.os.killpg") as killpg_mock,
+                    patch("dev_cluster.subprocess.Popen", return_value=fake_process),
+                    patch("dev_cluster.threading.Thread", return_value=fake_thread),
+                ):
+                    manager.start(ClusterMember.PORTAL)
+                next_record = manager._load_process_record(ClusterMember.PORTAL)
+
+        killpg_mock.assert_called_once_with(1111, signal.SIGTERM)
+        self.assertIsNotNone(next_record)
+        assert next_record is not None
+        self.assertEqual(next_record.pid, 2222)
+        self.assertIn("Found stale portal process from an earlier run (pid 1111); stopping it.", printer.lines)
+
+
+class DevClusterSignalHandlerTests(unittest.TestCase):
+    def test_install_signal_handlers_stops_all_processes_on_sigterm(self) -> None:
+        manager = Mock()
+        printer = _RecordingPrinter()
+        handlers: dict[int, object] = {}
+
+        def _capture(signum: int, handler: object) -> None:
+            handlers[signum] = handler
+
+        with patch("dev_cluster.signal.signal", side_effect=_capture):
+            _install_signal_handlers(manager, printer)
+
+        handler = handlers[int(signal.SIGTERM)]
+        with self.assertRaises(SystemExit) as context:
+            handler(int(signal.SIGTERM), None)
+
+        self.assertEqual(context.exception.code, 128 + int(signal.SIGTERM))
+        manager.stop_all.assert_called_once_with()
+        self.assertIn("SIGTERM received; stopping all processes.", printer.lines)
 
 
 if __name__ == "__main__":

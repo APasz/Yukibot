@@ -9021,6 +9021,33 @@ class ModWebTests(unittest.TestCase):
         )
         self.assertEqual(dialog.open.call_count, 2)
 
+    def test_mod_download_row_client_mod_uses_default_row_border_classes(self) -> None:
+        service = ModWebService()
+        ui = MagicMock()
+        row = MagicMock()
+        ui.row.return_value.classes.return_value = row
+        entry = self._mod_entry(
+            name="alpha-client.jar",
+            friendly="Alpha Client",
+            mod_type=ModType.CLIENT,
+            placement=ModPlacement.CLIENT_ONLY,
+        )
+
+        service._render_mod_download_row(
+            ui=cast(ModWebUi, ui),
+            entry=entry,
+            download_url=None,
+            on_change=Mock(),
+            can_select=True,
+            app_friendly="Minecraft Alpha",
+            model=cast(ModWebPageModel, object()),
+            user=cast(ModWebUser, object()),
+        )
+
+        row_classes = ui.row.return_value.classes.call_args_list[0].args[0]
+        self.assertNotIn("mod-row-client-only", row_classes)
+        self.assertIn("mod-row-clickable", row_classes)
+
     def test_large_mod_list_uses_virtual_scroll_table(self) -> None:
         service = ModWebService()
         mods = tuple(
@@ -9110,6 +9137,80 @@ class ModWebTests(unittest.TestCase):
         self.assertIn('window.sessionStorage.getItem(storageKey)', scroll_javascript)
         self.assertIn('window.sessionStorage.setItem(storageKey, String(position))', scroll_javascript)
         self.assertIn('mod-web:mods-scroll:yuki:factorio_alpha', scroll_javascript)
+
+    def test_large_mod_list_client_mod_rows_use_default_state_class(self) -> None:
+        service = ModWebService()
+        mods = tuple(
+            self._mod_entry(
+                name=f"client-mod-{index}.jar",
+                friendly=f"Client Mod {index}",
+                mod_type=ModType.CLIENT,
+                placement=ModPlacement.CLIENT_ONLY,
+            )
+            for index in range(50)
+        )
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            app_color_hex=None,
+            app_scope="factorio",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="factorio_alpha",
+                app_friendly="Factorio Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=self._mod_list(app_name="factorio_alpha", mods=mods),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={mod.name: f"/mods/{mod.name}" for mod in mods},
+        )
+        ui = MagicMock()
+        ui.refreshable.side_effect = lambda function: function
+        select = MagicMock()
+        select.props.return_value.classes.return_value = select
+        select.value = ModWebModlistFormat.PLAINTEXT.value
+        ui.select.return_value = select
+        table = MagicMock()
+        table.props.return_value.classes.return_value = table
+        table.rows = []
+        table.selected = []
+        ui.table.return_value = table
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_has_level", return_value=False),
+            patch.object(service, "_render_flat_tab_header"),
+            patch.object(
+                service,
+                "_render_mod_toolbar",
+                return_value=SimpleNamespace(
+                    selection_button=None,
+                    download_button=None,
+                    delete_control=None,
+                    result_count_label=None,
+                    metadata_status_button=None,
+                ),
+            ),
+            patch.object(service, "_render_mod_download_row"),
+        ):
+            service._render_mods_section(ui=cast(ModWebUi, ui), model=model, user=user)
+
+        rows = cast(list[dict[str, object]], ui.table.call_args.kwargs["rows"])
+        self.assertTrue(rows)
+        self.assertTrue(all(row["state_class"] == "" for row in rows))
 
     def test_filter_mod_entries_matches_name_version_and_state_tokens(self) -> None:
         service = ModWebService()
@@ -16134,6 +16235,7 @@ class ModWebTests(unittest.TestCase):
         ):
             service._render_user_header(ui=cast(ModWebUi, cast(object, ui)), user=user)
 
+        self.assertIn("Alias", [button.text for button in ui.buttons])
         self.assertIn("Discord", [button.text for button in ui.buttons])
         self.assertEqual(
             [control.value for control in ui.inputs],
@@ -16248,7 +16350,408 @@ class ModWebTests(unittest.TestCase):
         ):
             service._render_user_header(ui=cast(ModWebUi, cast(object, ui)), user=user)
 
+        self.assertIn("Alias", [button.text for button in ui.buttons])
         self.assertIn("Log out", [button.text for button in ui.buttons])
+
+    def test_render_user_header_menu_branch_includes_alias_item(self) -> None:
+        class FakeContainer:
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeContainer":
+                del value, replace
+                return self
+
+            def props(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def style(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+            ) -> "FakeContainer":
+                del value, add, remove
+                return self
+
+            def on(self, event: str, handler: object | None = None, *, js_handler: str | None = None) -> "FakeContainer":
+                del event, handler, js_handler
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeDialog(FakeContainer):
+            def open(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FakeButton(FakeContainer):
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.menu_items: list[FakeButton] = []
+                self.navigate = SimpleNamespace(reload=lambda: None, to=lambda *_args, **_kwargs: None)
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def dialog(self) -> FakeDialog:
+                return FakeDialog()
+
+            def menu(self) -> FakeContainer:
+                return FakeContainer()
+
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
+            def html(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def button(self, text: str = "", **kwargs: object) -> FakeButton:
+                del text, kwargs
+                return FakeButton("")
+
+            def menu_item(self, text: str, **kwargs: object) -> FakeButton:
+                del kwargs
+                item = FakeButton(text)
+                self.menu_items.append(item)
+                return item
+
+            def notify(self, message: str, *, type: str | None = None) -> None:
+                del message, type
+                return None
+
+        service = ModWebService()
+        ui = FakeUi()
+        user = ModWebUser(discord_id=42, username="sudo", global_name="Finch", avatar_hash=None)
+
+        with (
+            patch.object(service, "_user_can_manage_discord_settings", return_value=False),
+            patch.object(service, "_user_can_use_fake_chat_preview", return_value=False),
+            patch.object(service, "_user_has_level", side_effect=lambda _user, level: level is Power_Level.sudo),
+        ):
+            service._render_user_utility_launcher(ui=cast(ModWebUi, cast(object, ui)), user=user)
+
+        self.assertEqual(
+            [item.text for item in ui.menu_items],
+            ["Sim Upload", "Sim Download", "Clear Transfers", "Alias", "Log out"],
+        )
+
+    def test_alias_target_label_does_not_duplicate_unknown_discord_id(self) -> None:
+        cache = object.__new__(config.Name_Cache)
+        cache.by_id = {}
+        user = ModWebUser(discord_id=42, username=None, global_name=None, avatar_hash=None)
+
+        label = ModWebService._alias_target_label(name_cache=cache, user_id=42, viewer=user)
+
+        self.assertEqual(label, "42")
+
+    def test_alias_known_scopes_includes_configured_app_scopes_without_manager(self) -> None:
+        service = ModWebService()
+
+        scopes = service._alias_known_scopes()
+
+        self.assertEqual(scopes, tuple(sorted((scope.value for scope in config.AppScopes), key=str.casefold)))
+
+    def test_alias_panel_user_switcher_is_disabled_without_sudo(self) -> None:
+        class FakeContainer:
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeContainer":
+                del value, replace
+                return self
+
+            def props(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def style(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+            ) -> "FakeContainer":
+                del value, add, remove
+                return self
+
+            def on(self, event: str, handler: object | None = None, *, js_handler: str | None = None) -> "FakeContainer":
+                del event, handler, js_handler
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeDialog(FakeContainer):
+            def open(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FakeButton(FakeContainer):
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class FakeInput(FakeContainer):
+            def __init__(self, value: object) -> None:
+                self.value = value
+                self.disabled = False
+
+            def disable(self) -> None:
+                self.disabled = True
+
+        class FakeSelect(FakeInput):
+            def __init__(self, options: object, value: object, label: str) -> None:
+                super().__init__(value)
+                self.options = options
+                self.label = label
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.buttons: list[FakeButton] = []
+                self.inputs: list[FakeInput] = []
+                self.selects: list[FakeSelect] = []
+                self.navigate = SimpleNamespace(reload=lambda: None)
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def dialog(self) -> FakeDialog:
+                return FakeDialog()
+
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
+            def html(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def button(self, text: str = "", **kwargs: object) -> FakeButton:
+                del kwargs
+                button = FakeButton(text)
+                self.buttons.append(button)
+                return button
+
+            def input(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                control = FakeInput(kwargs.get("value"))
+                self.inputs.append(control)
+                return control
+
+            def select(self, options: object, *, value: object, label: str, **kwargs: object) -> FakeSelect:
+                del kwargs
+                control = FakeSelect(options, value, label)
+                self.selects.append(control)
+                return control
+
+            def notify(self, message: str, *, type: str | None = None) -> None:
+                del message, type
+                return None
+
+        service = ModWebService()
+        service.set_manager(cast(Any, SimpleNamespace(apps={}, list_known_scopes=lambda: ("factorio", "minecraft"))))
+        ui = FakeUi()
+        user = ModWebUser(discord_id=42, username="visitor", global_name="Visitor", avatar_hash=None)
+        cache = object.__new__(config.Name_Cache)
+        cache.pointer = Path("discord_names.json")
+        cache.by_id = {7: config.UserNames(account="other_user", global_name="Other User")}
+        cache.by_alias = {}
+        cache.by_platform_id = {}
+
+        with patch.object(config, "Name_Cache", return_value=cache):
+            with patch.object(service, "_user_has_level", return_value=False):
+                open_panel = service._build_alias_panel(ui=cast(ModWebUi, cast(object, ui)), user=user)
+                open_panel()
+
+        self.assertEqual(len(ui.selects), 1)
+        self.assertEqual(ui.selects[0].label, "User")
+        self.assertTrue(ui.selects[0].disabled)
+        self.assertEqual(ui.selects[0].value, "42")
+
+    def test_alias_panel_user_switcher_is_enabled_for_sudo(self) -> None:
+        class FakeContainer:
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeContainer":
+                del value, replace
+                return self
+
+            def props(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
+            def style(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+            ) -> "FakeContainer":
+                del value, add, remove
+                return self
+
+            def on(self, event: str, handler: object | None = None, *, js_handler: str | None = None) -> "FakeContainer":
+                del event, handler, js_handler
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeDialog(FakeContainer):
+            def open(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class FakeButton(FakeContainer):
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class FakeInput(FakeContainer):
+            def __init__(self, value: object) -> None:
+                self.value = value
+                self.disabled = False
+
+            def disable(self) -> None:
+                self.disabled = True
+
+        class FakeSelect(FakeInput):
+            def __init__(self, options: object, value: object, label: str) -> None:
+                super().__init__(value)
+                self.options = options
+                self.label = label
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.buttons: list[FakeButton] = []
+                self.inputs: list[FakeInput] = []
+                self.selects: list[FakeSelect] = []
+                self.navigate = SimpleNamespace(reload=lambda: None)
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def dialog(self) -> FakeDialog:
+                return FakeDialog()
+
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
+            def html(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def button(self, text: str = "", **kwargs: object) -> FakeButton:
+                del kwargs
+                button = FakeButton(text)
+                self.buttons.append(button)
+                return button
+
+            def input(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                control = FakeInput(kwargs.get("value"))
+                self.inputs.append(control)
+                return control
+
+            def select(self, options: object, *, value: object, label: str, **kwargs: object) -> FakeSelect:
+                del kwargs
+                control = FakeSelect(options, value, label)
+                self.selects.append(control)
+                return control
+
+            def notify(self, message: str, *, type: str | None = None) -> None:
+                del message, type
+                return None
+
+        service = ModWebService()
+        service.set_manager(cast(Any, SimpleNamespace(apps={}, list_known_scopes=lambda: ("factorio", "minecraft"))))
+        ui = FakeUi()
+        user = ModWebUser(discord_id=42, username="sudo", global_name="Finch", avatar_hash=None)
+        cache = object.__new__(config.Name_Cache)
+        cache.pointer = Path("discord_names.json")
+        cache.by_id = {7: config.UserNames(account="other_user", global_name="Other User")}
+        cache.by_alias = {}
+        cache.by_platform_id = {}
+
+        with patch.object(config, "Name_Cache", return_value=cache):
+            with patch.object(service, "_user_has_level", side_effect=lambda _user, level: level is Power_Level.sudo):
+                open_panel = service._build_alias_panel(ui=cast(ModWebUi, cast(object, ui)), user=user)
+                open_panel()
+
+        self.assertEqual(len(ui.selects), 1)
+        self.assertEqual(ui.selects[0].label, "User")
+        self.assertFalse(ui.selects[0].disabled)
+        self.assertEqual(ui.selects[0].value, "42")
+        self.assertEqual(
+            ui.selects[0].options,
+            {
+                "42": "Finch (42)",
+                "7": "Other User (7)",
+            },
+        )
 
     def test_app_enable_disable_label_reflects_enabled_state(self) -> None:
         enabled_model = ModWebBasePageModel(

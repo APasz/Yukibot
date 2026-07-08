@@ -1,0 +1,26 @@
+{
+  "scope": "sevendays",
+  "mods": [
+    {
+      "identities": [
+        {
+          "kind": "native",
+          "namespace": "sevendays",
+          "value": "GalaxyFarFarAway"
+        },
+        {
+          "kind": "filename",
+          "namespace": "sevendays",
+          "value": "galaxyfarfaraway"
+        }
+      ],
+      "friendly_name": null,
+      "classification_override": {
+        "mod_type": "client",
+        "download_block_reason": null
+      },
+      "mod_pages": []
+    }
+  ],
+  "schema_version": 1
+}

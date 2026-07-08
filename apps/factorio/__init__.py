@@ -445,7 +445,7 @@ def _factorio_required_dependency_mod_id(raw_dependency: object) -> str | None:
     dependency = raw_dependency.strip()
     if not dependency:
         return None
-    if dependency.startswith(("?", "!", "(?)")):
+    if dependency.startswith(("?", "+", "!", "(?)")):
         return None
     if dependency.startswith("~"):
         dependency = dependency.removeprefix("~").strip()

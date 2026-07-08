@@ -1,8 +1,8 @@
 import enum
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 from urllib.parse import urlparse
 
 import aiohttp
@@ -146,17 +146,27 @@ class AliasEditorView:
         return self.app_scopes.page_state
 
 
-async def ac_all_ids(ctx: lightbulb.AutocompleteContext[str], names_cache: Name_Cache) -> None:
-    accounts = sorted({entry.account for entry in names_cache.by_id.values() if entry.account})
-    await ctx.respond(accounts)
+async def ac_discord_usernames(ctx: lightbulb.AutocompleteContext[str], names_cache: Name_Cache) -> None:
+    needle = ctx.focused.value.strip().lower() if isinstance(ctx.focused.value, str) else ""
+    usernames = sorted({entry.account for entry in names_cache.by_id.values() if entry.account}, key=str.casefold)
+    if needle:
+        usernames = [username for username in usernames if needle in username.lower()]
+    await ctx.respond(usernames[:25])
 
 
 def _all_app_scopes(manager: App_Manager) -> tuple[str, ...]:
-    return tuple(sorted({app.scope.lower() for app in manager.apps.values()}))
-
-
-def _editable_app_scopes(manager: App_Manager) -> tuple[str, ...]:
-    return tuple(scope for scope in _all_app_scopes(manager) if scope != _MINECRAFT_SCOPE)
+    list_known_scopes = getattr(manager, "list_known_scopes", None)
+    if callable(list_known_scopes):
+        known_scopes = cast("Callable[[], object]", list_known_scopes)()
+        if isinstance(known_scopes, tuple) and all(isinstance(scope, str) for scope in known_scopes):
+            return tuple(scope.strip().lower() for scope in known_scopes if scope.strip())
+    scopes: set[str] = {app.scope.lower() for app in manager.apps.values()}
+    list_create_scopes = getattr(manager, "list_create_scopes", None)
+    if callable(list_create_scopes):
+        create_scopes = cast("Callable[[], object]", list_create_scopes)()
+        if isinstance(create_scopes, tuple) and all(isinstance(scope, str) for scope in create_scopes):
+            scopes.update(scope.strip().lower() for scope in create_scopes if scope.strip())
+    return tuple(sorted(scopes))
 
 
 def _component_text(value: str, /, *, limit: int = 100) -> str:
@@ -226,7 +236,7 @@ def _section_label(section: AliasEditorSection) -> str:
 
 
 def _app_scope_options(manager: App_Manager) -> tuple[str, ...]:
-    return _editable_app_scopes(manager)
+    return _all_app_scopes(manager)
 
 
 def _platform_label(platform: str) -> str:
@@ -236,11 +246,8 @@ def _platform_label(platform: str) -> str:
 
 
 def _display_override_label(category: config.DisplayNameCategory) -> str:
-    if category is config.DisplayNameCategory.DISCORD:
-        return "Discord"
-    if category is config.DisplayNameCategory.WEB:
-        return "Web App"
-    raise ValueError(f"Unsupported display override category `{category}`.")
+    _require_display_override_category(category)
+    return "Display Name"
 
 
 def _require_known_app_scope(manager: App_Manager, scope: str) -> str:
@@ -257,9 +264,11 @@ def _require_display_override_category(category: object) -> config.DisplayNameCa
 
 
 def _display_override_entries(names: UserNames) -> tuple[DisplayOverrideEntry, ...]:
-    return tuple(
-        DisplayOverrideEntry(category=category, value=names.display_overrides.get_for_category(category))
-        for category in config.DisplayNameCategory
+    return (
+        DisplayOverrideEntry(
+            category=config.DisplayNameCategory.WEB,
+            value=names.display_overrides.get_for_category(config.DisplayNameCategory.WEB),
+        ),
     )
 
 
@@ -822,7 +831,7 @@ class AliasEditorService:
 
         if action.kind is AliasActionKind.SET_DISPLAY_OVERRIDE:
             if not req.values:
-                return EditorResponse.ephemeral("Choose a display override to edit first.")
+                return EditorResponse.ephemeral("Choose a display name to edit first.")
             try:
                 category = _require_display_override_category(req.values[0])
             except ValueError as xcp:
@@ -830,7 +839,7 @@ class AliasEditorService:
             names = _user_names_for_editor(names_cache, target_user_id)
             current_value = names.display_overrides.get_for_category(category) or ""
             await req.interaction.create_modal_response(
-                f"Set {_display_override_label(category)} Display Name",
+                f"Set {_display_override_label(category)}",
                 self._display_override_modal.build_id(
                     self._action_codec.build(AliasActionKind.SET_DISPLAY_OVERRIDE, page=action.page, value=category.value),
                     scope_id=target_user_id,
@@ -910,7 +919,7 @@ class AliasEditorService:
 
         if action.kind is AliasActionKind.CLEAR_DISPLAY_OVERRIDE:
             if not req.values:
-                return EditorResponse.ephemeral("Choose a display override to clear.")
+                return EditorResponse.ephemeral("Choose a display name to clear.")
             try:
                 category = _require_display_override_category(req.values[0])
             except ValueError as xcp:
@@ -923,7 +932,7 @@ class AliasEditorService:
                 names_cache=names_cache,
                 manager=manager,
                 section=AliasEditorSection.DISPLAY_OVERRIDES,
-                status=f"Cleared {_display_override_label(category)} display override.",
+                status="Cleared display name.",
                 page=action.page,
             )
 
@@ -1147,11 +1156,11 @@ class AliasEditorService:
                     EditorSelectOption(
                         label=_display_override_label(entry.category),
                         value=entry.category.value,
-                        description=_component_text(entry.value or "Set or update display override"),
+                        description=_component_text(entry.value or "Set or update display name"),
                     )
                     for entry in view.display_overrides.visible
                 ],
-                placeholder="Set display override",
+                placeholder="Set display name",
             )
             active_display_overrides = [entry for entry in view.display_overrides.visible if entry.value]
             if active_display_overrides:
@@ -1164,11 +1173,11 @@ class AliasEditorService:
                         EditorSelectOption(
                             label=_display_override_label(entry.category),
                             value=entry.category.value,
-                            description=_component_text(entry.value or "Clear display override"),
+                            description=_component_text(entry.value or "Clear display name"),
                         )
                         for entry in active_display_overrides
                     ],
-                    placeholder="Clear display override",
+                    placeholder="Clear display name",
                 )
         if view.section is AliasEditorSection.ALIASES:
             layout.add_button(
@@ -1392,7 +1401,7 @@ class AliasEditorService:
             names_cache=names_cache,
             manager=manager,
             section=AliasEditorSection.DISPLAY_OVERRIDES,
-            status=f"Set {_display_override_label(category)} display override to `{display_name}`.",
+            status=f"Set display name to `{display_name}`.",
             page=action.page,
         )
 
@@ -1589,7 +1598,7 @@ class CMD_Alias(
     description="Open the identity, alias, and account linking editor",
 ):
     publc = lightbulb.boolean("publc", "Send the editor as a normal message", default=False)  # type: ignore[reportAssignmentType]
-    user = lightbulb.string("user", "Other user", autocomplete=ac_all_ids, default=None)  # pyright: ignore[reportAssignmentType, reportArgumentType]
+    user = lightbulb.string("user", "Discord username for another user", autocomplete=ac_discord_usernames, default=None)  # pyright: ignore[reportAssignmentType, reportArgumentType]
     manual_name = lightbulb.string("manual_name", "Manual display name for a raw uncached Discord user ID", default=None)  # pyright: ignore[reportAssignmentType, reportArgumentType]
 
     @lightbulb.invoke

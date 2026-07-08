@@ -2232,24 +2232,28 @@ class DisplayNameCategory(enum.StrEnum):
 
 
 class DisplayNameOverrides(BaseModel):
-    discord: str | None = None
-    web: str | None = None
+    value: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_fields(cls, raw_value: object) -> object:
+        if not isinstance(raw_value, Mapping):
+            return raw_value
+        if "value" in raw_value:
+            return raw_value
+        data = dict(raw_value)
+        data["value"] = data.get("web") or data.get("discord")
+        data.pop("web", None)
+        data.pop("discord", None)
+        return data
 
     def get_for_category(self, category: DisplayNameCategory) -> str | None:
-        if category is DisplayNameCategory.DISCORD:
-            return self.discord
-        if category is DisplayNameCategory.WEB:
-            return self.web
-        raise ValueError(f"Unsupported display override category `{category}`.")
+        del category
+        return self.value
 
     def set_for_category(self, category: DisplayNameCategory, value: str | None) -> None:
-        if category is DisplayNameCategory.DISCORD:
-            self.discord = value
-            return
-        if category is DisplayNameCategory.WEB:
-            self.web = value
-            return
-        raise ValueError(f"Unsupported display override category `{category}`.")
+        del category
+        self.value = value
 
 
 class UserNames(BaseModel):
@@ -2291,8 +2295,7 @@ class Persona:
     discord_global: str | None
     discord_nicks: dict[hikari.Snowflake, str]
     scopes: dict[str, str]
-    web_override: str | None
-    discord_override: str | None
+    display_override: str | None
     aliases: tuple[str, ...]
 
 
@@ -2400,8 +2403,7 @@ class Name_Cache(metaclass=Singleton):
                 if nickname
             },
             scopes=scope_aliases,
-            web_override=user.display_overrides.web,
-            discord_override=user.display_overrides.discord,
+            display_override=user.display_overrides.value,
             aliases=tuple(alias for alias in cls._sorted_name_values(user.nicknames) if alias),
         )
 
@@ -2415,12 +2417,10 @@ class Name_Cache(metaclass=Singleton):
         before = user.model_dump(mode="json")
         user.avatar_hash = self._normalised_optional_text(user.avatar_hash, label="Discord avatar hash")
         user.guild_names = {int(guild_id): name for guild_id, name in user.guild_names.items() if name}
-        for category in DisplayNameCategory:
-            normalised_override = self._normalised_optional_text(
-                user.display_overrides.get_for_category(category),
-                label=f"{category.value} display override",
-            )
-            user.display_overrides.set_for_category(category, normalised_override)
+        user.display_overrides.value = self._normalised_optional_text(
+            user.display_overrides.value,
+            label="display override",
+        )
         self._sync_known_names(user)
         return user.model_dump(mode="json") != before
 
@@ -2680,7 +2680,7 @@ class Name_Cache(metaclass=Singleton):
         self, user_id: int, category: DisplayNameCategory | str, display_name: object | None
     ) -> bool:
         category_key = self._normalised_display_name_category(category)
-        value = self._normalised_optional_text(display_name, label=f"{category_key.value} display override")
+        value = self._normalised_optional_text(display_name, label="display override")
         user = self.by_id.setdefault(user_id, UserNames())
         before = user.model_dump(mode="json")
         user.display_overrides.set_for_category(category_key, value)
@@ -2727,7 +2727,7 @@ class Name_Cache(metaclass=Singleton):
             category = self._normalised_display_name_category(event.get("category"))
             display_name = self._normalised_optional_text(
                 event.get("display_name"),
-                label=f"{category.value} display override",
+                label="display override",
             )
             user.display_overrides.set_for_category(category, display_name)
         elif kind is NameMutationKind.REMOVE_GAME_ALIAS:
@@ -3398,7 +3398,7 @@ class Name_Cache(metaclass=Singleton):
         if surface is PersonaSurface.APP:
             return (
                 scope_alias
-                or persona.web_override
+                or persona.display_override
                 or persona.discord_global
                 or persona.discord_username
                 or manual_alias
@@ -3407,7 +3407,7 @@ class Name_Cache(metaclass=Singleton):
 
         if surface is PersonaSurface.WEB:
             return (
-                persona.web_override
+                persona.display_override
                 or scope_alias
                 or discord_identity
                 or manual_alias
@@ -3416,7 +3416,7 @@ class Name_Cache(metaclass=Singleton):
             )
 
         if surface is PersonaSurface.DISCORD:
-            return discord_identity or persona.web_override or manual_alias or fallback_display_name or default
+            return persona.display_override or discord_identity or manual_alias or fallback_display_name or default
 
         raise ValueError(f"Unsupported persona surface `{surface}`.")
 
@@ -3670,9 +3670,8 @@ class Name_Cache(metaclass=Singleton):
             self._sync_known_names(entry)
             for name in entry.names | entry.nicknames:
                 self.by_alias.setdefault(name.lower(), set()).add(uid)
-            for override in (entry.display_overrides.discord, entry.display_overrides.web):
-                if override:
-                    self.by_alias.setdefault(override.lower(), set()).add(uid)
+            if entry.display_overrides.value:
+                self.by_alias.setdefault(entry.display_overrides.value.lower(), set()).add(uid)
             for platform, raw_id in entry.platform_ids.items():
                 try:
                     platform_key = self._norm_platform_key(platform)

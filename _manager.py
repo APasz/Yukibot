@@ -1153,6 +1153,11 @@ class App_Manager(metaclass=config.Singleton):
             scopes.append(entry.name)
         return tuple(sorted(scopes, key=str.casefold))
 
+    def list_known_scopes(self) -> tuple[str, ...]:
+        scopes: set[str] = {app.scope.strip().lower() for app in self.apps.values() if app.scope.strip()}
+        scopes.update(scope.strip().lower() for scope in self.list_create_scopes() if scope.strip())
+        return tuple(sorted(scopes, key=str.casefold))
+
     def create_instance(self, request: AppInstanceCreateRequest) -> str:
         scope = self._validate_scope_name(request.scope)
         instance_key = self._validate_instance_key(request.instance_key)

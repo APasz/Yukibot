@@ -34,6 +34,49 @@ def _component_custom_ids(components: list[hikari.api.MessageActionRowBuilder]) 
 
 
 class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discord_username_autocomplete_returns_only_accounts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = object.__new__(config.Name_Cache)
+            cache.pointer = Path(tmp) / "discord_names.json"
+            cache.by_id = {
+                1: config.UserNames(account="AlphaUser", global_name="Alpha Global", nicknames={"AliasOne"}),
+                2: config.UserNames(account="BetaUser", global_name="Beta Global"),
+                3: config.UserNames(global_name="Gamma Global", nicknames={"GammaAlias"}),
+            }
+            cache.by_alias = {}
+            cache.by_platform_id = {}
+            respond = AsyncMock()
+
+            await cmd_alias.ac_discord_usernames(
+                SimpleNamespace(focused=SimpleNamespace(value="user"), respond=respond),
+                cache,
+            )
+
+        respond.assert_awaited_once_with(["AlphaUser", "BetaUser"])
+
+    async def test_discord_username_autocomplete_filters_and_limits_results(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = object.__new__(config.Name_Cache)
+            cache.pointer = Path(tmp) / "discord_names.json"
+            cache.by_id = {
+                index: config.UserNames(account=f"Alpha{index:02d}")
+                for index in range(30)
+            }
+            cache.by_alias = {}
+            cache.by_platform_id = {}
+            respond = AsyncMock()
+
+            await cmd_alias.ac_discord_usernames(
+                SimpleNamespace(focused=SimpleNamespace(value="alpha"), respond=respond),
+                cache,
+            )
+
+        respond.assert_awaited_once()
+        suggestions = respond.await_args.args[0]
+        self.assertEqual(len(suggestions), 25)
+        self.assertEqual(suggestions[0], "Alpha00")
+        self.assertEqual(suggestions[-1], "Alpha24")
+
     async def test_raw_numeric_target_creates_manual_name_cache_entry(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = object.__new__(config.Name_Cache)
@@ -81,7 +124,7 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
                     names_cache=cache,
                 )
 
-    async def test_display_override_modal_sets_web_override(self) -> None:
+    async def test_display_override_modal_sets_shared_display_name(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = object.__new__(config.Name_Cache)
             cache.pointer = Path(tmp) / "discord_names.json"
@@ -109,6 +152,7 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsNotNone(response)
             self.assertEqual(cache.get_display_override(42, config.DisplayNameCategory.WEB), "Portal Alice")
+            self.assertEqual(cache.get_display_override(42, config.DisplayNameCategory.DISCORD), "Portal Alice")
 
     async def test_steam_modal_sets_platform_id(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -347,6 +391,55 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
 
         custom_ids = _component_custom_ids(components)
         self.assertEqual(len(custom_ids), len(set(custom_ids)))
+
+    async def test_app_scope_selector_includes_all_known_manager_scopes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = object.__new__(config.Name_Cache)
+            cache.pointer = Path(tmp) / "discord_names.json"
+            cache.by_id = {42: config.UserNames()}
+            cache.by_alias = {}
+            cache.by_platform_id = {}
+            manager = create_autospec(App_Manager, instance=True)
+            manager.apps = {"valheim_alpha": SimpleNamespace(scope="valheim")}
+            manager.list_create_scopes.return_value = ("factorio", "minecraft", "valheim")
+            service = cmd_alias.AliasEditorService()
+
+            view = service._build_view(
+                target_user_id=42,
+                names_cache=cache,
+                manager=manager,
+                state=cmd_alias.AliasEditorState(section=cmd_alias.AliasEditorSection.APP_SCOPES, page=0),
+            )
+
+        self.assertEqual(view.app_scopes.visible, ("factorio", "minecraft", "valheim"))
+
+    async def test_editor_action_accepts_scope_from_manager_registry_when_not_loaded(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = object.__new__(config.Name_Cache)
+            cache.pointer = Path(tmp) / "discord_names.json"
+            cache.by_id = {42: config.UserNames()}
+            cache.by_alias = {}
+            cache.by_platform_id = {}
+            manager = create_autospec(App_Manager, instance=True)
+            manager.apps = {"valheim_alpha": SimpleNamespace(scope="valheim")}
+            manager.list_create_scopes.return_value = ("factorio", "valheim")
+            service = cmd_alias.AliasEditorService()
+            interaction = SimpleNamespace(create_modal_response=AsyncMock())
+
+            response = await service._on_editor_action(
+                SimpleNamespace(
+                    action=service._action_codec.build(cmd_alias.AliasActionKind.SET_APP, page=0),
+                    user_id=42,
+                    scope_id=42,
+                    values=("factorio",),
+                    locale=hikari.Locale.EN_US,
+                    interaction=interaction,
+                ),
+                {"names_cache": cache, "manager": manager},
+            )
+
+        self.assertIsNone(response)
+        interaction.create_modal_response.assert_awaited_once()
 
 
 if __name__ == "__main__":
