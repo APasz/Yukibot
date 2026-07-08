@@ -26,6 +26,7 @@ from apps._mod import Mod_Manager
 from apps._updater import AppUpdateOperationKind, AppUpdateProviderKind, AppUpdateState
 from apps.factorio import (
     Factorio,
+    FactorioActivitySnapshot,
     FactorioActivities,
     FactorioEvolution,
     FactorioMapAge,
@@ -1303,6 +1304,53 @@ class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
         )
         relay.send.assert_awaited_once_with({"time": "/time", "evolution": "/yuki evolution player"})
 
+    async def test_factorio_activities_poll_preserves_ndjson_evolution_when_bridge_tail_is_active(self) -> None:
+        relay = SimpleNamespace(
+            send=AsyncMock(
+                return_value={
+                    "time": "Map age: 4 days 2 hours 0 minutes 0 seconds.",
+                    "evolution": json.dumps(
+                        {
+                            "kind": "evolution",
+                            "tick": 120,
+                            "force": "player",
+                            "surfaces": [
+                                {"surface": {"name": "Nauvis"}, "evolution": {"total": 0.999}},
+                            ],
+                        }
+                    ),
+                }
+            )
+        )
+        app = cast(Any, object.__new__(Factorio))
+        app._relay = relay
+        app.check_running = lambda: True
+        app.name = "factorio_demo"
+        app._factorio_yuki_bridge_enabled = True
+        app._bridge_events_tail = object()
+        app.register_enabled_activity_providers = MagicMock()
+        app.deregister_activity_providers = MagicMock()
+        app.set_activity_providers = MagicMock()
+        app._cancel_background_task = AsyncMock()
+
+        activities = FactorioActivities(app)
+        activities.snapshot = FactorioActivitySnapshot(
+            primary_evolution=FactorioEvolution(factor=0.123),
+            surface_evolutions=(FactorioSurfaceEvolution("Nauvis", FactorioEvolution(factor=0.123)),),
+        )
+
+        with patch("apps.factorio.asyncio.sleep", new=AsyncMock(side_effect=asyncio.CancelledError())):
+            with self.assertRaises(asyncio.CancelledError):
+                await activities._poll()
+
+        self.assertEqual(activities.snapshot.map_age, FactorioMapAge(total_seconds=(4 * 86_400) + (2 * 3_600)))
+        self.assertEqual(activities.snapshot.primary_evolution, FactorioEvolution(factor=0.123))
+        self.assertEqual(
+            activities.snapshot.surface_evolutions,
+            (FactorioSurfaceEvolution("Nauvis", FactorioEvolution(factor=0.123)),),
+        )
+        relay.send.assert_awaited_once_with({"time": "/time", "evolution": "/yuki evolution player"})
+
     async def test_factorio_activities_skip_evolution_without_yuki_bridge(self) -> None:
         relay = SimpleNamespace(send=AsyncMock(return_value={"time": "Map age: 4 days 2 hours 0 minutes 0 seconds."}))
         app = cast(Any, object.__new__(Factorio))
@@ -1415,6 +1463,108 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         assert relayed_message.relay_embed is not None
         self.assertEqual(relayed_message.relay_embed.title, "Research")
         self.assertEqual(relayed_message.relay_embed.description, "Electronics 1")
+
+    async def test_match_research_relays_yuki_bridge_finished_notice(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.scope = "factorio"
+        app.manage_embed_color = 0xDC6B0F
+        app._factorio_yuki_bridge_enabled = True
+        app._tail_machers = set()
+        matcher = Matchers(app)
+
+        with patch("apps.factorio.DC_Relay.add") as add_mock:
+            await matcher.match_research(
+                '1278.355 Script @__yuki-bridge__/control.lua:57: [Yuki] '
+                '{"technology":"bulk-inserter","localised_name":["technology-name.bulk-inserter"],'
+                '"level":1,"force":"player","by_script":false,"kind":"research_finished",'
+                '"tick":2840520,"mod":"yuki-bridge"}'
+            )
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.player, "System")
+        self.assertEqual(relayed_message.content, "Research: Bulk Inserter")
+        self.assertIsNotNone(relayed_message.relay_embed)
+        assert relayed_message.relay_embed is not None
+        self.assertEqual(relayed_message.relay_embed.title, "Research")
+        self.assertEqual(relayed_message.relay_embed.description, "Bulk Inserter")
+
+    async def test_match_research_relays_raw_yuki_bridge_event(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.scope = "factorio"
+        app.manage_embed_color = 0xDC6B0F
+        app._factorio_yuki_bridge_enabled = True
+        app._tail_machers = set()
+        app._bridge_tail_matchers = set()
+        app._bridge_events_tail = object()
+        matcher = Matchers(app)
+
+        with patch("apps.factorio.DC_Relay.add") as add_mock:
+            await matcher.match_bridge_event(
+                '{"technology":"bulk-inserter","localised_name":["technology-name.bulk-inserter"],'
+                '"level":1,"force":"player","by_script":false,"kind":"research_finished",'
+                '"tick":2840520,"mod":"yuki-bridge"}'
+            )
+
+        add_mock.assert_called_once()
+        relayed_message = add_mock.call_args.args[0]
+        self.assertEqual(relayed_message.player, "System")
+        self.assertEqual(relayed_message.content, "Research: Bulk Inserter")
+
+    async def test_match_research_skips_wrapped_yuki_bridge_event_when_ndjson_tail_is_active(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.scope = "factorio"
+        app.manage_embed_color = 0xDC6B0F
+        app._factorio_yuki_bridge_enabled = True
+        app._tail_machers = set()
+        app._bridge_tail_matchers = set()
+        app._bridge_events_tail = object()
+        matcher = Matchers(app)
+
+        with patch("apps.factorio.DC_Relay.add") as add_mock:
+            await matcher.match_research(
+                '1278.355 Script @__yuki-bridge__/control.lua:57: [Yuki] '
+                '{"technology":"bulk-inserter","localised_name":["technology-name.bulk-inserter"],'
+                '"level":1,"force":"player","by_script":false,"kind":"research_finished",'
+                '"tick":2840520,"mod":"yuki-bridge"}'
+            )
+
+        add_mock.assert_not_called()
+
+    async def test_match_bridge_event_updates_evolution_snapshot_from_raw_event(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.scope = "factorio"
+        app.manage_embed_color = 0xDC6B0F
+        app._factorio_yuki_bridge_enabled = True
+        app._tail_machers = set()
+        app._bridge_tail_matchers = set()
+        app._bridge_events_tail = object()
+        app._activities = FactorioActivities.__new__(FactorioActivities)
+        app._activities.snapshot = FactorioActivitySnapshot(map_age=FactorioMapAge(total_seconds=90_000))
+        matcher = Matchers(app)
+
+        await matcher.match_bridge_event(
+            '{"kind":"evolution","tick":1082092,"force":"player","surfaces":['
+            '{"surface":{"name":"nauvis","index":1,"planet":"nauvis"},'
+            '"evolution":{"total":0.06728584193305588,"pollution":0,"time":0,"spawner_kills":0}},'
+            '{"surface":{"name":"vulcanus","index":2,"planet":"vulcanus"},'
+            '"evolution":{"total":0,"pollution":0,"time":0,"spawner_kills":0}}'
+            '],"by":"rcon","mod":"yuki-bridge"}'
+        )
+
+        self.assertEqual(app._activities.snapshot.map_age, FactorioMapAge(total_seconds=90_000))
+        self.assertEqual(app._activities.snapshot.primary_evolution, FactorioEvolution(factor=0.06728584193305588))
+        self.assertEqual(
+            app._activities.snapshot.surface_evolutions,
+            (
+                FactorioSurfaceEvolution("Nauvis", FactorioEvolution(factor=0.06728584193305588)),
+                FactorioSurfaceEvolution("Vulcanus", FactorioEvolution(factor=0.0)),
+            ),
+        )
 
     async def test_match_research_requires_yuki_bridge(self) -> None:
         app = cast(Any, object.__new__(Factorio))

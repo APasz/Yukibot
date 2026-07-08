@@ -115,6 +115,7 @@ _FACTORIO_CONFIG_FILENAMES: tuple[str, ...] = (
 )
 _FACTORIO_MOD_SETTINGS_FILENAME = "mod-settings.dat"
 _FACTORIO_RESEARCH_FINISHED_RE: Pattern[str] = re.compile(r"\[RESEARCH FINISHED\]\s+(?P<research>.+)$", re.IGNORECASE)
+_FACTORIO_YUKI_BRIDGE_EVENT_RE: Pattern[str] = re.compile(r"\[Yuki\]\s+(?P<payload>\{.+\})\s*$")
 _FACTORIO_ERROR_RE: Pattern[str] = re.compile(r"^\s*\d+\.\d+\s+Error\s+(?P<source>\S+:\d+):\s+(?P<message>.+)$")
 _FACTORIO_MAP_AGE_PART_RE: Pattern[str] = re.compile(
     r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b",
@@ -134,6 +135,7 @@ _FACTORIO_COMMAND_FAILURE_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 _FACTORIO_YUKI_BRIDGE_MOD_ID = "yuki-bridge"
+_FACTORIO_YUKI_BRIDGE_EVENTS_PATH = Path("script-output") / "yuki" / "events.ndjson"
 _FACTORIO_LINE_MATCHER = Callable[[str], Awaitable[None]]
 _FactorioSettingValue = TypeVar("_FactorioSettingValue", str, bool, int)
 _FACTORIO_UPDATE_BRANCHES: tuple[FactorioUpdateBranch, ...] = (
@@ -1442,6 +1444,8 @@ class Factorio(App[App_Config]):
         self._relay: RconClient = RconClient(self.check_running, 27015)
         self._tail: Tailer | None = None
         self._tail_machers: set[_FACTORIO_LINE_MATCHER] = set()
+        self._bridge_events_tail: Tailer | None = None
+        self._bridge_tail_matchers: set[_FACTORIO_LINE_MATCHER] = set()
         self._startup_error: str | None = None
         self._players: Players = Players(self)
         self._activities: FactorioActivities = FactorioActivities(self)
@@ -1487,6 +1491,14 @@ class Factorio(App[App_Config]):
                 continue
             return mod.server_loadable and mod.cfg.enabled
         return False
+
+    @property
+    def bridge_events_path(self) -> Path:
+        return self.directory / _FACTORIO_YUKI_BRIDGE_EVENTS_PATH
+
+    @property
+    def bridge_events_tail_active(self) -> bool:
+        return getattr(self, "_bridge_events_tail", None) is not None
 
     @property
     def activity_providers(self) -> tuple[AppActivityProvider[Any], ...]:
@@ -1644,6 +1656,9 @@ class Factorio(App[App_Config]):
                 continue
             File_Utils.remove(item, silent=True, resolve=True)
 
+        if self.yuki_bridge_enabled:
+            self._reset_bridge_events_file()
+
         wait_count = 10
         while self._lock.exists() and wait_count >= 0:
             wait_count -= 1
@@ -1663,6 +1678,7 @@ class Factorio(App[App_Config]):
         else:
             raise SystemError("No Log to be passed to Tailer")
         await self._tail.start(self._tail_machers)
+        await self._start_bridge_events_tail()
 
         await self._wait_for_startup_ready()
 
@@ -1692,10 +1708,30 @@ class Factorio(App[App_Config]):
             if self._tail is not None:
                 await self._tail.stop()
                 self._tail = None
+            await self._stop_bridge_events_tail()
             raise
 
     def _startup_tail_ready(self) -> bool:
         return self.process is not None
+
+    def _reset_bridge_events_file(self) -> None:
+        File_Utils.remove(self.bridge_events_path, silent=True, resolve=False)
+
+    async def _start_bridge_events_tail(self) -> None:
+        if not self.yuki_bridge_enabled:
+            return
+        if self._bridge_events_tail is not None:
+            return
+        log.debug("%s Tailing: yuki bridge events", self.name)
+        self._bridge_events_tail = Tailer(self._startup_tail_ready, self.bridge_events_path)
+        await self._bridge_events_tail.start(self._bridge_tail_matchers)
+
+    async def _stop_bridge_events_tail(self) -> None:
+        bridge_events_tail = getattr(self, "_bridge_events_tail", None)
+        if bridge_events_tail is None:
+            return
+        await bridge_events_tail.stop()
+        self._bridge_events_tail = None
 
     async def stop(self) -> bool:
         log.info(f"{__name__}.stop")
@@ -1712,6 +1748,8 @@ class Factorio(App[App_Config]):
                 self.process.stdin.flush()
         if self._tail:
             await self._tail.stop()
+            self._tail = None
+        await self._stop_bridge_events_tail()
         await self._relay.teardown()
         await self._terminate()
         await asyncio.sleep(0.5)
@@ -1724,6 +1762,8 @@ class Factorio(App[App_Config]):
         await self._players.stop()
         if self._tail:
             await self._tail.stop()
+            self._tail = None
+        await self._stop_bridge_events_tail()
         await self._relay.teardown()
         await self._terminate()
         await asyncio.sleep(0.5)
@@ -2154,6 +2194,45 @@ def _render_factorio_research_name(raw_name: str) -> str:
     return humanise_mod_identifier(raw_name.strip(), split_single_camel=True)
 
 
+def _factorio_bridge_research_name(payload: Mapping[str, object]) -> str | None:
+    if payload.get("kind") != "research_finished":
+        return None
+    raw_technology = payload.get("technology")
+    if not isinstance(raw_technology, str) or not raw_technology.strip():
+        return None
+    research_name = _render_factorio_research_name(raw_technology)
+    raw_level = payload.get("level")
+    if isinstance(raw_level, int) and raw_level > 1 and not research_name.endswith(f" {raw_level}"):
+        return f"{research_name} {raw_level}"
+    return research_name
+
+
+def _parse_factorio_bridge_event_payload(line: str, *, include_wrapped_event: bool) -> Mapping[str, object] | None:
+    clean_line = line.strip()
+    if clean_line.startswith("{"):
+        payload_text = clean_line
+    elif include_wrapped_event and (match := _FACTORIO_YUKI_BRIDGE_EVENT_RE.search(clean_line)) is not None:
+        payload_text = match.group("payload")
+    else:
+        return None
+    try:
+        payload = _optional_mapping(json.loads(payload_text))
+    except json.JSONDecodeError:
+        return None
+    return payload
+
+
+def _parse_factorio_bridge_research_name(line: str, *, include_wrapped_event: bool = True) -> str | None:
+    payload = _parse_factorio_bridge_event_payload(line, include_wrapped_event=include_wrapped_event)
+    return None if payload is None else _factorio_bridge_research_name(payload)
+
+
+def _parse_factorio_research_name(line: str, *, include_wrapped_bridge_event: bool = True) -> str | None:
+    if match := _FACTORIO_RESEARCH_FINISHED_RE.search(line):
+        return _render_factorio_research_name(match.group("research"))
+    return _parse_factorio_bridge_research_name(line, include_wrapped_event=include_wrapped_bridge_event)
+
+
 def _parse_factorio_map_age(text: str) -> FactorioMapAge | None:
     total_seconds = 0.0
     found_any = False
@@ -2222,11 +2301,7 @@ def _factorio_bridge_surface_evolution(entry: object) -> FactorioSurfaceEvolutio
     return FactorioSurfaceEvolution(surface_name, evolution)
 
 
-def _parse_factorio_bridge_evolution_snapshot(text: str) -> FactorioActivitySnapshot | None:
-    try:
-        payload = _optional_mapping(json.loads(text))
-    except json.JSONDecodeError:
-        return None
+def _factorio_bridge_evolution_snapshot(payload: Mapping[str, object]) -> FactorioActivitySnapshot | None:
     if payload is None or payload.get("kind") != "evolution":
         return None
     raw_surfaces = payload.get("surfaces")
@@ -2244,6 +2319,16 @@ def _parse_factorio_bridge_evolution_snapshot(text: str) -> FactorioActivitySnap
         primary_evolution=ordered_evolutions[0].evolution,
         surface_evolutions=ordered_evolutions,
     )
+
+
+def _parse_factorio_bridge_evolution_snapshot(text: str) -> FactorioActivitySnapshot | None:
+    try:
+        payload = _optional_mapping(json.loads(text))
+    except json.JSONDecodeError:
+        return None
+    if payload is None:
+        return None
+    return _factorio_bridge_evolution_snapshot(payload)
 
 
 def _normalise_factorio_surface_name(raw_name: str) -> str:
@@ -2339,6 +2424,13 @@ class FactorioActivities:
         await self.app._cancel_background_task(self._task, label="activity task")
         self._task = None
 
+    def update_evolution_snapshot(self, snapshot: FactorioActivitySnapshot) -> None:
+        self.snapshot = FactorioActivitySnapshot(
+            map_age=self.snapshot.map_age,
+            primary_evolution=snapshot.primary_evolution,
+            surface_evolutions=snapshot.surface_evolutions,
+        )
+
     async def _poll(self) -> None:
         while self.app.check_running() and not config.IS_SHUTTINGDOWN:
             self.configure_providers()
@@ -2351,7 +2443,10 @@ class FactorioActivities:
                 map_age = _parse_factorio_map_age(responses.get("time") or "")
                 primary_evolution: FactorioEvolution | None = None
                 surface_evolutions: tuple[FactorioSurfaceEvolution, ...] = ()
-                if bridge_enabled:
+                if bridge_enabled and self.app.bridge_events_tail_active:
+                    primary_evolution = self.snapshot.primary_evolution
+                    surface_evolutions = self.snapshot.surface_evolutions
+                elif bridge_enabled:
                     evolution_snapshot = _parse_factorio_bridge_evolution_snapshot(responses.get("evolution") or "")
                     if evolution_snapshot is not None:
                         primary_evolution = evolution_snapshot.primary_evolution
@@ -2397,10 +2492,13 @@ class Provider_FactorioEvolution(AppActivityProvider["Factorio"]):
 class Matchers:
     def __init__(self, app: Factorio):
         self.app = app
+        if not hasattr(app, "_bridge_tail_matchers"):
+            app._bridge_tail_matchers = set()
         app._tail_machers.add(self.match_chat)
         app._tail_machers.add(self.match_death)
         app._tail_machers.add(self.match_error)
         app._tail_machers.add(self.match_research)
+        app._bridge_tail_matchers.add(self.match_bridge_event)
 
     async def match_chat(self, line: str):
         match: Match[str] | None = re.search(r"\[CHAT\] (.*?): (.+)", line, re.IGNORECASE)
@@ -2438,15 +2536,7 @@ class Matchers:
                 detail_text=detail_text,
                 source=RelayNoticeSource.APP_LOG,
             )
-            app_friendly = getattr(self.app, "friendly", self.app.name)
-            DC_Relay.add(
-                DC_Bound(
-                    self.app,
-                    render_notice_text(notice, author_name=player, app_name=app_friendly),
-                    player,
-                    notice=notice,
-                )
-            )
+            self._relay_death_notice(player=player, notice=notice)
 
     async def match_error(self, line: str) -> None:
         if match := _FACTORIO_ERROR_RE.search(line):
@@ -2458,35 +2548,104 @@ class Matchers:
     async def match_research(self, line: str) -> None:
         if self.app.relay_notice_progress_enabled is not True:
             return
-        if match := _FACTORIO_RESEARCH_FINISHED_RE.search(line):
-            research_name: str = _render_factorio_research_name(match.group("research"))
-            research_label = self.app.relay_advancement_term
-            app_friendly = getattr(self.app, "friendly", self.app.name)
-            notice = GameProgressNotice(
-                progress_kind=GameProgressKind.RESEARCH,
-                label=research_label,
-                title=research_name,
-                source=RelayNoticeSource.APP_LOG,
+        research_name = _parse_factorio_research_name(
+            line,
+            include_wrapped_bridge_event=not getattr(self.app, "bridge_events_tail_active", False),
+        )
+        if research_name is None:
+            return
+        self._relay_research_notice(research_name)
+
+    async def match_bridge_event(self, line: str) -> None:
+        payload = _parse_factorio_bridge_event_payload(line, include_wrapped_event=False)
+        if payload is None:
+            return
+        kind = payload.get("kind")
+        if kind == "evolution":
+            snapshot = _factorio_bridge_evolution_snapshot(payload)
+            if snapshot is not None:
+                self.app._activities.update_evolution_snapshot(snapshot)
+            return
+        if kind == "research_finished":
+            await self.match_research(line)
+            return
+        if kind == "player_died":
+            self._match_bridge_death(payload)
+
+    def _match_bridge_death(self, payload: Mapping[str, object]) -> None:
+        if self.app.relay_notice_player_death_enabled is not True:
+            return
+        raw_player = payload.get("player")
+        if not isinstance(raw_player, str) or not raw_player.strip():
+            return
+
+        cause_payload = _optional_mapping(payload.get("cause"))
+        cause_name: str | None = None
+        cause_force: str | None = None
+        if cause_payload is not None:
+            raw_cause_name = cause_payload.get("name")
+            if isinstance(raw_cause_name, str) and raw_cause_name.strip():
+                cause_name = humanise_mod_identifier(raw_cause_name.strip(), split_single_camel=True)
+            raw_cause_force = cause_payload.get("force")
+            if isinstance(raw_cause_force, str) and raw_cause_force.strip():
+                cause_force = raw_cause_force.strip().casefold()
+
+        if cause_force == "player":
+            death_kind = GameDeathKind.PVP
+            detail_text = f"killed by {cause_name}" if cause_name else "killed by another player"
+        elif cause_name is not None:
+            death_kind = GameDeathKind.PVE
+            detail_text = f"died to {cause_name}"
+        else:
+            death_kind = GameDeathKind.UNKNOWN
+            detail_text = "died"
+
+        notice = GameDeathNotice(
+            death_kind=death_kind,
+            detail_text=detail_text,
+            source=RelayNoticeSource.APP_LOG,
+        )
+        self._relay_death_notice(player=raw_player.strip(), notice=notice)
+
+    def _relay_death_notice(self, *, player: str, notice: GameDeathNotice) -> None:
+        app_friendly = getattr(self.app, "friendly", self.app.name)
+        DC_Relay.add(
+            DC_Bound(
+                self.app,
+                render_notice_text(notice, author_name=player, app_name=app_friendly),
+                player,
+                notice=notice,
             )
-            embed_spec = notice_embed_spec(notice, app_name=app_friendly, author_name="System")
-            relay_embed = (
-                None
-                if embed_spec is None
-                else RelayEmbedPayload(
-                    title=embed_spec.title,
-                    description=embed_spec.description,
-                    color=self.app.manage_embed_color,
-                )
+        )
+
+    def _relay_research_notice(self, research_name: str) -> None:
+        research_label = self.app.relay_advancement_term
+        app_friendly = getattr(self.app, "friendly", self.app.name)
+        notice = GameProgressNotice(
+            progress_kind=GameProgressKind.RESEARCH,
+            label=research_label,
+            title=research_name,
+            source=RelayNoticeSource.APP_LOG,
+        )
+        embed_spec = notice_embed_spec(notice, app_name=app_friendly, author_name="System")
+        relay_embed = (
+            None
+            if embed_spec is None
+            else RelayEmbedPayload(
+                title=embed_spec.title,
+                description=embed_spec.description,
+                color=self.app.manage_embed_color,
             )
-            DC_Relay.add(
-                DC_Bound(
-                    self.app,
-                    f"{research_label}: {research_name}",
-                    "System",
-                    relay_embed=relay_embed,
-                    notice=notice,
-                )
+        )
+        DC_Relay.add(
+            DC_Bound(
+                self.app,
+                f"{research_label}: {research_name}",
+                "System",
+                relay_embed=relay_embed,
+                notice=notice,
             )
+        )
 
 
 class Players:
