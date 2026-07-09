@@ -10,7 +10,7 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Coroutine, Mapping, Sequence
+from collections.abc import Collection, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,6 +29,7 @@ from apps._config import (
     App_Config,
     AppModCapabilities,
     AppVersion,
+    ClientPackModSnapshot,
     ClientPackRelease,
     Mod_Config,
     RelayChannelSource,
@@ -48,7 +49,7 @@ from apps._config_files import (
     resolve_app_config_root,
     write_app_config_file,
 )
-from apps._console import ConsoleAction
+from apps._console import ConsoleAction, ConsoleResponseSource
 from apps._mod import Mod, Mod_Manager
 from apps._save_files import AppSaveEntry, AppSaveRoot, list_app_save_files, resolve_app_save_path
 from apps._settings import App_Settings, Settings_Manager
@@ -265,6 +266,7 @@ class App(Generic[ConfigT], ABC):
     relay_notice_player_session_supported: bool = False
     relay_notice_player_death_supported: bool = False
     relay_notice_progress_supported: bool = False
+    rcon_requires_online_players_default: bool = False
     _instance_config_change_handler: Callable[["App"], None] | None = None
     lifecycle_started_at: datetime | None = None
     runtime_fault: AppRuntimeFault | None = None
@@ -466,6 +468,10 @@ class App(Generic[ConfigT], ABC):
             overrides["client_pack_releases"] = [
                 release.model_dump(mode="json") for release in client_pack_releases
             ]
+        if self.cfg.client_pack_published_mods:
+            overrides["client_pack_published_mods"] = [
+                mod.model_dump(mode="json") for mod in self.cfg.client_pack_published_mods
+            ]
         if self.cfg.client_pack_verified_hash is not None:
             overrides["client_pack_verified_hash"] = self.cfg.client_pack_verified_hash
         if self.cfg.client_pack_published_hash is not None or self.cfg.client_pack_content_dirty:
@@ -480,6 +486,8 @@ class App(Generic[ConfigT], ABC):
             overrides["steam_update"] = self.cfg.steam_update.model_dump(mode="json", exclude_none=True)
         if self.cfg.factorio_update is not None:
             overrides["factorio_update"] = self.cfg.factorio_update.model_dump(mode="json", exclude_none=True)
+        if self.cfg.rcon_requires_online_players is not None:
+            overrides["rcon_requires_online_players"] = self.cfg.rcon_requires_online_players
         if self.config_file_read_level_override is not None:
             overrides["config_file_read_level_override"] = self.config_file_read_level_override.name
         if self.config_file_write_level_override is not None:
@@ -524,7 +532,13 @@ class App(Generic[ConfigT], ABC):
             return
         self._instance_config_change_handler(self)
 
-    def publish_client_pack(self, content_hash: str, *, changelog: str) -> str:
+    def publish_client_pack(
+        self,
+        content_hash: str,
+        *,
+        changelog: str,
+        mods: Collection[ClientPackModSnapshot] | None = None,
+    ) -> str:
         normalised_changelog = changelog.strip()
         if not normalised_changelog:
             raise ValueError("Client pack publication requires a changelog.")
@@ -548,6 +562,8 @@ class App(Generic[ConfigT], ABC):
         else:
             releases.append(release)
         self.cfg.client_pack_releases = tuple(releases)
+        if mods is not None:
+            self.cfg.client_pack_published_mods = tuple(sorted(mods, key=lambda mod: mod.friendly.casefold()))
         self.cfg.client_pack_content_dirty = False
         self.persist_instance_config_overrides()
         return published_version
@@ -722,6 +738,41 @@ class App(Generic[ConfigT], ABC):
         if not self.check_running():
             return
         self.register_enabled_activity_providers()
+
+    @property
+    def supports_rcon_console_actions(self) -> bool:
+        return any(action.transport is ConsoleResponseSource.RCON for action in self.console_actions)
+
+    @property
+    def rcon_requires_online_players_enabled(self) -> bool | None:
+        if not self.supports_rcon_console_actions:
+            return None
+        override = getattr(self.cfg, "rcon_requires_online_players", None)
+        if override is None:
+            return self.rcon_requires_online_players_default
+        return override
+
+    def apply_rcon_requires_online_players_enabled(self, enabled: bool) -> None:
+        if self.rcon_requires_online_players_enabled is None:
+            raise ValueError(f"{self.friendly} does not support RCON command gating.")
+        self.cfg.rcon_requires_online_players = (
+            None if enabled == self.rcon_requires_online_players_default else enabled
+        )
+
+    async def ensure_console_action_allowed(self, action: ConsoleAction) -> None:
+        if action.transport is not ConsoleResponseSource.RCON:
+            return
+        if self.rcon_requires_online_players_enabled is not True:
+            return
+        player_snapshot = await self.player_count()
+        if player_snapshot is None:
+            raise RuntimeError(
+                f"{self.friendly} player count is unavailable, so RCON commands are currently gated."
+            )
+        online_players, _player_capacity = player_snapshot
+        if online_players > 0:
+            return
+        raise RuntimeError(f"{self.friendly} has no players online, so RCON commands are currently gated.")
 
     @property
     def relay_advancements_enabled(self) -> bool | None:

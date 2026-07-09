@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 from _security import Power_Level
 from apps._config_files import (
@@ -181,12 +182,32 @@ class ConfigFileTests(unittest.TestCase):
             ],
         )
         self.assertIsNone(factorio_roots[0].write_power_level_override)
+        self.assertIsNone(factorio_roots[0].read_power_level_override)
+        self.assertEqual(factorio_roots[1].read_power_level_override, Power_Level.sudo)
         self.assertEqual(factorio_roots[1].write_power_level_override, Power_Level.sudo)
+        self.assertEqual(factorio_roots[2].read_power_level_override, Power_Level.sudo)
         self.assertEqual(factorio_roots[2].write_power_level_override, Power_Level.sudo)
         self.assertEqual(
             [(root.id, root.path.name) for root in sevendays_roots],
             [("server", "serverconfig.xml"), ("rwg-mixer", "rwgmixer.xml")],
         )
+
+    def test_factorio_lowest_config_read_level_uses_sudo_map_root_overrides(self) -> None:
+        app = object.__new__(Factorio)
+        app.directory = Path("/srv/factorio")
+        app.settings = SimpleNamespace(
+            app=SimpleNamespace(
+                options=(
+                    SimpleNamespace(power_level=Power_Level.root),
+                )
+            )
+        )
+
+        self.assertEqual(app.config_file_read_level, Power_Level.root)
+        self.assertEqual(app.lowest_config_file_read_level, Power_Level.sudo)
+        self.assertEqual(app.config_file_read_level_for_root("server"), Power_Level.root)
+        self.assertEqual(app.config_file_read_level_for_root("map-settings"), Power_Level.sudo)
+        self.assertEqual(app.config_file_read_level_for_root("map-gen-settings"), Power_Level.sudo)
 
 
 if __name__ == "__main__":

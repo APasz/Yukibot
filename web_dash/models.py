@@ -47,6 +47,7 @@ from .runtime_imports import (
     Callable,
     Card,
     ClientPackKubeJsScript,
+    ClientPackFilePreview,
     ClientPackMetadataConfig,
     ClientPackRelease,
     Iterable,
@@ -713,6 +714,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             client_pack_releases=page_data.app_entry.client_pack_releases,
             client_pack_kubejs_scripts=page_data.app_entry.client_pack_kubejs_scripts,
             client_pack_metadata=page_data.app_entry.client_pack_metadata,
+            client_pack_file_previews=page_data.app_entry.client_pack_file_previews,
+            client_pack_automated_changelog=page_data.app_entry.client_pack_automated_changelog,
             chat_url=(self.app_chat_path(page_data.app_entry.name) if page_data.app_entry.supports_chat else None),
             update_info=page_data.app_entry.update_info,
             update_status=page_data.app_entry.update_status,
@@ -733,6 +736,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_advancements_enabled=page_data.app_entry.relay_advancements_enabled,
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
             factorio_chat_relay_use_shout=page_data.app_entry.factorio_chat_relay_use_shout,
+            rcon_requires_online_players=page_data.app_entry.rcon_requires_online_players,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
             minecraft_recipes=page_data.minecraft_recipes,
@@ -794,6 +798,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             relay_advancements_enabled=page_data.app_entry.relay_advancements_enabled,
             relay_advancement_term=page_data.app_entry.relay_advancement_term,
             factorio_chat_relay_use_shout=page_data.app_entry.factorio_chat_relay_use_shout,
+            rcon_requires_online_players=page_data.app_entry.rcon_requires_online_players,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
             factorio_mod_settings=page_data.factorio_mod_settings,
@@ -841,6 +846,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         client_pack_releases: tuple[ClientPackRelease, ...] = (),
         client_pack_kubejs_scripts: tuple[ClientPackKubeJsScript, ...] = (),
         client_pack_metadata: ClientPackMetadataConfig | None = None,
+        client_pack_file_previews: tuple[ClientPackFilePreview, ...] = (),
+        client_pack_automated_changelog: str = "",
         chat_url: str | None,
         update_info: AppUpdateInfo | None,
         update_status: AppUpdateStatus | None,
@@ -861,6 +868,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_advancements_enabled: bool | None = None,
         relay_advancement_term: str | None = None,
         factorio_chat_relay_use_shout: bool | None = None,
+        rcon_requires_online_players: bool | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
         minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None,
@@ -909,6 +917,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     client_pack_releases=client_pack_releases,
                     client_pack_kubejs_scripts=client_pack_kubejs_scripts,
                     client_pack_metadata=client_pack_metadata,
+                    client_pack_file_previews=client_pack_file_previews,
+                    client_pack_automated_changelog=client_pack_automated_changelog,
                     chat_url=chat_url,
                     update_info=update_info,
                     update_status=update_status,
@@ -926,6 +936,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_advancements_enabled=relay_advancements_enabled,
                     relay_advancement_term=relay_advancement_term,
                     factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
+                    rcon_requires_online_players=rcon_requires_online_players,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
                     minecraft_recipes=minecraft_recipes,
@@ -988,6 +999,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         relay_advancements_enabled: bool | None = None,
         relay_advancement_term: str | None = None,
         factorio_chat_relay_use_shout: bool | None = None,
+        rcon_requires_online_players: bool | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
         factorio_mod_settings: NodeFactorioModSettings | None = None,
@@ -1039,6 +1051,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     relay_advancements_enabled=relay_advancements_enabled,
                     relay_advancement_term=relay_advancement_term,
                     factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
+                    rcon_requires_online_players=rcon_requires_online_players,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
                     factorio_mod_settings=factorio_mod_settings,
@@ -2170,6 +2183,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         pack_format: PackFormat = PackFormat.GENERIC_ZIP,
         publish_client_pack: bool = False,
         include_kubejs_scripts: bool = True,
+        include_servers_dat: bool = True,
+        include_options_txt: bool = True,
     ) -> dict[str, object]:
         query: dict[str, object] = {
             "enabled_only": str(enabled_only).lower(),
@@ -2187,6 +2202,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
             query["publish_client_pack"] = "true"
         if pack_purpose is PackPurpose.CLIENT:
             query["include_kubejs_scripts"] = str(include_kubejs_scripts).lower()
+            query["include_servers_dat"] = str(include_servers_dat).lower()
+            query["include_options_txt"] = str(include_options_txt).lower()
         if mod_names:
             query["mod_name"] = list[str](mod_names)
         return query

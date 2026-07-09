@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, Never, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import config
 from _discord import Fileish, OutboundRelayFormatter, RelayMessageReferenceKind, RelayOutboundFormatOptions
@@ -597,6 +597,27 @@ class SevenDaysConsoleActionTests(unittest.IsolatedAsyncioTestCase):
 
         app._relay.send.assert_awaited_once_with("mem")
         self.assertEqual(result.summary, "7D2D Test: console command sent.")
+        self.assertEqual(result.source, ConsoleResponseSource.TELNET)
+
+    async def test_shutdown_sends_saveworld_before_shutdown(self) -> None:
+        app = self._console_app()
+        action = next(action for action in app.console_actions if action.key == "shutdown")
+
+        result = await execute_console_action(
+            app=app,
+            is_running=lambda: True,
+            action=action,
+            raw_value=None,
+        )
+
+        self.assertEqual(
+            app._relay.send.await_args_list,
+            [
+                call("saveworld"),
+                call("shutdown"),
+            ],
+        )
+        self.assertEqual(result.summary, "7D2D Test: world save and shutdown requested.")
         self.assertEqual(result.source, ConsoleResponseSource.TELNET)
 
     async def test_getsandboxoptions_sends_telnet_command_for_supported_versions(self) -> None:

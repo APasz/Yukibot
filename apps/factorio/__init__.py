@@ -68,8 +68,8 @@ from apps._settings import (
     IntSettingSpec,
     Setting,
     Setting_Label,
-    SettingStateForceRule,
     SettingSpec,
+    SettingStateForceRule,
     StringSettingSpec,
 )
 from apps._tailer import Tailer
@@ -114,6 +114,7 @@ _FACTORIO_CONFIG_FILENAMES: tuple[str, ...] = (
     "map-gen-settings.json",
 )
 _FACTORIO_MOD_SETTINGS_FILENAME = "mod-settings.dat"
+_FACTORIO_STOP_SAVE_GRACE_SECONDS = 1.0
 _FACTORIO_RESEARCH_FINISHED_RE: Pattern[str] = re.compile(r"\[RESEARCH FINISHED\]\s+(?P<research>.+)$", re.IGNORECASE)
 _FACTORIO_YUKI_BRIDGE_EVENT_RE: Pattern[str] = re.compile(r"\[Yuki\]\s+(?P<payload>\{.+\})\s*$")
 _FACTORIO_ERROR_RE: Pattern[str] = re.compile(r"^\s*\d+\.\d+\s+Error\s+(?P<source>\S+:\d+):\s+(?P<message>.+)$")
@@ -1378,6 +1379,7 @@ _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         description="List the current game admins.",
         power_level=Power_Level.user,
         execute=_console_admins,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="raw_command",
@@ -1386,6 +1388,7 @@ _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_raw_command,
         parameter=_FACTORIO_RAW_COMMAND_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="promote",
@@ -1394,6 +1397,7 @@ _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_promote,
         parameter=_FACTORIO_PLAYER_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="demote",
@@ -1402,6 +1406,7 @@ _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_demote,
         parameter=_FACTORIO_PLAYER_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
 )
 
@@ -1413,6 +1418,7 @@ class Factorio(App[App_Config]):
     relay_notice_player_session_supported = True
     relay_notice_player_death_supported = True
     relay_notice_progress_supported = True
+    rcon_requires_online_players_default = False
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = 0xDC6B0F
@@ -1549,6 +1555,7 @@ class Factorio(App[App_Config]):
                 kind=AppConfigFileKind.GAME,
                 recursive=False,
                 suffixes=frozenset[str]({".json"}),
+                read_power_level_override=Power_Level.sudo,
                 write_power_level_override=Power_Level.sudo,
             ),
             AppConfigFileRoot(
@@ -1558,6 +1565,7 @@ class Factorio(App[App_Config]):
                 kind=AppConfigFileKind.GAME,
                 recursive=False,
                 suffixes=frozenset[str]({".json"}),
+                read_power_level_override=Power_Level.sudo,
                 write_power_level_override=Power_Level.sudo,
             ),
         )
@@ -1738,14 +1746,19 @@ class Factorio(App[App_Config]):
         self._running = False
         await self._activities.stop()
         await self._players.stop()
+        save_requested = False
         ok: str | None = None
         if self._relay.is_connected:
             ok = await self._relay.send("/server-save", reconnect_on_failure=False)
+            save_requested = ok is not None
         if not ok:
             if self.process and self.process.stdin:
                 log.debug("Falling back to stdin")
                 self.process.stdin.write("/server-save\n")
                 self.process.stdin.flush()
+                save_requested = True
+        if save_requested:
+            await asyncio.sleep(_FACTORIO_STOP_SAVE_GRACE_SECONDS)
         if self._tail:
             await self._tail.stop()
             self._tail = None

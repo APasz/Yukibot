@@ -135,7 +135,7 @@ def _bundled_mod_entry(entry: ModArchiveEntry, *, override_root: str = "override
     )
 
 
-def _validate_purpose(entries: tuple[ArchiveEntry, ...], purpose: PackPurpose) -> None:
+def _validate_purpose(entries: tuple[WritableArchiveEntry, ...], purpose: PackPurpose) -> None:
     if purpose is not PackPurpose.SERVER:
         return
     excluded_mods = tuple(
@@ -186,7 +186,7 @@ def _modrinth_env(entry: ModArchiveEntry, purpose: PackPurpose) -> dict[str, str
 
 
 def _modrinth_entries(
-    entries: tuple[ArchiveEntry, ...], spec: MinecraftPackSpec
+    entries: tuple[WritableArchiveEntry, ...], spec: MinecraftPackSpec
 ) -> tuple[WritableArchiveEntry, ...]:
     manifest_files: list[dict[str, object]] = []
     archive_entries: list[WritableArchiveEntry] = []
@@ -262,7 +262,7 @@ async def _preflight_remote_download(
 
 
 async def _preflight_modrinth_downloads(
-    entries: tuple[ArchiveEntry, ...],
+    entries: tuple[WritableArchiveEntry, ...],
     *,
     http: httpx.AsyncClient,
 ) -> None:
@@ -305,7 +305,7 @@ def _curseforge_loader_id(spec: MinecraftPackSpec) -> str | None:
 
 
 def _curseforge_entries(
-    entries: tuple[ArchiveEntry, ...], spec: MinecraftPackSpec
+    entries: tuple[WritableArchiveEntry, ...], spec: MinecraftPackSpec
 ) -> tuple[WritableArchiveEntry, ...]:
     manifest_files: list[dict[str, object]] = []
     archive_entries: list[WritableArchiveEntry] = []
@@ -366,7 +366,7 @@ def _curseforge_entries(
 
 
 async def export_minecraft_pack(
-    entries: tuple[ArchiveEntry, ...],
+    entries: tuple[WritableArchiveEntry, ...],
     spec: MinecraftPackSpec,
     archive_name: str,
     *,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi.exceptions import RequestValidationError
 
@@ -41,7 +41,6 @@ from .nicegui_protocols import (
 from .runtime_imports import (
     MOD_WEB_ACTION_BASE_CLASSES,
     Awaitable,
-    aiohttp,
     Button,
     Callable,
     ChatAttachment,
@@ -65,6 +64,7 @@ from .runtime_imports import (
     Power_Level,
     Request,
     StarletteResponse,
+    aiohttp,
     asyncio,
     cast,
     config,
@@ -1075,14 +1075,9 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
             def _build_alias_draft(target_user_id: int) -> _AliasDialogDraft:
                 return _AliasDialogDraft(
-                    display_name=name_cache.get_display_override(
-                        target_user_id,
-                        config.DisplayNameCategory.WEB,
-                    )
-                    or "",
+                    display_name=name_cache.get_display_override(target_user_id) or "",
                     app_aliases={
-                        scope: name_cache.get_game_alias(target_user_id, scope) or ""
-                        for scope in _current_app_scopes()
+                        scope: name_cache.get_game_alias(target_user_id, scope) or "" for scope in _current_app_scopes()
                     },
                     steam_id=name_cache.get_platform_id(target_user_id, "steam") or "",
                     minecraft_uuid=name_cache.get_game_uuid(target_user_id, "minecraft") or "",
@@ -1117,11 +1112,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                 draft = _draft_for_user(target_user_id)
                 changed_fields: list[str] = []
                 try:
-                    if name_cache.set_display_override(
-                        target_user_id,
-                        config.DisplayNameCategory.WEB,
-                        draft.display_name,
-                    ):
+                    if name_cache.set_display_override(target_user_id, draft.display_name):
                         changed_fields.append("display name")
                     for scope in _current_app_scopes():
                         next_alias = draft.app_aliases.get(scope, "")
@@ -1356,7 +1347,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
         refresh: Callable[[], None],
     ) -> None:
         try:
-            changed = name_cache.set_display_override(user_id, config.DisplayNameCategory.WEB, value)
+            changed = name_cache.set_display_override(user_id, value)
         except ValueError as xcp:
             ui.notify(str(xcp), type="negative")
             return
@@ -2533,8 +2524,8 @@ class ModWebStatusMixin(ModWebServiceSupport):
         author_name: str | LiteralString = (
             state.author_name.strip() or state.author_kind.value.replace("_", " ").title()
         )
-        color_hex = state.author_color_hex.strip() or None
-        avatar_uri = state.author_avatar_uri.strip() or None
+        color_hex: str | None = state.author_color_hex.strip() or None
+        avatar_uri: str | None = state.author_avatar_uri.strip() or None
         return ChatAuthor(
             kind=state.author_kind,
             display_name=author_name,
@@ -2548,16 +2539,16 @@ class ModWebStatusMixin(ModWebServiceSupport):
     ) -> tuple[ChatReferenceKind, ChatMessageReference | None]:
         if state.reference_kind is ChatReferenceKind.NONE:
             return ChatReferenceKind.NONE, None
-        author_display_name = state.reference_author_name.strip() or "Taylor"
-        content = state.reference_content.strip() or "Previous message"
+        author_display_name: str = state.reference_author_name.strip() or "Taylor"
+        content: str = state.reference_content.strip() or "Previous message"
         return state.reference_kind, ChatMessageReference(author_display_name=author_display_name, content=content)
 
     @staticmethod
     def _fake_chat_preview_links(state: _ModWebFakeChatPreviewState) -> tuple[ChatLink, ...]:
-        url = state.link_url.strip()
+        url: str = state.link_url.strip()
         if not url:
             return ()
-        label = state.link_label.strip() or None
+        label: str | None = state.link_label.strip() or None
         return (
             ChatLink(
                 url=url,
@@ -2570,7 +2561,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
     @staticmethod
     def _fake_chat_preview_attachments(state: _ModWebFakeChatPreviewState) -> tuple[ChatAttachment, ...]:
-        url = state.attachment_url.strip()
+        url: str = state.attachment_url.strip()
         if not url:
             return ()
         name = state.attachment_name.strip() or "preview.bin"
@@ -2606,7 +2597,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
         app: object | None = self._chat_room_app(room_id)
         if app is None:
             return room_id
-        friendly = getattr(app, "friendly", None)
+        friendly: Any | None = getattr(app, "friendly", None)
         if isinstance(friendly, str) and friendly.strip():
             return friendly
         return room_id

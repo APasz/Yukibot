@@ -1554,9 +1554,12 @@ async def _console_save_game(app_obj: object, value: object | None) -> ConsoleAc
 async def _console_shutdown(app_obj: object, value: object | None) -> ConsoleActionResult:
     del value
     app: Satisfactory = _require_satisfactory_app(app_obj)
-    response_text: str | None = await app.request_api_shutdown()
+    save_name, response_text = await app.request_api_shutdown_with_save()
+    summary = f"{app.friendly}: shutdown requested via API."
+    if save_name is not None:
+        summary = f"{app.friendly}: save requested as `{save_name}` and shutdown requested via API."
     return ConsoleActionResult(
-        summary=f"{app.friendly}: shutdown requested via API.",
+        summary=summary,
         text=response_text,
         source=ConsoleResponseSource.API,
     )
@@ -1581,7 +1584,7 @@ _SATISFACTORY_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
     ConsoleAction(
         key="shutdown",
         label="Shutdown",
-        description="Gracefully stop the Satisfactory server through the HTTPS API.",
+        description="Create a stop save, then gracefully stop the Satisfactory server through the HTTPS API.",
         power_level=Power_Level.sudo,
         execute=_console_shutdown,
     ),
@@ -1919,6 +1922,20 @@ class Satisfactory(App[Satisfactory_Config]):
             self._bridge.shutdown,
             unavailable_detail=f"{self.friendly} API is unavailable.",
         )
+
+    async def request_api_shutdown_with_save(self) -> tuple[str | None, str | None]:
+        self._require_live_runtime_api()
+        save_name = self._build_stop_save_name()
+        if save_name is not None:
+            await self._call_live_api(
+                lambda: self._bridge.save_game(save_name),
+                unavailable_detail=f"{self.friendly} API is unavailable.",
+            )
+        response_text = await self._call_live_api(
+            self._bridge.shutdown,
+            unavailable_detail=f"{self.friendly} API is unavailable.",
+        )
+        return (save_name, response_text)
 
     async def list_save_files_async(self) -> tuple[AppSaveEntry, ...]:
         if not self.check_running():
@@ -2382,9 +2399,7 @@ class Satisfactory(App[Satisfactory_Config]):
 
     async def _graceful_shutdown(self) -> bool:
         try:
-            if save_name := self._build_stop_save_name():
-                await self._bridge.save_game(save_name)
-            await self._bridge.shutdown()
+            await self.request_api_shutdown_with_save()
             return True
         except Exception as xcp:
             log.warning(f"{self.friendly} API shutdown failed, falling back to SIGINT: {xcp}")

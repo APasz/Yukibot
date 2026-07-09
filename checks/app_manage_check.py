@@ -3428,6 +3428,46 @@ class AppManageAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(payload["alpha"]["relay_notice_player_death"])
             self.assertFalse(payload["alpha"]["relay_notice_progress"])
 
+    def test_update_app_details_persists_rcon_player_gate_override(self) -> None:
+        manager = object.__new__(App_Manager)
+        original_cwd = Path.cwd()
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            instances_path = temp_path / "instances.json"
+            instances_path.write_text(
+                json.dumps({"alpha": {"friendly_name": "Minecraft Alpha", "directory": "{APPS}/minecraft"}}),
+                encoding="utf-8",
+            )
+            app = _build_minecraft_app(relay_advancements=True)
+            app.file_instances = instances_path
+            app.cfg.apps_dir = temp_path
+            manager._lookup = {}
+            manager._register_lookup_aliases(app.name, app)
+
+            os.chdir(temp_path)
+            try:
+                manager.update_app_details(
+                    app,
+                    AppDetailsUpdate(
+                        friendly_name="Minecraft Alpha",
+                        notes=None,
+                        lifecycle_notice_started=True,
+                        lifecycle_notice_stopped=True,
+                        lifecycle_notice_crashed=True,
+                        rcon_requires_online_players=False,
+                        running_cpu_points=3,
+                        running_ram_points=5,
+                        startup_cpu_points=None,
+                        startup_ram_points=None,
+                    ),
+                )
+            finally:
+                os.chdir(original_cwd)
+
+            payload = json.loads(instances_path.read_text(encoding="utf-8"))
+            self.assertFalse(app.rcon_requires_online_players_enabled)
+            self.assertFalse(payload["alpha"]["rcon_requires_online_players"])
+
     def test_update_app_details_allows_single_resource_startup_override(self) -> None:
         manager = object.__new__(App_Manager)
         original_cwd = Path.cwd()

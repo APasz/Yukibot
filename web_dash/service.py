@@ -122,10 +122,9 @@ class ModWebService(
 
     @staticmethod
     def _web_display_name(user: ModWebUser) -> str:
-        return config.Name_Cache().cached_display_name(
+        return config.Name_Cache().web_display_name(
             user.discord_id,
             user.display_name,
-            category=config.DisplayNameCategory.WEB,
         )
 
     @staticmethod

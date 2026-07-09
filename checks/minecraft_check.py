@@ -10,10 +10,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, Never, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, call, patch
 
 import config
 from _relay_embeds import build_app_lifecycle_embed
+from apps._console import ConsoleResponseSource, execute_console_action
 from apps import minecraft
 from apps._config import Mod_Config, ModType
 from apps.minecraft import (
@@ -55,6 +56,37 @@ class _RecordingActivityManager:
 
     def deregister(self, provider: object) -> None:
         self.deregistered.append(provider)
+
+
+class MinecraftConsoleActionTests(unittest.IsolatedAsyncioTestCase):
+    def _console_app(self) -> Minecraft:
+        app = cast(Minecraft, object.__new__(Minecraft))
+        app.friendly = "Minecraft Test"
+        app.cfg = SimpleNamespace(rcon_requires_online_players=False)
+        app._relay = SimpleNamespace(send=AsyncMock(side_effect=["saved", "stopped"]))
+        return app
+
+    async def test_stop_server_sends_save_all_before_stop(self) -> None:
+        app = self._console_app()
+        action = next(action for action in app.console_actions if action.key == "stop_server")
+
+        result = await execute_console_action(
+            app=app,
+            is_running=lambda: True,
+            action=action,
+            raw_value=None,
+        )
+
+        self.assertEqual(
+            app._relay.send.await_args_list,
+            [
+                call("save-all"),
+                call("stop"),
+            ],
+        )
+        self.assertEqual(result.summary, "Minecraft Test: save-all and stop requested.")
+        self.assertEqual(result.text, "stopped")
+        self.assertEqual(result.source, ConsoleResponseSource.RCON)
 
 
 class MinecraftModVersionDetectionTests(unittest.TestCase):

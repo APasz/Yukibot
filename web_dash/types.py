@@ -15,6 +15,7 @@ from .runtime_imports import (
     ChatEndpointKind,
     ChatEvent,
     ChatReferenceKind,
+    ClientPackFilePreview,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
     ClientPackRelease,
@@ -729,6 +730,8 @@ class ModWebBasePageModel:
     client_pack_releases: tuple[ClientPackRelease, ...] = field(default=(), kw_only=True)
     client_pack_kubejs_scripts: tuple[ClientPackKubeJsScript, ...] = field(default=(), kw_only=True)
     client_pack_metadata: ClientPackMetadataConfig | None = field(default=None, kw_only=True)
+    client_pack_file_previews: tuple[ClientPackFilePreview, ...] = field(default=(), kw_only=True)
+    client_pack_automated_changelog: str = field(default="", kw_only=True)
     chat_url: str | None = field(default=None, kw_only=True)
     update_info: AppUpdateInfo | None = field(default=None, kw_only=True)
     update_status: AppUpdateStatus | None = field(default=None, kw_only=True)
@@ -746,6 +749,7 @@ class ModWebBasePageModel:
     relay_advancements_enabled: bool | None = field(default=None, kw_only=True)
     relay_advancement_term: str | None = field(default=None, kw_only=True)
     factorio_chat_relay_use_shout: bool | None = field(default=None, kw_only=True)
+    rcon_requires_online_players: bool | None = field(default=None, kw_only=True)
     activity_providers: tuple[NodeAppActivityProviderEntry, ...] = field(default=(), kw_only=True)
     load_warnings: tuple["ModWebPageLoadWarning", ...] = field(default=(), kw_only=True)
     app_scope: str | None = field(default=None, kw_only=True)

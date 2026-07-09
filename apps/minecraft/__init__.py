@@ -2434,9 +2434,23 @@ async def _console_save_all(app_obj: object, value: object | None) -> ConsoleAct
     return await _run_console_command(app, "save-all", success_text=f"{app.friendly}: world save requested.")
 
 
+async def _request_graceful_stop(app: "Minecraft", *, save_delay_seconds: float = 0.2) -> str | None:
+    await app._relay.send("save-all")
+    if save_delay_seconds > 0:
+        await asyncio.sleep(save_delay_seconds)
+    return await app._relay.send("stop")
+
+
 async def _console_stop_server(app_obj: object, value: object | None) -> ConsoleActionResult:
     app: Minecraft = cast(Minecraft, app_obj)
-    return await _run_console_command(app, "stop", success_text=f"{app.friendly}: stop requested.")
+    response = await _request_graceful_stop(app)
+    if response:
+        return ConsoleActionResult(
+            summary=f"{app.friendly}: save-all and stop requested.",
+            text=response,
+            source=ConsoleResponseSource.RCON,
+        )
+    return ConsoleActionResult(summary=f"{app.friendly}: save-all and stop requested.")
 
 
 async def _console_say(app_obj: object, value: object | None) -> ConsoleActionResult:
@@ -2560,6 +2574,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         description="Flush world state to disk.",
         power_level=Power_Level.user,
         execute=_console_save_all,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="say",
@@ -2568,6 +2583,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.user,
         execute=_console_say,
         parameter=_MESSAGE_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="weather",
@@ -2576,6 +2592,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.user,
         execute=_console_weather,
         parameter=_WEATHER_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="time_set",
@@ -2584,6 +2601,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.user,
         execute=_console_time_set,
         parameter=_TIME_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="raw_command",
@@ -2592,6 +2610,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_raw_command,
         parameter=_RAW_COMMAND_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="op",
@@ -2600,6 +2619,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_op,
         parameter=_PLAYER_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="deop",
@@ -2608,6 +2628,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_deop,
         parameter=_PLAYER_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="whitelist_add",
@@ -2616,6 +2637,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_whitelist_add,
         parameter=_PLAYER_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="whitelist_remove",
@@ -2624,6 +2646,7 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_whitelist_remove,
         parameter=_PLAYER_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="kick",
@@ -2632,13 +2655,15 @@ _MINECRAFT_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         power_level=Power_Level.sudo,
         execute=_console_kick,
         parameter=_PLAYER_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
         key="stop_server",
         label="Stop Server",
-        description="Stop the server process through RCON.",
+        description="Save the world, then stop the server process through RCON.",
         power_level=Power_Level.sudo,
         execute=_console_stop_server,
+        transport=ConsoleResponseSource.RCON,
     ),
 )
 
@@ -2830,6 +2855,7 @@ class Minecraft(App[Minecraft_Config]):
     relay_advancement_terms = RelayAdvancementTerms("Advancement", "Advancements")
     relay_notice_player_session_supported = True
     relay_notice_player_death_supported = True
+    rcon_requires_online_players_default = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: Minecraft_Config):
         self.manage_embed_color = 0x22C55E
@@ -3533,9 +3559,7 @@ class Minecraft(App[Minecraft_Config]):
             await self._stop_tailer()
             return True
         try:
-            await self._relay.send("save-all")
-            await asyncio.sleep(0.2)
-            await self._relay.send("stop")
+            await _request_graceful_stop(self)
         except RuntimeError as xcp:
             log.warning("%s shutdown fell back to terminate because RCON was unavailable: %s", self.name, xcp)
             await self._terminate()

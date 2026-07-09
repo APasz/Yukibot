@@ -111,8 +111,12 @@ class AppModCapabilitiesTests(unittest.TestCase):
             name="Example Pack",
             description="Client performance and interface mods.",
             filename_template="{app_name}-{pack_name}-{version}-{minecraft_version}-{format}",
+            include_servers_dat=False,
+            include_options_txt=False,
         )
 
+        self.assertFalse(metadata.include_servers_dat)
+        self.assertFalse(metadata.include_options_txt)
         self.assertEqual(
             metadata.filename_stem(
                 app_name="minecraft_alpha",

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import struct
 import tempfile
 import threading
 import time
@@ -44,6 +45,7 @@ from _authority import AuthorityResource, read_json_object
 from _file import File_Utils
 from _manager import App_Manager, AppDetailsUpdate, app_scope_from_name
 from _mod_ops import (
+    ArchiveDataEntry,
     ArchiveEntry,
     ClientPackSelection,
     ClientPackValidationError,
@@ -82,6 +84,7 @@ from apps._config import (
     ClientPackConfig,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
+    ClientPackModSnapshot,
     ClientPackRelease,
     KnownModPageProvider,
     LauncherMetadataDiscovery,
@@ -416,6 +419,28 @@ class NodeAppActivityProviderEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ClientPackFilePreview:
+    path: str
+    display_name: str
+    content_text: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> ClientPackFilePreview:
+        return cls(
+            path=_required_string(payload, "path"),
+            display_name=_required_string(payload, "display_name"),
+            content_text=_required_string(payload, "content_text"),
+        )
+
+    def to_mapping(self) -> dict[str, str]:
+        return {
+            "path": self.path,
+            "display_name": self.display_name,
+            "content_text": self.content_text,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeAppEntry:
     name: str
     friendly: str
@@ -445,6 +470,8 @@ class NodeAppEntry:
     client_pack_releases: tuple[ClientPackRelease, ...] = ()
     client_pack_kubejs_scripts: tuple[ClientPackKubeJsScript, ...] = ()
     client_pack_metadata: ClientPackMetadataConfig | None = None
+    client_pack_file_previews: tuple[ClientPackFilePreview, ...] = ()
+    client_pack_automated_changelog: str = ""
     runtime_fault: AppRuntimeFault | None = None
     update_info: AppUpdateInfo | None = None
     update_status: AppUpdateStatus | None = None
@@ -468,6 +495,7 @@ class NodeAppEntry:
     relay_advancements_enabled: bool | None = None
     relay_advancement_term: str | None = None
     factorio_chat_relay_use_shout: bool | None = None
+    rcon_requires_online_players: bool | None = None
     activity_providers: tuple[NodeAppActivityProviderEntry, ...] = ()
 
     @classmethod
@@ -501,6 +529,8 @@ class NodeAppEntry:
         raw_client_pack_releases = payload.get("client_pack_releases", ())
         raw_client_pack_kubejs_scripts = payload.get("client_pack_kubejs_scripts", ())
         raw_client_pack_metadata = payload.get("client_pack_metadata")
+        raw_client_pack_file_previews = payload.get("client_pack_file_previews", ())
+        client_pack_automated_changelog = payload.get("client_pack_automated_changelog", "")
         raw_runtime_fault = payload.get("runtime_fault")
         raw_update_info = payload.get("update_info")
         raw_update_status = payload.get("update_status")
@@ -523,6 +553,7 @@ class NodeAppEntry:
         relay_advancements_enabled = payload.get("relay_advancements_enabled")
         relay_advancement_term = payload.get("relay_advancement_term")
         factorio_chat_relay_use_shout = payload.get("factorio_chat_relay_use_shout")
+        rcon_requires_online_players = payload.get("rcon_requires_online_players")
         raw_activity_providers = payload.get("activity_providers", ())
         if not isinstance(name, str) or not name:
             raise ValueError("Node app entry name is invalid.")
@@ -582,6 +613,17 @@ class NodeAppEntry:
             ClientPackMetadataConfig.model_validate(raw_client_pack_metadata)
             if raw_client_pack_metadata is not None
             else None
+        )
+        if not isinstance(raw_client_pack_file_previews, list | tuple) or any(
+            not isinstance(preview_payload, Mapping)
+            for preview_payload in raw_client_pack_file_previews
+        ):
+            raise ValueError("Node app entry client_pack_file_previews is invalid.")
+        if not isinstance(client_pack_automated_changelog, str):
+            raise ValueError("Node app entry client_pack_automated_changelog is invalid.")
+        client_pack_file_previews = tuple(
+            ClientPackFilePreview.from_mapping(cast(Mapping[str, object], preview_payload))
+            for preview_payload in raw_client_pack_file_previews
         )
         client_pack_releases = tuple(
             ClientPackRelease.model_validate(release_payload)
@@ -648,6 +690,8 @@ class NodeAppEntry:
             raise ValueError("Node app entry relay advancement metadata is inconsistent.")
         if factorio_chat_relay_use_shout is not None and not isinstance(factorio_chat_relay_use_shout, bool):
             raise ValueError("Node app entry factorio_chat_relay_use_shout is invalid.")
+        if rcon_requires_online_players is not None and not isinstance(rcon_requires_online_players, bool):
+            raise ValueError("Node app entry rcon_requires_online_players is invalid.")
         if not isinstance(raw_activity_providers, list | tuple):
             raise ValueError("Node app entry activity_providers is invalid.")
         if any(not isinstance(provider_payload, Mapping) for provider_payload in raw_activity_providers):
@@ -682,6 +726,8 @@ class NodeAppEntry:
             client_pack_releases=client_pack_releases,
             client_pack_kubejs_scripts=client_pack_kubejs_scripts,
             client_pack_metadata=client_pack_metadata,
+            client_pack_file_previews=client_pack_file_previews,
+            client_pack_automated_changelog=client_pack_automated_changelog.strip(),
             runtime_fault=AppRuntimeFault.from_mapping(cast(Mapping[str, object], raw_runtime_fault))
             if raw_runtime_fault is not None
             else None,
@@ -714,6 +760,7 @@ class NodeAppEntry:
             relay_advancements_enabled=relay_advancements_enabled,
             relay_advancement_term=relay_advancement_term,
             factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
+            rcon_requires_online_players=rcon_requires_online_players,
             activity_providers=tuple(
                 NodeAppActivityProviderEntry.from_mapping(cast(Mapping[str, object], provider_payload))
                 for provider_payload in raw_activity_providers
@@ -759,6 +806,10 @@ class NodeAppEntry:
                 if self.client_pack_metadata is not None
                 else None
             ),
+            "client_pack_file_previews": [
+                preview.to_mapping() for preview in self.client_pack_file_previews
+            ],
+            "client_pack_automated_changelog": self.client_pack_automated_changelog,
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
             "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
             "update_status": self.update_status.to_mapping() if self.update_status is not None else None,
@@ -781,6 +832,7 @@ class NodeAppEntry:
             "relay_advancements_enabled": self.relay_advancements_enabled,
             "relay_advancement_term": self.relay_advancement_term,
             "factorio_chat_relay_use_shout": self.factorio_chat_relay_use_shout,
+            "rcon_requires_online_players": self.rcon_requires_online_players,
             "activity_providers": [provider.to_mapping() for provider in self.activity_providers],
         }
 
@@ -1704,6 +1756,7 @@ class NodeAppMutationRequest(BaseModel):
     relay_notice_progress: bool | None = None
     relay_advancements_enabled: bool | None = None
     factorio_chat_relay_use_shout: bool | None = None
+    rcon_requires_online_players: bool | None = None
     disabled_activity_provider_ids: tuple[str, ...] | None = None
     running_cpu_points: int | None = None
     running_ram_points: int | None = None
@@ -4037,6 +4090,8 @@ class NodeDownloadRequest:
     publish_client_pack: bool = False
     publish_changelog: str | None = None
     include_kubejs_scripts: bool = True
+    include_servers_dat: bool = True
+    include_options_txt: bool = True
 
     @property
     def resolved_pack_purpose(self) -> PackPurpose | None:
@@ -5197,6 +5252,8 @@ class NodeApiService:
                 relay_notice_player_death=mutation_request.relay_notice_player_death,
                 relay_notice_progress=mutation_request.relay_notice_progress,
                 relay_advancements_enabled=mutation_request.relay_advancements_enabled,
+                factorio_chat_relay_use_shout=mutation_request.factorio_chat_relay_use_shout,
+                rcon_requires_online_players=mutation_request.rcon_requires_online_players,
                 disabled_activity_provider_ids=mutation_request.disabled_activity_provider_ids,
                 running_cpu_points=mutation_request.running_cpu_points,
                 running_ram_points=mutation_request.running_ram_points,
@@ -5220,6 +5277,8 @@ class NodeApiService:
             pack_format: PackFormat = PackFormat.GENERIC_ZIP,
             publish_client_pack: bool = False,
             include_kubejs_scripts: bool = True,
+            include_servers_dat: bool = True,
+            include_options_txt: bool = True,
             access_token: str | None = None,
         ) -> FileResponse:
             mod_names = tuple(request.query_params.getlist("mod_name"))
@@ -5253,6 +5312,8 @@ class NodeApiService:
                     pack_format=pack_format,
                     publish_client_pack=publish_client_pack,
                     include_kubejs_scripts=include_kubejs_scripts,
+                    include_servers_dat=include_servers_dat,
+                    include_options_txt=include_options_txt,
                 ),
             )
 
@@ -6423,6 +6484,7 @@ class NodeApiService:
         relay_notice_player_death = getattr(app, "relay_notice_player_death_enabled", None)
         relay_notice_progress = getattr(app, "relay_notice_progress_enabled", None)
         relay_advancements_enabled = getattr(app, "relay_advancements_enabled", None)
+        rcon_requires_online_players = getattr(app, "rcon_requires_online_players_enabled", None)
         return NodeAppEntry(
             name=app.name,
             friendly=app.friendly,
@@ -6454,6 +6516,8 @@ class NodeApiService:
             client_pack_releases=app.client_pack_releases,
             client_pack_kubejs_scripts=self._client_pack_kubejs_scripts(app),
             client_pack_metadata=self._client_pack_metadata(app),
+            client_pack_file_previews=self._client_pack_file_previews(app),
+            client_pack_automated_changelog=self._client_pack_automated_changelog(app),
             runtime_fault=getattr(app, "runtime_fault", None),
             update_info=update_info,
             update_status=update_status,
@@ -6483,6 +6547,7 @@ class NodeApiService:
             factorio_chat_relay_use_shout=(
                 getattr(app.cfg, "factorio_chat_relay_use_shout", True) if app.scope == "factorio" else None
             ),
+            rcon_requires_online_players=rcon_requires_online_players,
             activity_providers=tuple(
                 NodeAppActivityProviderEntry(
                     provider_id=entry.provider_id,
@@ -8480,6 +8545,7 @@ class NodeApiService:
         relay_notice_progress: bool | None = None,
         relay_advancements_enabled: bool | None = None,
         factorio_chat_relay_use_shout: bool | None = None,
+        rcon_requires_online_players: bool | None = None,
         disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
@@ -8560,6 +8626,7 @@ class NodeApiService:
                     relay_notice_progress=relay_notice_progress,
                     relay_advancements_enabled=relay_advancements_enabled,
                     factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
+                    rcon_requires_online_players=rcon_requires_online_players,
                     disabled_activity_provider_ids=disabled_activity_provider_ids,
                     running_cpu_points=running_cpu_points,
                     running_ram_points=running_ram_points,
@@ -8947,7 +9014,7 @@ class NodeApiService:
                 for mod in app.has_mod_manager.list_mods()
                 if mod.downloadable and mod.name not in excluded_names
             )
-        entries: tuple[ArchiveEntry, ...]
+        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...]
         try:
             if pack_purpose is PackPurpose.CLIENT:
                 entries = self._client_pack_entries(
@@ -8957,6 +9024,8 @@ class NodeApiService:
                         supplied=request.selected_only or bool(request.mod_names),
                     ),
                     include_kubejs_scripts=request.include_kubejs_scripts,
+                    include_servers_dat=request.include_servers_dat,
+                    include_options_txt=request.include_options_txt,
                 )
             elif pack_purpose is PackPurpose.SERVER:
                 entries = build_server_pack_entries(app.has_mod_manager)
@@ -8998,6 +9067,7 @@ class NodeApiService:
                 generated_pack_version = app.publish_client_pack(
                     current_hash,
                     changelog=request.publish_changelog or "",
+                    mods=self._default_client_pack_mod_snapshots(app),
                 )
                 self._invalidate_state_caches(app_name=app.name)
             elif app.cfg.client_pack_published_hash != current_hash:
@@ -9059,7 +9129,12 @@ class NodeApiService:
         )
         return FileResponse(path=archive_path, filename=archive_path.name)
 
-    async def _client_pack_content_hash(self, *, app: App, entries: tuple[ArchiveEntry, ...]) -> str:
+    async def _client_pack_content_hash(
+        self,
+        *,
+        app: App,
+        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...],
+    ) -> str:
         version = app.cfg.version
         metadata = self._client_pack_metadata(app)
         hash_context_payload: dict[str, object] = {
@@ -9069,6 +9144,8 @@ class NodeApiService:
         }
         if metadata is not None and app.cfg.client_pack_metadata is not None:
             hash_context_payload["filename_template"] = metadata.filename_template
+            hash_context_payload["include_servers_dat"] = metadata.include_servers_dat
+            hash_context_payload["include_options_txt"] = metadata.include_options_txt
         hash_context = json.dumps(hash_context_payload, sort_keys=True)
         return await asyncio.to_thread(client_pack_content_hash, entries, format_name=hash_context)
 
@@ -9125,19 +9202,371 @@ class NodeApiService:
             description=app.cfg.notes or "",
         )
 
+    @staticmethod
+    def _client_pack_preview_overrides_dir(app: App) -> Path | None:
+        if not app.mod_capabilities.include_client_overrides:
+            return None
+        configured_dir = app.cfg.client_overrides_dir
+        if configured_dir is not None and configured_dir.is_dir():
+            return configured_dir.resolve()
+        fallback_dir = app.directory / ".yukibot" / "client-overrides"
+        if fallback_dir.is_dir():
+            return fallback_dir.resolve()
+        return None
+
+    @staticmethod
+    def _client_pack_options_txt_preview(app: App) -> str:
+        overrides_dir = NodeApiService._client_pack_preview_overrides_dir(app)
+        if overrides_dir is None:
+            return "No client overrides directory exists, so overrides/options.txt will not be added."
+        options_path = overrides_dir / "options.txt"
+        if not options_path.is_file():
+            return f"No options.txt file exists at {options_path}."
+        try:
+            return options_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as xcp:
+            return f"Could not read {options_path}: {xcp}"
+
+    def _client_pack_file_previews(self, app: App) -> tuple[ClientPackFilePreview, ...]:
+        if not isinstance(app, Minecraft):
+            return ()
+        server_address = app.cfg.join_direct_ip_address or app.cfg.join_address
+        if server_address is None:
+            servers_dat_preview = "No join address is configured, so overrides/servers.dat will not be generated."
+        else:
+            server_name = self._minecraft_servers_dat_server_name(self._client_pack_node_label())
+            servers_dat_preview = (
+                "Minecraft servers.dat entry\n"
+                f"name={server_name}\n"
+                f"ip={server_address}\n"
+            )
+        return (
+            ClientPackFilePreview(
+                path="overrides/servers.dat",
+                display_name="servers.dat",
+                content_text=servers_dat_preview,
+            ),
+            ClientPackFilePreview(
+                path="overrides/options.txt",
+                display_name="options.txt",
+                content_text=self._client_pack_options_txt_preview(app),
+            ),
+        )
+
+    def _default_client_pack_mod_snapshots(self, app: App) -> tuple[ClientPackModSnapshot, ...]:
+        entries = self._client_pack_entries(
+            selection=ClientPackSelection(),
+            app=app,
+            include_kubejs_scripts=False,
+            include_servers_dat=False,
+            include_options_txt=False,
+        )
+        snapshots: list[ClientPackModSnapshot] = []
+        for entry in entries:
+            if not isinstance(entry, ModArchiveEntry):
+                continue
+            mod = app.has_mod_manager.get(entry.mod_name)
+            snapshots.append(
+                ClientPackModSnapshot(
+                    name=mod.name,
+                    friendly=mod.friendly,
+                    version=mod.version,
+                )
+            )
+        return tuple(sorted(snapshots, key=lambda mod: mod.friendly.casefold()))
+
+    @staticmethod
+    def _client_pack_mod_snapshot_label(snapshot: ClientPackModSnapshot) -> str:
+        if snapshot.version is None:
+            return snapshot.friendly
+        return f"{snapshot.friendly} ({snapshot.version})"
+
+    @staticmethod
+    def _unique_client_pack_mods_by_friendly(
+        snapshots: Sequence[ClientPackModSnapshot],
+    ) -> dict[str, ClientPackModSnapshot]:
+        friendly_counts: dict[str, int] = {}
+        for snapshot in snapshots:
+            key = snapshot.friendly.casefold()
+            friendly_counts[key] = friendly_counts.get(key, 0) + 1
+        return {
+            snapshot.friendly.casefold(): snapshot
+            for snapshot in snapshots
+            if friendly_counts[snapshot.friendly.casefold()] == 1
+        }
+
+    @classmethod
+    def _client_pack_mod_update_label(cls, before: ClientPackModSnapshot, after: ClientPackModSnapshot) -> str:
+        changes: list[str] = []
+        if before.version != after.version:
+            changes.append(f"{before.version or 'unknown'} -> {after.version or 'unknown'}")
+        if before.name != after.name:
+            changes.append(f"file {before.name} -> {after.name}")
+        if before.friendly != after.friendly:
+            changes.append(f"name {before.friendly} -> {after.friendly}")
+        if not changes:
+            return cls._client_pack_mod_snapshot_label(after)
+        return f"{after.friendly}: {'; '.join(changes)}"
+
+    @classmethod
+    def _client_pack_automated_changelog_text(
+        cls,
+        *,
+        current: tuple[ClientPackModSnapshot, ...],
+        published: tuple[ClientPackModSnapshot, ...],
+        has_published_pack: bool,
+    ) -> str:
+        if not current and not published:
+            return "No automated client-pack changes detected."
+
+        current_by_name = {snapshot.name.casefold(): snapshot for snapshot in current}
+        published_by_name = {snapshot.name.casefold(): snapshot for snapshot in published}
+        matched_pairs: list[tuple[ClientPackModSnapshot, ClientPackModSnapshot]] = []
+        current_unmatched_keys = set(current_by_name)
+        published_unmatched_keys = set(published_by_name)
+
+        for key in sorted(current_unmatched_keys & published_unmatched_keys):
+            matched_pairs.append((published_by_name[key], current_by_name[key]))
+            current_unmatched_keys.remove(key)
+            published_unmatched_keys.remove(key)
+
+        current_unmatched = tuple(current_by_name[key] for key in current_unmatched_keys)
+        published_unmatched = tuple(published_by_name[key] for key in published_unmatched_keys)
+        current_by_friendly = cls._unique_client_pack_mods_by_friendly(current_unmatched)
+        published_by_friendly = cls._unique_client_pack_mods_by_friendly(published_unmatched)
+
+        for friendly_key in sorted(current_by_friendly.keys() & published_by_friendly.keys()):
+            before = published_by_friendly[friendly_key]
+            after = current_by_friendly[friendly_key]
+            matched_pairs.append((before, after))
+            current_unmatched_keys.remove(after.name.casefold())
+            published_unmatched_keys.remove(before.name.casefold())
+
+        added = tuple(
+            current_by_name[key]
+            for key in sorted(current_unmatched_keys, key=lambda item: current_by_name[item].friendly.casefold())
+        )
+        removed = tuple(
+            published_by_name[key]
+            for key in sorted(published_unmatched_keys, key=lambda item: published_by_name[item].friendly.casefold())
+        )
+        updated = tuple(
+            (before, after)
+            for before, after in sorted(matched_pairs, key=lambda item: item[1].friendly.casefold())
+            if before.version != after.version or before.name != after.name or before.friendly != after.friendly
+        )
+
+        lines: list[str] = []
+        if not published and not has_published_pack:
+            lines.append("Initial client pack contents:")
+            lines.extend(f"- {cls._client_pack_mod_snapshot_label(snapshot)}" for snapshot in current)
+            return "\n".join(lines)
+        if not published and has_published_pack:
+            lines.append("Published mod snapshot will be tracked after the next publish.")
+            lines.append("Current default client pack contents:")
+            lines.extend(f"- {cls._client_pack_mod_snapshot_label(snapshot)}" for snapshot in current)
+            return "\n".join(lines)
+
+        if added:
+            lines.append("Added mods:")
+            lines.extend(f"- {cls._client_pack_mod_snapshot_label(snapshot)}" for snapshot in added)
+        if removed:
+            if lines:
+                lines.append("")
+            lines.append("Removed mods:")
+            lines.extend(f"- {cls._client_pack_mod_snapshot_label(snapshot)}" for snapshot in removed)
+        if updated:
+            if lines:
+                lines.append("")
+            lines.append("Updated mods:")
+            lines.extend(
+                f"- {cls._client_pack_mod_update_label(before, after)}"
+                for before, after in updated
+            )
+        return "\n".join(lines) if lines else "No automated client-pack changes detected."
+
+    def _client_pack_automated_changelog(self, app: App) -> str:
+        if not app.mod_capabilities.supports_client_pack:
+            return ""
+        try:
+            current = self._default_client_pack_mod_snapshots(app)
+        except Exception as xcp:
+            log.warning("Client-pack automated changelog failed: app=%s error=%s", app.name, xcp)
+            return f"Automated client-pack changelog is unavailable: {xcp}"
+        return self._client_pack_automated_changelog_text(
+            current=current,
+            published=app.cfg.client_pack_published_mods,
+            has_published_pack=app.cfg.client_pack_published_hash is not None,
+        )
+
+    @staticmethod
+    def _normalised_client_pack_node_label(node_name: str) -> str:
+        text = node_name.strip()
+        if not text:
+            return "Node"
+        if text.casefold() == text:
+            return text.title()
+        return text
+
+    def _client_pack_node_label(self) -> str:
+        node_key = self.node_name.casefold()
+        for snapshot in self._known_bot_snapshots():
+            mod_web = snapshot.features.mod_web
+            if mod_web is None or mod_web.node_name.casefold() != node_key:
+                continue
+            if snapshot.profile.label:
+                return snapshot.profile.label
+        if node_key == config.ACTIVE_BOT_PROFILE.name.value.casefold():
+            return config.ACTIVE_BOT_PROFILE.name.value.title()
+        return self._normalised_client_pack_node_label(self.node_name)
+
+    @staticmethod
+    def _known_bot_snapshots() -> tuple[config.BotMetadataSnapshot, ...]:
+        snapshots: list[config.BotMetadataSnapshot] = []
+        try:
+            snapshots.extend(config.load_bot_configuration(Path("configuration.json")).known_bots.values())
+        except Exception as xcp:
+            log.warning("Node API failed to load local bot registry: %s", xcp)
+
+        cache_path = config.authority_cache_path(AuthorityResource.BOTS)
+        if cache_path.exists():
+            try:
+                raw_cache = read_json_object(cache_path)
+                snapshots.extend(
+                    config.BotMetadataSnapshot.model_validate(snapshot)
+                    for snapshot in raw_cache.values()
+                    if isinstance(snapshot, dict)
+                )
+            except Exception as xcp:
+                log.warning("Node API failed to load cached bot registry: %s", xcp)
+
+        unique: dict[str, config.BotMetadataSnapshot] = {}
+        for snapshot in snapshots:
+            unique[snapshot.profile.id] = snapshot
+        return tuple(unique.values())
+
+    @staticmethod
+    def _minecraft_servers_dat_server_name(node_label: str) -> str:
+        base = "".join(character for character in node_label.strip() if character.isalnum())
+        if not base:
+            base = "Node"
+        return f"{base}Server"
+
+    @staticmethod
+    def _minecraft_servers_dat_content(*, server_name: str, server_address: str) -> bytes:
+        def tag_name(name: str) -> bytes:
+            encoded = name.encode("utf-8")
+            return struct.pack(">H", len(encoded)) + encoded
+
+        def string_tag(name: str, value: str) -> bytes:
+            encoded = value.encode("utf-8")
+            return b"\x08" + tag_name(name) + struct.pack(">H", len(encoded)) + encoded
+
+        server_compound = (
+            string_tag("name", server_name)
+            + string_tag("ip", server_address)
+            + b"\x00"
+        )
+        servers_list = b"\x09" + tag_name("servers") + b"\x0a" + struct.pack(">i", 1) + server_compound
+        return b"\x0a" + tag_name("") + servers_list + b"\x00"
+
+    def _minecraft_client_pack_extra_entries(
+        self,
+        *,
+        app: Minecraft,
+        metadata: ClientPackMetadataConfig,
+    ) -> tuple[ArchiveDataEntry, ...]:
+        if not metadata.include_servers_dat:
+            return ()
+        server_address = app.cfg.join_direct_ip_address or app.cfg.join_address
+        if server_address is None:
+            log.warning("Skipping generated servers.dat because %s has no join address.", app.name)
+            return ()
+        return (
+            ArchiveDataEntry(
+                archive_path=PurePosixPath("overrides/servers.dat"),
+                content=self._minecraft_servers_dat_content(
+                    server_name=self._minecraft_servers_dat_server_name(self._client_pack_node_label()),
+                    server_address=server_address,
+                ),
+            ),
+        )
+
+    def _client_override_entries_for_pack(
+        self,
+        *,
+        app: App,
+        metadata: ClientPackMetadataConfig | None,
+    ) -> tuple[ArchiveEntry, ...]:
+        overrides_dir = self._client_overrides_dir_for_pack(app)
+        if overrides_dir is None:
+            return ()
+        overrides_path = overrides_dir.resolve()
+        if not overrides_path.exists() or not overrides_path.is_dir():
+            raise ClientPackValidationError(f"Client overrides directory is missing: {overrides_path}")
+
+        excluded_paths: frozenset[PurePosixPath] = frozenset(
+            {PurePosixPath("options.txt")}
+            if metadata is not None and not metadata.include_options_txt
+            else ()
+        )
+        entries: list[ArchiveEntry] = []
+        override_files = tuple(
+            sorted(
+                (path for path in overrides_path.rglob("*") if path.is_file()),
+                key=lambda path: path.as_posix(),
+            )
+        )
+        for file_path in override_files:
+            relative_path = PurePosixPath(file_path.relative_to(overrides_path).as_posix())
+            if relative_path in excluded_paths:
+                continue
+            entries.append(
+                ArchiveEntry(
+                    source_path=file_path,
+                    archive_path=PurePosixPath("overrides") / relative_path,
+                )
+            )
+        return tuple(entries)
+
     def _client_pack_entries(
         self,
         selection: ClientPackSelection,
         *,
         app: App,
         include_kubejs_scripts: bool,
-    ) -> tuple[ArchiveEntry, ...]:
+        include_servers_dat: bool | None = None,
+        include_options_txt: bool | None = None,
+    ) -> tuple[ArchiveEntry | ArchiveDataEntry, ...]:
+        metadata = self._client_pack_metadata(app)
+        if metadata is not None and (include_servers_dat is not None or include_options_txt is not None):
+            metadata = metadata.model_copy(
+                update={
+                    "include_servers_dat": metadata.include_servers_dat
+                    if include_servers_dat is None
+                    else include_servers_dat,
+                    "include_options_txt": metadata.include_options_txt
+                    if include_options_txt is None
+                    else include_options_txt,
+                }
+            )
         entries = build_client_pack_entries(
             app.has_mod_manager,
             selection,
-            client_overrides_dir=self._client_overrides_dir_for_pack(app),
+            client_overrides_dir=None,
         )
-        if not include_kubejs_scripts or not isinstance(app, Minecraft):
+        entries = (
+            *entries,
+            *self._client_override_entries_for_pack(app=app, metadata=metadata),
+        )
+        if not isinstance(app, Minecraft):
+            return entries
+        if metadata is not None:
+            entries = (
+                *entries,
+                *self._minecraft_client_pack_extra_entries(app=app, metadata=metadata),
+            )
+        if not include_kubejs_scripts:
             return entries
         return (
             *entries,
@@ -10695,7 +11124,11 @@ class NodeApiService:
             )
             raise _http_exception(409, "The default client pack contains no mods.")
         content_hash = await self._client_pack_content_hash(app=app, entries=entries)
-        version = app.publish_client_pack(content_hash, changelog=update.changelog)
+        version = app.publish_client_pack(
+            content_hash,
+            changelog=update.changelog,
+            mods=self._default_client_pack_mod_snapshots(app),
+        )
         self._invalidate_state_caches(app_name=app.name)
         return {
             "app_name": app.name,
@@ -11593,7 +12026,7 @@ class NodeApiService:
         self,
         *,
         app: App,
-        entries: tuple[ArchiveEntry, ...],
+        entries: tuple[ArchiveEntry | ArchiveDataEntry, ...],
         request: NodeDownloadRequest,
         client_pack_version: str | None = None,
     ) -> str:

@@ -92,6 +92,7 @@ class AppDetailsUpdate:
     relay_notice_progress: bool | None = None
     relay_advancements_enabled: bool | None = None
     factorio_chat_relay_use_shout: bool | None = None
+    rcon_requires_online_players: bool | None = None
     disabled_activity_provider_ids: tuple[str, ...] | None = None
     title_font_preset: str | None = None
     steam_update_enabled: bool | None = None
@@ -751,6 +752,7 @@ class App_Manager(metaclass=config.Singleton):
         previous_player_death_notice = app.relay_notice_player_death_enabled
         previous_progress_notice = app.relay_notice_progress_enabled
         previous_factorio_chat_relay_use_shout = getattr(app.cfg, "factorio_chat_relay_use_shout", True)
+        previous_rcon_requires_online_players = app.rcon_requires_online_players_enabled
         previous_disabled_activity_provider_ids = app.disabled_activity_provider_ids
         next_friendly_name = _validate_required_friendly_name(details.friendly_name)
         next_title_font_preset = (
@@ -765,6 +767,7 @@ class App_Manager(metaclass=config.Singleton):
         next_player_death_notice = self._resolve_next_relay_notice_player_death(app=app, details=details)
         next_progress_notice = self._resolve_next_relay_notice_progress(app=app, details=details)
         next_factorio_chat_relay_use_shout = self._resolve_next_factorio_chat_relay_use_shout(app=app, details=details)
+        next_rcon_requires_online_players = self._resolve_next_rcon_requires_online_players(app=app, details=details)
         next_disabled_activity_provider_ids = self._resolve_next_disabled_activity_provider_ids(app=app, details=details)
         self._validate_steam_update_change_allowed(
             app=app,
@@ -805,6 +808,7 @@ class App_Manager(metaclass=config.Singleton):
             and previous_player_death_notice == next_player_death_notice
             and previous_progress_notice == next_progress_notice
             and previous_factorio_chat_relay_use_shout == next_factorio_chat_relay_use_shout
+            and previous_rcon_requires_online_players == next_rcon_requires_online_players
             and previous_disabled_activity_provider_ids == next_disabled_activity_provider_ids
         ):
             if (
@@ -844,6 +848,13 @@ class App_Manager(metaclass=config.Singleton):
             next_payload["relay_advancements"] = next_relay_advancements
         if app.scope == "factorio":
             next_payload["factorio_chat_relay_use_shout"] = next_factorio_chat_relay_use_shout
+        if next_rcon_requires_online_players is not None:
+            if next_rcon_requires_online_players == app.rcon_requires_online_players_default:
+                next_payload.pop("rcon_requires_online_players", None)
+            else:
+                next_payload["rcon_requires_online_players"] = next_rcon_requires_online_players
+        else:
+            next_payload.pop("rcon_requires_online_players", None)
         if next_disabled_activity_provider_ids:
             next_payload["disabled_activity_provider_ids"] = list(next_disabled_activity_provider_ids)
         else:
@@ -868,6 +879,8 @@ class App_Manager(metaclass=config.Singleton):
         app.cfg.resource_points.running = running_points
         app.cfg.resource_points.startup = startup_points
         app.cfg.steam_update = next_steam_update
+        if next_rcon_requires_online_players is not None:
+            app.apply_rcon_requires_online_players_enabled(next_rcon_requires_online_players)
         app.apply_disabled_activity_provider_ids(next_disabled_activity_provider_ids)
         if next_player_session_notice is not None:
             app.apply_relay_notice_player_session_enabled(next_player_session_notice)
@@ -967,6 +980,15 @@ class App_Manager(metaclass=config.Singleton):
         if app.scope != "factorio":
             raise ValueError(f"{app.friendly} does not support Factorio chat relay routing.")
         return details.factorio_chat_relay_use_shout
+
+    @staticmethod
+    def _resolve_next_rcon_requires_online_players(*, app: ManagedApp, details: AppDetailsUpdate) -> bool | None:
+        current_value = app.rcon_requires_online_players_enabled
+        if details.rcon_requires_online_players is None:
+            return current_value
+        if current_value is None:
+            raise ValueError(f"{app.friendly} does not support RCON command gating.")
+        return details.rcon_requires_online_players
 
     @staticmethod
     def _steam_update_runtime_rebuild_required(

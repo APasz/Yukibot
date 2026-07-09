@@ -23,6 +23,7 @@ from modmux.models import Provider
 
 import config
 from _manager import AppStartBlocker, AppStartBlockerKind
+from _mod_ops import ArchiveDataEntry, ClientPackSelection
 from _security import Access_Control, Power_Level
 from apps._app import (
     App,
@@ -42,6 +43,7 @@ from apps._config import (
     ClientPackConfig,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
+    ClientPackModSnapshot,
     ClientPackPolicy,
     ClientPackRelease,
     LauncherMetadataDiscovery,
@@ -695,6 +697,62 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.summary, "Minecraft Alpha: broadcast sent.")
         self.assertEqual(result.text, "[Server] hi")
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
+
+    def test_execute_console_action_blocks_rcon_when_no_players_are_online(self) -> None:
+        execute = AsyncMock(return_value=ConsoleActionResult(summary="ok"))
+        action = ConsoleAction(
+            key="say",
+            label="Say",
+            description="Broadcast to all players.",
+            power_level=Power_Level.user,
+            execute=execute,
+            transport=ConsoleResponseSource.RCON,
+        )
+        app = _build_console_action_app(actions=(action,), running=True)
+        app.rcon_requires_online_players_default = True
+        app.player_count = AsyncMock(return_value=(0, 20))  # type: ignore[method-assign]
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(service.execute_console_action(app=app, action_key="say", raw_value=None, actor_user_id=42))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(
+            str(raised.exception.detail),
+            "Minecraft Alpha has no players online, so RCON commands are currently gated.",
+        )
+        app.player_count.assert_awaited_once()
+        execute.assert_not_awaited()
+
+    def test_execute_console_action_skips_player_gate_when_rcon_override_is_disabled(self) -> None:
+        execute = AsyncMock(return_value=ConsoleActionResult(summary="ok"))
+        action = ConsoleAction(
+            key="say",
+            label="Say",
+            description="Broadcast to all players.",
+            power_level=Power_Level.user,
+            execute=execute,
+            transport=ConsoleResponseSource.RCON,
+        )
+        app = _build_console_action_app(actions=(action,), running=True)
+        app.rcon_requires_online_players_default = True
+        app.cfg.rcon_requires_online_players = False
+        app.player_count = AsyncMock(return_value=(0, 20))  # type: ignore[method-assign]
+        acl = Mock()
+        acl.perm_check = AsyncMock()
+        service = NodeApiService()
+        service.set_acl(cast(Any, acl))
+
+        result: NodeConsoleActionExecutionResult = asyncio.run(
+            service.execute_console_action(app=app, action_key="say", raw_value=None, actor_user_id=42)
+        )
+
+        self.assertTrue(result.success)
+        app.player_count.assert_not_awaited()
+        execute.assert_awaited_once_with(app, None)
 
     def test_execute_console_action_requires_running_app_when_action_demands_it(self) -> None:
         action = ConsoleAction(
@@ -2674,6 +2732,112 @@ class NodeApiTests(unittest.TestCase):
             metadata.model_dump(mode="json"),
         )
 
+    def test_node_app_entry_round_trips_client_pack_automated_changelog(self) -> None:
+        entry = NodeAppEntry.from_mapping(
+            {
+                "name": "minecraft_alpha",
+                "friendly": "Minecraft Alpha",
+                "node": "erin",
+                "supports_mods": True,
+                "client_pack_automated_changelog": "Added mods:\n- Sodium (0.5.11)",
+            }
+        )
+
+        self.assertEqual(entry.client_pack_automated_changelog, "Added mods:\n- Sodium (0.5.11)")
+        self.assertEqual(
+            entry.to_mapping()["client_pack_automated_changelog"],
+            "Added mods:\n- Sodium (0.5.11)",
+        )
+
+    def test_client_pack_automated_changelog_reports_added_removed_and_updated_mods(self) -> None:
+        text = NodeApiService._client_pack_automated_changelog_text(
+            current=(
+                ClientPackModSnapshot(name="alpha.jar", friendly="Alpha", version="2.0.0"),
+                ClientPackModSnapshot(name="gamma.jar", friendly="Gamma", version=None),
+            ),
+            published=(
+                ClientPackModSnapshot(name="alpha.jar", friendly="Alpha", version="1.0.0"),
+                ClientPackModSnapshot(name="beta.jar", friendly="Beta", version="1.0.0"),
+            ),
+            has_published_pack=True,
+        )
+
+        self.assertEqual(
+            text,
+            "Added mods:\n"
+            "- Gamma\n\n"
+            "Removed mods:\n"
+            "- Beta (1.0.0)\n\n"
+            "Updated mods:\n"
+            "- Alpha: 1.0.0 -> 2.0.0",
+        )
+
+    def test_client_pack_automated_changelog_treats_disabled_mod_as_removed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "enabled.jar").write_bytes(b"enabled")
+            (root / "disabled.jar.disabled").write_bytes(b"disabled")
+            enabled = _TestMod(
+                Mod_Config(
+                    name="enabled.jar",
+                    directory=root,
+                    metadata_overrides=ModMetadataOverrides(friendly_name="Enabled Mod", version="1.0.0"),
+                )
+            )
+            disabled = _TestMod(
+                Mod_Config(
+                    name="disabled.jar",
+                    directory=root,
+                    placement=ModPlacement.SERVER_DISABLED,
+                    metadata_overrides=ModMetadataOverrides(friendly_name="Disabled Mod", version="1.0.0"),
+                )
+            )
+            manager = Mock()
+            manager.list_mods.return_value = (enabled, disabled)
+            manager.get.side_effect = {enabled.name: enabled, disabled.name: disabled}.__getitem__
+            app = _build_app(manager)
+            app.directory = root
+            app.cfg.directory = root
+            app.cfg.apps_dir = root
+            service = NodeApiService()
+
+            current = service._default_client_pack_mod_snapshots(app)
+
+        text = NodeApiService._client_pack_automated_changelog_text(
+            current=current,
+            published=(
+                ClientPackModSnapshot(name="enabled.jar", friendly="Enabled Mod", version="1.0.0"),
+                ClientPackModSnapshot(name="disabled.jar", friendly="Disabled Mod", version="1.0.0"),
+            ),
+            has_published_pack=True,
+        )
+
+        self.assertEqual(current, (ClientPackModSnapshot(name="enabled.jar", friendly="Enabled Mod", version="1.0.0"),))
+        self.assertEqual(text, "Removed mods:\n- Disabled Mod (1.0.0)")
+
+    def test_client_pack_automated_changelog_matches_versioned_filename_changes_by_friendly_name(self) -> None:
+        text = NodeApiService._client_pack_automated_changelog_text(
+            current=(
+                ClientPackModSnapshot(name="alpha-2.0.0.jar", friendly="Alpha", version="2.0.0"),
+                ClientPackModSnapshot(name="gamma.jar", friendly="Gamma", version=None),
+            ),
+            published=(
+                ClientPackModSnapshot(name="alpha-1.0.0.jar", friendly="Alpha", version="1.0.0"),
+                ClientPackModSnapshot(name="beta.jar", friendly="Beta", version="1.0.0"),
+            ),
+            has_published_pack=True,
+        )
+
+        self.assertEqual(
+            text,
+            "Added mods:\n"
+            "- Gamma\n\n"
+            "Removed mods:\n"
+            "- Beta (1.0.0)\n\n"
+            "Updated mods:\n"
+            "- Alpha: 1.0.0 -> 2.0.0; file alpha-1.0.0.jar -> alpha-2.0.0.jar",
+        )
+
     def test_node_app_entry_round_trips_join_addresses(self) -> None:
         entry = NodeAppEntry.from_mapping(
             {
@@ -2847,6 +3011,22 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertFalse(entry.relay_advancements_enabled)
         self.assertEqual(entry.relay_advancement_term, "Advancement")
+
+    def test_build_app_entry_captures_rcon_player_gate_metadata(self) -> None:
+        action = ConsoleAction(
+            key="say",
+            label="Say",
+            description="Broadcast to all players.",
+            power_level=Power_Level.user,
+            execute=AsyncMock(return_value=ConsoleActionResult(summary="ok")),
+            transport=ConsoleResponseSource.RCON,
+        )
+        app = _build_console_action_app(actions=(action,))
+        app.rcon_requires_online_players_default = True
+
+        entry = NodeApiService().build_app_entry(app)
+
+        self.assertTrue(entry.rcon_requires_online_players)
 
     def test_build_app_entry_captures_activity_provider_metadata(self) -> None:
         class _ActivityProvider(AppActivityProvider):
@@ -4140,6 +4320,8 @@ class NodeApiTests(unittest.TestCase):
                             name="Example Pack",
                             description="Example description",
                             filename_template="{pack_name}-{version}",
+                            include_servers_dat=False,
+                            include_options_txt=False,
                         ),
                         kubejs_scripts=(
                             ClientPackKubeJsScript(
@@ -4158,8 +4340,133 @@ class NodeApiTests(unittest.TestCase):
             ("server_scripts/events.js",),
         )
         self.assertEqual(app.cfg.client_pack_metadata.name, "Example Pack")
+        self.assertFalse(app.cfg.client_pack_metadata.include_servers_dat)
+        self.assertFalse(app.cfg.client_pack_metadata.include_options_txt)
         app.invalidate_client_pack_content.assert_called_once_with()
         app.persist_instance_config_overrides.assert_called_once_with()
+
+    def test_minecraft_client_pack_entries_generate_servers_dat_and_filter_options_txt(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overrides = root / "client-overrides"
+            overrides.mkdir()
+            (overrides / "options.txt").write_text("client options", encoding="utf-8")
+            (overrides / "config.toml").write_text("client config", encoding="utf-8")
+            (root / "required.jar").write_bytes(b"required")
+            required = _TestMod(Mod_Config(name="required.jar", directory=root))
+            manager = Mock()
+            manager.list_mods.return_value = (required,)
+            manager.get.side_effect = {required.name: required}.__getitem__
+            app = Mock(spec=Minecraft)
+            app.name = "minecraft_alpha"
+            app.friendly = "Minecraft Alpha"
+            app.directory = root
+            app.has_mod_manager = manager
+            app.mod_capabilities = SimpleNamespace(include_client_overrides=True)
+            app.cfg = App_Config(
+                name="minecraft_alpha",
+                instance_key="alpha",
+                friendly_name="Minecraft Alpha",
+                directory=root,
+                apps_dir=root,
+                mods_dir=None,
+                client_overrides_dir=overrides,
+                scope="minecraft",
+                join_host="play.example.test",
+                join_port=25565,
+                client_pack_metadata=ClientPackMetadataConfig(
+                    name="Example Pack",
+                    description="Example description",
+                    include_servers_dat=True,
+                    include_options_txt=False,
+                ),
+            )
+            service = NodeApiService()
+
+            with (
+                patch.object(NodeApiService, "node_name", new=property(lambda _service: "erin")),
+                patch.object(NodeApiService, "_known_bot_snapshots", return_value=()),
+            ):
+                entries = service._client_pack_entries(
+                    ClientPackSelection(),
+                    app=cast(App, app),
+                    include_kubejs_scripts=True,
+                )
+
+        archive_paths = {entry.archive_path.as_posix(): entry for entry in entries}
+        self.assertIn("required.jar", archive_paths)
+        self.assertIn("overrides/config.toml", archive_paths)
+        self.assertNotIn("overrides/options.txt", archive_paths)
+        self.assertIn("overrides/servers.dat", archive_paths)
+        servers_dat = archive_paths["overrides/servers.dat"]
+        self.assertIsInstance(servers_dat, ArchiveDataEntry)
+        assert isinstance(servers_dat, ArchiveDataEntry)
+        self.assertIn(b"ErinServer", servers_dat.content)
+        self.assertIn(b"play.example.test:25565", servers_dat.content)
+
+    def test_minecraft_client_pack_entries_honor_download_file_overrides(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            overrides = root / "client-overrides"
+            overrides.mkdir()
+            (overrides / "options.txt").write_text("client options", encoding="utf-8")
+            (root / "required.jar").write_bytes(b"required")
+            required = _TestMod(Mod_Config(name="required.jar", directory=root))
+            manager = Mock()
+            manager.list_mods.return_value = (required,)
+            manager.get.side_effect = {required.name: required}.__getitem__
+            app = Mock(spec=Minecraft)
+            app.name = "minecraft_alpha"
+            app.friendly = "Minecraft Alpha"
+            app.directory = root
+            app.has_mod_manager = manager
+            app.mod_capabilities = SimpleNamespace(include_client_overrides=True)
+            app.cfg = App_Config(
+                name="minecraft_alpha",
+                instance_key="alpha",
+                friendly_name="Minecraft Alpha",
+                directory=root,
+                apps_dir=root,
+                mods_dir=None,
+                client_overrides_dir=overrides,
+                scope="minecraft",
+                join_host="play.example.test",
+                join_port=25565,
+                client_pack_metadata=ClientPackMetadataConfig(
+                    name="Example Pack",
+                    description="Example description",
+                    include_servers_dat=True,
+                    include_options_txt=True,
+                ),
+            )
+
+            entries = NodeApiService()._client_pack_entries(
+                ClientPackSelection(),
+                app=cast(App, app),
+                include_kubejs_scripts=True,
+                include_servers_dat=False,
+                include_options_txt=False,
+            )
+
+        archive_paths = {entry.archive_path.as_posix() for entry in entries}
+        self.assertIn("required.jar", archive_paths)
+        self.assertNotIn("overrides/options.txt", archive_paths)
+        self.assertNotIn("overrides/servers.dat", archive_paths)
+
+    def test_client_pack_server_name_uses_node_label_when_available(self) -> None:
+        service = NodeApiService()
+        snapshot = SimpleNamespace(
+            profile=SimpleNamespace(label="Yoko"),
+            features=SimpleNamespace(mod_web=SimpleNamespace(node_name="yuki")),
+        )
+
+        with (
+            patch.object(NodeApiService, "node_name", new=property(lambda _service: "yuki")),
+            patch.object(NodeApiService, "_known_bot_snapshots", return_value=(snapshot,)),
+        ):
+            server_name = service._minecraft_servers_dat_server_name(service._client_pack_node_label())
+
+        self.assertEqual(server_name, "YokoServer")
 
     def test_client_pack_archive_name_uses_configured_metadata_template(self) -> None:
         app = Mock(spec=Minecraft)
@@ -4227,6 +4534,13 @@ class NodeApiTests(unittest.TestCase):
                     "_client_pack_content_hash",
                     new=AsyncMock(return_value="a" * 64),
                 ),
+                patch.object(
+                    service,
+                    "_default_client_pack_mod_snapshots",
+                    return_value=(
+                        ClientPackModSnapshot(name="alpha.jar", friendly="Alpha", version="1.0.0"),
+                    ),
+                ),
                 patch("apps._app.next_client_pack_version", return_value="2026-07-04"),
             ):
                 result = asyncio.run(
@@ -4244,6 +4558,10 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(
             app.cfg.client_pack_releases,
             (ClientPackRelease(version="2026-07-04", changelog="Initial release."),),
+        )
+        self.assertEqual(
+            app.cfg.client_pack_published_mods,
+            (ClientPackModSnapshot(name="alpha.jar", friendly="Alpha", version="1.0.0"),),
         )
         self.assertFalse(app.cfg.client_pack_content_dirty)
 
@@ -4490,6 +4808,7 @@ class NodeApiTests(unittest.TestCase):
                     lifecycle_notice_started=False,
                     lifecycle_notice_stopped=True,
                     lifecycle_notice_crashed=False,
+                    rcon_requires_online_players=False,
                     disabled_activity_provider_ids=("day",),
                     running_cpu_points=3,
                     running_ram_points=7,
@@ -4507,6 +4826,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(details.running_ram_points, 7)
         self.assertIsNone(details.startup_cpu_points)
         self.assertIsNone(details.startup_ram_points)
+        self.assertFalse(details.rcon_requires_online_players)
         self.assertEqual(details.disabled_activity_provider_ids, ("day",))
         self.assertTrue(details.steam_update_enabled)
         self.assertEqual(details.steam_update_selected_branch, "latest_experimental")

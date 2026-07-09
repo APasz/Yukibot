@@ -69,6 +69,7 @@ from .runtime_imports import (
     Card,
     Checkbox,
     ClientPackConfig,
+    ClientPackFilePreview,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
     ClientPackPolicy,
@@ -4504,6 +4505,83 @@ class ModWebAppPageMixin(
         client_choice_selects: dict[str, Select] = {}
         client_pack_format_select: Select | None = None
         include_kubejs_scripts_checkbox: Checkbox | None = None
+        include_servers_dat_checkbox: Checkbox | None = None
+        include_options_txt_checkbox: Checkbox | None = None
+        client_pack_file_previews: dict[str, ClientPackFilePreview] = {
+            preview.path: preview for preview in model.client_pack_file_previews
+        }
+        client_pack_file_preview_title: Label | None = None
+        client_pack_file_preview_content: Textarea | None = None
+        client_pack_file_preview_dialog: Dialog | None = None
+
+        def ensure_client_pack_file_preview_dialog() -> None:
+            nonlocal client_pack_file_preview_content
+            nonlocal client_pack_file_preview_dialog
+            nonlocal client_pack_file_preview_title
+            if client_pack_file_preview_dialog is not None:
+                return
+            client_pack_file_preview_dialog = ui.dialog()
+            with client_pack_file_preview_dialog:
+                with ui.card().classes("mod-card mod-dialog-card"):
+                    with ui.column().classes("w-full gap-4 p-5"):
+                        client_pack_file_preview_title = ui.label("View client file").classes(
+                            "text-xl font-black mod-title-small"
+                        )
+                        client_pack_file_preview_content = (
+                            ui.textarea(
+                                "Content",
+                                value="",
+                            )
+                            .props("filled square readonly hide-bottom-space color=accent rows=12")
+                            .classes("w-full mod-config-input")
+                        )
+                        with ui.row().classes("w-full justify-end gap-2"):
+                            ui.button("Close", on_click=client_pack_file_preview_dialog.close).classes(
+                                "mod-list-button secondary"
+                            )
+
+        def open_client_pack_file_preview(preview: ClientPackFilePreview) -> None:
+            ensure_client_pack_file_preview_dialog()
+            if client_pack_file_preview_title is None or client_pack_file_preview_content is None:
+                raise RuntimeError("Client pack file preview dialog was not rendered.")
+            client_pack_file_preview_title.set_text(f"View {preview.display_name}")
+            client_pack_file_preview_content.set_value(preview.content_text)
+            if client_pack_file_preview_dialog is None:
+                raise RuntimeError("Client pack file preview dialog was not rendered.")
+            client_pack_file_preview_dialog.open()
+
+        def client_pack_file_preview(path: str, display_name: str) -> ClientPackFilePreview:
+            preview = client_pack_file_previews.get(path)
+            if preview is not None:
+                return preview
+            return ClientPackFilePreview(
+                path=path,
+                display_name=display_name,
+                content_text=f"No preview is available for {display_name}.",
+            )
+
+        def render_client_pack_file_option(
+            *,
+            label: str,
+            value: bool,
+            preview_path: str,
+            preview_display_name: str,
+        ) -> Checkbox:
+            preview = client_pack_file_preview(preview_path, preview_display_name)
+            with ui.row().classes("mod-client-pack-file-option w-full items-center gap-2"):
+                checkbox = (
+                    ui.checkbox(label, value=value)
+                    .props("dense color=accent keep-color")
+                    .classes("mod-client-pack-checkbox grow")
+                )
+                with ui.button(
+                    icon="visibility",
+                    on_click=lambda file_preview=preview: open_client_pack_file_preview(file_preview),
+                ).props(
+                    f"flat round dense color=accent aria-label=View {preview_display_name}"
+                ).classes("mod-client-pack-file-view-button"):
+                    ui.tooltip(f"View {preview_display_name}")
+                return checkbox
         with ui.dialog() as upload_placement_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
@@ -4695,6 +4773,16 @@ class ModWebAppPageMixin(
                         if include_kubejs_scripts_checkbox is None
                         else bool(_value_as_object(include_kubejs_scripts_checkbox))
                     ),
+                    include_servers_dat=(
+                        True
+                        if include_servers_dat_checkbox is None
+                        else bool(_value_as_object(include_servers_dat_checkbox))
+                    ),
+                    include_options_txt=(
+                        True
+                        if include_options_txt_checkbox is None
+                        else bool(_value_as_object(include_options_txt_checkbox))
+                    ),
                 ),
                 doseq=True,
             )
@@ -4754,6 +4842,8 @@ class ModWebAppPageMixin(
         client_pack_name_input: Input | None = None
         client_pack_description_input: Textarea | None = None
         client_pack_filename_template_input: Input | None = None
+        client_pack_include_servers_dat_checkbox: Checkbox | None = None
+        client_pack_include_options_txt_checkbox: Checkbox | None = None
         client_pack_changelog_draft: str = model.client_pack_changelog or ""
         client_pack_changelog_input: Textarea | None = None
         client_pack_config_save_button: Button | None = None
@@ -4793,6 +4883,21 @@ class ModWebAppPageMixin(
         ) -> None:
             nonlocal client_pack_changelog_draft
             client_pack_changelog_draft = _value_as_text(event)
+
+        def client_pack_automated_changelog_to_append() -> str:
+            text = model.client_pack_automated_changelog.strip()
+            if not text or text == "No automated client-pack changes detected.":
+                return ""
+            if text.startswith("Automated client-pack changelog is unavailable:"):
+                return ""
+            return text
+
+        def client_pack_publish_changelog() -> str:
+            changelog = client_pack_changelog_draft.strip()
+            automated_changelog = client_pack_automated_changelog_to_append()
+            if not automated_changelog:
+                return changelog
+            return f"{changelog}\n\n{automated_changelog}" if changelog else automated_changelog
 
         def client_pack_configuration_updates() -> tuple[tuple[NodeModEntry, ClientPackConfig], ...]:
             choice_groups = configured_choice_groups()
@@ -4840,12 +4945,16 @@ class ModWebAppPageMixin(
                 client_pack_name_input is None
                 or client_pack_description_input is None
                 or client_pack_filename_template_input is None
+                or client_pack_include_servers_dat_checkbox is None
+                or client_pack_include_options_txt_checkbox is None
             ):
                 raise RuntimeError("Minecraft client-pack metadata controls are unavailable.")
             return ClientPackMetadataConfig(
                 name=_value_as_text(client_pack_name_input),
                 description=_value_as_text(client_pack_description_input),
                 filename_template=_value_as_text(client_pack_filename_template_input),
+                include_servers_dat=bool(_value_as_object(client_pack_include_servers_dat_checkbox)),
+                include_options_txt=bool(_value_as_object(client_pack_include_options_txt_checkbox)),
             )
 
         async def persist_client_pack_configuration() -> None:
@@ -4911,7 +5020,7 @@ class ModWebAppPageMixin(
             )
 
         async def _publish_client_pack_configuration() -> None:
-            changelog = client_pack_changelog_draft.strip()
+            changelog = client_pack_publish_changelog()
             if not changelog:
                 ui.notify("Add a changelog before publishing the client pack.", type="warning")
                 return
@@ -4957,6 +5066,8 @@ class ModWebAppPageMixin(
         def ensure_client_pack_config_dialog() -> None:
             nonlocal client_pack_changelog_input, client_pack_config_rendered
             nonlocal client_pack_description_input, client_pack_filename_template_input
+            nonlocal client_pack_include_options_txt_checkbox
+            nonlocal client_pack_include_servers_dat_checkbox
             nonlocal client_pack_config_save_button, client_pack_name_input
             nonlocal client_pack_publish_button
             if client_pack_config_rendered:
@@ -5133,6 +5244,18 @@ class ModWebAppPageMixin(
                                     )
                                     + ". The file extension is added automatically."
                                 ).classes("mod-client-pack-section-hint mod-subtitle text-xs")
+                                client_pack_include_servers_dat_checkbox = render_client_pack_file_option(
+                                    label="Include servers.dat",
+                                    value=client_pack_metadata.include_servers_dat,
+                                    preview_path="overrides/servers.dat",
+                                    preview_display_name="servers.dat",
+                                )
+                                client_pack_include_options_txt_checkbox = render_client_pack_file_option(
+                                    label="Include options.txt",
+                                    value=client_pack_metadata.include_options_txt,
+                                    preview_path="overrides/options.txt",
+                                    preview_display_name="options.txt",
+                                )
                         if is_minecraft_app:
                             with ui.column().classes("mod-client-pack-section w-full"):
                                 ui.label("KubeJS scripts").classes("mod-stat-label")
@@ -5184,6 +5307,15 @@ class ModWebAppPageMixin(
                                         f"maxlength={CLIENT_PACK_CHANGELOG_MAX_LENGTH}"
                                     )
                                     .classes("w-full mod-config-input mod-client-pack-changelog")
+                                )
+                                ui.textarea(
+                                    "Automated append",
+                                    value=model.client_pack_automated_changelog
+                                    or "No automated client-pack changes detected.",
+                                ).props(
+                                    "filled square stack-label readonly hide-bottom-space color=accent rows=6"
+                                ).classes(
+                                    "w-full mod-config-input mod-client-pack-changelog-automation"
                                 )
                                 ui.label(
                                     "Draft notes are shared when this configuration is saved."
@@ -5279,6 +5411,7 @@ class ModWebAppPageMixin(
 
         def render_client_pack_dialog() -> None:
             nonlocal client_pack_format_select, include_kubejs_scripts_checkbox
+            nonlocal include_options_txt_checkbox, include_servers_dat_checkbox
             with client_pack_dialog:
                 with ui.card().classes("mod-card mod-dialog-card mod-client-pack-dialog-card"):
                     with ui.column().classes("mod-client-pack-body w-full"):
@@ -5306,6 +5439,21 @@ class ModWebAppPageMixin(
                                     )
                                     .props("dense color=accent keep-color")
                                     .classes("mod-client-pack-checkbox w-full")
+                                )
+                        if is_minecraft_app:
+                            with ui.column().classes("mod-client-pack-section w-full"):
+                                ui.label("Client files").classes("mod-stat-label")
+                                include_servers_dat_checkbox = render_client_pack_file_option(
+                                    label="Include servers.dat",
+                                    value=client_pack_metadata.include_servers_dat,
+                                    preview_path="overrides/servers.dat",
+                                    preview_display_name="servers.dat",
+                                )
+                                include_options_txt_checkbox = render_client_pack_file_option(
+                                    label="Include options.txt",
+                                    value=client_pack_metadata.include_options_txt,
+                                    preview_path="overrides/options.txt",
+                                    preview_display_name="options.txt",
                                 )
                         required_entries: tuple[NodeModEntry, ...] = tuple(
                             entry
@@ -6280,6 +6428,7 @@ class ModWebAppPageMixin(
         relay_notice_progress_checkbox: Checkbox | None = None
         relay_advancements_checkbox: Checkbox | None = None
         factorio_chat_relay_use_shout_checkbox: Checkbox | None = None
+        rcon_requires_online_players_checkbox: Checkbox | None = None
         activity_provider_checkboxes: list[tuple[str, Checkbox]] = []
         current_runtime_model: ModWebBasePageModel = model
         start_stop_control_state: _ModWebStartStopControlState | None = None
@@ -6555,6 +6704,11 @@ class ModWebAppPageMixin(
                         if factorio_chat_relay_use_shout_checkbox is None
                         else bool(_value_as_object(factorio_chat_relay_use_shout_checkbox))
                     ),
+                    rcon_requires_online_players=(
+                        None
+                        if rcon_requires_online_players_checkbox is None
+                        else bool(_value_as_object(rcon_requires_online_players_checkbox))
+                    ),
                     disabled_activity_provider_ids=disabled_activity_provider_ids,
                     running_cpu_points=next_running_cpu_points,
                     running_ram_points=next_running_ram_points,
@@ -6593,6 +6747,7 @@ class ModWebAppPageMixin(
             nonlocal lifecycle_stopped_checkbox, notes_input, relay_advancements_checkbox
             nonlocal relay_notice_player_death_checkbox, relay_notice_player_session_checkbox
             nonlocal relay_notice_progress_checkbox, running_cpu_points_input, running_ram_points_input
+            nonlocal rcon_requires_online_players_checkbox
             nonlocal startup_cpu_points_input, startup_ram_points_input, steam_update_branch_select
             nonlocal steam_update_enabled_checkbox, title_font_select
             if details_dialog_rendered:
@@ -6764,6 +6919,11 @@ class ModWebAppPageMixin(
                                         factorio_chat_relay_use_shout_checkbox = _details_toggle_checkbox(
                                             label="Chat via /say or /shout",
                                             value=model.factorio_chat_relay_use_shout,
+                                        )
+                                    if model.rcon_requires_online_players is not None:
+                                        rcon_requires_online_players_checkbox = _details_toggle_checkbox(
+                                            label="Gate RCON commands behind online players",
+                                            value=model.rcon_requires_online_players,
                                         )
                                 if model.activity_providers:
                                     with ui.column().classes("mod-app-details-subsection"):

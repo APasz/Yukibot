@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from modmux.models import ModID, Provider
 
@@ -26,25 +26,25 @@ from apps._mod import Mod_Manager
 from apps._updater import AppUpdateOperationKind, AppUpdateProviderKind, AppUpdateState
 from apps.factorio import (
     Factorio,
-    FactorioActivitySnapshot,
+    Factorio_Updater,
     FactorioActivities,
+    FactorioActivitySnapshot,
     FactorioEvolution,
     FactorioMapAge,
     FactorioModMetadata,
-    FactorioSurfaceEvolution,
-    Factorio_Updater,
     FactorioModPortalCredentials,
+    FactorioSurfaceEvolution,
     Matchers,
+    Mod_Factorio,
     Provider_FactorioEvolution,
     Provider_FactorioMapAge,
     Receiver,
-    Mod_Factorio,
     _ensure_factorio_binary_executable,
     _factorio_download_archive_path,
     _factorio_latest_headless_versions,
+    _factorio_mod_portal_release_from_mapping,
     _format_factorio_bridge_say_command,
     _format_factorio_console_message,
-    _factorio_mod_portal_release_from_mapping,
     _parse_factorio_bridge_evolution_snapshot,
     _parse_factorio_evolution,
     _parse_factorio_map_age,
@@ -480,6 +480,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         actions = app.console_actions
 
         self.assertEqual(tuple(action.key for action in actions), ("admins", "raw_command", "promote", "demote"))
+        self.assertFalse(app.rcon_requires_online_players_enabled)
         self.assertEqual(actions[0].label, "List Admins")
         self.assertEqual(actions[0].power_level.name, "user")
         self.assertEqual(actions[1].label, "Run Command")
@@ -498,6 +499,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
         app.check_running = lambda: True
         app._relay = SimpleNamespace(send=AsyncMock(return_value="command output"))
+        app.player_count = AsyncMock(return_value=(0, 20))
         action = next(action for action in app.console_actions if action.key == "raw_command")
 
         result = asyncio.run(
@@ -510,6 +512,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
 
         app._relay.send.assert_awaited_once_with("/help")
+        app.player_count.assert_not_awaited()
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
         self.assertEqual(result.text, "command output")
 
@@ -1660,6 +1663,36 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
             await matcher.match_death("[DIED] PVE:Yuki biter")
 
         add_mock.assert_not_called()
+
+
+class FactorioStopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stop_waits_after_save_request_before_terminating(self) -> None:
+        app = cast(Factorio, object.__new__(Factorio))
+        app._running = True
+        app._activities = SimpleNamespace(stop=AsyncMock())
+        app._players = SimpleNamespace(stop=AsyncMock())
+        app._relay = SimpleNamespace(is_connected=True, send=AsyncMock(return_value="saved"), teardown=AsyncMock())
+        app._tail = None
+        app._bridge_events_tail = None
+        app.process = None
+        app._stop_bridge_events_tail = AsyncMock()
+        app._terminate = AsyncMock()
+        app._lock = Path("/tmp/factorio-test.lock")
+
+        with patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            result = await Factorio.stop(app)
+
+        self.assertTrue(result)
+        app._relay.send.assert_awaited_once_with("/server-save", reconnect_on_failure=False)
+        self.assertEqual(
+            sleep_mock.await_args_list,
+            [
+                call(1.0),
+                call(0.5),
+            ],
+        )
+        app._relay.teardown.assert_awaited_once()
+        app._terminate.assert_awaited_once()
 
 
 if __name__ == "__main__":

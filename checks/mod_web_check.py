@@ -96,6 +96,7 @@ from config import BotConfiguration, BotMetadataSnapshot, ModWebServerConfig
 from font_assets import FontAssetEntry, font_assets
 from mod_web_auth import ModWebUser
 from node_api import (
+    ClientPackFilePreview,
     ConsoleResponseSource,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
@@ -8873,20 +8874,26 @@ class ModWebTests(unittest.TestCase):
                 "pack_purpose": "client",
                 "pack_format": "mrpack",
                 "include_kubejs_scripts": "true",
+                "include_servers_dat": "true",
+                "include_options_txt": "true",
                 "mod_name": ["client.jar"],
             },
         )
 
-    def test_download_query_can_exclude_kubejs_scripts_from_client_pack(self) -> None:
+    def test_download_query_can_exclude_generated_client_files_from_client_pack(self) -> None:
         query = ModWebService._download_query(
             enabled_only=False,
             selected_only=True,
             mod_names=("client.jar",),
             pack_purpose=PackPurpose.CLIENT,
             include_kubejs_scripts=False,
+            include_servers_dat=False,
+            include_options_txt=False,
         )
 
         self.assertEqual(query["include_kubejs_scripts"], "false")
+        self.assertEqual(query["include_servers_dat"], "false")
+        self.assertEqual(query["include_options_txt"], "false")
 
     def test_download_query_supports_compact_excluded_mod_selection(self) -> None:
         query = ModWebService._download_query(
@@ -9709,6 +9716,7 @@ class ModWebTests(unittest.TestCase):
                 self.group_inputs: list[FakeInput] = []
                 self.rows: list[FakeContainer] = []
                 self.dialogs: list[FakeDialog] = []
+                self.tooltips: list[str] = []
                 self.render_events: list[str] = []
                 self.javascript_calls: list[str] = []
                 self.sort_change_handler: Callable[[object], None] | None = None
@@ -9807,6 +9815,9 @@ class ModWebTests(unittest.TestCase):
                 if args:
                     self.checkboxes[str(args[0])] = control
                 return control
+
+            def tooltip(self, text: str) -> None:
+                self.tooltips.append(text)
 
             def select(self, *args: object, **kwargs: object) -> FakeInput:
                 if kwargs.get("label") == "Format":
@@ -9931,6 +9942,19 @@ class ModWebTests(unittest.TestCase):
                 description="Example description",
                 filename_template="{pack_name}-{version}",
             ),
+            client_pack_file_previews=(
+                ClientPackFilePreview(
+                    path="overrides/servers.dat",
+                    display_name="servers.dat",
+                    content_text="Minecraft servers.dat entry\nname=YokoServer\nip=play.example.test:25565\n",
+                ),
+                ClientPackFilePreview(
+                    path="overrides/options.txt",
+                    display_name="options.txt",
+                    content_text="autoJump:false\n",
+                ),
+            ),
+            client_pack_automated_changelog="Added mods:\n- Alpha Fabric (1.0.0)",
         )
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
         ui = FakeUi()
@@ -9992,7 +10016,7 @@ class ModWebTests(unittest.TestCase):
             for dialog in ui.dialogs:
                 dialog.opened = 0
 
-            changelog_handler = ui.textareas[-1].handlers["change"]
+            changelog_handler = ui.textareas[-2].handlers["change"]
             changelog_handler(SimpleNamespace(value="Persisted after Save."))
             ui.checkboxes["server_scripts/events.js"].value = False
             save_button = next(button for button in ui.buttons if button.text == "Save")
@@ -10018,15 +10042,49 @@ class ModWebTests(unittest.TestCase):
                     "name": "Example Pack",
                     "description": "Example description",
                     "filename_template": "{pack_name}-{version}",
+                    "include_servers_dat": True,
+                    "include_options_txt": True,
                 },
             )
             self.assertTrue(ui.checkboxes["Include configured KubeJS scripts"].value)
+            self.assertTrue(ui.checkboxes["Include servers.dat"].value)
+            self.assertTrue(ui.checkboxes["Include options.txt"].value)
+            self.assertEqual(ui.tooltips.count("View servers.dat"), 2)
+            self.assertEqual(ui.tooltips.count("View options.txt"), 2)
+            view_buttons = [
+                button for button in ui.buttons if button.props_value is not None and "aria-label=View" in button.props_value
+            ]
+            self.assertEqual(len(view_buttons), 4)
+            self.assertIsNotNone(view_buttons[0].on_click)
+            assert view_buttons[0].on_click is not None
+            view_buttons[0].on_click()
+            self.assertTrue(ui.dialogs[-1].opened)
+            self.assertEqual(
+                ui.textareas[-1].value,
+                "Minecraft servers.dat entry\nname=YokoServer\nip=play.example.test:25565\n",
+            )
+            ui.dialogs[-1].opened = False
             set_changelog_draft.assert_called_once_with(
                 node_name="yuki",
                 app_name="minecraft_alpha",
                 changelog="Persisted after Save.",
             )
             changelog_handler(SimpleNamespace(value="Shared draft notes."))
+            remote_json.reset_mock()
+            publish_button = next(button for button in ui.buttons if button.text == "Publish")
+            self.assertIsNotNone(publish_button.on_click)
+            assert publish_button.on_click is not None
+            asyncio.run(cast(Any, publish_button.on_click()))
+            publish_calls = [
+                call_args
+                for call_args in remote_json.await_args_list
+                if call_args.kwargs["method"] == "POST"
+            ]
+            self.assertEqual(len(publish_calls), 1)
+            self.assertEqual(
+                publish_calls[0].kwargs["json_payload"]["changelog"],
+                "Shared draft notes.\n\nAdded mods:\n- Alpha Fabric (1.0.0)",
+            )
 
             self.assertEqual([control.placeholder for control in ui.inputs], ["Search mods"])
             self.assertEqual(
@@ -10174,17 +10232,24 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(all_button_text.count("Publish"), 1)
             self.assertEqual(
                 [control.placeholder for control in ui.textareas],
-                [None, "Describe client-pack changes in this release…"],
+                [None, "Describe client-pack changes in this release…", None, None],
             )
             self.assertEqual(
                 [control.value for control in ui.textareas],
-                ["Example description", "Shared draft notes."],
+                [
+                    "Example description",
+                    "Shared draft notes.",
+                    "Added mods:\n- Alpha Fabric (1.0.0)",
+                    "Minecraft servers.dat entry\nname=YokoServer\nip=play.example.test:25565\n",
+                ],
             )
             self.assertIn("rows=2", ui.textareas[0].props_value or "")
-            self.assertIn("stack-label", ui.textareas[-1].props_value or "")
-            self.assertIn("rows=3", ui.textareas[-1].props_value or "")
-            self.assertNotIn("debounce=", ui.textareas[-1].props_value or "")
-            self.assertIn("change", ui.textareas[-1].handlers)
+            self.assertIn("stack-label", ui.textareas[1].props_value or "")
+            self.assertIn("rows=3", ui.textareas[1].props_value or "")
+            self.assertNotIn("debounce=", ui.textareas[1].props_value or "")
+            self.assertIn("change", ui.textareas[1].handlers)
+            self.assertIn("readonly", ui.textareas[2].props_value or "")
+            self.assertIn("rows=6", ui.textareas[2].props_value or "")
             label_texts = [label.text for label in ui.labels]
             self.assertIn(
                 "Draft notes are shared when this configuration is saved.",
@@ -10196,7 +10261,7 @@ class ModWebTests(unittest.TestCase):
             self.assertIsNotNone(configure_button.on_click)
             assert configure_button.on_click is not None
             configure_button.on_click()
-            self.assertEqual(ui.textareas[-1].value, "Fresh shared draft.")
+            self.assertIn("Fresh shared draft.", [control.value for control in ui.textareas])
             changelog_labels = [
                 label.text
                 for label in ui.labels

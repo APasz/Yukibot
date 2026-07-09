@@ -38,6 +38,7 @@ _STEAM_MODAL_PREFIX = "steam-modal:"
 _MINECRAFT_PROFILE_MODAL_PREFIX = "mc-prof:"
 _ALIAS_MODAL_FIELD_ID = "alias"
 _DISPLAY_OVERRIDE_MODAL_FIELD_ID = "display_name"
+_DISPLAY_OVERRIDE_SELECT_VALUE = "display_name"
 _STEAM_MODAL_FIELD_ID = "steam_id"
 _MINECRAFT_PROFILE_NAME_FIELD_ID = "profile_name"
 _MINECRAFT_PROFILE_UUID_FIELD_ID = "profile_uuid"
@@ -98,7 +99,6 @@ class AppAliasEntry:
 
 @dataclass(frozen=True, slots=True)
 class DisplayOverrideEntry:
-    category: config.DisplayNameCategory
     value: str | None
 
 
@@ -245,9 +245,13 @@ def _platform_label(platform: str) -> str:
     return platform.title()
 
 
-def _display_override_label(category: config.DisplayNameCategory) -> str:
-    _require_display_override_category(category)
+def _display_override_label() -> str:
     return "Display Name"
+
+
+def _require_display_override_selection(value: object) -> None:
+    if str(value).strip() != _DISPLAY_OVERRIDE_SELECT_VALUE:
+        raise ValueError("Unsupported display name selection.")
 
 
 def _require_known_app_scope(manager: App_Manager, scope: str) -> str:
@@ -259,15 +263,10 @@ def _require_known_app_scope(manager: App_Manager, scope: str) -> str:
     return normalised_scope
 
 
-def _require_display_override_category(category: object) -> config.DisplayNameCategory:
-    return Name_Cache._normalised_display_name_category(category)
-
-
 def _display_override_entries(names: UserNames) -> tuple[DisplayOverrideEntry, ...]:
     return (
         DisplayOverrideEntry(
-            category=config.DisplayNameCategory.WEB,
-            value=names.display_overrides.get_for_category(config.DisplayNameCategory.WEB),
+            value=names.display_overrides.value,
         ),
     )
 
@@ -833,15 +832,15 @@ class AliasEditorService:
             if not req.values:
                 return EditorResponse.ephemeral("Choose a display name to edit first.")
             try:
-                category = _require_display_override_category(req.values[0])
+                _require_display_override_selection(req.values[0])
             except ValueError as xcp:
                 return EditorResponse.ephemeral(str(xcp))
             names = _user_names_for_editor(names_cache, target_user_id)
-            current_value = names.display_overrides.get_for_category(category) or ""
+            current_value = names.display_overrides.value or ""
             await req.interaction.create_modal_response(
-                f"Set {_display_override_label(category)}",
+                f"Set {_display_override_label()}",
                 self._display_override_modal.build_id(
-                    self._action_codec.build(AliasActionKind.SET_DISPLAY_OVERRIDE, page=action.page, value=category.value),
+                    self._action_codec.build(AliasActionKind.SET_DISPLAY_OVERRIDE, page=action.page),
                     scope_id=target_user_id,
                     user_id=actor_user_id,
                 ),
@@ -921,10 +920,10 @@ class AliasEditorService:
             if not req.values:
                 return EditorResponse.ephemeral("Choose a display name to clear.")
             try:
-                category = _require_display_override_category(req.values[0])
+                _require_display_override_selection(req.values[0])
             except ValueError as xcp:
                 return EditorResponse.ephemeral(str(xcp))
-            names_cache.set_display_override(target_user_id, category, None)
+            names_cache.set_display_override(target_user_id, None)
             return self._build_editor_response(
                 target_user_id=target_user_id,
                 actor_user_id=actor_user_id,
@@ -1016,7 +1015,7 @@ class AliasEditorService:
             embed.add_field(
                 name="Display Names",
                 value=_display_value(
-                    [f"{_display_override_label(entry.category)}: {entry.value or 'Default'}" for entry in view.display_overrides.visible]
+                    [f"{_display_override_label()}: {entry.value or 'Default'}" for entry in view.display_overrides.visible]
                 ),
                 inline=False,
             )
@@ -1025,7 +1024,7 @@ class AliasEditorService:
             embed.add_field(
                 name="Display Names",
                 value=_display_value(
-                    [f"{_display_override_label(entry.category)}: {entry.value or 'Default'}" for entry in view.display_overrides.visible]
+                    [f"{_display_override_label()}: {entry.value or 'Default'}" for entry in view.display_overrides.visible]
                 ),
                 inline=False,
             )
@@ -1154,8 +1153,8 @@ class AliasEditorService:
                 ),
                 options=[
                     EditorSelectOption(
-                        label=_display_override_label(entry.category),
-                        value=entry.category.value,
+                        label=_display_override_label(),
+                        value=_DISPLAY_OVERRIDE_SELECT_VALUE,
                         description=_component_text(entry.value or "Set or update display name"),
                     )
                     for entry in view.display_overrides.visible
@@ -1171,8 +1170,8 @@ class AliasEditorService:
                     ),
                     options=[
                         EditorSelectOption(
-                            label=_display_override_label(entry.category),
-                            value=entry.category.value,
+                            label=_display_override_label(),
+                            value=_DISPLAY_OVERRIDE_SELECT_VALUE,
                             description=_component_text(entry.value or "Clear display name"),
                         )
                         for entry in active_display_overrides
@@ -1379,13 +1378,8 @@ class AliasEditorService:
         action = self._action_codec.parse(req.action)
         if action is None:
             return EditorResponse.ephemeral("Unknown display override modal action.")
-        if action.kind is not AliasActionKind.SET_DISPLAY_OVERRIDE or action.value is None:
+        if action.kind is not AliasActionKind.SET_DISPLAY_OVERRIDE:
             return EditorResponse.ephemeral("Unsupported display override modal action.")
-
-        try:
-            category = _require_display_override_category(action.value)
-        except ValueError as xcp:
-            return EditorResponse.ephemeral(str(xcp))
 
         actor_user_id = int(req.user_id)
         target_user_id = int(req.scope_id)
@@ -1393,7 +1387,7 @@ class AliasEditorService:
         if not display_name:
             return EditorResponse.ephemeral("Display name must not be empty.")
 
-        names_cache.set_display_override(target_user_id, category, display_name)
+        names_cache.set_display_override(target_user_id, display_name)
         return self._build_editor_response(
             target_user_id=target_user_id,
             actor_user_id=actor_user_id,

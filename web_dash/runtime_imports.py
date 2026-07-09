@@ -115,6 +115,7 @@ from maintenance import MAX_RESTART_INTERVAL_MINUTES, MIN_RESTART_INTERVAL_MINUT
 from mod_web_auth import ModWebAuthError, ModWebAuthService, ModWebSessionPersistence, ModWebUser
 from mod_web_theme import MOD_WEB_ACTION_BASE_CLASSES, BadgeTone, apply_mod_web_theme, mod_web_badge_class
 from node_api import (
+    ClientPackFilePreview,
     NodeApiService,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
@@ -229,6 +230,7 @@ __all__: tuple[str, ...] = (
     "ChatMessageReference",
     "ChatReferenceKind",
     "ClientPackConfig",
+    "ClientPackFilePreview",
     "ClientPackKubeJsScript",
     "ClientPackMetadataConfig",
     "ClientPackPolicy",

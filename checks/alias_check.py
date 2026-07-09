@@ -140,7 +140,6 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
                     action=service._action_codec.build(
                         cmd_alias.AliasActionKind.SET_DISPLAY_OVERRIDE,
                         page=0,
-                        value=config.DisplayNameCategory.WEB.value,
                     ),
                     user_id=42,
                     scope_id=42,
@@ -151,8 +150,7 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertIsNotNone(response)
-            self.assertEqual(cache.get_display_override(42, config.DisplayNameCategory.WEB), "Portal Alice")
-            self.assertEqual(cache.get_display_override(42, config.DisplayNameCategory.DISCORD), "Portal Alice")
+            self.assertEqual(cache.get_display_override(42), "Portal Alice")
 
     async def test_steam_modal_sets_platform_id(self) -> None:
         with TemporaryDirectory() as tmp:

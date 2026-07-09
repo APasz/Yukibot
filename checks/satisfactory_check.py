@@ -786,7 +786,10 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
             action=actions["shutdown"],
             raw_value=None,
         )
+        self.assertEqual(len(self.bridge.saved_games), 2)
         self.assertEqual(self.bridge.shutdown_count, 1)
+        self.assertRegex(self.bridge.saved_games[1], r"^SERVER-SESSION-stop-\d{8}-\d{6}$")
+        self.assertIn(self.bridge.saved_games[1], shutdown_result.summary)
         self.assertEqual(shutdown_result.source, ConsoleResponseSource.API)
         self.assertEqual(shutdown_result.text, "shutdown requested")
 

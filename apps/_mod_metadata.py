@@ -254,7 +254,7 @@ class ScopeModMetadataStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temp_path = self.path.with_name(f".{self.path.name}.tmp")
             temp_path.write_text(
-                json.dumps(document.model_dump(mode="json"), indent=2) + "\n",
+                json.dumps(document.model_dump(mode="json"), indent=4) + "\n",
                 config.STR_ENCODE,
             )
             temp_path.replace(self.path)

@@ -215,6 +215,25 @@ class ClientPackRelease(BaseModel):
         return changelog
 
 
+class ClientPackModSnapshot(BaseModel):
+    name: str
+    friendly: str
+    version: str | None = None
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    @field_validator("name", "friendly", mode="before")
+    @classmethod
+    def validate_required_text(cls, raw: object, info: ValidationInfo) -> str:
+        field_name = info.field_name or "value"
+        return _normalise_required_text(raw, field_name=field_name)
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def validate_optional_version(cls, raw: object) -> str | None:
+        return normalise_optional_text(raw)
+
+
 _CLIENT_PACK_KUBEJS_SCRIPT_ROOTS = frozenset({"server_scripts", "startup_scripts"})
 
 
@@ -256,6 +275,8 @@ class ClientPackMetadataConfig(BaseModel):
         min_length=1,
         max_length=CLIENT_PACK_FILENAME_TEMPLATE_MAX_LENGTH,
     )
+    include_servers_dat: bool = True
+    include_options_txt: bool = True
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
@@ -1826,6 +1847,7 @@ class App_Config(BaseModel):
     client_pack_published_version: str | None = None
     client_pack_published_changelog: str | None = None
     client_pack_releases: tuple[ClientPackRelease, ...] = ()
+    client_pack_published_mods: tuple[ClientPackModSnapshot, ...] = ()
     client_pack_verified_hash: str | None = None
     client_pack_content_dirty: bool = False
     client_pack_excluded_kubejs_scripts: tuple[str, ...] = ()
@@ -1854,6 +1876,7 @@ class App_Config(BaseModel):
     cmd_start: list[str] = Field(default_factory=list)
     provider_alt_text: str | None = None
     factorio_chat_relay_use_shout: bool = True
+    rcon_requires_online_players: bool | None = None
     version: AppVersion | None = None
     steam_update: SteamUpdateConfig | None = None
     factorio_update: FactorioUpdateConfig | None = None
@@ -1892,6 +1915,17 @@ class App_Config(BaseModel):
         if len(versions) != len(set(versions)):
             raise ValueError("client pack release versions must be unique")
         return releases
+
+    @field_validator("client_pack_published_mods")
+    @classmethod
+    def validate_client_pack_published_mods(
+        cls,
+        mods: tuple[ClientPackModSnapshot, ...],
+    ) -> tuple[ClientPackModSnapshot, ...]:
+        names = [mod.name.casefold() for mod in mods]
+        if len(names) != len(set(names)):
+            raise ValueError("client pack published mods must be unique")
+        return tuple(sorted(mods, key=lambda mod: mod.friendly.casefold()))
 
     @field_validator("client_pack_published_changelog", mode="before")
     @classmethod

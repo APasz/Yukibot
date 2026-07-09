@@ -93,10 +93,14 @@ class ClientPackValidationError(ValueError):
     """The persisted client-pack policy or submitted selection is invalid."""
 
 
-def client_pack_content_hash(entries: Collection[ArchiveEntry], *, format_name: str) -> str:
+def client_pack_content_hash(entries: Collection[WritableArchiveEntry], *, format_name: str) -> str:
     digest = hashlib.sha256()
     _update_content_hash(digest, format_name.encode("utf-8"))
     for entry in sorted(entries, key=lambda item: item.archive_path.as_posix().casefold()):
+        if isinstance(entry, ArchiveDataEntry):
+            _update_content_hash(digest, entry.archive_path.as_posix().encode("utf-8"))
+            _update_content_hash(digest, entry.content)
+            continue
         source = entry.source_path
         if source.is_dir():
             files = tuple(

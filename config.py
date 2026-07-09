@@ -2226,34 +2226,8 @@ class Singleton(type):
         return cls._instances[cls]
 
 
-class DisplayNameCategory(enum.StrEnum):
-    DISCORD = "discord"
-    WEB = "web"
-
-
 class DisplayNameOverrides(BaseModel):
     value: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_legacy_fields(cls, raw_value: object) -> object:
-        if not isinstance(raw_value, Mapping):
-            return raw_value
-        if "value" in raw_value:
-            return raw_value
-        data = dict(raw_value)
-        data["value"] = data.get("web") or data.get("discord")
-        data.pop("web", None)
-        data.pop("discord", None)
-        return data
-
-    def get_for_category(self, category: DisplayNameCategory) -> str | None:
-        del category
-        return self.value
-
-    def set_for_category(self, category: DisplayNameCategory, value: str | None) -> None:
-        del category
-        self.value = value
 
 
 class UserNames(BaseModel):
@@ -2451,18 +2425,6 @@ class Name_Cache(metaclass=Singleton):
             scope_key = cls._normalised_alias_scope(scope)
             aliases[scope_key] = cls._normalised_optional_text(alias, label=f"{scope_key} alias")
         return aliases
-
-    @staticmethod
-    def _normalised_display_name_category(category: object) -> DisplayNameCategory:
-        if isinstance(category, DisplayNameCategory):
-            return category
-        text = str(category).strip().lower()
-        if not text:
-            raise ValueError("display override category must not be empty")
-        try:
-            return DisplayNameCategory(text)
-        except ValueError as xcp:
-            raise ValueError(f"Unsupported display override category `{text}`.") from xcp
 
     @staticmethod
     def _alias_conflict_error(alias: str, *, scope: str | None = None) -> ValueError:
@@ -2669,21 +2631,17 @@ class Name_Cache(metaclass=Singleton):
         user = self.by_id.get(user_id)
         return user.is_manual if user is not None else False
 
-    def get_display_override(self, user_id: int, category: DisplayNameCategory | str) -> str | None:
+    def get_display_override(self, user_id: int) -> str | None:
         user = self.by_id.get(user_id)
         if user is None:
             return None
-        category_key = self._normalised_display_name_category(category)
-        return user.display_overrides.get_for_category(category_key)
+        return user.display_overrides.value
 
-    def set_display_override(
-        self, user_id: int, category: DisplayNameCategory | str, display_name: object | None
-    ) -> bool:
-        category_key = self._normalised_display_name_category(category)
+    def set_display_override(self, user_id: int, display_name: object | None) -> bool:
         value = self._normalised_optional_text(display_name, label="display override")
         user = self.by_id.setdefault(user_id, UserNames())
         before = user.model_dump(mode="json")
-        user.display_overrides.set_for_category(category_key, value)
+        user.display_overrides.value = value
         if user.model_dump(mode="json") == before:
             return False
 
@@ -2691,7 +2649,6 @@ class Name_Cache(metaclass=Singleton):
         self._queue_remote_mutation(
             NameMutationKind.SET_DISPLAY_OVERRIDE,
             user_id=user_id,
-            category=category_key.value,
             display_name=value,
         )
         return True
@@ -2724,12 +2681,11 @@ class Name_Cache(metaclass=Singleton):
             user.guild_names = {guild_id: name for guild_id, name in user.guild_names.items() if name in allowed_names}
             self._sync_known_names(user)
         elif kind is NameMutationKind.SET_DISPLAY_OVERRIDE:
-            category = self._normalised_display_name_category(event.get("category"))
             display_name = self._normalised_optional_text(
                 event.get("display_name"),
                 label="display override",
             )
-            user.display_overrides.set_for_category(category, display_name)
+            user.display_overrides.value = display_name
         elif kind is NameMutationKind.REMOVE_GAME_ALIAS:
             user.games.pop(str(event["scope"]).lower(), None)
         elif kind is NameMutationKind.REMOVE_NAME:
@@ -3443,7 +3399,6 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
-        category: DisplayNameCategory | None = None,
     ) -> str | None: ...
 
     @overload
@@ -3454,7 +3409,6 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
-        category: DisplayNameCategory | None = None,
     ) -> str: ...
 
     def cached_display_name(
@@ -3464,18 +3418,15 @@ class Name_Cache(metaclass=Singleton):
         /,
         *,
         preferred_guild_id: hikari.Snowflakeish | None = DISCORD_GUILD,
-        category: DisplayNameCategory | None = None,
     ) -> str | None:
         user: UserNames | None = self.by_id.get(user_id)
         if user is None:
             return default
 
-        if category is not None and (override := user.display_overrides.get_for_category(category)):
+        if override := user.display_overrides.value:
             return override
         del preferred_guild_id
         persona = self._persona_from_entry(user_id, user)
-        if category is DisplayNameCategory.WEB:
-            return self._resolve_surface_name(persona, surface=PersonaSurface.WEB, default=default)
         return self._resolve_surface_name(persona, surface=PersonaSurface.DISCORD, default=default)
 
     def _resolve_candidate_result(

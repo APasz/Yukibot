@@ -726,9 +726,25 @@ async def _console_saveworld(app_obj: object, value: object | None) -> ConsoleAc
     return await _send_console_command(app, "saveworld", success_text=f"{app.friendly}: world save requested.")
 
 
+async def _request_graceful_shutdown(app: "SevenDays") -> tuple[bool, bool]:
+    save_sent = bool(await app._relay.send("saveworld"))
+    if save_sent:
+        await asyncio.sleep(0.1)
+    shutdown_sent = bool(await app._relay.send("shutdown"))
+    return (save_sent, shutdown_sent)
+
+
 async def _console_shutdown(app_obj: object, value: object | None) -> ConsoleActionResult:
     app = cast(SevenDays, app_obj)
-    return await _send_console_command(app, "shutdown", success_text=f"{app.friendly}: shutdown requested.")
+    save_sent, shutdown_sent = await _request_graceful_shutdown(app)
+    if not save_sent:
+        raise RuntimeError("Failed to send console command: saveworld")
+    if not shutdown_sent:
+        raise RuntimeError("Failed to send console command: shutdown")
+    return ConsoleActionResult(
+        summary=f"{app.friendly}: world save and shutdown requested.",
+        source=ConsoleResponseSource.TELNET,
+    )
 
 
 async def _console_settime(app_obj: object, value: object | None) -> ConsoleActionResult:
@@ -905,7 +921,7 @@ _SEVENDAYS_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
     ConsoleAction(
         key="shutdown",
         label="Shutdown",
-        description="Gracefully stop the 7D2D server.",
+        description="Save the world, then gracefully stop the 7D2D server.",
         power_level=Power_Level.sudo,
         execute=_console_shutdown,
     ),
@@ -2066,12 +2082,9 @@ class SevenDays(App[App_Config]):
         log.info(f"{__name__}.stop")
         self._running = False
         try:
-            save_sent = await self._relay.send("saveworld")
-            if save_sent:
-                await asyncio.sleep(0.1)
-            else:
+            save_sent, shutdown_sent = await _request_graceful_shutdown(self)
+            if not save_sent:
                 log.warning("Could not request a world save before stopping %s", self.name)
-            shutdown_sent = await self._relay.send("shutdown")
             if not shutdown_sent:
                 log.warning("Could not request graceful shutdown for %s; terminating the process", self.name)
         except Exception:
