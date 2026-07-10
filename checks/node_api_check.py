@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 import unittest
 import uuid
 import zipfile
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -191,6 +192,71 @@ class _ConsoleActionApp(_DummyApp):
 class _TestMod(Mod):
     async def install(self, src: Path, atomic: bool = True) -> None:
         del src, atomic
+
+
+@dataclass(frozen=True, slots=True)
+class _ServersDatEntry:
+    name: str
+    ip: str
+
+
+def _read_nbt_string(content: bytes, offset: int) -> tuple[str, int]:
+    length = struct.unpack_from(">H", content, offset)[0]
+    offset += 2
+    value = content[offset:offset + length].decode("utf-8")
+    return value, offset + length
+
+
+def _parse_servers_dat(content: bytes) -> tuple[_ServersDatEntry, ...]:
+    offset = 0
+    if content[offset] != 0x0A:
+        raise AssertionError("servers.dat root tag must be a compound")
+    offset += 1
+    root_name, offset = _read_nbt_string(content, offset)
+    if root_name:
+        raise AssertionError("servers.dat root compound name must be empty")
+    if content[offset] != 0x09:
+        raise AssertionError("servers.dat must contain a servers list tag")
+    offset += 1
+    list_name, offset = _read_nbt_string(content, offset)
+    if list_name != "servers":
+        raise AssertionError(f"servers.dat list name was {list_name!r}, expected 'servers'")
+    list_type = content[offset]
+    offset += 1
+    if list_type != 0x0A:
+        raise AssertionError("servers.dat servers list must contain compounds")
+    entry_count = struct.unpack_from(">i", content, offset)[0]
+    offset += 4
+    entries: list[_ServersDatEntry] = []
+    for _ in range(entry_count):
+        name: str | None = None
+        ip: str | None = None
+        while True:
+            tag_type = content[offset]
+            offset += 1
+            if tag_type == 0x00:
+                break
+            tag_name, offset = _read_nbt_string(content, offset)
+            if tag_type == 0x08:
+                value, offset = _read_nbt_string(content, offset)
+                if tag_name == "name":
+                    name = value
+                elif tag_name == "ip":
+                    ip = value
+                continue
+            if tag_type == 0x01:
+                offset += 1
+                continue
+            raise AssertionError(f"servers.dat contained unsupported tag type {tag_type} for {tag_name!r}")
+        if name is None or ip is None:
+            raise AssertionError("servers.dat entry must contain name and ip")
+        entries.append(_ServersDatEntry(name=name, ip=ip))
+    if content[offset] != 0x00:
+        raise AssertionError("servers.dat root compound must end after the servers list")
+    offset += 1
+    if offset != len(content):
+        raise AssertionError("servers.dat contained trailing bytes")
+    return tuple(entries)
 
 
 class _DummyReceiver:
@@ -4401,8 +4467,63 @@ class NodeApiTests(unittest.TestCase):
         servers_dat = archive_paths["overrides/servers.dat"]
         self.assertIsInstance(servers_dat, ArchiveDataEntry)
         assert isinstance(servers_dat, ArchiveDataEntry)
-        self.assertIn(b"ErinServer", servers_dat.content)
-        self.assertIn(b"play.example.test:25565", servers_dat.content)
+        self.assertEqual(
+            _parse_servers_dat(servers_dat.content),
+            (_ServersDatEntry(name="ErinServer", ip="play.example.test:25565"),),
+        )
+
+    def test_minecraft_client_pack_entries_prefer_direct_join_address_for_servers_dat(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "required.jar").write_bytes(b"required")
+            required = _TestMod(Mod_Config(name="required.jar", directory=root))
+            manager = Mock()
+            manager.list_mods.return_value = (required,)
+            manager.get.side_effect = {required.name: required}.__getitem__
+            app = Mock(spec=Minecraft)
+            app.name = "minecraft_alpha"
+            app.friendly = "Minecraft Alpha"
+            app.directory = root
+            app.has_mod_manager = manager
+            app.mod_capabilities = SimpleNamespace(include_client_overrides=True)
+            app.cfg = App_Config(
+                name="minecraft_alpha",
+                instance_key="alpha",
+                friendly_name="Minecraft Alpha",
+                directory=root,
+                apps_dir=root,
+                mods_dir=None,
+                scope="minecraft",
+                join_host="play.example.test",
+                join_port=25565,
+                client_pack_metadata=ClientPackMetadataConfig(
+                    name="Example Pack",
+                    description="Example description",
+                    include_servers_dat=True,
+                ),
+            )
+            service = NodeApiService()
+
+            with (
+                patch.object(NodeApiService, "node_name", new=property(lambda _service: "erin")),
+                patch.object(NodeApiService, "_known_bot_snapshots", return_value=()),
+                patch.object(config, "PUBLIC_ADDR", "play.example.test"),
+                patch.object(config, "PUBLIC_IP", "203.0.113.10"),
+            ):
+                entries = service._client_pack_entries(
+                    ClientPackSelection(),
+                    app=cast(App, app),
+                    include_kubejs_scripts=False,
+                )
+
+        archive_paths = {entry.archive_path.as_posix(): entry for entry in entries}
+        servers_dat = archive_paths["overrides/servers.dat"]
+        self.assertIsInstance(servers_dat, ArchiveDataEntry)
+        assert isinstance(servers_dat, ArchiveDataEntry)
+        self.assertEqual(
+            _parse_servers_dat(servers_dat.content),
+            (_ServersDatEntry(name="ErinServer", ip="203.0.113.10:25565"),),
+        )
 
     def test_minecraft_client_pack_entries_honor_download_file_overrides(self) -> None:
         with TemporaryDirectory() as temp_dir:

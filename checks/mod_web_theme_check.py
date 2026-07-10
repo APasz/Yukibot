@@ -394,6 +394,8 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-client-pack-checkbox .q-checkbox__inner--truthy", css)
         self.assertIn(".mod-client-pack-select", css)
         self.assertIn(".mod-client-pack-select .q-field__native", css)
+        self.assertIn(".mod-client-pack-config-layout", css)
+        self.assertIn(".mod-client-pack-config-column", css)
         self.assertIn(".mod-client-pack-changelog textarea", css)
         self.assertRegex(
             css,
@@ -407,6 +409,8 @@ class ModWebThemeTests(unittest.TestCase):
             css,
             r"(?s)\.mod-client-pack-changelog-hint \{.*?margin-top: 0;",
         )
+        self.assertIn(".mod-client-pack-publish-reasons", css)
+        self.assertIn(".mod-client-pack-publish-reason", css)
         self.assertRegex(
             css,
             r"(?s)\.mod-client-pack-changelog textarea.*?color: var\(--mod-text\) !important;",

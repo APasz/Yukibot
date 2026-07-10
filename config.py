@@ -1053,6 +1053,31 @@ def load_bot_configuration(path: Path) -> BotConfiguration:
     return loaded
 
 
+def load_known_bot_snapshots() -> tuple[BotMetadataSnapshot, ...]:
+    snapshots: list[BotMetadataSnapshot] = []
+    try:
+        snapshots.extend(load_bot_configuration(Path("configuration.json")).known_bots.values())
+    except Exception as xcp:
+        log.warning("Failed to load local bot registry: %s", xcp)
+
+    cache_path = authority_cache_path(AuthorityResource.BOTS)
+    if cache_path.exists():
+        try:
+            raw_cache = read_json_object(cache_path)
+            snapshots.extend(
+                BotMetadataSnapshot.model_validate(snapshot)
+                for snapshot in raw_cache.values()
+                if isinstance(snapshot, dict)
+            )
+        except Exception as xcp:
+            log.warning("Failed to load cached bot registry: %s", xcp)
+
+    unique: dict[str, BotMetadataSnapshot] = {}
+    for snapshot in snapshots:
+        unique[snapshot.profile.id] = snapshot
+    return tuple(unique.values())
+
+
 def save_bot_configuration(path: Path, bot_config: BotConfiguration) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

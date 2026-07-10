@@ -32,6 +32,10 @@ def _presence(
     )
 
 
+def _activity(name: str, activity_type: str = "PLAYING") -> SimpleNamespace:
+    return SimpleNamespace(name=name, type=SimpleNamespace(name=activity_type))
+
+
 class OnlineTrackerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         config.Singleton._instances.pop(Online_Tracker, None)
@@ -134,6 +138,51 @@ class OnlineTrackerTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(stable, changes)
             self.assertNotIn(user_id, tracker._suppressed_game_stops)
+
+    def test_equiv_games_suppress_flip_flop_activity_changes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tracker_path = Path(tmp) / "online_watch.json"
+            tracker_path.write_text(
+                '{"equiv_games":[["Satisfactory","Satisfactory Modeler"]]}',
+                encoding="utf-8",
+            )
+            tracker = Online_Tracker(tracker_path)
+
+            old_snapshot = tracker._snapshot_from_presence(
+                _presence(
+                    user_id=200,
+                    status="online",
+                    desktop="online",
+                    activities=[_activity("Satisfactory")],
+                )
+            )
+            new_snapshot = tracker._snapshot_from_presence(
+                _presence(
+                    user_id=200,
+                    status="online",
+                    desktop="online",
+                    activities=[_activity("Satisfactory Modeler")],
+                )
+            )
+
+            status_changes, activity_changes = tracker._diff(old_snapshot, new_snapshot)
+
+            self.assertEqual(status_changes, [])
+            self.assertEqual(activity_changes, [])
+
+    def test_equiv_games_match_rule_include_filters(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tracker_path = Path(tmp) / "online_watch.json"
+            tracker_path.write_text(
+                '{"equiv_games":[["Satisfactory","Satisfactory Modeler"]]}',
+                encoding="utf-8",
+            )
+            tracker = Online_Tracker(tracker_path)
+            rule = tracker.ensure_rule(hikari.Snowflake(100), hikari.Snowflake(200))[0]
+            rule.games_mode = "include"
+            rule.games = {"satisfactory"}
+
+            self.assertTrue(tracker._game_allowed(rule, "Satisfactory Modeler"))
 
 
 if __name__ == "__main__":

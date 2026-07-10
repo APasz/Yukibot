@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+import config
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
     ChatAttachment,
@@ -54,6 +55,50 @@ class ChatHubTests(unittest.TestCase):
 
         self.assertEqual(targets, (app_endpoint,))
         self.assertEqual(hub.history(room_id), (event,))
+
+    def test_discord_source_event_index_tracks_publish_and_eviction(self) -> None:
+        config.Singleton._instances.pop(ChatHub, None)
+        try:
+            hub = ChatHub(history_limit=2)
+            room_id = "minecraft_alpha"
+            endpoint = ChatEndpointId.discord_channel("123")
+            first = ChatEvent(
+                room_id=room_id,
+                source=endpoint,
+                author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Erin"),
+                content="first",
+                source_channel_id=123,
+                source_message_id=1,
+            )
+            second = ChatEvent(
+                room_id=room_id,
+                source=endpoint,
+                author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Erin"),
+                content="second",
+                source_channel_id=123,
+                source_message_id=2,
+            )
+            third = ChatEvent(
+                room_id=room_id,
+                source=endpoint,
+                author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Erin"),
+                content="third",
+                source_channel_id=123,
+                source_message_id=3,
+            )
+
+            hub.publish(first)
+            hub.publish(second)
+            self.assertIs(hub.discord_source_event(room_id, channel_id=123, message_id=1), first)
+            self.assertIs(hub.discord_source_event(room_id, channel_id=123, message_id=2), second)
+
+            hub.publish(third)
+
+            self.assertIsNone(hub.discord_source_event(room_id, channel_id=123, message_id=1))
+            self.assertIs(hub.discord_source_event(room_id, channel_id=123, message_id=2), second)
+            self.assertIs(hub.discord_source_event(room_id, channel_id=123, message_id=3), third)
+        finally:
+            config.Singleton._instances.pop(ChatHub, None)
 
     def test_clear_room_removes_endpoint_room_indexes(self) -> None:
         hub = ChatHub()

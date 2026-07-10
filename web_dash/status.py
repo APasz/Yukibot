@@ -118,6 +118,54 @@ class _AliasDialogDraft:
 
 class ModWebStatusMixin(ModWebServiceSupport):
     @staticmethod
+    def _sync_name_cache_with_authority_if_remote(*, name_cache: config.Name_Cache) -> None:
+        if config.DATA_AUTHORITY_MODE is not config.DataAuthorityMode.REMOTE:
+            return
+        sent = name_cache.flush_pending_mutations()
+        if sent <= 0:
+            raise RuntimeError("No alias authority mutations were delivered.")
+        if config.authority_pending_names_path().exists():
+            raise RuntimeError("Alias authority sync is incomplete; pending name mutations remain queued.")
+        if not name_cache.refresh_from_authority():
+            raise RuntimeError("Alias authority refresh failed after syncing mutations.")
+
+    @classmethod
+    async def _sync_name_cache_with_authority_if_remote_async(cls, *, name_cache: config.Name_Cache) -> None:
+        await asyncio.to_thread(cls._sync_name_cache_with_authority_if_remote, name_cache=name_cache)
+
+    @classmethod
+    def _persist_alias_dialog_draft(
+        cls,
+        *,
+        name_cache: config.Name_Cache,
+        target_user_id: int,
+        draft: _AliasDialogDraft,
+        scopes: tuple[str, ...],
+        sync_authority: bool = True,
+    ) -> tuple[str, ...]:
+        changed_fields: list[str] = []
+        if name_cache.set_display_override(target_user_id, draft.display_name):
+            changed_fields.append("display name")
+        for scope in scopes:
+            next_alias = draft.app_aliases.get(scope, "")
+            current_alias = name_cache.get_game_alias(target_user_id, scope) or ""
+            if next_alias:
+                if next_alias != current_alias:
+                    name_cache.set_game_alias(target_user_id, scope, next_alias)
+                    changed_fields.append(f"{scope.title()} alias")
+                continue
+            if current_alias:
+                name_cache.remove_game_alias(target_user_id, scope)
+                changed_fields.append(f"{scope.title()} alias")
+        if name_cache.set_platform_id(target_user_id, "steam", draft.steam_id):
+            changed_fields.append("Steam ID")
+        if name_cache.set_game_uuid(target_user_id, "minecraft", draft.minecraft_uuid):
+            changed_fields.append("Minecraft UUID")
+        if changed_fields and sync_authority:
+            cls._sync_name_cache_with_authority_if_remote(name_cache=name_cache)
+        return tuple(changed_fields)
+
+    @staticmethod
     def _fake_chat_preview_notice_source(source_kind: ChatEndpointKind) -> RelayNoticeSource:
         if source_kind is ChatEndpointKind.APP:
             return RelayNoticeSource.APP_LOG
@@ -1106,31 +1154,27 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     for scope, control in app_alias_controls.items()
                 }
 
-            def _save_alias_form() -> None:
+            async def _save_alias_form() -> None:
                 _capture_alias_draft()
                 target_user_id = _target_user_id()
                 draft = _draft_for_user(target_user_id)
-                changed_fields: list[str] = []
                 try:
-                    if name_cache.set_display_override(target_user_id, draft.display_name):
-                        changed_fields.append("display name")
-                    for scope in _current_app_scopes():
-                        next_alias = draft.app_aliases.get(scope, "")
-                        current_alias = name_cache.get_game_alias(target_user_id, scope) or ""
-                        if next_alias:
-                            if next_alias != current_alias:
-                                name_cache.set_game_alias(target_user_id, scope, next_alias)
-                                changed_fields.append(f"{scope.title()} alias")
-                            continue
-                        if current_alias:
-                            name_cache.remove_game_alias(target_user_id, scope)
-                            changed_fields.append(f"{scope.title()} alias")
-                    if name_cache.set_platform_id(target_user_id, "steam", draft.steam_id):
-                        changed_fields.append("Steam ID")
-                    if name_cache.set_game_uuid(target_user_id, "minecraft", draft.minecraft_uuid):
-                        changed_fields.append("Minecraft UUID")
+                    changed_fields = self._persist_alias_dialog_draft(
+                        name_cache=name_cache,
+                        target_user_id=target_user_id,
+                        draft=draft,
+                        scopes=_current_app_scopes(),
+                        sync_authority=False,
+                    )
+                    if changed_fields:
+                        await self._sync_name_cache_with_authority_if_remote_async(name_cache=name_cache)
                 except ValueError as xcp:
                     ui.notify(str(xcp), type="negative")
+                    return
+                except Exception as xcp:
+                    ui.notify(f"Alias changes were saved locally, but authority sync failed: {xcp}", type="warning")
+                    drafts_by_user[target_user_id] = _build_alias_draft(target_user_id)
+                    refresh_alias_body()
                     return
                 drafts_by_user[target_user_id] = _build_alias_draft(target_user_id)
                 ui.notify("Saved alias changes." if changed_fields else "Alias values are unchanged.", type="positive")
@@ -1330,7 +1374,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
                         render_alias_body()
                         with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
-                            ui.button("Save", on_click=lambda _: _save_alias_form()).classes("mod-list-button")
+                            ui.button("Save", on_click=_save_alias_form).classes("mod-list-button")
                             ui.button("Close", on_click=alias_dialog.close).classes("mod-list-button secondary")
 
             alias_dialog.open()

@@ -3912,8 +3912,8 @@ class ModWebTheme:
                     }}
                 }}
                 .mod-client-pack-dialog-card {{
-                    width: min(36rem, calc(100vw - 2rem)) !important;
-                    max-height: min(48rem, calc(100vh - 2rem));
+                    width: min(72rem, calc(100vw - 2rem)) !important;
+                    max-height: min(52rem, calc(100vh - 1.5rem));
                     overflow: hidden;
                 }}
                 .mod-client-pack-dialog-card > .nicegui-content,
@@ -3924,12 +3924,71 @@ class ModWebTheme:
                 .mod-client-pack-body {{
                     gap: 0;
                     padding: 1.2rem 1.25rem 1rem;
-                    max-height: min(48rem, calc(100vh - 2rem));
+                    max-height: min(52rem, calc(100vh - 1.5rem));
                     overflow-y: auto;
                 }}
                 .mod-client-pack-header {{
                     gap: 0.18rem;
                     padding-bottom: 0.95rem;
+                }}
+                .mod-client-pack-config-layout {{
+                    display: grid !important;
+                    grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+                    align-items: stretch;
+                    gap: 1rem;
+                }}
+                .mod-client-pack-config-column {{
+                    display: flex;
+                    flex-direction: column;
+                    min-width: 0;
+                    gap: 0;
+                    align-self: stretch;
+                    overflow: visible;
+                }}
+                .mod-client-pack-config-column-left {{
+                    min-height: 0;
+                }}
+                .mod-client-pack-config-column-right {{
+                    min-height: 0;
+                }}
+                .mod-client-pack-config-mods-section {{
+                    display: grid !important;
+                    flex: 1 1 auto;
+                    grid-template-rows: auto auto minmax(0, 1fr);
+                    align-content: start;
+                    justify-content: stretch;
+                    align-items: stretch;
+                    gap: 0.32rem;
+                    height: 100%;
+                    min-height: 0;
+                }}
+                .mod-client-pack-config-mod-list {{
+                    display: grid !important;
+                    grid-template-rows: auto minmax(0, 1fr);
+                    align-content: start;
+                    justify-content: stretch;
+                    align-items: stretch;
+                    gap: 0.4rem;
+                    flex: 1 1 auto;
+                    min-height: 0;
+                    overflow: hidden;
+                }}
+                .mod-client-pack-config-mod-list > .mod-client-pack-option-list {{
+                    margin-top: 0;
+                    display: flex !important;
+                    flex: 1 1 auto;
+                    flex-direction: column;
+                    justify-content: flex-start;
+                    align-items: stretch;
+                    align-self: stretch;
+                    min-height: 0;
+                    max-height: none;
+                    overflow-y: auto;
+                    padding-right: 0.15rem;
+                }}
+                .mod-client-pack-config-column > .mod-client-pack-section:first-child {{
+                    padding-top: 0;
+                    border-top: 0;
                 }}
                 .mod-client-pack-section {{
                     gap: 0.42rem;
@@ -3955,6 +4014,24 @@ class ModWebTheme:
                 }}
                 .mod-client-pack-changelog-hint {{
                     margin-top: 0;
+                }}
+                .mod-client-pack-publish-reasons {{
+                    gap: 0.38rem;
+                }}
+                .mod-client-pack-publish-reason {{
+                    padding-left: 0.9rem;
+                    color: var(--mod-text) !important;
+                    font-size: 0.82rem;
+                    line-height: 1.45;
+                    position: relative;
+                    white-space: pre-wrap;
+                }}
+                .mod-client-pack-publish-reason::before {{
+                    content: "•";
+                    position: absolute;
+                    left: 0;
+                    color: var(--mod-purple);
+                    font-weight: 900;
                 }}
                 .mod-client-pack-option-list,
                 .mod-client-pack-choice-list {{
@@ -4000,19 +4077,38 @@ class ModWebTheme:
                 }}
                 .mod-client-pack-config-option {{
                     display: grid !important;
-                    grid-template-columns: minmax(0, 1fr) 9.5rem 9.5rem;
+                    grid-template-columns: minmax(0, 1fr) minmax(0, 8.5rem);
                     align-items: center;
+                    overflow: hidden;
+                    box-sizing: border-box;
+                }}
+                .mod-client-pack-config-option-alt {{
+                    grid-template-columns: minmax(0, 1fr) minmax(0, 7.5rem) minmax(0, 8rem);
                 }}
                 .mod-client-pack-config-control {{
                     width: 100%;
+                    max-width: 100%;
                     min-width: 0;
                     flex: none;
+                }}
+                .mod-client-pack-config-control.mod-config-select,
+                .mod-client-pack-config-control.mod-config-input {{
+                    flex: 0 1 auto;
+                    min-width: 0;
+                    max-width: 100%;
                 }}
                 .mod-client-pack-config-group {{
                     grid-column: 2;
                 }}
                 .mod-client-pack-config-policy {{
+                    grid-column: 2;
+                }}
+                .mod-client-pack-config-option-alt .mod-client-pack-config-policy {{
                     grid-column: 3;
+                }}
+                .mod-client-pack-config-control .q-field__control {{
+                    max-width: 100%;
+                    min-width: 0 !important;
                 }}
                 .mod-client-pack-config-invalid .q-field__control {{
                     border-color: rgba(248, 113, 113, 0.96) !important;
@@ -4026,7 +4122,23 @@ class ModWebTheme:
                 .mod-client-pack-config-invalid .q-icon {{
                     color: #fca5a5 !important;
                 }}
-                @media (max-width: 640px) {{
+                @media (max-width: 70rem) {{
+                    .mod-client-pack-config-layout {{
+                        grid-template-columns: minmax(0, 1fr);
+                    }}
+                    .mod-client-pack-config-column-left,
+                    .mod-client-pack-config-column-right {{
+                        flex-basis: 100%;
+                    }}
+                    .mod-client-pack-config-mods-section,
+                    .mod-client-pack-config-mod-list {{
+                        height: auto;
+                    }}
+                    .mod-client-pack-config-mod-list > .mod-client-pack-option-list {{
+                        max-height: min(34rem, calc(100vh - 14rem));
+                    }}
+                }}
+                @media (max-width: 54rem) {{
                     .mod-client-pack-config-option {{
                         grid-template-columns: minmax(0, 1fr);
                     }}

@@ -28,6 +28,12 @@ _PORTAL_RESTART_REQUEST_TIMEOUT_SECONDS: Final[int] = 10
 _PORTAL_RESTART_TOKEN_TTL_SECONDS: Final[int] = 60
 
 
+@dataclass(frozen=True, slots=True)
+class PortalRestartTarget:
+    node_name: str
+    restart_url: str
+
+
 class Stats_CPU:
     def __init__(self):
         self.last_updated: datetime | None = None
@@ -767,23 +773,41 @@ async def request_portal_process_restart(*, subject: str) -> None:
     if token_secret is None:
         raise RuntimeError("Portal restart requires a configured node API token secret.")
 
-    portal_node_name = config.BotProfileName.PORTAL.value
+    portal_target = _portal_restart_target()
     token = issue_node_token(
         secret=token_secret,
         grant=NodeAccessGrant(
             subject=subject,
-            node=portal_node_name,
+            node=portal_target.node_name,
             app=None,
             scopes=frozenset({NodeApiScope.NODE_MANAGE}),
             expires_at=int(time.time()) + _PORTAL_RESTART_TOKEN_TTL_SECONDS,
         ),
     )
-    portal_node_api_url = config.resolve_node_api_base_url(config.MOD_WEB_SERVER.public_base_url)
     await asyncio.to_thread(
         _request_portal_restart,
-        f"{portal_node_api_url.rstrip('/')}/restart",
+        portal_target.restart_url,
         token,
     )
+
+
+def _portal_restart_target() -> PortalRestartTarget:
+    portal_node_api_url = config.resolve_node_api_base_url(config.MOD_WEB_SERVER.public_base_url)
+    portal_node_name = _configured_portal_node_name()
+    return PortalRestartTarget(
+        node_name=portal_node_name,
+        restart_url=f"{portal_node_api_url.rstrip('/')}/restart",
+    )
+
+
+def _configured_portal_node_name() -> str:
+    for snapshot in config.load_known_bot_snapshots():
+        if snapshot.profile.bot_profile is not config.BotProfileName.PORTAL:
+            continue
+        mod_web = snapshot.features.mod_web
+        if mod_web is not None:
+            return mod_web.node_name
+    return config.BotProfileName.PORTAL.value
 
 
 def _request_portal_restart(url: str, token: str) -> None:
@@ -792,7 +816,30 @@ def _request_portal_restart(url: str, token: str) -> None:
         headers={"Authorization": f"Bearer {token}"},
         timeout=_PORTAL_RESTART_REQUEST_TIMEOUT_SECONDS,
     )
-    response.raise_for_status()
+    if response.ok:
+        return
+    detail = _portal_restart_error_detail(response)
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as xcp:
+        if detail is None:
+            raise
+        raise requests.HTTPError(f"{xcp} ({detail})", response=response) from xcp
+
+
+def _portal_restart_error_detail(response: requests.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, Mapping):
+        detail = payload.get("detail")
+        if isinstance(detail, str):
+            text = detail.strip()
+            if text:
+                return text
+    text = response.text.strip()
+    return text or None
 
 
 async def restart(

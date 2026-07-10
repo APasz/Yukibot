@@ -10097,6 +10097,12 @@ class ModWebTests(unittest.TestCase):
                 for row in ui.rows
                 if row.class_value is not None and "mod-client-pack-config-option" in row.class_value
             ]
+            config_layout_rows = [
+                row
+                for row in ui.rows
+                if row.class_value is not None and "mod-client-pack-config-layout" in row.class_value
+            ]
+            self.assertEqual(len(config_layout_rows), 1)
             self.assertEqual(len(config_rows), 2)
             ui.config_search_inputs[0].handlers["update:model-value"](SimpleNamespace(args="beta"))
             self.assertEqual([row.visible for row in config_rows], [False, True])
@@ -10251,10 +10257,17 @@ class ModWebTests(unittest.TestCase):
             self.assertIn("readonly", ui.textareas[2].props_value or "")
             self.assertIn("rows=6", ui.textareas[2].props_value or "")
             label_texts = [label.text for label in ui.labels]
+            self.assertIn("Mods", label_texts)
             self.assertIn(
                 "Draft notes are shared when this configuration is saved.",
                 label_texts,
             )
+            self.assertIn("Publish reasons", label_texts)
+            self.assertIn(
+                "Saved client-pack configuration changes are waiting to be published.",
+                label_texts,
+            )
+            self.assertIn("Added mods: Alpha Fabric (1.0.0)", label_texts)
             configure_button = next(
                 item for item in ui.menu_items if item.text == "Configure <!>"
             )
@@ -10323,6 +10336,46 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(ui.inputs[0].value, "")
             self.assertEqual(rendered_mod_names, ["beta-forge.jar", "alpha-fabric.jar"])
             self.assertIn('url.searchParams.delete("search")', ui.javascript_calls[-1])
+
+        fallback_model = replace(
+            model,
+            client_pack_file_previews=(),
+            join_address="play.example.test:25565",
+            join_direct_ip_address="203.0.113.10:25565",
+        )
+        fallback_ui = FakeUi()
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service._backend, "client_pack_changelog_draft", return_value=None),
+            patch.object(ModWebService, "_render_mod_download_row", return_value=None),
+        ):
+            service._render_mods_section(
+                ui=cast(ModWebUi, cast(object, fallback_ui)),
+                model=fallback_model,
+                user=user,
+            )
+            configure_button = next(
+                item for item in fallback_ui.menu_items if item.text == "Configure <!>"
+            )
+            self.assertIsNotNone(configure_button.on_click)
+            assert configure_button.on_click is not None
+            configure_button.on_click()
+            client_pack_button = next(button for button in fallback_ui.buttons if button.text == "Client Pack")
+            self.assertIsNotNone(client_pack_button.on_click)
+            assert client_pack_button.on_click is not None
+            client_pack_button.on_click()
+            fallback_view_button = next(
+                button
+                for button in fallback_ui.buttons
+                if button.props_value is not None and "aria-label=View servers.dat" in button.props_value
+            )
+            self.assertIsNotNone(fallback_view_button.on_click)
+            assert fallback_view_button.on_click is not None
+            fallback_view_button.on_click()
+            self.assertEqual(
+                fallback_ui.textareas[-1].value,
+                "Minecraft servers.dat entry\nname=YukiServer\nip=203.0.113.10:25565\n",
+            )
 
         self.assertIn("No mods match that search.", [label.text for label in ui.labels])
 
@@ -16542,6 +16595,103 @@ class ModWebTests(unittest.TestCase):
         scopes = service._alias_known_scopes()
 
         self.assertEqual(scopes, tuple(sorted((scope.value for scope in config.AppScopes), key=str.casefold)))
+
+    def test_persist_alias_dialog_draft_saves_factorio_and_minecraft_aliases(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = object.__new__(config.Name_Cache)
+            cache.pointer = Path(tmp) / "discord_names.json"
+            cache.by_id = {42: config.UserNames(games={"beammp": ("RoadRunner", None)})}
+            cache.by_alias = {}
+            cache.by_platform_id = {}
+            draft = cast(
+                Any,
+                SimpleNamespace(
+                    display_name="Portal Finch",
+                    app_aliases={
+                        "beammp": "RoadRunner",
+                        "factorio": "Factory Finch",
+                        "minecraft": "Miner Finch",
+                    },
+                    steam_id="76561198000000001",
+                    minecraft_uuid="123e4567-e89b-12d3-a456-426614174000",
+                ),
+            )
+
+            with patch.object(ModWebService, "_sync_name_cache_with_authority_if_remote") as sync_mock:
+                changed_fields = ModWebService._persist_alias_dialog_draft(
+                    name_cache=cache,
+                    target_user_id=42,
+                    draft=draft,
+                    scopes=("beammp", "factorio", "minecraft"),
+                )
+
+            payload = json.loads(cache.pointer.read_text(encoding="utf-8"))
+
+            self.assertEqual(
+                changed_fields,
+                (
+                    "display name",
+                    "Factorio alias",
+                    "Minecraft alias",
+                    "Steam ID",
+                    "Minecraft UUID",
+                ),
+            )
+            self.assertEqual(cache.get_display_override(42), "Portal Finch")
+            self.assertEqual(cache.get_game_alias(42, "beammp"), "RoadRunner")
+            self.assertEqual(cache.get_game_alias(42, "factorio"), "Factory Finch")
+            self.assertEqual(cache.get_game_alias(42, "minecraft"), "Miner Finch")
+            self.assertEqual(cache.get_platform_id(42, "steam"), "76561198000000001")
+            self.assertEqual(cache.get_game_uuid(42, "minecraft"), "123e4567-e89b-12d3-a456-426614174000")
+            sync_mock.assert_called_once_with(name_cache=cache)
+            self.assertEqual(payload["42"]["display_overrides"], {"value": "Portal Finch"})
+            self.assertEqual(
+                payload["42"]["games"],
+                {
+                    "beammp": ["RoadRunner", None],
+                    "factorio": ["Factory Finch", None],
+                    "minecraft": ["Miner Finch", "123e4567-e89b-12d3-a456-426614174000"],
+                },
+            )
+            self.assertEqual(payload["42"]["platform_ids"], {"steam": "76561198000000001"})
+
+    def test_sync_name_cache_with_authority_if_remote_flushes_and_refreshes(self) -> None:
+        cache = SimpleNamespace(
+            flush_pending_mutations=Mock(return_value=2),
+            refresh_from_authority=Mock(return_value=True),
+        )
+
+        with (
+            patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
+            patch.object(config, "authority_pending_names_path", return_value=Path("/tmp/pending-names.jsonl")),
+            patch.object(Path, "exists", return_value=False),
+        ):
+            ModWebService._sync_name_cache_with_authority_if_remote(name_cache=cast(Any, cache))
+
+        cache.flush_pending_mutations.assert_called_once_with()
+        cache.refresh_from_authority.assert_called_once_with()
+
+    def test_sync_name_cache_with_authority_if_remote_async_uses_sync_helper(self) -> None:
+        cache = SimpleNamespace()
+
+        with patch.object(ModWebService, "_sync_name_cache_with_authority_if_remote") as sync_mock:
+            asyncio.run(ModWebService._sync_name_cache_with_authority_if_remote_async(name_cache=cast(Any, cache)))
+
+        sync_mock.assert_called_once_with(name_cache=cache)
+
+    def test_sync_name_cache_with_authority_if_remote_fails_when_pending_mutations_remain(self) -> None:
+        cache = SimpleNamespace(
+            flush_pending_mutations=Mock(return_value=1),
+            refresh_from_authority=Mock(return_value=True),
+        )
+
+        with (
+            patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
+            patch.object(config, "authority_pending_names_path", return_value=Path("/tmp/pending-names.jsonl")),
+            patch.object(Path, "exists", return_value=True),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pending name mutations remain queued"):
+                ModWebService._sync_name_cache_with_authority_if_remote(name_cache=cast(Any, cache))
 
     def test_alias_panel_user_switcher_is_disabled_without_sudo(self) -> None:
         class FakeContainer:

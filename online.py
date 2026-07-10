@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import hikari
+from hikari.snowflakes import Snowflake
 from modmux import Muxer, Provider, SteamCreds
 from modmux.modmux_errors import ModMuxError
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -99,7 +100,7 @@ DRINK_REMINDERS = (
     "One sip now helps later, it's been {duration}",
     "Drink some water and reset your focus",
 )
-STATUS_EMOJI = {
+STATUS_EMOJI: dict[str, str] = {
     "online": "🟢",
     "offline": "⚪",
     "idle": "🟡",
@@ -107,7 +108,7 @@ STATUS_EMOJI = {
 }
 UNKNOWN_STATUS_EMOJI = "❓"
 
-PLATFORM_EMOJI = {
+PLATFORM_EMOJI: dict[str, str] = {
     "desktop": "🖥️",
     "mobile": "📱",
     "web": "🕸️",
@@ -115,21 +116,20 @@ PLATFORM_EMOJI = {
 UNKNOWN_PLATFORM_EMOJI = "❔"
 
 # Activity/game names to ignore globally (case-insensitive exact match).
-IGNORED_ACTIVITY_NAMES = {
+IGNORED_ACTIVITY_NAMES: set[str] = {
     "wordle",
     "vroid studio",
     "vtube studio",
-    "Satisfactory Modeler",
 }
 
-IGNORED_USER_IDS: set[hikari.Snowflake] = set()
+IGNORED_USER_IDS: set[hikari.Snowflake] = set[Snowflake]()
 
 
 class WatchRule(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    types: set[str] = Field(default_factory=lambda: set(STATUS_TYPES))
-    activities: set[str] = Field(default_factory=lambda: set(ACTIVITY_TYPES))
+    types: set[str] = Field(default_factory=lambda: set[str](STATUS_TYPES))
+    activities: set[str] = Field(default_factory=lambda: set[str](ACTIVITY_TYPES))
     games_mode: str = "all"
     "all | include | exclude"
     games: set[str] = Field(default_factory=set)
@@ -156,7 +156,7 @@ class WatchRule(BaseModel):
         if value is None:
             return set(ACTIVITY_TYPES)
         if isinstance(value, str):
-            value = [value]
+            value: list[str] = [value]
         if isinstance(value, (list, tuple, set)):
             return {str(v).strip().lower() for v in value if str(v).strip().lower() in ACTIVITY_TYPES_SET}
         return set(ACTIVITY_TYPES)
@@ -164,7 +164,7 @@ class WatchRule(BaseModel):
     @field_validator("games_mode", mode="before")
     @classmethod
     def _validate_games_mode(cls, value: object):
-        mode = str(value).strip().lower() if value is not None else "all"
+        mode: str = str(value).strip().lower() if value is not None else "all"
         return mode if mode in {"all", "include", "exclude"} else "all"
 
     @field_validator("games", mode="before")
@@ -173,7 +173,7 @@ class WatchRule(BaseModel):
         if value is None:
             return set()
         if isinstance(value, str):
-            value = [value]
+            value: list[str] = [value]
         if isinstance(value, (list, tuple, set)):
             return {str(v).strip().casefold() for v in value if str(v).strip()}
         return set()
@@ -196,9 +196,9 @@ class WatchRule(BaseModel):
             game_raw = entry.get("game")
             silent_raw = entry.get("silent", True)
 
-            status_type = str(status_raw).strip().lower() if status_raw is not None else ""
-            activity = str(activity_raw).strip().lower() if activity_raw is not None else ""
-            game = str(game_raw).strip().casefold() if game_raw is not None else ""
+            status_type: str = str(status_raw).strip().lower() if status_raw is not None else ""
+            activity: str = str(activity_raw).strip().lower() if activity_raw is not None else ""
+            game: str = str(game_raw).strip().casefold() if game_raw is not None else ""
 
             if status_type and status_type not in STATUS_TYPES_SET:
                 continue
@@ -255,7 +255,7 @@ class DrinkRule(BaseModel):
     @field_validator("mode", mode="before")
     @classmethod
     def _validate_mode(cls, value: object):
-        mode = str(value).strip().lower() if value is not None else "include"
+        mode: str = str(value).strip().lower() if value is not None else "include"
         return mode if mode in DRINK_MODES else "include"
 
     @field_validator("games", mode="before")
@@ -308,6 +308,8 @@ class Online_Tracker(metaclass=config.Singleton):
         self.pointer = pointer or Path("online_watch.json")
         self.rules: dict[hikari.Snowflake, dict[hikari.Snowflake, WatchRule]] = {}
         self._watchers_by_target: dict[hikari.Snowflake, set[hikari.Snowflake]] = {}
+        self.equiv_games: tuple[frozenset[str], ...] = ()
+        self._equiv_games_index: dict[str, frozenset[str]] = {}
         self.ignored_user_ids: set[hikari.Snowflake] = set(IGNORED_USER_IDS)
         self.seen_games: set[str] = set()
         self._seen_games_cf: dict[str, str] = {}
@@ -377,6 +379,8 @@ class Online_Tracker(metaclass=config.Singleton):
             log.exception("Online_Tracker config read failed, resetting")
             self.rules = {}
             self._watchers_by_target = {}
+            self.equiv_games = ()
+            self._equiv_games_index = {}
             self.ignored_user_ids = set(IGNORED_USER_IDS)
             self.seen_games = set()
             self._seen_games_cf = {}
@@ -406,6 +410,7 @@ class Online_Tracker(metaclass=config.Singleton):
 
         self.rules = loaded_rules
         self._rebuild_watch_index()
+        self._load_equiv_games(raw.get("equiv_games", []) if isinstance(raw, dict) else [])
 
         ignored_raw: object = []
         if isinstance(raw, dict):
@@ -496,6 +501,7 @@ class Online_Tracker(metaclass=config.Singleton):
                 str(watcher): {str(target): rule.to_json() for target, rule in targets.items()}
                 for watcher, targets in self.rules.items()
             },
+            "equiv_games": [sorted(group) for group in self.equiv_games],
             "ignored_users": [str(uid) for uid in sorted(self.ignored_user_ids)],
             "seen_games": sorted(self.seen_games),
             "seen_games_by_user": {
@@ -516,6 +522,55 @@ class Online_Tracker(metaclass=config.Singleton):
     @staticmethod
     def _norm_game(name: str) -> str:
         return name.strip().casefold()
+
+    @classmethod
+    def _normalise_equiv_games(cls, raw: object) -> tuple[frozenset[str], ...]:
+        if not isinstance(raw, (list, tuple, set)):
+            return ()
+
+        merged_groups: list[set[str]] = []
+        for entry in raw:
+            if not isinstance(entry, (list, tuple, set)):
+                continue
+            group = {cls._norm_game(str(name)) for name in entry if cls._norm_game(str(name))}
+            if len(group) < 2:
+                continue
+
+            overlapping_groups = [existing for existing in merged_groups if existing & group]
+            if not overlapping_groups:
+                merged_groups.append(set(group))
+                continue
+
+            combined_group = set(group)
+            for existing in overlapping_groups:
+                combined_group.update(existing)
+                merged_groups.remove(existing)
+            merged_groups.append(combined_group)
+
+        return tuple(
+            frozenset(group)
+            for group in sorted(merged_groups, key=lambda entry: tuple(sorted(entry)))
+        )
+
+    def _load_equiv_games(self, raw: object) -> None:
+        self.equiv_games = self._normalise_equiv_games(raw)
+        self._equiv_games_index = {
+            game_name: group
+            for group in self.equiv_games
+            for game_name in group
+        }
+
+    def _equivalent_game_names(self, game_name: str) -> frozenset[str]:
+        game_key = self._norm_game(game_name)
+        if not game_key:
+            return frozenset()
+        return self._equiv_games_index.get(game_key, frozenset((game_key,)))
+
+    def _equivalent_game_key(self, game_name: str) -> str:
+        names = self._equivalent_game_names(game_name)
+        if not names:
+            return ""
+        return min(names)
 
     @staticmethod
     def _norm_status_type(type_name: str) -> str:
@@ -793,12 +848,13 @@ class Online_Tracker(metaclass=config.Singleton):
             return rule.silent
 
         status_list = [s for s in (status_types or []) if s in STATUS_TYPES_SET]
-        game_key = game_name.casefold() if game_name else None
+        game_keys = self._equivalent_game_names(game_name) if game_name else frozenset[str]()
         kind = activity_kind if activity_kind in ACTIVITY_TYPES_SET else None
 
         level3: list[tuple[str | None, str | None, str | None]] = []
-        if status_list and game_key:
-            level3.extend((status, None, game_key) for status in status_list)
+        if status_list and game_keys:
+            for status in status_list:
+                level3.extend((status, None, game_key) for game_key in sorted(game_keys))
         if status_list and kind:
             level3.extend((status, kind, None) for status in status_list)
         resolved = self._resolve_silent_candidates(overrides, level3)
@@ -811,8 +867,8 @@ class Online_Tracker(metaclass=config.Singleton):
             return resolved
 
         level1: list[tuple[str | None, str | None, str | None]] = []
-        if game_key:
-            level1.append((None, None, game_key))
+        if game_keys:
+            level1.extend((None, None, game_key) for game_key in sorted(game_keys))
         if kind:
             level1.append((None, kind, None))
         resolved = self._resolve_silent_candidates(overrides, level1)
@@ -972,6 +1028,9 @@ class Online_Tracker(metaclass=config.Singleton):
     def _display_game(self, user_id: hikari.Snowflake, game_key: str) -> str:
         if game := self.seen_games_by_user.get(user_id, {}).get(game_key):
             return game
+        for equiv_key in self._equivalent_game_names(game_key):
+            if game := self.seen_games_by_user.get(user_id, {}).get(equiv_key):
+                return game
         return self._seen_games_cf.get(game_key, game_key)
 
     def get_drink_rule(self, user_id: hikari.Snowflake) -> DrinkRule | None:
@@ -1634,7 +1693,7 @@ class Online_Tracker(metaclass=config.Singleton):
                 if kind == "games":
                     ignored_games.add(key)
                 continue
-            key = activity_name.casefold()
+            key = self._equivalent_game_key(activity_name) if kind == "games" else activity_name.casefold()
             activities[(kind, key)] = activity_name
             if kind == "games":
                 game_starts[key] = self._activity_start_at(activity)
@@ -1889,14 +1948,13 @@ class Online_Tracker(metaclass=config.Singleton):
                 keys.append(key)
         return keys
 
-    @staticmethod
-    def _game_allowed(rule: WatchRule, game_name: str) -> bool:
-        game_key = game_name.casefold()
+    def _game_allowed(self, rule: WatchRule, game_name: str) -> bool:
+        game_keys = self._equivalent_game_names(game_name)
         if rule.games_mode == "all":
             return True
         if rule.games_mode == "include":
-            return game_key in rule.games
-        return game_key not in rule.games
+            return any(game_key in rule.games for game_key in game_keys)
+        return all(game_key not in rule.games for game_key in game_keys)
 
     def _fmt_status(self, target_id: hikari.Snowflake, change: StatusChange, snapshot: PresenceSnapshot) -> str:
         del snapshot

@@ -627,6 +627,7 @@ class ChatHub(metaclass=Singleton):
         self._room_endpoints: dict[str, dict[str, ChatEndpoint]] = {}
         self._endpoint_rooms: dict[ChatEndpointId, set[str]] = {}
         self._history: dict[str, deque[ChatEvent]] = {}
+        self._discord_source_events: dict[str, dict[tuple[int, int], ChatEvent]] = {}
         self._room_revisions: dict[str, int] = {}
         self._room_subscribers: dict[str, dict[str, Callable[[ChatRoomUpdate], None]]] = {}
         self._lock = threading.RLock()
@@ -650,6 +651,7 @@ class ChatHub(metaclass=Singleton):
         with self._lock:
             endpoints = self._room_endpoints.pop(room_id, {})
             history = self._history.pop(room_id, ())
+            self._discord_source_events.pop(room_id, None)
             self._increment_room_revision(room_id)
             for endpoint in endpoints.values():
                 rooms = self._endpoint_rooms.get(endpoint.id)
@@ -690,7 +692,12 @@ class ChatHub(metaclass=Singleton):
 
     def publish(self, event: ChatEvent) -> tuple[ChatEndpoint, ...]:
         with self._lock:
-            self._history.setdefault(event.room_id, deque(maxlen=self._history_limit)).append(event)
+            history = self._history.setdefault(event.room_id, deque(maxlen=self._history_limit))
+            evicted_event = history[0] if len(history) == self._history_limit else None
+            history.append(event)
+            if evicted_event is not None:
+                self._discard_discord_source_event(evicted_event)
+            self._index_discord_source_event(event)
             self._increment_room_revision(event.room_id)
             targets = self.endpoints_for_room(event.room_id, exclude=event.source)
         log.debug(
@@ -744,6 +751,32 @@ class ChatHub(metaclass=Singleton):
         self._room_revisions[room_id] = revision
         return revision
 
+    @staticmethod
+    def _discord_source_key(event: ChatEvent) -> tuple[int, int] | None:
+        if event.source.kind is not ChatEndpointKind.DISCORD_CHANNEL:
+            return None
+        if event.source_channel_id is None or event.source_message_id is None:
+            return None
+        return event.source_channel_id, event.source_message_id
+
+    def _index_discord_source_event(self, event: ChatEvent) -> None:
+        key = self._discord_source_key(event)
+        if key is None:
+            return
+        self._discord_source_events.setdefault(event.room_id, {})[key] = event
+
+    def _discard_discord_source_event(self, event: ChatEvent) -> None:
+        key = self._discord_source_key(event)
+        if key is None:
+            return
+        room_events = self._discord_source_events.get(event.room_id)
+        if room_events is None:
+            return
+        if room_events.get(key) is event:
+            room_events.pop(key, None)
+        if not room_events:
+            self._discord_source_events.pop(event.room_id, None)
+
     def history(self, room_id: str, *, limit: int | None = None) -> tuple[ChatEvent, ...]:
         with self._lock:
             events: Sequence[ChatEvent] = tuple(self._history.get(room_id, ()))
@@ -760,3 +793,7 @@ class ChatHub(metaclass=Singleton):
                 if event.id == event_id:
                     return event
         return None
+
+    def discord_source_event(self, room_id: str, *, channel_id: int, message_id: int) -> ChatEvent | None:
+        with self._lock:
+            return self._discord_source_events.get(room_id, {}).get((channel_id, message_id))

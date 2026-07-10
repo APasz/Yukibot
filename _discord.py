@@ -2341,22 +2341,77 @@ class DC_Relay(metaclass=Singleton):
                 rendered_snapshots.append(rendered)
         return " ... ".join(rendered_snapshots)
 
-    def _chat_reference_from_discord_message(
+    async def _resolve_referenced_discord_message(self, message: hikari.Message) -> hikari.Message | None:
+        referenced_message = getattr(message, "referenced_message", None)
+        if referenced_message is not None and referenced_message is not hikari.UNDEFINED:
+            return cast(hikari.Message, referenced_message)
+
+        reference = getattr(message, "message_reference", None)
+        if reference is None or reference is hikari.UNDEFINED:
+            return None
+
+        reference_message_id = getattr(reference, "id", None)
+        if reference_message_id is None:
+            reference_message_id = getattr(reference, "message_id", None)
+        if not isinstance(reference_message_id, int | str | hikari.Snowflake):
+            return None
+
+        reference_channel_id = getattr(reference, "channel_id", None)
+        if not isinstance(reference_channel_id, int | str | hikari.Snowflake):
+            reference_channel_id = getattr(message, "channel_id", None)
+        if not isinstance(reference_channel_id, int | str | hikari.Snowflake):
+            return None
+
+        resolver = getattr(self, "reso", None)
+        if resolver is None:
+            return None
+
+        resolved_message = await cast(Resolutator, resolver).message(reference_message_id, reference_channel_id)
+        if resolved_message is None:
+            return None
+        return cast(hikari.Message, resolved_message)
+
+    def _chat_event_for_discord_source_message(
+        self,
+        *,
+        room_id: str,
+        channel_id: hikari.Snowflakeish,
+        message_id: hikari.Snowflakeish,
+    ) -> ChatEvent | None:
+        channel_id_int = int(hikari.Snowflake(channel_id))
+        message_id_int = int(hikari.Snowflake(message_id))
+        return self._chat_hub(self).discord_source_event(
+            room_id,
+            channel_id=channel_id_int,
+            message_id=message_id_int,
+        )
+
+    def _chat_reference_from_resolved_discord_message(
         self,
         message: hikari.Message,
+        referenced_message: hikari.Message,
         *,
+        room_id: str | None = None,
         guild_id: hikari.Snowflakeish | None,
     ) -> ChatMessageReference | None:
-        referenced_message = getattr(message, "referenced_message", None)
-        if referenced_message is None or referenced_message is hikari.UNDEFINED:
-            return None
         resolved_referenced_message = cast(hikari.Message, referenced_message)
+        reference_channel_id = getattr(resolved_referenced_message, "channel_id", None)
+        if not isinstance(reference_channel_id, int | str | hikari.Snowflake):
+            reference_channel_id = getattr(message, "channel_id", None)
         tracked_reference = self._discord_relay_reference_for_message(
-            channel_id=message.channel_id,
+            channel_id=reference_channel_id,
             message_id=resolved_referenced_message.id,
         )
         if tracked_reference is not None:
             return tracked_reference
+        if room_id is not None and isinstance(reference_channel_id, int | str | hikari.Snowflake):
+            room_event = self._chat_event_for_discord_source_message(
+                room_id=room_id,
+                channel_id=reference_channel_id,
+                message_id=resolved_referenced_message.id,
+            )
+            if room_event is not None:
+                return self._chat_reference_from_event(room_event)
         referenced_author = getattr(resolved_referenced_message, "author", None)
         referenced_author_id = getattr(referenced_author, "id", None)
         discord_user_id = (
@@ -2372,6 +2427,23 @@ class DC_Relay(metaclass=Singleton):
             content=content,
             event_id=event_id,
             discord_user_id=discord_user_id,
+        )
+
+    async def _chat_reference_from_discord_message(
+        self,
+        message: hikari.Message,
+        *,
+        room_id: str | None = None,
+        guild_id: hikari.Snowflakeish | None,
+    ) -> ChatMessageReference | None:
+        referenced_message = await self._resolve_referenced_discord_message(message)
+        if referenced_message is None:
+            return None
+        return self._chat_reference_from_resolved_discord_message(
+            message,
+            referenced_message,
+            room_id=room_id,
+            guild_id=guild_id,
         )
 
     async def publish_web_chat(
@@ -2620,7 +2692,7 @@ class DC_Relay(metaclass=Singleton):
                 notice_body = f"{reference_prefix} {notice_body}".strip() if notice_body else reference_prefix
             if event.author.kind is ChatAuthorKind.SYSTEM:
                 return notice_body, set()
-            return f"{player_plate} {notice_body}".strip(), set()
+            return self._discord_text_with_player_plate(player_plate=player_plate, body=notice_body), set()
 
         app_scope = getattr(app, "scope", None) if app is not None else None
         scope = app_scope if isinstance(app_scope, str) else None
@@ -2635,7 +2707,10 @@ class DC_Relay(metaclass=Singleton):
         body = parsed_content
         if reference_prefix is not None:
             body = f"{reference_prefix} {body}".strip() if body else reference_prefix
-        text = f"{player_plate} {body}".strip()
+        if event.author.kind is ChatAuthorKind.SYSTEM:
+            text = f"{player_plate} {body}".strip()
+        else:
+            text = self._discord_text_with_player_plate(player_plate=player_plate, body=body)
         if relay_embed is not None:
             text = self._discord_text_for_embed_event(
                 event,
@@ -2686,6 +2761,13 @@ class DC_Relay(metaclass=Singleton):
         return f"<{reference.author_display_name}>"
 
     @staticmethod
+    def _discord_text_with_player_plate(*, player_plate: str, body: str) -> str:
+        message_body = body.strip()
+        if not message_body:
+            return player_plate
+        return f"{player_plate}\n{message_body}"
+
+    @staticmethod
     def _discord_text_for_embed_event(
         event: ChatEvent,
         *,
@@ -2696,7 +2778,7 @@ class DC_Relay(metaclass=Singleton):
             return reference_prefix or ""
         if reference_prefix is None:
             return player_plate
-        return f"{reference_prefix} {player_plate}".strip()
+        return DC_Relay._discord_text_with_player_plate(player_plate=player_plate, body=reference_prefix)
 
     @staticmethod
     def _is_discord_attachment_too_large_error(error: hikari.HTTPResponseError) -> bool:
@@ -3188,6 +3270,25 @@ class DC_Relay(metaclass=Singleton):
         shushPylance = hikari.TextableChannel(app=self.bot, id=hikari.Snowflake(0), name="UNKNOWN", type=1)
         remote_files = [_discord_attachment_fileish(attachment) for attachment in ctx.message.attachments]
         downloaded_attachments: DiscordAttachmentDownloadBatch | None = None
+        resolved_reference_message: hikari.Message | None = None
+        reference_was_resolved = False
+
+        async def referenced_discord_message() -> hikari.Message | None:
+            nonlocal resolved_reference_message, reference_was_resolved
+            if not reference_was_resolved:
+                resolved_reference_message = await self._resolve_referenced_discord_message(ctx.message)
+                reference_was_resolved = True
+            return resolved_reference_message
+
+        def chat_reference_from_resolved_message(*, room_id: str | None = None) -> ChatMessageReference | None:
+            if resolved_reference_message is None:
+                return None
+            return self._chat_reference_from_resolved_discord_message(
+                ctx.message,
+                resolved_reference_message,
+                room_id=room_id,
+                guild_id=source_guild_id,
+            )
 
         message = App_Bound(
             chan or shushPylance,
@@ -3195,7 +3296,7 @@ class DC_Relay(metaclass=Singleton):
             ctx.author_id,
             files=remote_files,
             reference_kind=relay_reference_kind_for_message(ctx.message),
-            reference=self._chat_reference_from_discord_message(ctx.message, guild_id=source_guild_id),
+            reference=None,
             source_guild_id=source_guild_id,
             source_message_id=ctx.message_id,
         )
@@ -3217,6 +3318,8 @@ class DC_Relay(metaclass=Singleton):
                 continue
             log.debug(f"{app} | {app._running} | {bool(app.am_receiver)}")
             message.app = app
+            await referenced_discord_message()
+            message.reference = chat_reference_from_resolved_message(room_id=app.name)
             should_deliver = True
             if app_uses_default_channels and app is not default_pickup_app:
                 can_receive_chat = self._app_can_receive_chat(app)
@@ -3274,6 +3377,8 @@ class DC_Relay(metaclass=Singleton):
             message.files = set(remote_files)
         for app_name, send_func in self._special_channels.get(ctx.channel_id, ()):
             log.debug(f"{app_name} | {send_func} | {bool(send_func)}")
+            await referenced_discord_message()
+            message.reference = chat_reference_from_resolved_message()
             if remote_files and downloaded_attachments is None:
                 downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
                 self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)

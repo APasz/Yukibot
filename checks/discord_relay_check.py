@@ -606,6 +606,7 @@ class DiscordRelayAppDeliveryTests(unittest.IsolatedAsyncioTestCase):
         payload = receiver.payload
         self.assertIsNotNone(payload)
         self.assertEqual(getattr(payload, "player"), "FactorioAlice")
+        self.assertEqual(getattr(payload, "alias"), "FactorioAlice")
         self.assertEqual(
             cast(_NamesStub, cast(Any, relay).names).relay_display_name_calls,
             [(42, "Tester", "factorio", (), None, 100)],
@@ -839,6 +840,9 @@ class _NamesStub:
         del user_id
         return fallback_display_name or fallback
 
+    def discord_identity_label(self, global_name: str | None, username: str | None) -> str | None:
+        return global_name or username
+
     def relay_display_name(
         self,
         user_id: object,
@@ -1034,7 +1038,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=hikari.Snowflake(123))
 
-        self.assertEqual(text, "<<@42>> hello")
+        self.assertEqual(text, "<<@42>>\nhello")
         self.assertEqual(mentions, set())
         membership.assert_awaited_once_with(42, hikari.Snowflake(123))
 
@@ -1058,7 +1062,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=hikari.Snowflake(123))
 
-        self.assertEqual(text, "<Alice> hello")
+        self.assertEqual(text, "<Alice>\nhello")
         self.assertEqual(mentions, set())
 
     async def test_discord_text_uses_username_without_alias_or_membership(self) -> None:
@@ -1081,7 +1085,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=hikari.Snowflake(123))
 
-        self.assertEqual(text, "<nameA> hello")
+        self.assertEqual(text, "<nameA>\nhello")
         self.assertEqual(mentions, set())
 
     async def test_discord_text_preserves_body_mentions_without_allowing_author_prefix_ping(self) -> None:
@@ -1104,7 +1108,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=hikari.Snowflake(123))
 
-        self.assertEqual(text, "<<@42>> hello <@77>")
+        self.assertEqual(text, "<<@42>>\nhello <@77>")
         self.assertEqual(mentions, {77})
         self.assertEqual(cast(Any, relay).names.parse_mention_calls, [("hello @bob", "minecraft", (), None)])
 
@@ -1152,7 +1156,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         text, mentions = await relay._discord_text_for_event(event, guild_id=hikari.Snowflake(123))
 
-        self.assertEqual(text, "<Web Alice> reply to <Yoko>; hello")
+        self.assertEqual(text, "<Web Alice>\nreply to <Yoko>; hello")
         self.assertEqual(mentions, set())
 
     async def test_discord_text_skips_reply_prefix_when_native_reply_is_used(self) -> None:
@@ -1181,7 +1185,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             include_reference_prefix=False,
         )
 
-        self.assertEqual(text, "<Web Alice> hello")
+        self.assertEqual(text, "<Web Alice>\nhello")
         self.assertEqual(mentions, set())
 
     def test_embedify_event_keeps_explicit_embed_without_generating_media_embeds(self) -> None:
@@ -1727,7 +1731,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         rest._request.assert_not_awaited()
         exception_mock.assert_called_once()
 
-    def test_chat_reference_from_discord_message_uses_tracked_relay_reference_for_relay_bot_message(self) -> None:
+    async def test_chat_reference_from_discord_message_uses_tracked_relay_reference_for_relay_bot_message(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay)._chat_apps = {}
         source_event = ChatEvent(
@@ -1752,10 +1756,97 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        reference = relay._chat_reference_from_discord_message(message, guild_id=hikari.Snowflake(10))
+        reference = await relay._chat_reference_from_discord_message(message, guild_id=hikari.Snowflake(10))
 
         self.assertEqual(
             reference, ChatMessageReference(author_display_name="Yoko", content="from game", event_id="target-event")
+        )
+
+    async def test_chat_reference_from_discord_message_uses_room_event_id_for_discord_source_message(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay.chat_hub = ChatHub()
+        cast(Any, relay)._chat_apps = {}
+        cast(Any, relay).names = _NamesStub()
+        room_id = "minecraft_alpha"
+        source_event = ChatEvent(
+            room_id=room_id,
+            source=ChatEndpointId.discord_channel("111"),
+            author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "Erin", discord_user_id=42),
+            content="earlier",
+            id="room-event",
+            source_channel_id=111,
+            source_message_id=777,
+        )
+        relay.chat_hub.clear_room(room_id)
+        relay.chat_hub.publish(source_event)
+        message = cast(
+            Any,
+            SimpleNamespace(
+                channel_id=hikari.Snowflake(111),
+                referenced_message=SimpleNamespace(
+                    id=hikari.Snowflake(777),
+                    channel_id=hikari.Snowflake(111),
+                    author=SimpleNamespace(id=hikari.Snowflake(42), username="erin", global_name="Erin"),
+                    content="earlier",
+                    attachments=(),
+                ),
+            ),
+        )
+
+        try:
+            reference = await relay._chat_reference_from_discord_message(
+                message,
+                room_id=room_id,
+                guild_id=hikari.Snowflake(10),
+            )
+        finally:
+            relay.chat_hub.clear_room(room_id)
+
+        self.assertEqual(
+            reference,
+            ChatMessageReference(
+                author_display_name="Erin",
+                content="earlier",
+                event_id="room-event",
+                discord_user_id=42,
+            ),
+        )
+
+    async def test_chat_reference_from_discord_message_fetches_missing_referenced_message(self) -> None:
+        relay = object.__new__(DC_Relay)
+        cast(Any, relay)._chat_apps = {}
+        cast(Any, relay).names = _NamesStub()
+        cast(Any, relay).reso = SimpleNamespace(
+            message=AsyncMock(
+                return_value=SimpleNamespace(
+                    id=hikari.Snowflake(777),
+                    channel_id=hikari.Snowflake(111),
+                    author=SimpleNamespace(id=hikari.Snowflake(42), username="erin", global_name="Erin"),
+                    content="earlier",
+                    attachments=(),
+                )
+            )
+        )
+        message = cast(
+            Any,
+            SimpleNamespace(
+                channel_id=hikari.Snowflake(111),
+                referenced_message=None,
+                message_reference=SimpleNamespace(message_id=hikari.Snowflake(777), channel_id=hikari.Snowflake(111)),
+            ),
+        )
+
+        reference = await relay._chat_reference_from_discord_message(message, guild_id=hikari.Snowflake(10))
+
+        cast(Any, relay).reso.message.assert_awaited_once_with(hikari.Snowflake(777), hikari.Snowflake(111))
+        self.assertEqual(
+            reference,
+            ChatMessageReference(
+                author_display_name="Erin",
+                content="earlier",
+                event_id="777",
+                discord_user_id=42,
+            ),
         )
 
     def test_forwarded_snapshot_content_uses_snapshot_body_and_extras(self) -> None:

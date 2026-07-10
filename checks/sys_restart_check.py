@@ -74,6 +74,7 @@ class PortalRestartTests(unittest.IsolatedAsyncioTestCase):
     async def test_restart_portal_requests_authenticated_process_exit(self) -> None:
         ctx = SimpleNamespace(user=SimpleNamespace(id=1234), respond=AsyncMock())
         response = Mock()
+        response.ok = True
         portal_config = replace(
             config.MOD_WEB_SERVER,
             public_base_url="https://portal.example",
@@ -103,7 +104,52 @@ class PortalRestartTests(unittest.IsolatedAsyncioTestCase):
             headers={"Authorization": "Bearer restart-token"},
             timeout=10,
         )
-        response.raise_for_status.assert_called_once_with()
+        response.raise_for_status.assert_not_called()
+        ctx.respond.assert_awaited_once_with("Portal restarting.", flags=hikari.UNDEFINED)
+
+    async def test_restart_portal_uses_portal_registry_node_name(self) -> None:
+        ctx = SimpleNamespace(user=SimpleNamespace(id=1234), respond=AsyncMock())
+        response = Mock()
+        response.ok = True
+        portal_config = replace(
+            config.MOD_WEB_SERVER,
+            public_base_url="https://portal.example",
+            token_secret="shared-secret",
+        )
+        portal_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="999",
+                label="Portal",
+                bot_profile=config.BotProfileName.PORTAL,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="wakusei",
+                    public_base_url="https://portal.example",
+                    node_api_base_url="https://portal.example/api/node",
+                )
+            ),
+        )
+
+        with (
+            patch.object(config, "MOD_WEB_SERVER", portal_config),
+            patch.object(config, "load_known_bot_snapshots", return_value=(portal_snapshot,)),
+            patch("_sys.time.time", return_value=1000),
+            patch("_sys.issue_node_token", return_value="restart-token") as issue_token_mock,
+            patch("_sys.requests.post", return_value=response),
+        ):
+            await _sys.restart_portal(ctx, silent=False)
+
+        issue_token_mock.assert_called_once_with(
+            secret="shared-secret",
+            grant=NodeAccessGrant(
+                subject="web:1234",
+                node="wakusei",
+                app=None,
+                scopes=frozenset({NodeApiScope.NODE_MANAGE}),
+                expires_at=1060,
+            ),
+        )
         ctx.respond.assert_awaited_once_with("Portal restarting.", flags=hikari.UNDEFINED)
 
     async def test_restart_portal_reports_request_failure(self) -> None:
@@ -118,6 +164,24 @@ class PortalRestartTests(unittest.IsolatedAsyncioTestCase):
             await _sys.restart_portal(ctx, silent=False)
 
         ctx.respond.assert_awaited_once_with("Unable to restart Portal.", flags=hikari.MessageFlag.EPHEMERAL)
+
+    def test_request_portal_restart_includes_api_detail_in_http_error(self) -> None:
+        response = Mock()
+        response.ok = False
+        response.text = ""
+        response.json.return_value = {"detail": "Node token was issued for a different node."}
+        response.raise_for_status.side_effect = _sys.requests.HTTPError(
+            "403 Client Error: Forbidden for url: https://portal.example/api/node/restart",
+            response=response,
+        )
+
+        with (
+            patch("_sys.requests.post", return_value=response),
+            self.assertRaises(_sys.requests.HTTPError) as raised,
+        ):
+            _sys._request_portal_restart("https://portal.example/api/node/restart", "restart-token")
+
+        self.assertIn("Node token was issued for a different node.", str(raised.exception))
 
 
 if __name__ == "__main__":

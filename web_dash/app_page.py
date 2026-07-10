@@ -4550,10 +4550,38 @@ class ModWebAppPageMixin(
                 raise RuntimeError("Client pack file preview dialog was not rendered.")
             client_pack_file_preview_dialog.open()
 
+        def _normalised_client_pack_node_label(node_name: str) -> str:
+            text = node_name.strip()
+            if not text:
+                return "Node"
+            if text.casefold() == text:
+                return text.title()
+            return text
+
+        def _fallback_servers_dat_preview() -> ClientPackFilePreview:
+            server_address = model.join_direct_ip_address or model.join_address
+            if server_address is None:
+                content_text = "No join address is configured, so overrides/servers.dat will not be generated."
+            else:
+                node_label = _normalised_client_pack_node_label(model.node_name)
+                server_base = "".join(character for character in node_label if character.isalnum()) or "Node"
+                content_text = (
+                    "Minecraft servers.dat entry\n"
+                    f"name={server_base}Server\n"
+                    f"ip={server_address}\n"
+                )
+            return ClientPackFilePreview(
+                path="overrides/servers.dat",
+                display_name="servers.dat",
+                content_text=content_text,
+            )
+
         def client_pack_file_preview(path: str, display_name: str) -> ClientPackFilePreview:
             preview = client_pack_file_previews.get(path)
             if preview is not None:
                 return preview
+            if path == "overrides/servers.dat":
+                return _fallback_servers_dat_preview()
             return ClientPackFilePreview(
                 path=path,
                 display_name=display_name,
@@ -4899,6 +4927,39 @@ class ModWebAppPageMixin(
                 return changelog
             return f"{changelog}\n\n{automated_changelog}" if changelog else automated_changelog
 
+        def client_pack_publish_reasons_from_automated_changelog(text: str) -> tuple[str, ...]:
+            if not text:
+                return ()
+            reasons: list[str] = []
+            current_heading: str | None = None
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    current_heading = None
+                    continue
+                if line.endswith(":"):
+                    current_heading = line[:-1]
+                    continue
+                if line.startswith("- "):
+                    item = line[2:].strip()
+                    reasons.append(f"{current_heading}: {item}" if current_heading is not None else item)
+                    continue
+                current_heading = None
+                reasons.append(line)
+            return tuple(reasons)
+
+        def client_pack_publish_reasons() -> tuple[str, ...]:
+            automated_changelog = client_pack_automated_changelog_to_append()
+            reasons: list[str] = []
+            if model.client_pack_published_version is None:
+                reasons.append("This client pack has not been published yet.")
+            if model.client_pack_content_dirty:
+                reasons.append("Saved client-pack configuration changes are waiting to be published.")
+            reasons.extend(client_pack_publish_reasons_from_automated_changelog(automated_changelog))
+            if not reasons:
+                return ("No unpublished client-pack changes are currently detected.",)
+            return tuple(dict.fromkeys(reasons))
+
         def client_pack_configuration_updates() -> tuple[tuple[NodeModEntry, ClientPackConfig], ...]:
             choice_groups = configured_choice_groups()
             for group_name, entries in choice_groups.items():
@@ -5070,6 +5131,13 @@ class ModWebAppPageMixin(
             nonlocal client_pack_include_servers_dat_checkbox
             nonlocal client_pack_config_save_button, client_pack_name_input
             nonlocal client_pack_publish_button
+
+            def config_option_classes(policy: ClientPackPolicy) -> str:
+                classes = "mod-client-pack-option mod-client-pack-config-option w-full items-center gap-2"
+                if policy is ClientPackPolicy.ALTERNATIVE:
+                    return f"{classes} mod-client-pack-config-option-alt"
+                return classes
+
             if client_pack_config_rendered:
                 return
             if not can_configure_client_pack:
@@ -5083,72 +5151,234 @@ class ModWebAppPageMixin(
                             ui.label(
                                 "Save configuration changes independently, then publish them with release notes."
                             ).classes("mod-subtitle text-sm")
-                        (
-                            ui.input(placeholder="Search pack mods")
-                            .props(
-                                "filled square dense clearable hide-bottom-space color=accent "
-                                f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
-                            )
-                            .classes("mod-config-search mod-client-pack-config-search w-full")
-                            .on("update:model-value", filter_client_pack_config_rows)
-                        )
-                        with ui.column().classes("mod-client-pack-option-list w-full"):
-                            for entry in configurable_client_entries:
-                                with ui.row().classes(
-                                    "mod-client-pack-option mod-client-pack-config-option w-full items-center gap-2"
-                                ) as config_row:
-                                    config_rows[entry.name] = config_row
-                                    ui.label(entry.friendly).classes("mod-client-pack-option-label")
-                                    config_group_inputs[entry.name] = (
-                                        ui.input(
-                                            "Group ID",
-                                            value=config_group_names[entry.name],
-                                            placeholder="e.g. minimap",
-                                        )
-                                        .props("filled square dense hide-bottom-space color=accent debounce=150")
-                                        .classes(
-                                            "mod-config-input mod-client-pack-select "
-                                            "mod-client-pack-config-control mod-client-pack-config-group"
-                                        )
+                        with ui.row().classes("mod-client-pack-config-layout w-full"):
+                            with ui.column().classes(
+                                "mod-client-pack-config-column mod-client-pack-config-column-left"
+                            ):
+                                with ui.column().classes("mod-client-pack-section mod-client-pack-config-mods-section w-full"):
+                                    ui.label("Mods").classes("mod-stat-label")
+                                    ui.label("Choose which mods are required, optional, or alternatives.").classes(
+                                        "mod-client-pack-section-hint mod-subtitle"
                                     )
-                                    config_policy_selects[entry.name] = (
-                                        ui.select(
-                                            {policy.value: policy.label for policy in ClientPackPolicy},
-                                            value=entry.client_pack.policy.value,
+                                    with ui.column().classes("mod-client-pack-config-mod-list w-full"):
+                                        (
+                                            ui.input(placeholder="Search pack mods")
+                                            .props(
+                                                "filled square dense clearable hide-bottom-space color=accent "
+                                                f"debounce={_SEARCH_INPUT_DEBOUNCE_MILLISECONDS}"
+                                            )
+                                            .classes("mod-config-search mod-client-pack-config-search w-full")
+                                            .on("update:model-value", filter_client_pack_config_rows)
                                         )
-                                        .props("filled square dense hide-bottom-space color=accent options-dark")
-                                        .classes(
-                                            "mod-config-select mod-client-pack-select "
-                                            "mod-client-pack-config-control mod-client-pack-config-policy"
-                                        )
-                                    )
+                                        with ui.column().classes("mod-client-pack-option-list w-full"):
+                                            for entry in configurable_client_entries:
+                                                with ui.row().classes(
+                                                    config_option_classes(entry.client_pack.policy)
+                                                ) as config_row:
+                                                    config_rows[entry.name] = config_row
+                                                    ui.label(entry.friendly).classes("mod-client-pack-option-label")
+                                                    config_group_inputs[entry.name] = (
+                                                        ui.input(
+                                                            "Group ID",
+                                                            value=config_group_names[entry.name],
+                                                            placeholder="e.g. minimap",
+                                                        )
+                                                        .props(
+                                                            "filled square dense hide-bottom-space color=accent debounce=150"
+                                                        )
+                                                        .classes(
+                                                            "mod-config-input mod-client-pack-select "
+                                                            "mod-client-pack-config-control mod-client-pack-config-group"
+                                                        )
+                                                    )
+                                                    config_policy_selects[entry.name] = (
+                                                        ui.select(
+                                                            {policy.value: policy.label for policy in ClientPackPolicy},
+                                                            value=entry.client_pack.policy.value,
+                                                        )
+                                                        .props(
+                                                            "filled square dense hide-bottom-space color=accent options-dark"
+                                                        )
+                                                        .classes(
+                                                            "mod-config-select mod-client-pack-select "
+                                                            "mod-client-pack-config-control mod-client-pack-config-policy"
+                                                        )
+                                                    )
 
-                        @ui.refreshable
-                        def render_config_default_choices() -> None:
-                            config_default_selects.clear()
-                            groups = configured_choice_groups()
-                            if not groups:
-                                return
-                            with ui.column().classes("mod-client-pack-section w-full"):
-                                ui.label("Default alternatives").classes("mod-stat-label")
-                                ui.label("Choose the default mod for each alternative group.").classes(
-                                    "mod-client-pack-section-hint mod-subtitle"
-                                )
-                                for group_name, entries in groups.items():
-                                    member_names = {entry.name for entry in entries}
-                                    default_name = config_default_names.get(group_name)
-                                    if default_name not in member_names:
-                                        default_name = entries[0].name
-                                        config_default_names[group_name] = default_name
-                                    config_default_selects[group_name] = (
-                                        ui.select(
-                                            {entry.name: entry.friendly for entry in entries},
-                                            value=default_name,
-                                            label=group_name,
+                            with ui.column().classes(
+                                "mod-client-pack-config-column mod-client-pack-config-column-right"
+                            ):
+
+                                @ui.refreshable
+                                def render_config_default_choices() -> None:
+                                    config_default_selects.clear()
+                                    groups = configured_choice_groups()
+                                    if not groups:
+                                        return
+                                    with ui.column().classes("mod-client-pack-section w-full"):
+                                        ui.label("Default alternatives").classes("mod-stat-label")
+                                        ui.label("Choose the default mod for each alternative group.").classes(
+                                            "mod-client-pack-section-hint mod-subtitle"
                                         )
-                                        .props("filled square dense hide-bottom-space color=accent options-dark")
-                                        .classes("mod-config-select mod-client-pack-select w-full")
-                                    )
+                                        for group_name, entries in groups.items():
+                                            member_names = {entry.name for entry in entries}
+                                            default_name = config_default_names.get(group_name)
+                                            if default_name not in member_names:
+                                                default_name = entries[0].name
+                                                config_default_names[group_name] = default_name
+                                            config_default_selects[group_name] = (
+                                                ui.select(
+                                                    {entry.name: entry.friendly for entry in entries},
+                                                    value=default_name,
+                                                    label=group_name,
+                                                )
+                                                .props(
+                                                    "filled square dense hide-bottom-space color=accent options-dark"
+                                                )
+                                                .classes("mod-config-select mod-client-pack-select w-full")
+                                            )
+
+                                if is_minecraft_app:
+                                    with ui.column().classes("mod-client-pack-section w-full"):
+                                        ui.label("Pack metadata").classes("mod-stat-label")
+                                        ui.label(
+                                            "Used for launcher manifests and the downloaded archive filename."
+                                        ).classes("mod-client-pack-section-hint mod-subtitle")
+                                        client_pack_name_input = (
+                                            ui.input(
+                                                "Name",
+                                                value=client_pack_metadata.name,
+                                            )
+                                            .props(
+                                                "filled square dense hide-bottom-space color=accent "
+                                                f"maxlength={CLIENT_PACK_METADATA_NAME_MAX_LENGTH}"
+                                            )
+                                            .classes("w-full mod-config-input")
+                                        )
+                                        client_pack_description_input = (
+                                            ui.textarea(
+                                                "Description",
+                                                value=client_pack_metadata.description,
+                                            )
+                                            .props(
+                                                "filled square stack-label hide-bottom-space color=accent rows=2 "
+                                                f"maxlength={CLIENT_PACK_METADATA_DESCRIPTION_MAX_LENGTH}"
+                                            )
+                                            .classes("w-full mod-config-input")
+                                        )
+                                        client_pack_filename_template_input = (
+                                            ui.input(
+                                                "Filename stem",
+                                                value=client_pack_metadata.filename_template,
+                                            )
+                                            .props(
+                                                "filled square dense hide-bottom-space color=accent "
+                                                f"maxlength={CLIENT_PACK_FILENAME_TEMPLATE_MAX_LENGTH}"
+                                            )
+                                            .classes("w-full mod-config-input")
+                                        )
+                                        ui.label(
+                                            "Placeholders: "
+                                            + ", ".join(
+                                                f"{{{placeholder}}}" for placeholder in CLIENT_PACK_FILENAME_PLACEHOLDERS
+                                            )
+                                            + ". The file extension is added automatically."
+                                        ).classes("mod-client-pack-section-hint mod-subtitle text-xs")
+                                        client_pack_include_servers_dat_checkbox = render_client_pack_file_option(
+                                            label="Include servers.dat",
+                                            value=client_pack_metadata.include_servers_dat,
+                                            preview_path="overrides/servers.dat",
+                                            preview_display_name="servers.dat",
+                                        )
+                                        client_pack_include_options_txt_checkbox = render_client_pack_file_option(
+                                            label="Include options.txt",
+                                            value=client_pack_metadata.include_options_txt,
+                                            preview_path="overrides/options.txt",
+                                            preview_display_name="options.txt",
+                                        )
+                                if is_minecraft_app:
+                                    with ui.column().classes("mod-client-pack-section w-full"):
+                                        ui.label("KubeJS scripts").classes("mod-stat-label")
+                                        ui.label(
+                                            "Choose which server and startup scripts are included in the client pack."
+                                        ).classes("mod-client-pack-section-hint mod-subtitle")
+                                        if model.client_pack_kubejs_scripts:
+                                            with ui.column().classes("mod-client-pack-option-list w-full"):
+                                                for script in model.client_pack_kubejs_scripts:
+                                                    config_kubejs_script_checkboxes[script.relative_path] = (
+                                                        ui.checkbox(
+                                                            script.relative_path,
+                                                            value=script.included,
+                                                        )
+                                                        .props("dense color=accent keep-color")
+                                                        .classes("mod-client-pack-checkbox w-full")
+                                                    )
+                                        else:
+                                            ui.label("No KubeJS server or startup scripts were found.").classes(
+                                                "mod-client-pack-section-hint mod-subtitle text-sm"
+                                            )
+                                with ui.column().classes(
+                                    "mod-client-pack-section mod-client-pack-release-section w-full"
+                                ):
+                                    ui.label("Release").classes("mod-stat-label")
+                                    with ui.row().classes(
+                                        "mod-client-pack-release-versions w-full flex-wrap"
+                                    ):
+                                        with ui.column().classes("mod-client-pack-release-version"):
+                                            ui.label("Current version").classes("mod-subtitle text-xs")
+                                            ui.label(
+                                                model.client_pack_published_version or "Unpublished"
+                                            ).classes("mod-stat-value")
+                                        with ui.column().classes("mod-client-pack-release-version"):
+                                            ui.label("Proposed next version").classes("mod-subtitle text-xs")
+                                            ui.label(
+                                                model.client_pack_next_version or "Unavailable"
+                                            ).classes("mod-stat-value")
+                                    with ui.column().classes("mod-client-pack-changelog-block w-full"):
+                                        client_pack_changelog_input = (
+                                            ui.textarea(
+                                                "Changelog",
+                                                value=client_pack_changelog_draft,
+                                                placeholder="Describe client-pack changes in this release…",
+                                                on_change=update_client_pack_changelog_draft,
+                                            )
+                                            .props(
+                                                "filled square stack-label hide-bottom-space color=accent rows=3 "
+                                                f"maxlength={CLIENT_PACK_CHANGELOG_MAX_LENGTH}"
+                                            )
+                                            .classes("w-full mod-config-input mod-client-pack-changelog")
+                                        )
+                                        ui.textarea(
+                                            "Automated append",
+                                            value=model.client_pack_automated_changelog
+                                            or "No automated client-pack changes detected.",
+                                        ).props(
+                                            "filled square stack-label readonly hide-bottom-space color=accent rows=6"
+                                        ).classes(
+                                            "w-full mod-config-input mod-client-pack-changelog-automation"
+                                        )
+                                        ui.label(
+                                            "Draft notes are shared when this configuration is saved."
+                                        ).classes(
+                                            "mod-client-pack-section-hint mod-client-pack-changelog-hint "
+                                            "mod-subtitle text-xs"
+                                        )
+                                    with ui.column().classes("mod-client-pack-publish-reasons w-full"):
+                                        ui.label("Publish reasons").classes("mod-stat-label")
+                                        for reason in client_pack_publish_reasons():
+                                            ui.label(reason).classes("mod-client-pack-publish-reason")
+                                    with ui.row().classes("mod-client-pack-actions w-full"):
+                                        ui.button("Cancel", on_click=client_pack_config_dialog.close).classes(
+                                            "mod-list-button secondary"
+                                        )
+                                        client_pack_config_save_button = ui.button(
+                                            "Save",
+                                            on_click=save_client_pack_configuration,
+                                        ).classes("mod-list-button secondary")
+                                        client_pack_publish_button = ui.button(
+                                            "Publish",
+                                            on_click=publish_client_pack_configuration,
+                                        ).classes("mod-list-button")
 
                         def refresh_config_row(entry: NodeModEntry) -> None:
                             is_alternative = (
@@ -5156,6 +5386,11 @@ class ModWebAppPageMixin(
                                 is ClientPackPolicy.ALTERNATIVE
                             )
                             config_group_inputs[entry.name].set_visibility(is_alternative)
+                            config_rows[entry.name].classes(
+                                config_option_classes(
+                                    ClientPackPolicy.ALTERNATIVE if is_alternative else ClientPackPolicy.REQUIRED
+                                )
+                            )
                             render_config_default_choices.refresh()
 
                         def create_config_policy_handler(
@@ -5198,143 +5433,6 @@ class ModWebAppPageMixin(
                                 entry.client_pack.policy is ClientPackPolicy.ALTERNATIVE
                             )
                         render_config_default_choices()
-                        if is_minecraft_app:
-                            with ui.column().classes("mod-client-pack-section w-full"):
-                                ui.label("Pack metadata").classes("mod-stat-label")
-                                ui.label("Used for launcher manifests and the downloaded archive filename.").classes(
-                                    "mod-client-pack-section-hint mod-subtitle"
-                                )
-                                client_pack_name_input = (
-                                    ui.input(
-                                        "Name",
-                                        value=client_pack_metadata.name,
-                                    )
-                                    .props(
-                                        "filled square dense hide-bottom-space color=accent "
-                                        f"maxlength={CLIENT_PACK_METADATA_NAME_MAX_LENGTH}"
-                                    )
-                                    .classes("w-full mod-config-input")
-                                )
-                                client_pack_description_input = (
-                                    ui.textarea(
-                                        "Description",
-                                        value=client_pack_metadata.description,
-                                    )
-                                    .props(
-                                        "filled square stack-label hide-bottom-space color=accent rows=2 "
-                                        f"maxlength={CLIENT_PACK_METADATA_DESCRIPTION_MAX_LENGTH}"
-                                    )
-                                    .classes("w-full mod-config-input")
-                                )
-                                client_pack_filename_template_input = (
-                                    ui.input(
-                                        "Filename stem",
-                                        value=client_pack_metadata.filename_template,
-                                    )
-                                    .props(
-                                        "filled square dense hide-bottom-space color=accent "
-                                        f"maxlength={CLIENT_PACK_FILENAME_TEMPLATE_MAX_LENGTH}"
-                                    )
-                                    .classes("w-full mod-config-input")
-                                )
-                                ui.label(
-                                    "Placeholders: "
-                                    + ", ".join(
-                                        f"{{{placeholder}}}" for placeholder in CLIENT_PACK_FILENAME_PLACEHOLDERS
-                                    )
-                                    + ". The file extension is added automatically."
-                                ).classes("mod-client-pack-section-hint mod-subtitle text-xs")
-                                client_pack_include_servers_dat_checkbox = render_client_pack_file_option(
-                                    label="Include servers.dat",
-                                    value=client_pack_metadata.include_servers_dat,
-                                    preview_path="overrides/servers.dat",
-                                    preview_display_name="servers.dat",
-                                )
-                                client_pack_include_options_txt_checkbox = render_client_pack_file_option(
-                                    label="Include options.txt",
-                                    value=client_pack_metadata.include_options_txt,
-                                    preview_path="overrides/options.txt",
-                                    preview_display_name="options.txt",
-                                )
-                        if is_minecraft_app:
-                            with ui.column().classes("mod-client-pack-section w-full"):
-                                ui.label("KubeJS scripts").classes("mod-stat-label")
-                                ui.label(
-                                    "Choose which server and startup scripts are included in the client pack."
-                                ).classes("mod-client-pack-section-hint mod-subtitle")
-                                if model.client_pack_kubejs_scripts:
-                                    with ui.column().classes("mod-client-pack-option-list w-full"):
-                                        for script in model.client_pack_kubejs_scripts:
-                                            config_kubejs_script_checkboxes[script.relative_path] = (
-                                                ui.checkbox(
-                                                    script.relative_path,
-                                                    value=script.included,
-                                                )
-                                                .props("dense color=accent keep-color")
-                                                .classes("mod-client-pack-checkbox w-full")
-                                            )
-                                else:
-                                    ui.label("No KubeJS server or startup scripts were found.").classes(
-                                        "mod-client-pack-section-hint mod-subtitle text-sm"
-                                    )
-                        with ui.column().classes(
-                            "mod-client-pack-section mod-client-pack-release-section w-full"
-                        ):
-                            ui.label("Release").classes("mod-stat-label")
-                            with ui.row().classes(
-                                "mod-client-pack-release-versions w-full flex-wrap"
-                            ):
-                                with ui.column().classes("mod-client-pack-release-version"):
-                                    ui.label("Current version").classes("mod-subtitle text-xs")
-                                    ui.label(
-                                        model.client_pack_published_version or "Unpublished"
-                                    ).classes("mod-stat-value")
-                                with ui.column().classes("mod-client-pack-release-version"):
-                                    ui.label("Proposed next version").classes("mod-subtitle text-xs")
-                                    ui.label(
-                                        model.client_pack_next_version or "Unavailable"
-                                    ).classes("mod-stat-value")
-                            with ui.column().classes("mod-client-pack-changelog-block w-full"):
-                                client_pack_changelog_input = (
-                                    ui.textarea(
-                                        "Changelog",
-                                        value=client_pack_changelog_draft,
-                                        placeholder="Describe client-pack changes in this release…",
-                                        on_change=update_client_pack_changelog_draft,
-                                    )
-                                    .props(
-                                        "filled square stack-label hide-bottom-space color=accent rows=3 "
-                                        f"maxlength={CLIENT_PACK_CHANGELOG_MAX_LENGTH}"
-                                    )
-                                    .classes("w-full mod-config-input mod-client-pack-changelog")
-                                )
-                                ui.textarea(
-                                    "Automated append",
-                                    value=model.client_pack_automated_changelog
-                                    or "No automated client-pack changes detected.",
-                                ).props(
-                                    "filled square stack-label readonly hide-bottom-space color=accent rows=6"
-                                ).classes(
-                                    "w-full mod-config-input mod-client-pack-changelog-automation"
-                                )
-                                ui.label(
-                                    "Draft notes are shared when this configuration is saved."
-                                ).classes(
-                                    "mod-client-pack-section-hint mod-client-pack-changelog-hint "
-                                    "mod-subtitle text-xs"
-                                )
-                        with ui.row().classes("mod-client-pack-actions w-full"):
-                            ui.button("Cancel", on_click=client_pack_config_dialog.close).classes(
-                                "mod-list-button secondary"
-                            )
-                            client_pack_config_save_button = ui.button(
-                                "Save",
-                                on_click=save_client_pack_configuration,
-                            ).classes("mod-list-button secondary")
-                            client_pack_publish_button = ui.button(
-                                "Publish",
-                                on_click=publish_client_pack_configuration,
-                            ).classes("mod-list-button")
 
         def open_client_pack_configuration() -> None:
             nonlocal client_pack_changelog_draft
