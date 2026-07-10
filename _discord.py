@@ -2355,18 +2355,23 @@ class DC_Relay(metaclass=Singleton):
             reference_message_id = getattr(reference, "message_id", None)
         if not isinstance(reference_message_id, int | str | hikari.Snowflake):
             return None
+        reference_message_snowflake = hikari.Snowflake(reference_message_id)
 
         reference_channel_id = getattr(reference, "channel_id", None)
         if not isinstance(reference_channel_id, int | str | hikari.Snowflake):
             reference_channel_id = getattr(message, "channel_id", None)
         if not isinstance(reference_channel_id, int | str | hikari.Snowflake):
             return None
+        reference_channel_snowflake = hikari.Snowflake(reference_channel_id)
 
         resolver = getattr(self, "reso", None)
         if resolver is None:
             return None
 
-        resolved_message = await cast(Resolutator, resolver).message(reference_message_id, reference_channel_id)
+        resolved_message = await cast(Resolutator, resolver).message(
+            reference_message_snowflake,
+            reference_channel_snowflake,
+        )
         if resolved_message is None:
             return None
         return cast(hikari.Message, resolved_message)
@@ -2394,20 +2399,24 @@ class DC_Relay(metaclass=Singleton):
         room_id: str | None = None,
         guild_id: hikari.Snowflakeish | None,
     ) -> ChatMessageReference | None:
-        resolved_referenced_message = cast(hikari.Message, referenced_message)
+        resolved_referenced_message = referenced_message
         reference_channel_id = getattr(resolved_referenced_message, "channel_id", None)
         if not isinstance(reference_channel_id, int | str | hikari.Snowflake):
             reference_channel_id = getattr(message, "channel_id", None)
+        if not isinstance(reference_channel_id, int | str | hikari.Snowflake):
+            reference_channel_snowflake: hikari.Snowflake | None = None
+        else:
+            reference_channel_snowflake = hikari.Snowflake(reference_channel_id)
         tracked_reference = self._discord_relay_reference_for_message(
-            channel_id=reference_channel_id,
+            channel_id=reference_channel_snowflake,
             message_id=resolved_referenced_message.id,
         )
         if tracked_reference is not None:
             return tracked_reference
-        if room_id is not None and isinstance(reference_channel_id, int | str | hikari.Snowflake):
+        if room_id is not None and reference_channel_snowflake is not None:
             room_event = self._chat_event_for_discord_source_message(
                 room_id=room_id,
-                channel_id=reference_channel_id,
+                channel_id=reference_channel_snowflake,
                 message_id=resolved_referenced_message.id,
             )
             if room_event is not None:

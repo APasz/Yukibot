@@ -156,7 +156,7 @@ class WatchRule(BaseModel):
         if value is None:
             return set(ACTIVITY_TYPES)
         if isinstance(value, str):
-            value: list[str] = [value]
+            value = [value]
         if isinstance(value, (list, tuple, set)):
             return {str(v).strip().lower() for v in value if str(v).strip().lower() in ACTIVITY_TYPES_SET}
         return set(ACTIVITY_TYPES)
@@ -173,7 +173,7 @@ class WatchRule(BaseModel):
         if value is None:
             return set()
         if isinstance(value, str):
-            value: list[str] = [value]
+            value = [value]
         if isinstance(value, (list, tuple, set)):
             return {str(v).strip().casefold() for v in value if str(v).strip()}
         return set()
