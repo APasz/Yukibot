@@ -1816,7 +1816,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
             ui.notify(result.message, type="positive")
             _hide_discord_settings_panel()
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         with ui.element("div").classes("mod-node-settings-overlay").style("display: none;") as discord_settings_overlay:
             backdrop = ui.element("div").classes("mod-node-settings-backdrop")

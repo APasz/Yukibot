@@ -1669,7 +1669,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             save_button.enable()
                             return
                         ui.notify(" ".join(result_messages), type="positive")
-                        ui.navigate.reload()
+                        self._guarded_reload(ui=ui)
 
                     with ui.row().classes("w-full justify-end"):
                         save_button = ui.button("Save", on_click=_save_properties).classes("mod-list-button")

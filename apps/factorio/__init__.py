@@ -1918,6 +1918,10 @@ class Factorio(App[App_Config]):
                 await self._tail.stop()
                 self._tail = None
             await self._stop_bridge_events_tail()
+            with contextlib.suppress(Exception):
+                await self._relay.teardown()
+            with contextlib.suppress(Exception):
+                await self._terminate()
             raise
 
     def _startup_tail_ready(self) -> bool:
@@ -1955,9 +1959,12 @@ class Factorio(App[App_Config]):
         if not ok:
             if self.process and self.process.stdin:
                 log.debug("Falling back to stdin")
-                self.process.stdin.write("/server-save\n")
-                self.process.stdin.flush()
-                save_requested = True
+                try:
+                    self.process.stdin.write("/server-save\n")
+                    self.process.stdin.flush()
+                    save_requested = True
+                except (BrokenPipeError, OSError, ValueError) as xcp:
+                    log.warning("Factorio stdin save fallback failed for %s: %s", self.name, xcp)
         if save_requested:
             await asyncio.sleep(_FACTORIO_STOP_SAVE_GRACE_SECONDS)
         if self._tail:
@@ -2049,6 +2056,9 @@ class Factorio(App[App_Config]):
 
 
 class Factorio_Updater(Update_Manager):
+    _scope_update_locks: dict[str, threading.Lock] = {}
+    _scope_update_locks_guard = threading.Lock()
+
     def __init__(self, app: Factorio, *, base: bool = False, mods: bool = False) -> None:
         super().__init__(app, base=base, mods=mods)
         self.version: tuple[int, ...] | None = None
@@ -2067,6 +2077,7 @@ class Factorio_Updater(Update_Manager):
         self._log_tail: deque[str] = deque(maxlen=80)
         self._operation_running: bool = False
         self._active_task: asyncio.Task[AppUpdateOperationResult] | None = None
+        self._held_scope_update_lock: threading.Lock | None = None
 
     @staticmethod
     def _unix_ms_now() -> int:
@@ -2153,6 +2164,12 @@ class Factorio_Updater(Update_Manager):
         with self._state_lock:
             if self._operation_running:
                 raise RuntimeError(f"{self.app.friendly} already has an update operation in progress.")
+        scope_update_lock = self._acquire_scope_update_lock(kind)
+        with self._state_lock:
+            if self._operation_running:
+                scope_update_lock.release()
+                raise RuntimeError(f"{self.app.friendly} already has an update operation in progress.")
+            self._held_scope_update_lock = scope_update_lock
             self._operation_running = True
             self._active_task = None
             self._log_tail.clear()
@@ -2165,6 +2182,23 @@ class Factorio_Updater(Update_Manager):
             )
         self._append_log(f"Selected branch: {branch.display_label} ({branch.value})")
         return branch
+
+    def _acquire_scope_update_lock(self, kind: AppUpdateOperationKind) -> threading.Lock:
+        scope = str(getattr(self.app, "scope", "")).strip() or "factorio"
+        with self._scope_update_locks_guard:
+            scope_update_lock = self._scope_update_locks.setdefault(scope, threading.Lock())
+        if scope_update_lock.acquire(blocking=False):
+            return scope_update_lock
+        raise RuntimeError(
+            f"Another Factorio {kind.value} operation is already in progress for scope `{scope}`."
+        )
+
+    def _release_scope_update_lock(self) -> None:
+        with self._state_lock:
+            scope_update_lock = self._held_scope_update_lock
+            self._held_scope_update_lock = None
+        if scope_update_lock is not None:
+            scope_update_lock.release()
 
     async def _run_started_operation(
         self,
@@ -2260,6 +2294,7 @@ class Factorio_Updater(Update_Manager):
             with self._state_lock:
                 self._operation_running = False
                 self._active_task = None
+            self._release_scope_update_lock()
 
     async def download_release(self, *, branch: FactorioUpdateBranch, version_text: str) -> Path:
         url = _factorio_download_url(branch)

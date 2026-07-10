@@ -1226,6 +1226,20 @@ class FactorioUpdaterTests(unittest.TestCase):
             installed_binary = root / "bin" / "x64" / "factorio"
             self.assertEqual(installed_binary.stat().st_mode & 0o777, 0o755)
 
+    def test_factorio_updater_rejects_concurrent_scope_operation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = Factorio_Updater(_FakeFactorioUpdateApp(root / "first"), base=True)
+            second = Factorio_Updater(_FakeFactorioUpdateApp(root / "second"), base=True)
+
+            first._begin_selected_operation(AppUpdateOperationKind.UPDATE)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "scope `factorio`"):
+                    second._begin_selected_operation(AppUpdateOperationKind.VERIFY)
+            finally:
+                first._operation_running = False
+                first._release_scope_update_lock()
+
 
 class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
     def test_parse_factorio_map_age_from_human_readable_output(self) -> None:
@@ -1911,6 +1925,26 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FactorioStopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_failure_tears_down_relay_and_process(self) -> None:
+        app = cast(Factorio, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app._startup_error = "Util.cpp:81: failed"
+        app.check_running = lambda: True
+        tail = SimpleNamespace(stop=AsyncMock())
+        app._tail = tail
+        app._stop_bridge_events_tail = AsyncMock()
+        app._terminate = AsyncMock()
+        app._relay = SimpleNamespace(setup=AsyncMock(), teardown=AsyncMock())
+
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            await app._wait_for_startup_ready()
+
+        tail.stop.assert_awaited_once()
+        self.assertIsNone(app._tail)
+        app._stop_bridge_events_tail.assert_awaited_once()
+        app._relay.teardown.assert_awaited_once()
+        app._terminate.assert_awaited_once()
+
     async def test_stop_waits_after_save_request_before_terminating(self) -> None:
         app = cast(Factorio, object.__new__(Factorio))
         app._running = True
@@ -1938,6 +1972,38 @@ class FactorioStopTests(unittest.IsolatedAsyncioTestCase):
         )
         app._relay.teardown.assert_awaited_once()
         app._terminate.assert_awaited_once()
+
+    async def test_stop_continues_cleanup_when_stdin_save_fallback_fails(self) -> None:
+        class _BrokenStdin:
+            def write(self, _value: str) -> None:
+                raise BrokenPipeError("closed")
+
+            def flush(self) -> None:
+                raise AssertionError("flush should not be called after failed write")
+
+        app = cast(Factorio, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app._running = True
+        app._activities = SimpleNamespace(stop=AsyncMock())
+        app._players = SimpleNamespace(stop=AsyncMock())
+        app._relay = SimpleNamespace(is_connected=False, teardown=AsyncMock())
+        tail = SimpleNamespace(stop=AsyncMock())
+        app._tail = tail
+        app._bridge_events_tail = None
+        app.process = SimpleNamespace(stdin=_BrokenStdin())
+        app._stop_bridge_events_tail = AsyncMock()
+        app._terminate = AsyncMock()
+        app._lock = Path("/tmp/factorio-test.lock")
+
+        with patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            result = await Factorio.stop(app)
+
+        self.assertTrue(result)
+        tail.stop.assert_awaited_once()
+        app._stop_bridge_events_tail.assert_awaited_once()
+        app._relay.teardown.assert_awaited_once()
+        app._terminate.assert_awaited_once()
+        sleep_mock.assert_awaited_once_with(0.5)
 
 
 if __name__ == "__main__":

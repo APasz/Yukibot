@@ -557,7 +557,7 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                 ui.notify(f"Recipe add failed: {xcp}", type="negative")
                 return
             ui.notify(success_message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         @ui.refreshable
         def render_editor() -> None:
@@ -1016,7 +1016,7 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
                         ui.notify(f"Recipe delete failed: {xcp}", type="negative")
                         return
                     ui.notify("Recipe deleted.", type="positive")
-                    ui.navigate.reload()
+                    self._guarded_reload(ui=ui)
 
                 with ui.card().classes("mod-card mod-card-plain mod-recipe-manage-card w-full"):
                     with ui.column().classes("w-full gap-2"):

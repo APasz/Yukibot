@@ -872,7 +872,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             finish_direct_save_transfer(error=None)
             upload_dialog.close()
             ui.notify(f"Uploaded the save for {model.app_friendly}.", type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         def direct_save_upload_failed() -> None:
             error = f"Save upload failed before {model.app_friendly} accepted it."
@@ -1070,7 +1070,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return
             upload_dialog.close()
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         with ui.dialog() as upload_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
@@ -1227,7 +1227,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 if dialog is not None:
                     dialog.close()
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def delete_blueprint_selected() -> None:
             await delete_selected(blueprint_id=blueprint.id, dialogs_to_close=(delete_dialog,))
@@ -1388,7 +1388,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if rename_dialog is not None:
                 rename_dialog.close()
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def rename_selected() -> None:
             if rename_submit_button is None:
@@ -1411,7 +1411,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if delete_dialog is not None:
                 delete_dialog.close()
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def delete_selected() -> None:
             if delete_submit_button is None:
@@ -1619,7 +1619,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             draft_values.clear()
             refresh_save_button()
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def save_settings() -> None:
             if save_button is None:
@@ -1642,7 +1642,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 ui.notify(f"Settings reload failed: {xcp}", type="negative")
                 return
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def reload_settings() -> None:
             if reload_button is None:
@@ -2181,7 +2181,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 ui.notify(f"Mod settings upload failed: {xcp}", type="negative")
                 return
             ui.notify(self._factorio_mod_settings_status_text(updated), type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def delete_mod_settings() -> None:
             try:
@@ -2190,7 +2190,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 ui.notify(f"Mod settings reset failed: {xcp}", type="negative")
                 return
             ui.notify(self._factorio_mod_settings_status_text(updated), type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def download_mod_settings() -> None:
             await self._start_download(

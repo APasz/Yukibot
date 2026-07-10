@@ -13,7 +13,7 @@ from mod_web_theme import MOD_WEB_THEME_STYLESHEET
 from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT
 
 from .assets import CacheableTextAsset, cacheable_text_asset
-from .constants import _MOD_WEB_PAGE_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
+from .constants import _MOD_WEB_PAGE_PATH, _PORTAL_HEALTH_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
 from .nicegui_protocols import ModWebFastApiApp, ModWebNotificationType, ModWebRouteUi
 from .runtime_imports import (
     Access_Control,
@@ -280,6 +280,14 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             return self._static_text_asset_response(
                 request=request,
                 asset=cacheable_text_asset(MOD_WEB_THEME_STYLESHEET, "text/css"),
+            )
+
+        @nicegui_app.get(_PORTAL_HEALTH_PATH)
+        async def _portal_health() -> StarletteResponse:
+            return StarletteResponse(
+                content='{"ok":true}',
+                media_type="application/json",
+                headers={"Cache-Control": "no-store"},
             )
 
         @nicegui_app.get("/mod-web/assets/toasts.js")

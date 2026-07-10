@@ -4331,7 +4331,7 @@ class ModWebAppPageMixin(
             delete_dialog.close()
             mod_label: str = "mod" if len(mod_names) == 1 else "mods"
             ui.notify(f"Deleted {len(mod_names)} {mod_label}.", type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def delete_selected() -> None:
             if delete_selected_button is None:
@@ -4420,7 +4420,7 @@ class ModWebAppPageMixin(
         def direct_upload_succeeded() -> None:
             finish_direct_upload_transfer(error=None)
             ui.notify(f"Uploaded mods for {model.app_friendly}.", type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         def direct_upload_failed() -> None:
             error = f"Mod upload failed before {model.app_friendly} accepted it."
@@ -4472,7 +4472,7 @@ class ModWebAppPageMixin(
                 return
             mod_link_dialog.close()
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def _resolve_mod_link_from_dialog() -> None:
             nonlocal mod_link_resolution
@@ -5070,7 +5070,7 @@ class ModWebAppPageMixin(
 
             client_pack_config_dialog.close()
             ui.notify("Saved client-pack configuration.", type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def save_client_pack_configuration() -> None:
             if client_pack_config_save_button is None:
@@ -5107,7 +5107,7 @@ class ModWebAppPageMixin(
                 app_name=model.app_name,
             )
             ui.notify(str(result.get("message") or "Published client pack."), type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def publish_client_pack_configuration() -> None:
             if client_pack_publish_button is None:
@@ -5962,7 +5962,7 @@ class ModWebAppPageMixin(
                         f"{'s' if applied_type_count != 1 else ''}.",
                         type="positive",
                     )
-                    ui.navigate.reload()
+                    self._guarded_reload(ui=ui)
 
                 async def run_apply(operation_id: str) -> None:
                     await self._run_with_loading_button(
@@ -6639,7 +6639,7 @@ class ModWebAppPageMixin(
                         xcp,
                     )
                 return
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         def _create_app_action_handler(
             action: NodeAppMutationAction,
@@ -6825,7 +6825,7 @@ class ModWebAppPageMixin(
                 ui.notify(f"App details update failed: {xcp}", type="negative")
                 return
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def _handle_details_submit(_: object | None = None) -> None:
             if details_save_button is None:

@@ -171,6 +171,7 @@ from web_dash.assets import AssetContentEncoding, CacheableTextAsset, extract_ht
 from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+    _PORTAL_HEALTH_PATH,
 )
 from web_dash.home import (
     _format_restart_hours_input,
@@ -351,6 +352,64 @@ class _FakeCleanupTimer:
 
 
 class ModWebTests(unittest.TestCase):
+    def test_portal_recovery_script_targets_health_endpoint(self) -> None:
+        script = ModWebService._portal_recovery_head_html()
+
+        self.assertIn(_PORTAL_HEALTH_PATH, script)
+        self.assertIn("window.modWebPortalRecovery", script)
+        self.assertIn("visibilitychange", script)
+        self.assertIn("window.location.reload()", script)
+
+    def test_guarded_reload_uses_browser_recovery_helper(self) -> None:
+        class FakeNavigate:
+            def __init__(self) -> None:
+                self.reload_calls = 0
+
+            def reload(self) -> None:
+                self.reload_calls += 1
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.navigate = FakeNavigate()
+                self.javascript_calls: list[tuple[str, float]] = []
+
+            def run_javascript(self, code: str, *, timeout: float = 1.0) -> object:
+                self.javascript_calls.append((code, timeout))
+                return None
+
+        ui = FakeUi()
+
+        ModWebService._guarded_reload(ui=cast(ModWebUi, ui), reason="Refreshing after save")
+
+        self.assertEqual(ui.navigate.reload_calls, 0)
+        self.assertEqual(len(ui.javascript_calls), 1)
+        code, timeout = ui.javascript_calls[0]
+        self.assertEqual(timeout, 0.1)
+        self.assertIn("modWebPortalRecovery.reload", code)
+        self.assertIn("Refreshing after save", code)
+
+    def test_guarded_reload_falls_back_to_nicegui_reload(self) -> None:
+        class FakeNavigate:
+            def __init__(self) -> None:
+                self.reload_calls = 0
+
+            def reload(self) -> None:
+                self.reload_calls += 1
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.navigate = FakeNavigate()
+
+            def run_javascript(self, code: str, *, timeout: float = 1.0) -> object:
+                del code, timeout
+                raise RuntimeError("client disconnected")
+
+        ui = FakeUi()
+
+        ModWebService._guarded_reload(ui=cast(ModWebUi, ui))
+
+        self.assertEqual(ui.navigate.reload_calls, 1)
+
     def test_loading_button_wraps_action_and_clears_after_success(self) -> None:
         button = Mock()
 

@@ -29,6 +29,10 @@ from .constants import (
     _HOME_NODE_LATENCY_REFRESH_INTERVAL_SECONDS,
     _HOME_NODE_LATENCY_TIMEOUT_SECONDS,
     _NODE_PRESENCE_RECONNECT_DELAY_SECONDS,
+    _PORTAL_HEALTH_PATH,
+    _PORTAL_RECOVERY_HEALTH_TIMEOUT_SECONDS,
+    _PORTAL_RECOVERY_IDLE_THRESHOLD_SECONDS,
+    _PORTAL_RECOVERY_POLL_INTERVAL_SECONDS,
 )
 from .nicegui_protocols import ModWebUi
 
@@ -82,6 +86,230 @@ def copy_text_to_clipboard(
 
 
 class ModWebUiHelpersMixin(ModWebServiceSupport):
+    @staticmethod
+    def _portal_recovery_head_html() -> str:
+        health_path: str = json.dumps(_PORTAL_HEALTH_PATH)
+        health_timeout_ms: int = round(_PORTAL_RECOVERY_HEALTH_TIMEOUT_SECONDS * 1000)
+        idle_threshold_ms: int = round(_PORTAL_RECOVERY_IDLE_THRESHOLD_SECONDS * 1000)
+        poll_interval_ms: int = round(_PORTAL_RECOVERY_POLL_INTERVAL_SECONDS * 1000)
+        return f"""
+            <script>
+            (() => {{
+              const existing = window.modWebPortalRecovery;
+              if (existing?.version === 1) {{
+                return;
+              }}
+              const healthPath = {health_path};
+              const healthTimeoutMs = {health_timeout_ms};
+              const idleThresholdMs = {idle_threshold_ms};
+              const pollIntervalMs = {poll_interval_ms};
+              const overlayId = 'mod-web-recovery-overlay';
+              const styleId = 'mod-web-recovery-style';
+              let lastTick = Date.now();
+              let hiddenAt = document.visibilityState === 'hidden' ? Date.now() : null;
+              let recoveryActive = false;
+              let reloadScheduled = false;
+
+              const installStyle = () => {{
+                if (document.getElementById(styleId)) {{
+                  return;
+                }}
+                const style = document.createElement('style');
+                style.id = styleId;
+                style.textContent = `
+                  #${{overlayId}} {{
+                    position: fixed;
+                    inset: 0;
+                    z-index: 2147483000;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 24px;
+                    background: rgba(8, 8, 12, 0.72);
+                    backdrop-filter: blur(8px);
+                    color: #fafafa;
+                    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                  }}
+                  #${{overlayId}} .mod-web-recovery-panel {{
+                    width: min(100%, 420px);
+                    border: 1px solid rgba(245, 158, 11, 0.55);
+                    background: rgba(18, 18, 24, 0.96);
+                    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.46);
+                    padding: 20px;
+                  }}
+                  #${{overlayId}} .mod-web-recovery-title {{
+                    margin: 0 0 8px;
+                    color: #fbbf24;
+                    font-size: 13px;
+                    font-weight: 700;
+                    letter-spacing: 0;
+                    text-transform: uppercase;
+                  }}
+                  #${{overlayId}} .mod-web-recovery-message {{
+                    margin: 0 0 16px;
+                    color: #f4f4f5;
+                    font-size: 14px;
+                    line-height: 1.5;
+                  }}
+                  #${{overlayId}} .mod-web-recovery-actions {{
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 8px;
+                  }}
+                  #${{overlayId}} button {{
+                    border: 1px solid rgba(250, 250, 250, 0.16);
+                    background: rgba(250, 250, 250, 0.08);
+                    color: #fafafa;
+                    cursor: pointer;
+                    font: inherit;
+                    font-size: 13px;
+                    min-height: 34px;
+                    padding: 7px 11px;
+                  }}
+                  #${{overlayId}} button.primary {{
+                    border-color: rgba(245, 158, 11, 0.72);
+                    background: rgba(245, 158, 11, 0.18);
+                    color: #fde68a;
+                  }}
+                `;
+                document.head.appendChild(style);
+              }};
+
+              const ensureOverlay = message => {{
+                installStyle();
+                let overlay = document.getElementById(overlayId);
+                if (!overlay) {{
+                  overlay = document.createElement('div');
+                  overlay.id = overlayId;
+                  overlay.innerHTML = `
+                    <div class="mod-web-recovery-panel" role="status" aria-live="polite">
+                      <p class="mod-web-recovery-title">Connection interrupted</p>
+                      <p class="mod-web-recovery-message"></p>
+                      <div class="mod-web-recovery-actions">
+                        <button class="primary" type="button" data-mod-web-recovery-reload>Reload portal</button>
+                        <button type="button" data-mod-web-recovery-home>Home</button>
+                      </div>
+                    </div>
+                  `;
+                  overlay.querySelector('[data-mod-web-recovery-reload]')?.addEventListener('click', () => hardReload());
+                  overlay.querySelector('[data-mod-web-recovery-home]')?.addEventListener('click', () => {{
+                    window.location.assign('/');
+                  }});
+                  document.body.appendChild(overlay);
+                }}
+                const messageElement = overlay.querySelector('.mod-web-recovery-message');
+                if (messageElement) {{
+                  messageElement.textContent = message;
+                }}
+              }};
+
+              const hideOverlay = () => {{
+                document.getElementById(overlayId)?.remove();
+              }};
+
+              const probeHealth = async () => {{
+                const controller = new AbortController();
+                const timeoutId = window.setTimeout(() => controller.abort(), healthTimeoutMs);
+                try {{
+                  const response = await fetch(healthPath, {{
+                    cache: 'no-store',
+                    credentials: 'same-origin',
+                    headers: {{ Accept: 'application/json' }},
+                    signal: controller.signal,
+                  }});
+                  return response.ok;
+                }} finally {{
+                  window.clearTimeout(timeoutId);
+                }}
+              }};
+
+              const hardReload = reason => {{
+                if (reloadScheduled) {{
+                  return;
+                }}
+                reloadScheduled = true;
+                ensureOverlay(reason || 'Refreshing the portal...');
+                window.setTimeout(() => window.location.reload(), 250);
+              }};
+
+              const recover = async (reason, shouldReload) => {{
+                if (recoveryActive || reloadScheduled) {{
+                  return;
+                }}
+                recoveryActive = true;
+                ensureOverlay(reason || 'Reconnecting to the portal...');
+                try {{
+                  if (await probeHealth()) {{
+                    if (shouldReload) {{
+                      hardReload('Refreshing the portal connection...');
+                    }} else {{
+                      hideOverlay();
+                    }}
+                    return;
+                  }}
+                  ensureOverlay('The portal is not responding yet. Retrying shortly...');
+                  window.setTimeout(() => {{
+                    recoveryActive = false;
+                    recover('Retrying portal connection...', shouldReload);
+                  }}, 2000);
+                }} catch (_error) {{
+                  ensureOverlay(navigator.onLine ? 'The portal is not responding yet. Retrying shortly...' : 'The browser is offline. Waiting for the network...');
+                  window.setTimeout(() => {{
+                    recoveryActive = false;
+                    recover('Retrying portal connection...', shouldReload);
+                  }}, 2000);
+                }} finally {{
+                  if (!reloadScheduled) {{
+                    recoveryActive = false;
+                  }}
+                }}
+              }};
+
+              window.setInterval(() => {{
+                const now = Date.now();
+                const drift = now - lastTick - pollIntervalMs;
+                lastTick = now;
+                if (document.visibilityState === 'visible' && drift > idleThresholdMs) {{
+                  recover('The portal was idle for a while. Reconnecting...', true);
+                }}
+              }}, pollIntervalMs);
+
+              document.addEventListener('visibilitychange', () => {{
+                if (document.visibilityState === 'hidden') {{
+                  hiddenAt = Date.now();
+                  return;
+                }}
+                const hiddenDuration = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+                hiddenAt = null;
+                lastTick = Date.now();
+                if (hiddenDuration > idleThresholdMs) {{
+                  recover('The portal was idle for a while. Reconnecting...', true);
+                }}
+              }});
+
+              window.addEventListener('pageshow', event => {{
+                if (event.persisted) {{
+                  recover('Restoring the portal connection...', true);
+                }}
+              }});
+              window.addEventListener('online', () => recover('Network restored. Reconnecting...', true));
+
+              window.setTimeout(() => {{
+                const bodyText = document.body?.innerText?.trim() || '';
+                const hasPortalContent = Boolean(document.querySelector('.mod-page, .q-layout, .nicegui-content'));
+                if (!bodyText && !hasPortalContent) {{
+                  ensureOverlay('The portal did not finish loading. Reload to try again.');
+                }}
+              }}, 8000);
+
+              window.modWebPortalRecovery = {{
+                version: 1,
+                reload: hardReload,
+                recover,
+              }};
+            }})();
+            </script>
+        """
 
     @staticmethod
     def _badge_class_name(*, tone: BadgeTone, extra_classes: str = "") -> str:
@@ -104,9 +332,30 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
     @staticmethod
     def _apply_theme(*, ui: ModWebUi) -> None:
         apply_mod_web_theme(ui=ui)
+        ui.add_head_html(ModWebUiHelpersMixin._portal_recovery_head_html())
         font_face_css_html = font_assets.font_face_css_html(base_path="/mod-web/assets/fonts")
         if font_face_css_html:
             ui.add_head_html(font_face_css_html)
+
+    @staticmethod
+    def _guarded_reload(*, ui: ModWebUi, reason: str = "Refreshing the portal...") -> None:
+        encoded_reason: str = json.dumps(reason)
+        try:
+            ui.run_javascript(
+                (
+                    "(() => {"
+                    f"const reason = {encoded_reason};"
+                    "if (window.modWebPortalRecovery?.reload) {"
+                    "window.modWebPortalRecovery.reload(reason);"
+                    "} else {"
+                    "window.location.reload();"
+                    "}"
+                    "})()"
+                ),
+                timeout=0.1,
+            )
+        except Exception:
+            ui.navigate.reload()
 
     @staticmethod
     def _pulse_live_value(element: "Element") -> None:

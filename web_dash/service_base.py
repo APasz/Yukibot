@@ -216,6 +216,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_apply_theme"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_guarded_reload"]) -> Callable[..., None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_attach_text_tooltip"]) -> Callable[..., None]: ...
 
     @overload

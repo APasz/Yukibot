@@ -2128,7 +2128,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return
             dialog.close()
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def save_properties() -> None:
             if save_properties_button is None:
@@ -2156,7 +2156,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return
             dialog.close()
             ui.notify(result.message, type="positive")
-            ui.navigate.reload()
+            self._guarded_reload(ui=ui)
 
         async def _confirm_delete() -> None:
             await run_mod_action(NodeModMutationAction.DELETE)
