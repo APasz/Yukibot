@@ -631,6 +631,9 @@ class ModWebServiceSupport:
     ) -> Callable[..., Awaitable[tuple[bytes, str | None, tuple[tuple[str, str], ...]]]]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_remote_stream_response_async"]) -> Callable[..., Awaitable[StarletteResponse]]: ...
+
+    @overload
     def __getattr__(
         self, name: Literal["_remote_mod_list_async"]
     ) -> Callable[..., Awaitable[NodeModList]]: ...

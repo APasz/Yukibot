@@ -36,6 +36,7 @@ from apps.factorio import (
     FactorioSurfaceEvolution,
     Matchers,
     Mod_Factorio,
+    Players,
     Provider_FactorioEvolution,
     Provider_FactorioMapAge,
     Receiver,
@@ -479,14 +480,61 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
         actions = app.console_actions
 
-        self.assertEqual(tuple(action.key for action in actions), ("admins", "raw_command", "promote", "demote"))
-        self.assertFalse(app.rcon_requires_online_players_enabled)
+        self.assertEqual(
+            tuple(action.key for action in actions),
+            (
+                "admins",
+                "seed",
+                "time",
+                "perf_avg_frames",
+                "shout",
+                "raw_command",
+                "server_save",
+                "promote",
+                "demote",
+                "kick",
+                "cheat",
+                "command",
+                "silent_command",
+            ),
+        )
+        self.assertTrue(app.rcon_requires_online_players_enabled)
         self.assertEqual(actions[0].label, "List Admins")
         self.assertEqual(actions[0].power_level.name, "user")
-        self.assertEqual(actions[1].label, "Run Command")
-        self.assertEqual(actions[1].power_level.name, "sudo")
+        self.assertEqual(actions[5].label, "Run Command")
+        self.assertEqual(actions[5].power_level.name, "sudo")
 
     def test_factorio_raw_console_command_sends_rcon_command(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.friendly = "Factorio"
+        app.cfg = App_Config(
+            name="factorio_alpha",
+            instance_key="alpha",
+            friendly_name="Factorio",
+            directory=Path("."),
+            apps_dir=Path("."),
+            scope="factorio",
+        )
+        app.check_running = lambda: True
+        app._relay = SimpleNamespace(send=AsyncMock(return_value="command output"))
+        app.player_count = AsyncMock(return_value=(1, 20))
+        action = next(action for action in app.console_actions if action.key == "raw_command")
+
+        result = asyncio.run(
+            execute_console_action(
+                app=app,
+                is_running=app.check_running,
+                action=action,
+                raw_value="/help",
+            )
+        )
+
+        app._relay.send.assert_awaited_once_with("/help")
+        app.player_count.assert_not_awaited()
+        self.assertEqual(result.source, ConsoleResponseSource.RCON)
+        self.assertEqual(result.text, "command output")
+
+    def test_factorio_raw_console_command_skips_player_gate_for_manual_console(self) -> None:
         app = cast(Any, object.__new__(Factorio))
         app.friendly = "Factorio"
         app.cfg = App_Config(
@@ -514,7 +562,6 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         app._relay.send.assert_awaited_once_with("/help")
         app.player_count.assert_not_awaited()
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
-        self.assertEqual(result.text, "command output")
 
     def test_factorio_admins_console_action_requests_admin_list(self) -> None:
         app = cast(Any, object.__new__(Factorio))
@@ -529,6 +576,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
         app.check_running = lambda: True
         app._relay = SimpleNamespace(send=AsyncMock(return_value="Admins: Alice, Bob"))
+        app.player_count = AsyncMock(return_value=(1, 20))
         action = next(action for action in app.console_actions if action.key == "admins")
 
         result = asyncio.run(
@@ -541,6 +589,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
 
         app._relay.send.assert_awaited_once_with("/admins")
+        app.player_count.assert_not_awaited()
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
         self.assertEqual(result.text, "Admins: Alice, Bob")
 
@@ -557,6 +606,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
         app.check_running = lambda: True
         app._relay = SimpleNamespace(send=AsyncMock(return_value="Promoted Alice"))
+        app.player_count = AsyncMock(return_value=(1, 20))
         action = next(action for action in app.console_actions if action.key == "promote")
 
         result = asyncio.run(
@@ -569,6 +619,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
 
         app._relay.send.assert_awaited_once_with("/promote Alice")
+        app.player_count.assert_not_awaited()
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
         self.assertEqual(result.text, "Promoted Alice")
 
@@ -585,6 +636,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
         app.check_running = lambda: True
         app._relay = SimpleNamespace(send=AsyncMock(return_value="Demoted Alice"))
+        app.player_count = AsyncMock(return_value=(1, 20))
         action = next(action for action in app.console_actions if action.key == "demote")
 
         result = asyncio.run(
@@ -597,8 +649,80 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         )
 
         app._relay.send.assert_awaited_once_with("/demote Alice")
+        app.player_count.assert_not_awaited()
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
         self.assertEqual(result.text, "Demoted Alice")
+
+    def test_factorio_added_console_actions_send_wiki_commands(self) -> None:
+        cases: tuple[tuple[str, str | None, str], ...] = (
+            ("seed", None, "/seed"),
+            ("time", None, "/time"),
+            ("perf_avg_frames", "10", "/perf-avg-frames 10"),
+            ("server_save", None, "/server-save"),
+            ("shout", "Hello factory", "/shout Hello factory"),
+            ("cheat", "off", "/cheat off"),
+            ("command", "game.print('hi')", "/command game.print('hi')"),
+            ("silent_command", "game.print('hi')", "/silent-command game.print('hi')"),
+        )
+
+        for action_key, raw_value, expected_command in cases:
+            with self.subTest(action_key=action_key):
+                app = cast(Any, object.__new__(Factorio))
+                app.friendly = "Factorio"
+                app.cfg = App_Config(
+                    name="factorio_alpha",
+                    instance_key="alpha",
+                    friendly_name="Factorio",
+                    directory=Path("."),
+                    apps_dir=Path("."),
+                    scope="factorio",
+                )
+                app.check_running = lambda: True
+                app._relay = SimpleNamespace(send=AsyncMock(return_value="ok"))
+                app.player_count = AsyncMock(return_value=(0, 20))
+                action = next(action for action in app.console_actions if action.key == action_key)
+
+                result = asyncio.run(
+                    execute_console_action(
+                        app=app,
+                        is_running=app.check_running,
+                        action=action,
+                        raw_value=raw_value,
+                    )
+                )
+
+                app._relay.send.assert_awaited_once_with(expected_command)
+                app.player_count.assert_not_awaited()
+                self.assertEqual(result.source, ConsoleResponseSource.RCON)
+
+    def test_factorio_kick_console_action_parses_player_and_reason(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.friendly = "Factorio"
+        app.cfg = App_Config(
+            name="factorio_alpha",
+            instance_key="alpha",
+            friendly_name="Factorio",
+            directory=Path("."),
+            apps_dir=Path("."),
+            scope="factorio",
+        )
+        app.check_running = lambda: True
+        app._relay = SimpleNamespace(send=AsyncMock(return_value="Kicked Alice"))
+        app.player_count = AsyncMock(return_value=(0, 20))
+        action = next(action for action in app.console_actions if action.key == "kick")
+
+        result = asyncio.run(
+            execute_console_action(
+                app=app,
+                is_running=app.check_running,
+                action=action,
+                raw_value="Alice griefing",
+            )
+        )
+
+        app._relay.send.assert_awaited_once_with("/kick Alice griefing")
+        app.player_count.assert_not_awaited()
+        self.assertEqual(result.text, "Kicked Alice")
 
     def test_factorio_mod_portal_download_follows_archive_redirects(self) -> None:
         archive_bytes = b"factorio-mod-archive"
@@ -1266,7 +1390,7 @@ class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
         relay = SimpleNamespace(send=AsyncMock(side_effect=("Unknown command: /shout", None)))
         app = cast(Any, object.__new__(Factorio))
         app._relay = relay
-        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=True)
+        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=True, rcon_requires_online_players=False)
         app._factorio_yuki_bridge_enabled = False
         receiver = Receiver(app)
         payload = SimpleNamespace(
@@ -1290,7 +1414,7 @@ class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
         relay = SimpleNamespace(send=AsyncMock(side_effect=("Usage: /yuki say Speaker|message", None)))
         app = cast(Any, object.__new__(Factorio))
         app._relay = relay
-        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=True)
+        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=True, rcon_requires_online_players=False)
         app._factorio_yuki_bridge_enabled = True
         receiver = Receiver(app)
         payload = SimpleNamespace(
@@ -1311,7 +1435,7 @@ class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
         relay = SimpleNamespace(send=AsyncMock(return_value=None))
         app = cast(Any, object.__new__(Factorio))
         app._relay = relay
-        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=False)
+        app.cfg = SimpleNamespace(factorio_chat_relay_use_shout=False, rcon_requires_online_players=False)
         receiver = Receiver(app)
         payload = SimpleNamespace(
             alias="DiscordUser",
@@ -1324,6 +1448,127 @@ class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
         await receiver.send(payload)
 
         relay.send.assert_awaited_once_with('/silent-command game.print("DiscordUser: Line one Line two")')
+
+    async def test_receiver_skips_rcon_when_player_gate_has_no_online_players(self) -> None:
+        relay = SimpleNamespace(send=AsyncMock(return_value=None))
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_alpha"
+        app.friendly = "Factorio"
+        app.cfg = App_Config(
+            name="factorio_alpha",
+            instance_key="alpha",
+            friendly_name="Factorio",
+            directory=Path("."),
+            apps_dir=Path("."),
+            scope="factorio",
+        )
+        app._relay = relay
+        app.player_count = AsyncMock(return_value=(0, 20))
+        app._factorio_yuki_bridge_enabled = False
+        receiver = Receiver(app)
+        payload = SimpleNamespace(
+            alias="DiscordUser",
+            content="Hello",
+            urls=(),
+            files=(),
+            content_for_app=lambda _app: "Hello",
+        )
+
+        await receiver.send(payload)
+
+        relay.send.assert_not_awaited()
+        app.player_count.assert_awaited_once()
+
+    async def test_match_player_session_updates_players_from_join_game_stdout_event(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app._tail_machers = set()
+        app._players = SimpleNamespace(note_player_join_signal=MagicMock())
+        matcher = Matchers(app)
+
+        await matcher.match_player_session(
+            '1278.355 Script @__yuki-bridge__/control.lua:57: [Yuki] '
+            '{"event":"PlayerJoinGame"}'
+        )
+
+        app._players.note_player_join_signal.assert_called_once_with()
+
+    async def test_match_player_session_ignores_nonexistent_leave_game_stdout_event(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app._tail_machers = set()
+        app._players = SimpleNamespace(note_player_join_signal=MagicMock())
+        matcher = Matchers(app)
+
+        await matcher.match_player_session("PlayerLeaveGame player=Alice")
+
+        app._players.note_player_join_signal.assert_not_called()
+
+    async def test_players_poll_fetches_max_players_once_per_session(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.friendly = "Factorio"
+        app.cfg = SimpleNamespace(relay_notice_player_session=False)
+        app._relay = SimpleNamespace(
+            send=AsyncMock(
+                side_effect=(
+                    "Value of option max-players is 20",
+                    "Online players (1):\nAlice (online)",
+                    "Online players (1):\nAlice (online)",
+                )
+            )
+        )
+        players = Players(app)
+        players._running = True
+
+        first_count = await players._poll_player_snapshot()
+        second_count = await players._poll_player_snapshot()
+
+        self.assertEqual(first_count, 1)
+        self.assertEqual(second_count, 1)
+        self.assertEqual(await players.count(), (1, 20))
+        self.assertEqual(
+            app._relay.send.await_args_list,
+            [
+                call("/config get max-players"),
+                call("/players online"),
+                call("/players online"),
+            ],
+        )
+
+    async def test_players_poll_returns_to_idle_after_three_empty_snapshots(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.friendly = "Factorio"
+        app.cfg = SimpleNamespace(relay_notice_player_session=False)
+        app.check_running = lambda: True
+        app._relay = SimpleNamespace(
+            send=AsyncMock(
+                side_effect=(
+                    "Value of option max-players is 20",
+                    "Online players (0):",
+                    "Online players (0):",
+                    "Online players (0):",
+                )
+            )
+        )
+        players = Players(app)
+        players._running = True
+        players.note_player_join_signal()
+
+        with patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            await players._poll_until_idle()
+
+        self.assertEqual(players._online, 0)
+        self.assertEqual(players._empty_poll_count, 0)
+        self.assertEqual(sleep_mock.await_count, 2)
+        self.assertEqual(
+            app._relay.send.await_args_list,
+            [
+                call("/config get max-players"),
+                call("/players online"),
+                call("/players online"),
+                call("/players online"),
+            ],
+        )
 
     async def test_factorio_activities_poll_updates_snapshot(self) -> None:
         relay = SimpleNamespace(

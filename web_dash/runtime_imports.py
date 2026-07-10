@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from asyncio.events import AbstractEventLoop
-from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping, MutableMapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
@@ -59,7 +59,7 @@ from nicegui.elements.timer import Timer
 from nicegui.elements.tooltip import Tooltip
 from nicegui.elements.upload import Upload
 from requests.models import Response
-from starlette.responses import Response as StarletteResponse
+from starlette.responses import Response as StarletteResponse, StreamingResponse
 
 import config
 from _authority import AuthorityResource, read_json_object
@@ -198,6 +198,7 @@ __all__: tuple[str, ...] = (
     "App",
     "App_Manager",
     "AppRuntimeFault",
+    "AsyncIterator",
     "AppTitleFont",
     "BulkLauncherMetadataDiscovery",
     "BulkLauncherMetadataEntry",
@@ -358,6 +359,7 @@ __all__: tuple[str, ...] = (
     "ScrollArea",
     "Select",
     "StarletteResponse",
+    "StreamingResponse",
     "Table",
     "Textarea",
     "TYPE_CHECKING",

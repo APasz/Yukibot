@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.types import Receive, Scope, Send
 
 from font_assets import font_assets
 from mod_web_theme import MOD_WEB_THEME_STYLESHEET
@@ -51,6 +52,34 @@ class _ModWebClientMapErrorReport(BaseModel):
     public_map_url: str | None = None
 
     model_config = ConfigDict(str_strip_whitespace=False)
+
+
+class _ModWebGZipMiddleware(GZipMiddleware):
+    _EXCLUDED_PATH_PREFIXES: tuple[str, ...] = (
+        "/mod-web/assets/fonts/",
+    )
+    _EXCLUDED_API_PATH_PARTS: tuple[str, ...] = (
+        "/download",
+        "/map/",
+        "/minecraft/recipes/item-icon",
+    )
+
+    @classmethod
+    def _should_skip_compression(cls, path: str) -> bool:
+        if path.startswith(cls._EXCLUDED_PATH_PREFIXES):
+            return True
+        if not (path.startswith("/api/node/") or path.startswith(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/")):
+            return False
+        return any(part in path for part in cls._EXCLUDED_API_PATH_PARTS)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            path = scope.get("path")
+            if isinstance(path, str) and self._should_skip_compression(path):
+                await self.app(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
+
 
 class ModWebRoutesMixin(ModWebServiceSupport):
     @staticmethod
@@ -111,7 +140,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         return (target.path or "/") == request_path and target.query == normalized_request_query
 
     def _register_routes(self, *, nicegui_app: ModWebFastApiApp, ui: ModWebRouteUi) -> None:
-        nicegui_app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
+        nicegui_app.add_middleware(_ModWebGZipMiddleware, minimum_size=500, compresslevel=6)
 
         @nicegui_app.middleware("http")
         async def _log_mod_web_request(
@@ -652,14 +681,13 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         async def _proxy_map_players(node_name: str, app_name: str, request: Request) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            content, media_type, headers = await self._remote_bytes_async(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/players",
                 scopes=(NodeApiScope.MAP_READ,),
                 user=user,
             )
-            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
         @nicegui_app.get(
             f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/worlds/{{world_name}}/settings"
@@ -672,14 +700,13 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            content, media_type, headers = await self._remote_bytes_async(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/settings",
                 scopes=(NodeApiScope.MAP_READ,),
                 user=user,
             )
-            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
         @nicegui_app.get(
             f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/worlds/{{world_name}}/markers"
@@ -692,14 +719,13 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            content, media_type, headers = await self._remote_bytes_async(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/worlds/{quote(world_name, safe='')}/markers",
                 scopes=(NodeApiScope.MAP_READ,),
                 user=user,
             )
-            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
         @nicegui_app.get(
             f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/worlds/{{world_name}}/tiles/{{z}}/{{tile_name}}"
@@ -714,7 +740,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            content, media_type, headers = await self._remote_bytes_async(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=(
@@ -724,7 +750,6 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 scopes=(NodeApiScope.MAP_READ,),
                 user=user,
             )
-            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/map/assets/{{asset_path:path}}")
         async def _proxy_map_asset(
@@ -735,14 +760,13 @@ class ModWebRoutesMixin(ModWebServiceSupport):
         ) -> StarletteResponse:
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
-            content, media_type, headers = await self._remote_bytes_async(
+            return await self._remote_stream_response_async(
                 node=node,
                 app_name=app_name,
                 path=f"/apps/{quote(app_name, safe='')}/map/assets/{quote(asset_path, safe='/')}",
                 scopes=(NodeApiScope.MAP_READ,),
                 user=user,
             )
-            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/minecraft/recipes/item-icon")
         async def _proxy_minecraft_recipe_item_icon(
@@ -754,7 +778,7 @@ class ModWebRoutesMixin(ModWebServiceSupport):
             user = self._require_http_user(request=request, required_level=Power_Level.visitor)
             node = self._remote_node_link(node_name)
             try:
-                content, media_type, headers = await self._remote_bytes_async(
+                return await self._remote_stream_response_async(
                     node=node,
                     app_name=app_name,
                     path=self._minecraft_item_icon_remote_path(app_name=app_name, item_id=item_id),
@@ -775,7 +799,6 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                     media_type="image/svg+xml",
                     headers={"Cache-Control": "private, max-age=30"},
                 )
-            return StarletteResponse(content=content, media_type=media_type, headers=dict(headers))
 
         @nicegui_app.get(f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{{node_name}}/apps/{{app_name}}/mods")
         async def _proxy_mods(node_name: str, app_name: str, request: Request) -> dict[str, object]:

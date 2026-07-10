@@ -6,6 +6,7 @@ import hashlib
 import logging
 import secrets
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,7 @@ _BROWSER_SESSION_TTL_SECONDS = 16 * 60 * 60
 _REMEMBERED_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 _DISCORD_REQUEST_TIMEOUT_SECONDS = 10.0
 _CACHE_PAYLOAD_VERSION = 1
+_SESSION_MEMORY_CACHE_LIMIT = 256
 _SESSION_CACHE_KEY_PREFIX = "session:"
 _OAUTH_STATE_CACHE_KEY_PREFIX = "oauth_state:"
 _DEV_BYPASS_ACCOUNT_NAMES: dict[Power_Level, str] = {
@@ -107,6 +109,7 @@ class ModWebAuthService:
         self._config = auth_config or config.MOD_WEB_AUTH
         cache_directory: Path | None = self._config.session_cache_directory
         self._cache = Cache(directory=None if cache_directory is None else str(cache_directory))
+        self._session_memory_cache: OrderedDict[str, ModWebSession] = OrderedDict()
 
     @property
     def enabled(self) -> bool:
@@ -219,25 +222,40 @@ class ModWebAuthService:
         session_id = request.cookies.get(_SESSION_COOKIE_NAME)
         if not session_id:
             return
+        self._session_memory_cache.pop(session_id, None)
         self._cache.delete(self._session_cache_key(session_id), retry=True)
 
     def current_session(self, request: Request) -> ModWebSession | None:
         session_id = request.cookies.get(_SESSION_COOKIE_NAME)
         if not session_id:
             return None
+        now = self._now()
+        cached_session = self._session_memory_cache.get(session_id)
+        if cached_session is not None:
+            if cached_session.expires_at > now:
+                self._session_memory_cache.move_to_end(session_id)
+                return cached_session
+            self._session_memory_cache.pop(session_id, None)
         cache_key = self._session_cache_key(session_id)
         raw: object = cast(object, self._cache.get(cache_key, retry=True))
         if raw is None:
             return None
         session = self._session_from_cache_payload(raw, session_id=session_id)
-        if session.expires_at <= self._now():
+        if session.expires_at <= now:
             self._cache.delete(cache_key, retry=True)
             return None
+        self._remember_session(session)
         return session
 
     def current_user(self, request: Request) -> ModWebUser | None:
         session = self.current_session(request)
         return session.user if session is not None else None
+
+    def _remember_session(self, session: ModWebSession) -> None:
+        self._session_memory_cache[session.session_id] = session
+        self._session_memory_cache.move_to_end(session.session_id)
+        while len(self._session_memory_cache) > _SESSION_MEMORY_CACHE_LIMIT:
+            self._session_memory_cache.popitem(last=False)
 
     def dev_login_response(
         self,
@@ -370,6 +388,7 @@ class ModWebAuthService:
         )
         if not stored:
             raise RuntimeError("Failed to persist the mod web session.")
+        self._remember_session(session)
         return session
 
     def _set_session_cookie(self, response: Response, session: ModWebSession) -> None:
@@ -392,6 +411,7 @@ class ModWebAuthService:
         )
 
     def close(self) -> None:
+        self._session_memory_cache.clear()
         self._cache.close()
 
     def _store_pending_state(self, pending: PendingOAuthState) -> None:

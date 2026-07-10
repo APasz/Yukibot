@@ -19,10 +19,12 @@ from apps.minecraft import (
 from apps.sevendays import SevenDays, SevenDaysSandboxOptionsSnapshot
 
 from .constants import (
+    _KNOWN_BOT_SNAPSHOT_CACHE_TTL_SECONDS,
     _REMOTE_NODE_GET_MAX_ATTEMPTS,
     _REMOTE_NODE_GET_RETRY_DELAY_SECONDS,
     _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    _REMOTE_NODE_STREAM_CHUNK_SIZE_BYTES,
     _REMOTE_NODE_TOKEN_TTL_SECONDS,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
@@ -38,6 +40,7 @@ from .runtime_imports import (
     App_Manager,
     AppUpdateInfo,
     AppUpdateStatus,
+    AsyncIterator,
     AuthorityEndpoint,
     AuthorityResource,
     Awaitable,
@@ -90,6 +93,8 @@ from .runtime_imports import (
     RedirectResponse,
     Request,
     Response,
+    StarletteResponse,
+    StreamingResponse,
     Timer,
     Utilities,
     aiohttp,
@@ -161,7 +166,37 @@ class _RemoteNodeHttpError(RuntimeError):
         super().__init__(f"Remote node rejected the request: url={url} status={status_code} detail={detail}")
 
 
+@dataclass(frozen=True, slots=True)
+class _PathCacheSignature:
+    exists: bool
+    mtime_ns: int | None
+    size: int | None
+
+    @classmethod
+    def from_path(cls, path: Path) -> _PathCacheSignature:
+        try:
+            stat = path.stat()
+        except OSError:
+            return cls(exists=False, mtime_ns=None, size=None)
+        return cls(exists=True, mtime_ns=stat.st_mtime_ns, size=stat.st_size)
+
+
+@dataclass(frozen=True, slots=True)
+class _KnownBotSnapshotCache:
+    captured_at_seconds: float
+    local_signature: _PathCacheSignature
+    authority_signature: _PathCacheSignature
+    loader_id: int
+    authority_path_resolver_id: int
+    snapshots: tuple[config.BotMetadataSnapshot, ...]
+
+
 class ModWebModelsMixin(ModWebServiceSupport):
+    _ALLOWED_DASHBOARD_NODE_PROFILES: frozenset[config.BotProfileName] = frozenset(
+        {config.BotProfileName.YUKI, config.BotProfileName.ERIN}
+    )
+    _known_bot_snapshot_cache: _KnownBotSnapshotCache | None = None
+
     def _remote_sync_http_client(self) -> requests.Session:
         session = cast(requests.Session | None, getattr(self._remote_sync_http_local, "session", None))
         if session is not None:
@@ -246,6 +281,12 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 node_api_public_base_url = str(item["node_api_public_base_url"]).strip()
                 if not node_name or not label or not node_api_public_base_url:
                     raise ValueError("fields must not be blank")
+                if node_name.casefold() not in {
+                    config.BotProfileName.YUKI.value.casefold(),
+                    config.BotProfileName.ERIN.value.casefold(),
+                }:
+                    log.warning("Mod web ignored DEV_CLUSTER_NODE_LINKS_JSON node outside dashboard split: %s", node_name)
+                    continue
                 resolved_public_base_url = config.resolve_node_api_public_base_url(
                     node_api_public_base_url,
                     mod_web_public_base_url=config.MOD_WEB_SERVER.public_base_url,
@@ -272,13 +313,20 @@ class ModWebModelsMixin(ModWebServiceSupport):
         return tuple(links)
 
     @staticmethod
-    def _portal_default_node_snapshot() -> config.BotMetadataSnapshot | None:
-        snapshots = ModWebModelsMixin._known_bot_snapshots()
+    def _dashboard_node_snapshot_allowed(snapshot: config.BotMetadataSnapshot) -> bool:
+        return snapshot.profile.bot_profile in ModWebModelsMixin._ALLOWED_DASHBOARD_NODE_PROFILES
+
+    @classmethod
+    def _portal_default_node_snapshot(cls) -> config.BotMetadataSnapshot | None:
+        snapshots = cls._known_bot_snapshots()
         for snapshot in snapshots:
             if snapshot.profile.bot_profile is config.BotProfileName.YUKI and snapshot.features.mod_web is not None:
                 return snapshot
         for snapshot in snapshots:
-            if snapshot.features.mod_web is not None:
+            if (
+                snapshot.profile.bot_profile is config.BotProfileName.ERIN
+                and snapshot.features.mod_web is not None
+            ):
                 return snapshot
         return None
 
@@ -1075,6 +1123,14 @@ class ModWebModelsMixin(ModWebServiceSupport):
             mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
             if mod_web is None:
                 continue
+            if not self._dashboard_node_snapshot_allowed(snapshot):
+                log.warning(
+                    "Mod web ignored registry node outside dashboard split: bot_id=%s profile=%s node=%s",
+                    snapshot.profile.id,
+                    None if snapshot.profile.bot_profile is None else snapshot.profile.bot_profile.value,
+                    mod_web.node_name,
+                )
+                continue
             node_name: str = mod_web.node_name
             key: str = node_name.casefold()
             if key in links:
@@ -1111,6 +1167,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         for snapshot in self._known_bot_snapshots():
             mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
             if mod_web is None or mod_web.node_name.casefold() != key:
+                continue
+            if not self._dashboard_node_snapshot_allowed(snapshot):
                 continue
             return snapshot
         return None
@@ -2060,6 +2118,57 @@ class ModWebModelsMixin(ModWebServiceSupport):
         except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
             raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
 
+    async def _remote_stream_response_async(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str | None,
+        path: str,
+        scopes: tuple[NodeApiScope, ...],
+        user: ModWebUser,
+        timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> StarletteResponse:
+        token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
+        session = await self._remote_http_client()
+        response_context = session.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._aiohttp_client_timeout(timeout),
+        )
+        try:
+            response: aiohttp.ClientResponse = await response_context.__aenter__()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+
+        if response.status >= 400:
+            try:
+                detail = await self._aiohttp_response_detail(response)
+            finally:
+                await response_context.__aexit__(None, None, None)
+            raise RuntimeError(f"Remote node rejected the request: url={url} status={response.status} detail={detail}")
+
+        forwarded_headers = {
+            header_name: header_value
+            for header_name in ("Cache-Control", "ETag", "Last-Modified", "Expires")
+            if (header_value := response.headers.get(header_name))
+        }
+
+        async def _stream_body() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in response.content.iter_chunked(_REMOTE_NODE_STREAM_CHUNK_SIZE_BYTES):
+                    if chunk:
+                        yield bytes(chunk)
+            finally:
+                await response_context.__aexit__(None, None, None)
+
+        return StreamingResponse(
+            _stream_body(),
+            media_type=response.headers.get("Content-Type"),
+            headers=forwarded_headers,
+        )
+
     @staticmethod
     def _aiohttp_client_timeout(timeout: float | tuple[float, float]) -> aiohttp.ClientTimeout:
         if isinstance(timeout, tuple):
@@ -2352,17 +2461,38 @@ class ModWebModelsMixin(ModWebServiceSupport):
         return response.text or response.reason
 
     @staticmethod
-    def _known_bot_snapshots() -> tuple[config.BotMetadataSnapshot, ...]:
+    def _snapshot_cache_fresh(cache: _KnownBotSnapshotCache, *, local_path: Path, authority_path: Path) -> bool:
+        if time.monotonic() - cache.captured_at_seconds >= _KNOWN_BOT_SNAPSHOT_CACHE_TTL_SECONDS:
+            return False
+        if cache.loader_id != id(config.load_bot_configuration):
+            return False
+        if cache.authority_path_resolver_id != id(config.authority_cache_path):
+            return False
+        if cache.local_signature != _PathCacheSignature.from_path(local_path):
+            return False
+        return cache.authority_signature == _PathCacheSignature.from_path(authority_path)
+
+    @classmethod
+    def _known_bot_snapshots(cls) -> tuple[config.BotMetadataSnapshot, ...]:
+        local_path = Path("configuration.json")
+        authority_path: Path = config.authority_cache_path(AuthorityResource.BOTS)
+        cached = cls._known_bot_snapshot_cache
+        if cached is not None and cls._snapshot_cache_fresh(
+            cached,
+            local_path=local_path,
+            authority_path=authority_path,
+        ):
+            return cached.snapshots
+
         snapshots: list[config.BotMetadataSnapshot] = []
         try:
-            snapshots.extend(config.load_bot_configuration(Path("configuration.json")).known_bots.values())
+            snapshots.extend(config.load_bot_configuration(local_path).known_bots.values())
         except Exception as xcp:
             log.warning("Mod web failed to load local bot registry: %s", xcp)
 
-        cache_path: Path = config.authority_cache_path(AuthorityResource.BOTS)
-        if cache_path.exists():
+        if authority_path.exists():
             try:
-                raw_cache: dict[str, object] = read_json_object(cache_path)
+                raw_cache: dict[str, object] = read_json_object(authority_path)
                 snapshots.extend(
                     config.BotMetadataSnapshot.model_validate(snapshot)
                     for snapshot in raw_cache.values()
@@ -2374,7 +2504,16 @@ class ModWebModelsMixin(ModWebServiceSupport):
         unique: dict[str, config.BotMetadataSnapshot] = {}
         for snapshot in snapshots:
             unique[snapshot.profile.id] = snapshot
-        return tuple[BotMetadataSnapshot, ...](unique.values())
+        resolved = tuple[BotMetadataSnapshot, ...](unique.values())
+        cls._known_bot_snapshot_cache = _KnownBotSnapshotCache(
+            captured_at_seconds=time.monotonic(),
+            local_signature=_PathCacheSignature.from_path(local_path),
+            authority_signature=_PathCacheSignature.from_path(authority_path),
+            loader_id=id(config.load_bot_configuration),
+            authority_path_resolver_id=id(config.authority_cache_path),
+            snapshots=resolved,
+        )
+        return resolved
 
     def _app_start_blocked_local(self, app: App) -> bool:
         manager: App_Manager | None = self._manager

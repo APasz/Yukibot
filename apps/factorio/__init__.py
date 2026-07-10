@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from re import Match, Pattern
-from typing import Any, Generic, TypeAlias, TypeVar, cast
+from typing import Any, Generic, TypeAlias, TypeVar, cast, overload
 from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
@@ -48,7 +48,7 @@ from apps._config import (
     known_mod_page_provider_for_url,
 )
 from apps._config_files import AppConfigFileKind, AppConfigFileRoot
-from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleResponseSource
+from apps._console import ConsoleAction, ConsoleActionParameter, ConsoleActionResult, ConsoleExecutor, ConsoleResponseSource
 from apps._mod import Mod, humanise_mod_identifier
 from apps._rcon import RconClient
 from apps._save_files import (
@@ -135,10 +135,17 @@ _FACTORIO_COMMAND_FAILURE_RE: Pattern[str] = re.compile(
     r"\b(?:unknown command|cannot execute command|unknown option|failed|error|usage)\b",
     re.IGNORECASE,
 )
+_FACTORIO_PLAYER_JOIN_EVENT_NAME = "PlayerJoinGame"
+_FACTORIO_PLAYER_EVENT_NAME_RE: Pattern[str] = re.compile(
+    rf"\b{_FACTORIO_PLAYER_JOIN_EVENT_NAME}\b",
+    re.IGNORECASE,
+)
 _FACTORIO_YUKI_BRIDGE_MOD_ID = "yuki-bridge"
 _FACTORIO_YUKI_BRIDGE_EVENTS_PATH = Path("script-output") / "yuki" / "events.ndjson"
 _FACTORIO_LINE_MATCHER = Callable[[str], Awaitable[None]]
 _FactorioSettingValue = TypeVar("_FactorioSettingValue", str, bool, int)
+FactorioRconCommand: TypeAlias = str | dict[str, str]
+FactorioRconResponse: TypeAlias = str | dict[str, str | None] | None
 _FACTORIO_UPDATE_BRANCHES: tuple[FactorioUpdateBranch, ...] = (
     FactorioUpdateBranch.STABLE,
     FactorioUpdateBranch.EXPERIMENTAL,
@@ -295,6 +302,10 @@ class FactorioActivitySnapshot:
 
 def _is_non_empty_text(text: str) -> bool:
     return bool(text.strip())
+
+
+def _is_positive_int_text(text: str) -> bool:
+    return text.isdigit() and int(text) > 0
 
 
 def factorio_server_settings_path(directory: Path) -> Path:
@@ -1299,13 +1310,27 @@ class Factorio_Settings(App_Settings):
         return data
 
 
+@dataclass(frozen=True, slots=True)
+class FactorioKickRequest:
+    player: str
+    reason: str
+
+
+def _parse_factorio_kick_request(value: object) -> FactorioKickRequest:
+    raw_value = str(value).strip()
+    player, separator, reason = raw_value.partition(" ")
+    if not player.strip() or not separator or not reason.strip():
+        raise ValueError("Kick requires a player and reason, for example `Alice griefing`.")
+    return FactorioKickRequest(player=player.strip(), reason=reason.strip())
+
+
 async def _run_factorio_console_command(
     app: "Factorio",
     command: str,
     *,
     success_text: str,
 ) -> ConsoleActionResult:
-    response = await app._relay.send(command)
+    response = await app.send_player_gated_rcon(command, check_player_gate=False)
     if response:
         return ConsoleActionResult(
             summary=success_text,
@@ -1313,6 +1338,36 @@ async def _run_factorio_console_command(
             source=ConsoleResponseSource.RCON,
         )
     return ConsoleActionResult(summary=success_text, source=ConsoleResponseSource.RCON)
+
+
+def _static_factorio_console_executor(command: str, *, success_text: str) -> ConsoleExecutor:
+    async def _execute(app_obj: object, value: object | None) -> ConsoleActionResult:
+        del value
+        app = cast(Factorio, app_obj)
+        return await _run_factorio_console_command(
+            app,
+            command,
+            success_text=f"{app.friendly}: {success_text}",
+        )
+
+    return _execute
+
+
+def _value_factorio_console_executor(
+    command_builder: Callable[[object], str],
+    success_text_builder: Callable[["Factorio", object], str],
+) -> ConsoleExecutor:
+    async def _execute(app_obj: object, value: object | None) -> ConsoleActionResult:
+        if value is None:
+            raise ValueError("Console action value is required.")
+        app = cast(Factorio, app_obj)
+        return await _run_factorio_console_command(
+            app,
+            command_builder(value),
+            success_text=success_text_builder(app, value),
+        )
+
+    return _execute
 
 
 async def _console_raw_command(app_obj: object, value: object | None) -> ConsoleActionResult:
@@ -1372,6 +1427,49 @@ _FACTORIO_RAW_COMMAND_PARAMETER = ConsoleActionParameter[str](
     max_length=500,
     multiline=True,
 )
+_FACTORIO_PERF_AVG_FRAMES_PARAMETER = ConsoleActionParameter[int](
+    key="frames",
+    label="Frames",
+    value_type=int,
+    validator=_is_positive_int_text,
+    desc="Number of ticks/updates used to average performance counters.",
+    max_length=6,
+)
+_FACTORIO_KICK_PARAMETER = ConsoleActionParameter[FactorioKickRequest](
+    key="kick",
+    label="Player And Reason",
+    value_type=_parse_factorio_kick_request,
+    validator=_is_non_empty_text,
+    desc="Player name followed by kick reason, for example `Alice griefing`.",
+    max_length=300,
+)
+_FACTORIO_MESSAGE_PARAMETER = ConsoleActionParameter[str](
+    key="message",
+    label="Message",
+    value_type=str,
+    validator=_is_non_empty_text,
+    desc="Message to send to all players.",
+    max_length=300,
+    multiline=True,
+)
+_FACTORIO_CHEAT_PARAMETER = ConsoleActionParameter[str](
+    key="mode",
+    label="Mode",
+    value_type=str,
+    choices=ChoiceSpec(ChoiceOption("all", "All"), ChoiceOption("off", "Off"), strict=False),
+    validator=_is_non_empty_text,
+    desc="Cheat mode target: all, off, or a planet/platform name.",
+    max_length=100,
+)
+_FACTORIO_LUA_COMMAND_PARAMETER = ConsoleActionParameter[str](
+    key="lua",
+    label="Lua Command",
+    value_type=str,
+    validator=_is_non_empty_text,
+    desc="Lua command body to execute.",
+    max_length=1000,
+    multiline=True,
+)
 _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
     ConsoleAction(
         key="admins",
@@ -1382,12 +1480,60 @@ _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
+        key="seed",
+        label="Seed",
+        description="Print the starting map seed.",
+        power_level=Power_Level.user,
+        execute=_static_factorio_console_executor("/seed", success_text="map seed requested."),
+        transport=ConsoleResponseSource.RCON,
+    ),
+    ConsoleAction(
+        key="time",
+        label="Map Time",
+        description="Print how old the map is.",
+        power_level=Power_Level.user,
+        execute=_static_factorio_console_executor("/time", success_text="map time requested."),
+        transport=ConsoleResponseSource.RCON,
+    ),
+    ConsoleAction(
+        key="perf_avg_frames",
+        label="Perf Avg Frames",
+        description="Set the averaging window for performance counters.",
+        power_level=Power_Level.user,
+        execute=_value_factorio_console_executor(
+            lambda value: f"/perf-avg-frames {cast(int, value)}",
+            lambda app, value: f"{app.friendly}: performance counter averaging set to {cast(int, value)} frames.",
+        ),
+        parameter=_FACTORIO_PERF_AVG_FRAMES_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
+    ),
+    ConsoleAction(
+        key="shout",
+        label="Shout",
+        description="Send a message to all players, including other forces.",
+        power_level=Power_Level.user,
+        execute=_value_factorio_console_executor(
+            lambda value: f"/shout {cast(str, value)}",
+            lambda app, _value: f"{app.friendly}: shout sent.",
+        ),
+        parameter=_FACTORIO_MESSAGE_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
+    ),
+    ConsoleAction(
         key="raw_command",
         label="Run Command",
         description="Send a raw command to the Factorio console.",
         power_level=Power_Level.sudo,
         execute=_console_raw_command,
         parameter=_FACTORIO_RAW_COMMAND_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
+    ),
+    ConsoleAction(
+        key="server_save",
+        label="Server Save",
+        description="Save the game on the server.",
+        power_level=Power_Level.sudo,
+        execute=_static_factorio_console_executor("/server-save", success_text="server save requested."),
         transport=ConsoleResponseSource.RCON,
     ),
     ConsoleAction(
@@ -1408,6 +1554,58 @@ _FACTORIO_CONSOLE_ACTIONS: tuple[ConsoleAction, ...] = (
         parameter=_FACTORIO_PLAYER_PARAMETER,
         transport=ConsoleResponseSource.RCON,
     ),
+    ConsoleAction(
+        key="kick",
+        label="Kick Player",
+        description="Kick a player with a reason.",
+        power_level=Power_Level.sudo,
+        execute=_value_factorio_console_executor(
+            lambda value: (
+                f"/kick {cast(FactorioKickRequest, value).player} {cast(FactorioKickRequest, value).reason}"
+            ),
+            lambda app, value: (
+                f"{app.friendly}: kick requested for `{cast(FactorioKickRequest, value).player}`."
+            ),
+        ),
+        parameter=_FACTORIO_KICK_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
+    ),
+    ConsoleAction(
+        key="cheat",
+        label="Cheat",
+        description="Enable cheat mode/research or disable cheat mode.",
+        power_level=Power_Level.sudo,
+        execute=_value_factorio_console_executor(
+            lambda value: f"/cheat {cast(str, value)}",
+            lambda app, value: f"{app.friendly}: cheat command requested for `{cast(str, value)}`.",
+        ),
+        parameter=_FACTORIO_CHEAT_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
+    ),
+    ConsoleAction(
+        key="command",
+        label="Lua Command",
+        description="Execute a Lua command.",
+        power_level=Power_Level.sudo,
+        execute=_value_factorio_console_executor(
+            lambda value: f"/command {cast(str, value)}",
+            lambda app, _value: f"{app.friendly}: Lua command requested.",
+        ),
+        parameter=_FACTORIO_LUA_COMMAND_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
+    ),
+    ConsoleAction(
+        key="silent_command",
+        label="Silent Lua Command",
+        description="Execute a Lua command without printing it to the console.",
+        power_level=Power_Level.sudo,
+        execute=_value_factorio_console_executor(
+            lambda value: f"/silent-command {cast(str, value)}",
+            lambda app, _value: f"{app.friendly}: silent Lua command requested.",
+        ),
+        parameter=_FACTORIO_LUA_COMMAND_PARAMETER,
+        transport=ConsoleResponseSource.RCON,
+    ),
 )
 
 
@@ -1418,7 +1616,7 @@ class Factorio(App[App_Config]):
     relay_notice_player_session_supported = True
     relay_notice_player_death_supported = True
     relay_notice_progress_supported = True
-    rcon_requires_online_players_default = False
+    rcon_requires_online_players_default = True
 
     def __init__(self, bot: hikari.GatewayBot, am: Activity_Manager, cfg: App_Config):
         self.manage_embed_color = 0xDC6B0F
@@ -1481,6 +1679,9 @@ class Factorio(App[App_Config]):
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:
         return self.available_console_actions(_FACTORIO_CONSOLE_ACTIONS)
+
+    async def ensure_console_action_allowed(self, action: ConsoleAction) -> None:
+        del action
 
     @property
     def yuki_bridge_enabled(self) -> bool:
@@ -1749,7 +1950,7 @@ class Factorio(App[App_Config]):
         save_requested = False
         ok: str | None = None
         if self._relay.is_connected:
-            ok = await self._relay.send("/server-save", reconnect_on_failure=False)
+            ok = await self.send_player_gated_rcon("/server-save", reconnect_on_failure=False)
             save_requested = ok is not None
         if not ok:
             if self.process and self.process.stdin:
@@ -1788,6 +1989,60 @@ class Factorio(App[App_Config]):
 
     def connected_player_names(self) -> tuple[str, ...]:
         return self._players.connected_player_names()
+
+    async def _rcon_player_gate_block_reason(self) -> str | None:
+        try:
+            gate_enabled = self.rcon_requires_online_players_enabled
+        except AttributeError:
+            gate_enabled = False
+        if gate_enabled is not True:
+            return None
+        player_snapshot = await self.player_count()
+        if player_snapshot is None:
+            return f"{self.friendly} player count is unavailable, so RCON commands are currently gated."
+        online_players, _player_capacity = player_snapshot
+        if online_players > 0:
+            return None
+        return f"{self.friendly} has no players online, so RCON commands are currently gated."
+
+    @overload
+    async def send_player_gated_rcon(
+        self,
+        command: str,
+        *,
+        reconnect_on_failure: bool = True,
+        fail_when_gated: bool = False,
+        check_player_gate: bool = True,
+    ) -> str | None: ...
+
+    @overload
+    async def send_player_gated_rcon(
+        self,
+        command: dict[str, str],
+        *,
+        reconnect_on_failure: bool = True,
+        fail_when_gated: bool = False,
+        check_player_gate: bool = True,
+    ) -> dict[str, str | None] | None: ...
+
+    async def send_player_gated_rcon(
+        self,
+        command: FactorioRconCommand,
+        *,
+        reconnect_on_failure: bool = True,
+        fail_when_gated: bool = False,
+        check_player_gate: bool = True,
+    ) -> FactorioRconResponse:
+        if check_player_gate:
+            block_reason = await self._rcon_player_gate_block_reason()
+            if block_reason is not None:
+                if fail_when_gated:
+                    raise RuntimeError(block_reason)
+                log.debug("Skipping Factorio RCON command for %s: %s", getattr(self, "name", "unknown"), block_reason)
+                return None
+        if reconnect_on_failure:
+            return await self._relay.send(command)
+        return await self._relay.send(command, reconnect_on_failure=False)
 
     def detect_installed_version(self) -> AppVersion | None:
         return detect_factorio_version(directory=self.directory)
@@ -2190,17 +2445,17 @@ class Receiver(AM_Receiver):
         app_config = getattr(self.app, "cfg", None)
         use_shout = getattr(app_config, "factorio_chat_relay_use_shout", True)
         if not use_shout:
-            await self.app._relay.send(f"/silent-command game.print({json.dumps(message)})")
+            await self.app.send_player_gated_rcon(f"/silent-command game.print({json.dumps(message)})")
             return
         if self.app.yuki_bridge_enabled:
-            response = await self.app._relay.send(
+            response = await self.app.send_player_gated_rcon(
                 _format_factorio_bridge_say_command(alias=payload.alias, content=content)
             )
             if not _factorio_command_failed(response):
                 return
-        response = await self.app._relay.send(f"/shout {message}")
+        response = await self.app.send_player_gated_rcon(f"/shout {message}")
         if _factorio_command_failed(response):
-            await self.app._relay.send(f"/silent-command game.print({json.dumps(message)})")
+            await self.app.send_player_gated_rcon(f"/silent-command game.print({json.dumps(message)})")
 
 
 def _render_factorio_research_name(raw_name: str) -> str:
@@ -2233,6 +2488,20 @@ def _parse_factorio_bridge_event_payload(line: str, *, include_wrapped_event: bo
     except json.JSONDecodeError:
         return None
     return payload
+
+
+def _line_has_factorio_player_join_event(line: str, *, include_wrapped_event: bool = True) -> bool:
+    payload = _parse_factorio_bridge_event_payload(line, include_wrapped_event=include_wrapped_event)
+    if payload is not None:
+        raw_event_name = payload.get("event") or payload.get("event_name") or payload.get("name") or payload.get(
+            "kind"
+        )
+        return (
+            isinstance(raw_event_name, str)
+            and raw_event_name.strip().casefold() == _FACTORIO_PLAYER_JOIN_EVENT_NAME.casefold()
+        )
+
+    return _FACTORIO_PLAYER_EVENT_NAME_RE.search(line) is not None
 
 
 def _parse_factorio_bridge_research_name(line: str, *, include_wrapped_event: bool = True) -> str | None:
@@ -2451,7 +2720,7 @@ class FactorioActivities:
             bridge_enabled = self.app.yuki_bridge_enabled
             if bridge_enabled:
                 commands["evolution"] = "/yuki evolution player"
-            responses = await self.app._relay.send(commands)
+            responses = await self.app.send_player_gated_rcon(commands)
             if isinstance(responses, dict):
                 map_age = _parse_factorio_map_age(responses.get("time") or "")
                 primary_evolution: FactorioEvolution | None = None
@@ -2510,6 +2779,7 @@ class Matchers:
         app._tail_machers.add(self.match_chat)
         app._tail_machers.add(self.match_death)
         app._tail_machers.add(self.match_error)
+        app._tail_machers.add(self.match_player_session)
         app._tail_machers.add(self.match_research)
         app._bridge_tail_matchers.add(self.match_bridge_event)
 
@@ -2558,6 +2828,11 @@ class Matchers:
             self.app._startup_error = f"{source}: {message}"
             log.warning("Factorio error detected for %s: %s", self.app.name, self.app._startup_error)
 
+    async def match_player_session(self, line: str) -> None:
+        if not _line_has_factorio_player_join_event(line):
+            return
+        self.app._players.note_player_join_signal()
+
     async def match_research(self, line: str) -> None:
         if self.app.relay_notice_progress_enabled is not True:
             return
@@ -2584,6 +2859,9 @@ class Matchers:
             return
         if kind == "player_died":
             self._match_bridge_death(payload)
+            return
+        if _line_has_factorio_player_join_event(line, include_wrapped_event=False):
+            self.app._players.note_player_join_signal()
 
     def _match_bridge_death(self, payload: Mapping[str, object]) -> None:
         if self.app.relay_notice_player_death_enabled is not True:
@@ -2662,30 +2940,39 @@ class Matchers:
 
 
 class Players:
+    _POLL_INTERVAL_SECONDS = 1.0
+    _EMPTY_POLLS_BEFORE_IDLE = 3
+
     def __init__(self, app: "Factorio") -> None:
         self.app: Factorio = app
         self._players_task: asyncio.Task[None] | None = None
         self._players_task_loop: asyncio.AbstractEventLoop | None = None
+        self._poll_requested: asyncio.Event | None = None
         self._running = False
         self._online: int | None = None
         self._max: int | None = None
         self._players: set[str] = set[str]()
+        self._empty_poll_count = 0
 
     async def start(self) -> None:
-        self._online = None
+        self._online = 0
         self._max = None
         self._players = set[str]()
+        self._empty_poll_count = 0
         if self._players_task and not self._players_task.done():
             return
         self._running = True
+        self._poll_requested = asyncio.Event()
         self._players_task_loop = asyncio.get_running_loop()
-        self._players_task = asyncio.create_task(self._listplayers())
+        self._players_task = asyncio.create_task(self._poll_after_join_signal())
 
     async def stop(self) -> None:
         self._online = None
         self._max = None
         self._players = set[str]()
+        self._empty_poll_count = 0
         self._running = False
+        self._poll_requested = None
         if self._players_task:
             task = self._players_task
             self._players_task = None
@@ -2704,72 +2991,121 @@ class Players:
             except asyncio.CancelledError:
                 pass
 
-    async def _listplayers(self) -> None:
+    def note_player_join_signal(self) -> None:
+        if not self._running:
+            return
+        self._online = max(self._online or 0, 1)
+        self._empty_poll_count = 0
+        if self._poll_requested is not None:
+            self._poll_requested.set()
+
+    async def _poll_after_join_signal(self) -> None:
         while self._running:
-            await asyncio.sleep(1)
-            if not self._running or config.IS_SHUTTINGDOWN or not self.app.check_running():
+            poll_requested = self._poll_requested
+            if poll_requested is None:
                 return
-            log.debug(f"Players.PRE {self._online}/{self._max} | {self._players}")
-            _max: str | None = await self.app._relay.send("/config get max-players")
-            if not self._running:
+            await poll_requested.wait()
+            poll_requested.clear()
+            await self._poll_until_idle()
+
+    async def _poll_until_idle(self) -> None:
+        while self._running and not config.IS_SHUTTINGDOWN and self.app.check_running():
+            online_players = await self._poll_player_snapshot()
+            if online_players == 0:
+                self._empty_poll_count += 1
+            elif online_players is not None:
+                self._empty_poll_count = 0
+
+            if self._empty_poll_count >= self._EMPTY_POLLS_BEFORE_IDLE:
+                self._players.clear()
+                self._online = 0
+                self._empty_poll_count = 0
                 return
-            if _max:
-                self._max = int(_max) or -1
+
+            await asyncio.sleep(self._POLL_INTERVAL_SECONDS)
+
+    async def _poll_player_snapshot(self) -> int | None:
+        log.debug(f"Players.PRE {self._online}/{self._max} | {self._players}")
+        if self._max is None:
+            max_response = await self.app._relay.send("/config get max-players")
+            max_players = self.extract_num(max_response) if max_response else None
+            if max_players is not None:
+                self._max = max_players or -1
                 log.debug(f"Players.{self._max=}")
-            string: str | None = await self.app._relay.send("/players online")
-            if not self._running:
+
+        response = await self.app._relay.send("/players online")
+        if not response:
+            return None
+        players = self._parse_online_players(response)
+        self._apply_player_snapshot(players)
+        return len(players)
+
+    @staticmethod
+    def _parse_online_players(text: str) -> set[str]:
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        return set[str](name.rsplit(" ", 1)[0] for name in lines[1:])
+
+    def _apply_player_snapshot(self, players: set[str]) -> None:
+        joins = players.difference(self._players)
+        leaves = self._players.difference(players)
+
+        for player in leaves:
+            self.apply_session_event(
+                player=player,
+                action=PlayerSessionAction.LEFT,
+                source=RelayNoticeSource.APP_POLL,
+            )
+        for player in joins:
+            self.apply_session_event(
+                player=player,
+                action=PlayerSessionAction.JOINED,
+                source=RelayNoticeSource.APP_POLL,
+            )
+
+        self._players = set(players)
+        self._online = len(players)
+
+    def apply_session_event(self, *, player: str, action: PlayerSessionAction, source: RelayNoticeSource) -> None:
+        player_name = player.strip()
+        if not player_name:
+            raise ValueError("Factorio player session event requires a player name.")
+        if action is PlayerSessionAction.JOINED:
+            if player_name in self._players:
                 return
-            if string:
+            self._players.add(player_name)
+            self._online = len(self._players)
+            self._relay_session_notice(player=player_name, action=action, source=source)
+            log.debug(f"Players.add.{self._players=}")
+            return
+        if action is PlayerSessionAction.LEFT:
+            if player_name not in self._players:
+                return
+            self._players.discard(player_name)
+            self._online = len(self._players)
+            self._relay_session_notice(player=player_name, action=action, source=source)
+            log.debug(f"Players.discard.{self._players=}")
+            return
+        raise ValueError(f"Unsupported Factorio player session action: {action}")
 
-                def find_players(x: str) -> tuple[int, set[str]]:
-                    lines: list[str] = [line.strip() for line in x.split("\n") if line]
-                    count: int = len(lines) - 1
-                    players: set[str] = set[str](name.rsplit(" ", 1)[0] for name in lines[1:])
-                    return count, players
-
-                self._online, players = find_players(string)
-
-                def is_join(new: set[str]) -> tuple[set[str], set[str]]:
-                    join: set[str] = new.difference(self._players)
-                    leave: set[str] = self._players.difference(new)
-                    return join, leave
-
-                joins, leaves = is_join(players)
-
-                for player in leaves:
-                    if self.app.relay_notice_player_left_enabled is not False:
-                        notice = self.app.player_session_notice(
-                            action=PlayerSessionAction.LEFT,
-                            source=RelayNoticeSource.APP_POLL,
-                        )
-                        app_friendly = getattr(self.app, "friendly", self.app.name)
-                        DC_Relay.add(
-                            DC_Bound(
-                                self.app,
-                                render_notice_text(notice, author_name=player, app_name=app_friendly),
-                                player,
-                                notice=notice,
-                            )
-                        )
-                    self._players.discard(player)
-                    log.debug(f"Players.discard.{self._players=}")
-                for player in joins:
-                    if self.app.relay_notice_player_joined_enabled is not False:
-                        notice = self.app.player_session_notice(
-                            action=PlayerSessionAction.JOINED,
-                            source=RelayNoticeSource.APP_POLL,
-                        )
-                        app_friendly = getattr(self.app, "friendly", self.app.name)
-                        DC_Relay.add(
-                            DC_Bound(
-                                self.app,
-                                render_notice_text(notice, author_name=player, app_name=app_friendly),
-                                player,
-                                notice=notice,
-                            )
-                        )
-                    self._players.add(player)
-                    log.debug(f"Players.add.{self._players=}")
+    def _relay_session_notice(self, *, player: str, action: PlayerSessionAction, source: RelayNoticeSource) -> None:
+        if action is PlayerSessionAction.JOINED:
+            if self.app.relay_notice_player_joined_enabled is False:
+                return
+        elif action is PlayerSessionAction.LEFT:
+            if self.app.relay_notice_player_left_enabled is False:
+                return
+        else:
+            raise ValueError(f"Unsupported Factorio player session action: {action}")
+        notice = self.app.player_session_notice(action=action, source=source)
+        app_friendly = getattr(self.app, "friendly", self.app.name)
+        DC_Relay.add(
+            DC_Bound(
+                self.app,
+                render_notice_text(notice, author_name=player, app_name=app_friendly),
+                player,
+                notice=notice,
+            )
+        )
 
     @staticmethod
     def extract_num(text: str) -> int | None:
@@ -2781,8 +3117,8 @@ class Players:
     async def count(self) -> tuple[int, int] | None:
         if not config.SILENT_DEBUG:
             log.debug(f"Player.count={self._online}/{self._max}")
-        if self._online is not None and self._max is not None:
-            return (self._online, self._max)
+        if self._online is not None:
+            return (self._online, self._max or -1)
         return None
 
     def connected_player_names(self) -> tuple[str, ...]:

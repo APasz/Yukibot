@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import Request  # pyright: ignore[reportMissingImports]
@@ -85,6 +86,24 @@ class ModWebAuthTests(unittest.TestCase):
         request = cast(Request, FakeRequest(cookies={_SESSION_COOKIE_NAME: session.session_id}))
 
         self.assertEqual(auth.current_user(request), user)
+
+    def test_current_user_uses_memory_cache_for_active_session(self) -> None:
+        auth = ModWebAuthService(
+            config.ModWebAuthConfig(
+                discord_client_id="123456789012345678",
+                discord_client_secret="secret",
+                redirect_url="https://mods.example/auth/discord/callback",
+            )
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name="Tester", avatar_hash=None)
+        session = auth._create_session(user)
+        request = cast(Request, FakeRequest(cookies={_SESSION_COOKIE_NAME: session.session_id}))
+
+        with patch.object(auth._cache, "get", wraps=auth._cache.get) as cache_get:
+            self.assertEqual(auth.current_user(request), user)
+            self.assertEqual(auth.current_user(request), user)
+
+        cache_get.assert_not_called()
 
     def test_browser_session_cookie_expires_when_the_browser_closes(self) -> None:
         auth = ModWebAuthService(

@@ -184,6 +184,7 @@ from web_dash.home import (
 )
 from web_dash.links import current_node_app_url, mod_web_node_system_path
 from web_dash.nicegui_protocols import ModWebUi
+from web_dash.routes import _ModWebGZipMiddleware
 from web_dash.service import ModWebService
 from web_dash.stream_broker import SharedAsyncStreamBroker
 from web_dash.types import (
@@ -3297,6 +3298,63 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(links[1].latency_probe_url, "http://erin.example:3180/api/node/ping")
         self.assertEqual(links[1].presence_stream_url, "http://erin.example:3180/api/node/presence/stream")
 
+    def test_node_links_ignore_registry_nodes_without_dashboard_profiles(self) -> None:
+        profiled_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="123456789012345678",
+                label="Erin",
+                bot_profile=config.BotProfileName.ERIN,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="erin",
+                    public_base_url="http://erin.example:3180",
+                    node_api_base_url="http://erin.example:3180/api/node",
+                )
+            ),
+        )
+        unprofiled_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="223456789012345678",
+                label="Kousei",
+                bot_profile=None,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="kousei",
+                    public_base_url="http://kousei.example:3180",
+                    node_api_base_url="http://kousei.example:3180/api/node",
+                )
+            ),
+        )
+
+        with patch.object(ModWebService, "_known_bot_snapshots", return_value=(profiled_snapshot, unprofiled_snapshot)):
+            links = ModWebService()._node_links()
+
+        self.assertEqual([link.node_name for link in links if not link.is_current], ["erin"])
+
+    def test_portal_default_node_name_ignores_unprofiled_registry_nodes(self) -> None:
+        unprofiled_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="223456789012345678",
+                label="Kousei",
+                bot_profile=None,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="kousei",
+                    public_base_url="http://kousei.example:3180",
+                    node_api_base_url="http://kousei.example:3180/api/node",
+                )
+            ),
+        )
+
+        with (
+            patch.object(config, "env_opt", return_value=None),
+            patch.object(ModWebService, "_known_bot_snapshots", return_value=(unprofiled_snapshot,)),
+        ):
+            self.assertIsNone(ModWebService()._portal_default_node_name())
+
     def test_portal_node_links_omit_local_current_node(self) -> None:
         yuki_snapshot = config.BotMetadataSnapshot(
             profile=config.BotMetadataProfile(
@@ -3445,6 +3503,20 @@ class ModWebTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(ModWebService()._portal_default_node_name(), "yuki")
+
+    def test_mod_web_gzip_middleware_skips_binary_proxy_paths(self) -> None:
+        self.assertTrue(
+            _ModWebGZipMiddleware._should_skip_compression(
+                "/api/node-proxy/yuki/apps/minecraft_alpha/map/worlds/world/tiles/0/0_0.png"
+            )
+        )
+        self.assertTrue(
+            _ModWebGZipMiddleware._should_skip_compression(
+                "/api/node/apps/minecraft_alpha/mods/download"
+            )
+        )
+        self.assertTrue(_ModWebGZipMiddleware._should_skip_compression("/mod-web/assets/fonts/test.woff2"))
+        self.assertFalse(_ModWebGZipMiddleware._should_skip_compression("/mod-web/assets/theme.css"))
 
     def test_app_links_include_dedicated_chat_link_for_local_chat_relay_apps(self) -> None:
         service: ModWebService = ModWebService()
