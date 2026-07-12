@@ -37,6 +37,7 @@ from .runtime_imports import (
     NodeDiskManagementState,
     NodeRestartScheduleEntry,
     NodeRestartScheduleState,
+    NodeRestartState,
     NodeStateStreamEvent,
     NodeSystemAction,
     NodeSystemHistory,
@@ -163,6 +164,15 @@ def _restart_anchor_timestamp(
 def _format_restart_timestamp(timestamp: int, timezone_name: str) -> str:
     scheduled_at = datetime.fromtimestamp(timestamp, ZoneInfo(timezone_name))
     return scheduled_at.strftime("%a, %d %b %Y · %H:%M %Z")
+
+
+def _format_restart_state_line(label: str, timestamp: int, restart_kind: str, timezone_name: str) -> str:
+    return f"{label}: {_format_restart_timestamp(timestamp, timezone_name)} [{restart_kind}]"
+
+
+_RESTART_STATE_LINE_CLASSES = "mod-subtitle text-xs"
+
+
 from .service_base import ModWebServiceSupport
 from .types import (
     ModWebAppLink,
@@ -1145,6 +1155,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
         initial_system_history: NodeSystemHistory,
         initial_app_entries: tuple[NodeAppEntry, ...],
         initial_restart_schedules: NodeRestartScheduleState | None,
+        initial_restart_state: NodeRestartState | None,
+        initial_portal_restart_state: NodeRestartState | None,
         initial_node_capacity: config.NodeCapacityProfile | None,
         initial_node_font_sources: config.NodeFontSourceSettings | None,
         initial_node_disk_settings: NodeDiskManagementState | None,
@@ -1249,6 +1261,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 node=node,
                 user=user,
                 initial_restart_schedules=initial_restart_schedules,
+                initial_restart_state=initial_restart_state,
+                initial_portal_restart_state=initial_portal_restart_state,
             )
 
             page_closed = False
@@ -1694,6 +1708,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
         node: ModWebNodeLink,
         user: ModWebUser,
         initial_restart_schedules: NodeRestartScheduleState | None,
+        initial_restart_state: NodeRestartState | None,
+        initial_portal_restart_state: NodeRestartState | None,
     ) -> None:
         action_buttons: list[Button] = []
         from nicegui.context import context as nicegui_context
@@ -1730,6 +1746,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             spec: _ModWebSystemActionSpec,
             dialog: Dialog,
             auto_restart_running_apps_checkbox: Checkbox,
+            silent_checkbox: Checkbox,
         ) -> Callable[[], Awaitable[None]]:
             async def _confirm() -> None:
                 for action_button in action_buttons:
@@ -1739,6 +1756,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         node,
                         spec.action,
                         _value_as_bool(auto_restart_running_apps_checkbox),
+                        _value_as_bool(silent_checkbox),
                         user,
                     )
                 except Exception as xcp:
@@ -1764,6 +1782,12 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         value=True,
                     ).props("dense color=accent").classes(
                         "mod-app-details-toggle mod-system-auto-restart-toggle"
+                    )
+                    silent_checkbox = ui.checkbox(
+                        "Silent",
+                        value=False,
+                    ).props("dense color=accent").classes(
+                        "mod-app-details-toggle mod-system-silent-toggle"
                     )
                     for spec in _SYSTEM_ACTION_SPECS:
                         if spec.required_target is not None and (
@@ -1792,6 +1816,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                                 auto_restart_running_apps_checkbox=(
                                                     auto_restart_running_apps_checkbox
                                                 ),
+                                                silent_checkbox=silent_checkbox,
                                             ),
                                         )
                         open_button = ui.button(spec.button_label, on_click=dialog.open).classes(
@@ -1803,6 +1828,33 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if initial_restart_schedules is None:
                     ui.label("Unavailable").classes("mod-subtitle text-sm")
                     return
+                if initial_restart_state is not None:
+                    ui.label(
+                        _format_restart_state_line(
+                            "Bot",
+                            initial_restart_state.process.timestamp,
+                            initial_restart_state.process.kind.value,
+                            "Australia/Melbourne",
+                        )
+                    ).classes(_RESTART_STATE_LINE_CLASSES)
+                    if initial_restart_state.voice is not None:
+                        ui.label(
+                            _format_restart_state_line(
+                                "Voice",
+                                initial_restart_state.voice.timestamp,
+                                initial_restart_state.voice.kind.value,
+                                "Australia/Melbourne",
+                            )
+                        ).classes(_RESTART_STATE_LINE_CLASSES)
+                if initial_portal_restart_state is not None:
+                    ui.label(
+                        _format_restart_state_line(
+                            "Portal",
+                            initial_portal_restart_state.process.timestamp,
+                            initial_portal_restart_state.process.kind.value,
+                            "Australia/Melbourne",
+                        )
+                    ).classes(_RESTART_STATE_LINE_CLASSES)
 
                 def _schedule_status(entry: NodeRestartScheduleEntry) -> str:
                     if not entry.enabled:

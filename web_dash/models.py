@@ -77,6 +77,7 @@ from .runtime_imports import (
     NodeMinecraftRecipeWorkspaceState,
     NodeModList,
     NodeModDependencyResolutionResult,
+    NodeModPortalVersionList,
     NodeModUploadBatchResult,
     NodeSaveList,
     NodeSaveMutationResult,
@@ -1173,6 +1174,31 @@ class ModWebModelsMixin(ModWebServiceSupport):
             return snapshot
         return None
 
+    def _node_is_yuki(self, node: ModWebNodeLink) -> bool:
+        if node.is_current and config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.YUKI:
+            return True
+        snapshot = self._known_bot_snapshot_for_node(node_name=node.node_name)
+        return snapshot is not None and snapshot.profile.bot_profile is config.BotProfileName.YUKI
+
+    def _portal_node_link(self) -> ModWebNodeLink | None:
+        for snapshot in self._known_bot_snapshots():
+            if snapshot.profile.bot_profile is not config.BotProfileName.PORTAL:
+                continue
+            mod_web: BotMetadataModWeb | None = snapshot.features.mod_web
+            if mod_web is None:
+                return None
+            return ModWebNodeLink(
+                node_name=mod_web.node_name,
+                label=snapshot.profile.label or "Portal",
+                url=mod_web_node_system_path(mod_web.node_name),
+                api_base_url=mod_web.node_api_base_url.rstrip("/"),
+                api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(mod_web.node_name, safe='')}/apps",
+                is_current=False,
+                latency_probe_url=self._node_api.ping_url(base_url=mod_web.node_api_base_url),
+                presence_stream_url=self._node_api.presence_stream_url(base_url=mod_web.node_api_base_url),
+            )
+        return None
+
     def _remote_node_link(self, node_name: str) -> ModWebNodeLink:
         key: str = node_name.casefold()
         for node in self._node_links():
@@ -1423,6 +1449,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         url_to_install: str,
         user: ModWebUser,
         selected_mod_ids: tuple[str, ...] | None = None,
+        version: str | None = None,
     ) -> NodeModUploadBatchResult:
         token: str = self._remote_token(
             node=node,
@@ -1435,7 +1462,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         try:
             response: Response = self._remote_sync_http_client().post(
                 url,
-                json={"url": url_to_install, "selected_mod_ids": selected_mod_ids},
+                json={"url": url_to_install, "selected_mod_ids": selected_mod_ids, "version": version},
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
             )
@@ -1458,6 +1485,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         app_name: str,
         url_to_install: str,
         user: ModWebUser,
+        version: str | None = None,
     ) -> NodeModDependencyResolutionResult:
         token: str = self._remote_token(
             node=node,
@@ -1467,6 +1495,41 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
         url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/resolve-link"
+        try:
+            response: Response = self._remote_sync_http_client().post(
+                url,
+                json={"url": url_to_install, "version": version},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as xcp:
+            raise RuntimeError(f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}") from xcp
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Remote node rejected the request: url={url} status={response.status_code} "
+                f"detail={self._response_detail(response)}"
+            )
+        try:
+            payload: object = cast(object, response.json())
+        except ValueError as xcp:
+            raise RuntimeError("Remote node returned invalid JSON.") from xcp
+        return NodeModDependencyResolutionResult.from_mapping(_json_object(payload, context="Remote node response"))
+
+    def _remote_mod_link_versions(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        url_to_install: str,
+        user: ModWebUser,
+    ) -> NodeModPortalVersionList:
+        token: str = self._remote_token(
+            node=node,
+            app_name=app_name,
+            scopes=(NodeApiScope.MODS_READ,),
+            user=user,
+        )
+        node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
+        url: str = f"{node_api_base_url.rstrip('/')}/apps/{quote(app_name, safe='')}/mods/resolve-link/versions"
         try:
             response: Response = self._remote_sync_http_client().post(
                 url,
@@ -1485,7 +1548,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             payload: object = cast(object, response.json())
         except ValueError as xcp:
             raise RuntimeError("Remote node returned invalid JSON.") from xcp
-        return NodeModDependencyResolutionResult.from_mapping(_json_object(payload, context="Remote node response"))
+        return NodeModPortalVersionList.from_mapping(_json_object(payload, context="Remote node response"))
 
     def _direct_mod_upload_target(
         self,

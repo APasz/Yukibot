@@ -94,6 +94,8 @@ from .runtime_imports import (
     NodeModMutationAction,
     NodeModDependencyEntry,
     NodeModDependencyResolutionResult,
+    NodeModPortalVersionEntry,
+    NodeModPortalVersionList,
     NodeModSummary,
     NodeSaveList,
     NodeSettingList,
@@ -1231,7 +1233,7 @@ class ModWebAppPageMixin(
                     raise TypeError("The Mods section requires a full mod page model.")
                 return self._mods_header_badges(
                     model.mods.summary,
-                    client_pack_version=model.client_pack_published_version,
+                    client_pack_version=self._supported_client_pack_version(model),
                 )
             case ModWebAppSectionKind.CONFIGS:
                 return self._config_section_badges(model=model, user=user)
@@ -3816,6 +3818,16 @@ class ModWebAppPageMixin(
         return PackFormat.GENERIC_ZIP
 
     @staticmethod
+    def _supported_client_pack_version(model: ModWebPageModel) -> str | None:
+        if not mod_capabilities_for_scope(model.app_scope).supports_client_pack:
+            return None
+        return model.client_pack_published_version
+
+    @staticmethod
+    def _supports_client_pack(model: ModWebPageModel) -> bool:
+        return mod_capabilities_for_scope(model.app_scope).supports_client_pack
+
+    @staticmethod
     def _render_modlist(
         mods: tuple[NodeModEntry, ...],
         *,
@@ -3824,6 +3836,7 @@ class ModWebAppPageMixin(
         output_format: ModWebModlistFormat,
         include_version: bool,
         include_filename: bool,
+        include_pack_version: bool = True,
         include_disabled: bool = False,
         include_builtin: bool = False,
         include_client: bool = True,
@@ -3883,7 +3896,7 @@ class ModWebAppPageMixin(
             return f"{delimiter}{value}{delimiter}"
 
         version_label = pack_version or "Unpublished"
-        plaintext_heading = f"{instance_name} [{version_label}]"
+        plaintext_heading = f"{instance_name} [{version_label}]" if include_pack_version else instance_name
 
         match output_format:
             case ModWebModlistFormat.PLAINTEXT:
@@ -3936,12 +3949,20 @@ class ModWebAppPageMixin(
                     if include_filename:
                         cells.append(markdown_cell(entry.archive_name))
                     rows.append(f"| {' | '.join(cells)} |")
-                heading = f"# {markdown_text(instance_name)} [{markdown_text(version_label)}]"
+                heading = (
+                    f"# {markdown_text(instance_name)} [{markdown_text(version_label)}]"
+                    if include_pack_version
+                    else f"# {markdown_text(instance_name)}"
+                )
                 body = "\n".join(rows)
                 return f"{heading}\n\n{body}"
             case ModWebModlistFormat.MARKDOWN_COMMONMARK:
                 body = "\n".join(f"- {display_line(entry, markdown_text)}" for entry in ordered_mods)
-                heading = f"# {markdown_text(instance_name)} [{markdown_text(version_label)}]"
+                heading = (
+                    f"# {markdown_text(instance_name)} [{markdown_text(version_label)}]"
+                    if include_pack_version
+                    else f"# {markdown_text(instance_name)}"
+                )
                 return f"{heading}\n\n{body}" if body else heading
             case ModWebModlistFormat.DISCORD:
                 lines: list[str] = []
@@ -3954,7 +3975,11 @@ class ModWebAppPageMixin(
                     if include_filename:
                         parts.append(f"({discord_code(entry.archive_name)})")
                     lines.append(f"- {' '.join(parts)}")
-                heading = f"**{discord_text(instance_name)} [{discord_text(version_label)}]**"
+                heading = (
+                    f"**{discord_text(instance_name)} [{discord_text(version_label)}]**"
+                    if include_pack_version
+                    else f"**{discord_text(instance_name)}**"
+                )
                 body = "\n".join(lines)
                 return f"{heading}\n\n{body}" if body else heading
             case _:
@@ -4345,6 +4370,11 @@ class ModWebAppPageMixin(
         direct_upload_transfer_id: int | None = None
         upload_placement = ModPlacement.SERVER_ENABLED
         mod_link_input: Input | None = None
+        mod_link_version_input: Input | None = None
+        mod_link_version_select: Select | None = None
+        mod_link_versions_button: Button | None = None
+        mod_link_versions_status_label: Label | None = None
+        mod_link_versions: NodeModPortalVersionList | None = None
         mod_link_install_button: Button | None = None
         mod_link_resolution: NodeModDependencyResolutionResult | None = None
         mod_link_dependency_checkboxes: dict[str, Checkbox] = {}
@@ -4382,6 +4412,9 @@ class ModWebAppPageMixin(
             if direct_upload_transfer_id is None:
                 return
             finish_direct_upload_transfer(error="Mod upload was interrupted because the app page was closed.")
+
+        def mod_portal_version_option_label(version: NodeModPortalVersionEntry) -> str:
+            return version.version
 
         def open_upload_picker() -> None:
             if inline_upload_control is None:
@@ -4443,13 +4476,64 @@ class ModWebAppPageMixin(
             )
 
         def open_mod_link_dialog() -> None:
-            nonlocal mod_link_resolution
+            nonlocal mod_link_resolution, mod_link_versions
             mod_link_resolution = None
+            mod_link_versions = None
             mod_link_dependency_checkboxes.clear()
             if mod_link_input is not None:
                 mod_link_input.set_value("")
+            if mod_link_version_input is not None:
+                mod_link_version_input.set_value("")
+            if mod_link_versions_status_label is not None:
+                mod_link_versions_status_label.set_text("")
+            mod_link_version_control.refresh()
             mod_link_dialog_body.refresh()
             mod_link_dialog.open()
+
+        def selected_mod_link_version() -> str | None:
+            if mod_link_version_select is not None:
+                selected_version = _value_as_text(mod_link_version_select).strip()
+                return selected_version or None
+            if mod_link_version_input is None:
+                raise RuntimeError("Mod link version input was not rendered.")
+            version = _value_as_text(mod_link_version_input).strip()
+            return version or None
+
+        async def _load_mod_link_versions() -> None:
+            nonlocal mod_link_versions, mod_link_resolution
+            if mod_link_input is None:
+                raise RuntimeError("Mod link input was not rendered.")
+            if mod_link_versions_status_label is None:
+                raise RuntimeError("Mod link versions status label was not rendered.")
+            try:
+                loaded_versions = await self._mod_link_versions(
+                    model=model,
+                    url_to_install=_value_as_text(mod_link_input),
+                    user=user,
+                )
+            except Exception as xcp:
+                mod_link_versions = None
+                mod_link_versions_status_label.set_text("Version lookup failed.")
+                ui.notify(f"Mod version lookup failed: {xcp}", type="negative", multi_line=True)
+                mod_link_version_control.refresh()
+                return
+            mod_link_versions = loaded_versions
+            mod_link_resolution = None
+            mod_link_dependency_checkboxes.clear()
+            mod_link_versions_status_label.set_text(
+                f"{len(loaded_versions.versions)} compatible version"
+                f"{'s' if len(loaded_versions.versions) != 1 else ''}."
+            )
+            mod_link_version_control.refresh()
+            mod_link_dialog_body.refresh()
+
+        async def load_mod_link_versions() -> None:
+            if mod_link_versions_button is None:
+                raise RuntimeError("Mod link versions button was not rendered.")
+            await self._run_with_loading_button(
+                button=mod_link_versions_button,
+                action=_load_mod_link_versions,
+            )
 
         async def _install_mod_link_from_dialog() -> None:
             if mod_link_input is None:
@@ -4466,6 +4550,7 @@ class ModWebAppPageMixin(
                         resolution=mod_link_resolution,
                         dependency_checkboxes=mod_link_dependency_checkboxes,
                     ),
+                    version=selected_mod_link_version(),
                 )
             except Exception as xcp:
                 ui.notify(f"Mod link install failed: {xcp}", type="negative", multi_line=True)
@@ -4484,6 +4569,7 @@ class ModWebAppPageMixin(
                     model=model,
                     url_to_install=raw_url,
                     user=user,
+                    version=selected_mod_link_version(),
                 )
             except Exception as xcp:
                 ui.notify(f"Mod link resolve failed: {xcp}", type="negative", multi_line=True)
@@ -4637,19 +4723,63 @@ class ModWebAppPageMixin(
 
                     def reset_mod_link_resolution(_event: object | None = None) -> None:
                         nonlocal mod_link_resolution
-                        if mod_link_resolution is None:
-                            return
                         mod_link_resolution = None
                         mod_link_dependency_checkboxes.clear()
                         mod_link_dialog_body.refresh()
+
+                    def reset_mod_link_url_state(_event: object | None = None) -> None:
+                        nonlocal mod_link_versions
+                        mod_link_versions = None
+                        if mod_link_versions_status_label is not None:
+                            mod_link_versions_status_label.set_text("")
+                        reset_mod_link_resolution()
+                        mod_link_version_control.refresh()
 
                     mod_link_input = (
                         ui.input(placeholder="https://mods.factorio.com/mod/example")
                         .props("filled square dense clearable hide-bottom-space color=accent")
                         .classes("w-full mod-config-input")
                     )
-                    mod_link_input.on("update:model-value", reset_mod_link_resolution)
+                    mod_link_input.on("update:model-value", reset_mod_link_url_state)
                     mod_link_input.on("keydown.enter", install_mod_link_from_dialog)
+                    with ui.row().classes("w-full gap-2 items-center"):
+                        @ui.refreshable
+                        def mod_link_version_control() -> None:
+                            nonlocal mod_link_version_input, mod_link_version_select
+                            mod_link_version_input = None
+                            mod_link_version_select = None
+                            if mod_link_versions is None:
+                                mod_link_version_input = (
+                                    ui.input("Version", placeholder="Latest compatible")
+                                    .props(
+                                        "filled square dense clearable stack-label hide-bottom-space color=accent"
+                                    )
+                                    .classes("grow mod-config-input")
+                                )
+                                mod_link_version_input.on("update:model-value", reset_mod_link_resolution)
+                                mod_link_version_input.on("keydown.enter", install_mod_link_from_dialog)
+                                return
+                            loaded_versions = mod_link_versions
+                            version_options = {
+                                "": "Latest compatible",
+                                **{
+                                    version.version: mod_portal_version_option_label(version)
+                                    for version in loaded_versions.versions
+                                },
+                            }
+                            mod_link_version_select = (
+                                ui.select(version_options, value="", label="Version")
+                                .props("filled square dense stack-label hide-bottom-space color=accent options-dark")
+                                .classes("grow mod-config-input")
+                            )
+                            mod_link_version_select.on("update:model-value", reset_mod_link_resolution)
+
+                        mod_link_version_control()
+                        mod_link_versions_button = ui.button(
+                            "Load Versions",
+                            on_click=load_mod_link_versions,
+                        ).classes("mod-list-button secondary shrink-0")
+                    mod_link_versions_status_label = ui.label("").classes("mod-subtitle text-xs")
 
                     @ui.refreshable
                     def mod_link_dialog_body() -> None:
@@ -5705,10 +5835,11 @@ class ModWebAppPageMixin(
                         return self._render_modlist(
                             model.mods.mods,
                             instance_name=model.app_friendly,
-                            pack_version=model.client_pack_published_version,
+                            pack_version=self._supported_client_pack_version(model),
                             output_format=ModWebModlistFormat(_value_as_text(modlist_format_select)),
                             include_version=bool(_value_as_object(modlist_include_version)),
                             include_filename=bool(_value_as_object(modlist_include_filename)),
+                            include_pack_version=self._supports_client_pack(model),
                             include_disabled=bool(_value_as_object(modlist_include_disabled)),
                             include_builtin=bool(_value_as_object(modlist_include_builtin)),
                             include_client=bool(_value_as_object(modlist_include_client)),

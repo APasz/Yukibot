@@ -1459,6 +1459,21 @@ class ModWebChatMixin(ModWebServiceSupport):
                   }});
                   window.modWebChatTimeObserver.observe(document.body, {{childList: true, subtree: true}});
                 }};
+                const openMediaLinkInNewTab = (event) => {{
+                  if (event.button !== 0) {{
+                    return;
+                  }}
+                  const link = event.currentTarget;
+                  if (!(link instanceof HTMLAnchorElement) || !link.href) {{
+                    return;
+                  }}
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const opened = window.open(link.href, '_blank', 'noopener,noreferrer');
+                  if (opened) {{
+                    opened.opener = null;
+                  }}
+                }};
                 const attachMediaListeners = (timelineId, unreadBarId, unreadCountId) => {{
                   const timeline = scrollTargetFor(timelineId);
                   if (!timeline) {{
@@ -1484,6 +1499,13 @@ class ModWebChatMixin(ModWebServiceSupport):
                       resizeObserver.observe(media);
                       media._modChatResizeObserver = resizeObserver;
                     }}
+                  }}
+                  for (const link of timeline.querySelectorAll('a.mod-chat-media-link[href]')) {{
+                    if (link.dataset.modChatOpenObserved === '1') {{
+                      continue;
+                    }}
+                    link.dataset.modChatOpenObserved = '1';
+                    link.addEventListener('click', openMediaLinkInNewTab, {{capture: true}});
                   }}
                 }};
                 const observeTimelineMutations = (timelineId, unreadBarId, unreadCountId) => {{
@@ -2573,9 +2595,8 @@ class ModWebChatMixin(ModWebServiceSupport):
         else:
             raise ValueError(f"Unsupported chat media preview kind: {preview.kind}")
         return (
-            f'<div class="mod-chat-media-link">{media}'
-            f'<a class="mod-chat-media-caption" href="{safe_url}" target="_blank" rel="noopener noreferrer">'
-            f"{safe_label}</a></div>"
+            f'<a class="mod-chat-media-link" href="{safe_url}" target="_blank" rel="noopener noreferrer">'
+            f'{media}<span class="mod-chat-media-caption">{safe_label}</span></a>'
         )
 
     @classmethod
@@ -2637,7 +2658,61 @@ class ModWebChatMixin(ModWebServiceSupport):
     def _chat_event_display_content(self, event: ChatEvent) -> str:
         if self._chat_event_hides_body_content(event):
             return ""
-        return self._chat_event_content(event)
+        content = self._chat_event_content(event).strip()
+        if self._chat_event_content_is_redundant_media(event, content):
+            return ""
+        return content
+
+    @classmethod
+    def _chat_event_content_is_redundant_media(cls, event: ChatEvent, content: str) -> bool:
+        if not content:
+            return False
+        return cls._chat_content_matches_previewed_link(event, content) or cls._chat_content_matches_previewed_sticker(
+            event,
+            content,
+        )
+
+    @classmethod
+    def _chat_content_matches_previewed_link(cls, event: ChatEvent, content: str) -> bool:
+        content_text = content.strip()
+        if not content_text:
+            return False
+        for link in event.links:
+            if cls._chat_media_preview_from_link(link) is None:
+                continue
+            if content_text in {link.url, link.original_url}:
+                return True
+        return False
+
+    @classmethod
+    def _chat_content_matches_previewed_sticker(cls, event: ChatEvent, content: str) -> bool:
+        sticker_names = cls._chat_sticker_content_names(content)
+        if not sticker_names:
+            return False
+
+        previewed_attachment_names = {
+            cls._normalise_chat_media_name(PurePosixPath(attachment.name).stem)
+            for attachment in event.attachments
+            if cls._chat_media_preview_from_attachment(attachment) is not None
+        }
+        return bool(previewed_attachment_names) and sticker_names <= previewed_attachment_names
+
+    @classmethod
+    def _chat_sticker_content_names(cls, content: str) -> set[str]:
+        prefix, separator, raw_names = content.partition(";")
+        if separator != ";":
+            return set()
+        if prefix.strip().casefold() not in {"sticker", "stickers"}:
+            return set()
+        return {
+            normalised_name
+            for raw_name in raw_names.split(",")
+            if (normalised_name := cls._normalise_chat_media_name(raw_name))
+        }
+
+    @staticmethod
+    def _normalise_chat_media_name(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip().casefold()
 
     def _chat_event_copy_text(self, event: ChatEvent) -> str:
         content: str = self._chat_event_content(event).strip()
@@ -2756,24 +2831,30 @@ class ModWebChatMixin(ModWebServiceSupport):
         return room_id
 
     def _discord_chat_event_source_label(self, event: ChatEvent) -> str:
+        guild_id: int | None = self._discord_chat_event_guild_id(event)
         guild_name: str | None = self._discord_chat_event_guild_name(event)
         channel_name: str | None = self._discord_chat_event_channel_name(event)
-        if guild_name is None:
-            return channel_name or event.source_label or "Discord"
-        if self._discord_guild_has_multiple_room_channels(event.room_id, guild_id=event.source_guild_id):
+        guild_label = guild_name or "Discord"
+        if self._discord_guild_has_multiple_room_channels(event.room_id, guild_id=guild_id):
             if channel_name is not None:
-                return f"{guild_name}.{channel_name}"
-        return guild_name
+                return f"{guild_label}.{channel_name}"
+        if guild_id is not None:
+            return guild_label
+        return channel_name or event.source_label or "Discord"
+
+    def _discord_chat_event_guild_id(self, event: ChatEvent) -> int | None:
+        if event.source_guild_id is not None:
+            return event.source_guild_id
+        source_channel: object | None = self._discord_chat_source_channel(event)
+        cached_guild_id = getattr(source_channel, "guild_id", None)
+        if isinstance(cached_guild_id, int | str):
+            return int(cached_guild_id)
+        return None
 
     def _discord_chat_event_guild_name(self, event: ChatEvent) -> str | None:
         if event.source_guild_name is not None and event.source_guild_name.strip():
             return event.source_guild_name
-        guild_id: int | None = event.source_guild_id
-        if guild_id is None:
-            source_channel: object | None = self._discord_chat_source_channel(event)
-            cached_guild_id = getattr(source_channel, "guild_id", None)
-            if isinstance(cached_guild_id, int | str):
-                guild_id = int(cached_guild_id)
+        guild_id: int | None = self._discord_chat_event_guild_id(event)
         if guild_id is None:
             return None
         manager: App_Manager | None = self._manager

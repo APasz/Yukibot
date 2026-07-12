@@ -20,6 +20,7 @@ import config
 from _manager import App_Manager
 from config import Singleton
 from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
+from restart_state import RestartKind, mark_pending_process_restart, process_restart_kind
 
 log = logging.getLogger(__name__)
 _IGNORED_SYSTEM_MOUNTPOINTS = frozenset({"/boot", "/boot/efi", "/efi"})
@@ -756,7 +757,7 @@ async def restart_portal(
     silent: bool = False,
 ) -> None:
     try:
-        await request_portal_process_restart(subject=f"web:{ctx.user.id}")
+        await request_portal_process_restart(subject=f"web:{ctx.user.id}", restart_kind=RestartKind.MANUAL_BOT)
     except (RuntimeError, requests.RequestException) as xcp:
         log.error("Portal restart failed: %s", xcp)
         await ctx.respond("Unable to restart Portal.", flags=hikari.MessageFlag.EPHEMERAL)
@@ -768,7 +769,13 @@ async def restart_portal(
     await ctx.respond("Portal restarting.", flags=flags)
 
 
-async def request_portal_process_restart(*, subject: str) -> None:
+async def request_portal_process_restart(
+    *,
+    subject: str,
+    restart_kind: RestartKind = RestartKind.MANUAL_BOT,
+) -> None:
+    if restart_kind not in {RestartKind.SCHEDULED_BOT, RestartKind.MANUAL_BOT}:
+        raise ValueError("Portal process restart kind must be scheduled_bot or manual_bot.")
     token_secret = config.MOD_WEB_SERVER.token_secret
     if token_secret is None:
         raise RuntimeError("Portal restart requires a configured node API token secret.")
@@ -788,6 +795,7 @@ async def request_portal_process_restart(*, subject: str) -> None:
         _request_portal_restart,
         portal_target.restart_url,
         token,
+        restart_kind,
     )
 
 
@@ -810,9 +818,10 @@ def _configured_portal_node_name() -> str:
     return config.BotProfileName.PORTAL.value
 
 
-def _request_portal_restart(url: str, token: str) -> None:
+def _request_portal_restart(url: str, token: str, restart_kind: RestartKind) -> None:
     response = requests.post(
         url,
+        json={"restart_kind": restart_kind.value},
         headers={"Authorization": f"Bearer {token}"},
         timeout=_PORTAL_RESTART_REQUEST_TIMEOUT_SECONDS,
     )
@@ -852,6 +861,7 @@ async def restart(
     restart_type = restart_type.strip().lower()
     restart_sys = True if restart_type == "system" else False
 
+    mark_pending_process_restart(process_restart_kind(scheduled=False, restart_sys=restart_sys))
     await _prepare_restart(bot=bot, manager=manager)
 
     if me := bot.get_me():
@@ -885,9 +895,14 @@ async def scheduled_restart(
     reason: str,
     message_channel_id: hikari.Snowflakeish | None,
     suppress_notifications: bool = False,
+    scheduled: bool = True,
+    silent: bool = False,
 ) -> None:
     restart_kind = restart_type.strip().lower()
     restart_sys = restart_kind == "system"
+    mark_pending_process_restart(process_restart_kind(scheduled=scheduled, restart_sys=restart_sys))
+    if silent:
+        Path("silent_restart").touch()
     await _prepare_restart(bot=bot, manager=manager)
     await bot.update_presence(
         activity=hikari.Activity(name=f"!!! Scheduled {restart_kind} restart", type=hikari.ActivityType.CUSTOM),

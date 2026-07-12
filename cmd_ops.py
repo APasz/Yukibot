@@ -13,6 +13,7 @@ from _security import Access_Control
 from cmd_music import MusicService
 from cmd_voice import VoiceTTSService
 from restart_targets import RestartTarget
+from restart_state import RestartKind, record_voice_restart
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ async def reset_voice_runtime(ctx: lightbulb.Context) -> None:
             music = None
 
     await reset_voice_runtime_services(voice_tts, music)
+    record_voice_restart(RestartKind.MANUAL_VOICE)
     await ctx.respond("Voice restart complete.")
 
 

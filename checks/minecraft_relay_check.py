@@ -1538,6 +1538,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
             message=SimpleNamespace(
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,

@@ -28,7 +28,6 @@ class ConsoleActionResult:
 
 
 ConsoleExecutor = Callable[[object, object | None], Awaitable[ConsoleActionResult]]
-ConsoleActionAuthorizer = Callable[["ConsoleAction"], Awaitable[object]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,9 +171,4 @@ async def execute_console_action(
             raise ValueError(f"{parameter.label} must not be empty.")
         parsed_value = parameter.parse(raw_value)
         parameter.remember_input(raw_value)
-    ensure_console_action_allowed = getattr(app, "ensure_console_action_allowed", None)
-    if ensure_console_action_allowed is not None:
-        if not callable(ensure_console_action_allowed):
-            raise TypeError("Console action authorizer must be callable.")
-        await cast(ConsoleActionAuthorizer, ensure_console_action_allowed)(action)
     return await action.execute(app, parsed_value)

@@ -57,6 +57,8 @@ from apps.factorio import (
     factorio_config_path,
     factorio_mod_portal_credentials_from_server_settings,
     factorio_mod_settings_path,
+    factorio_vanilla_mods,
+    list_factorio_mod_portal_release_options,
     parse_factorio_mod_portal_url,
     resolve_factorio_mod_portal_candidates,
 )
@@ -148,6 +150,22 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
         self.assertEqual(mod_id, "even-distribution")
 
+    def test_factorio_vanilla_mods_reads_data_info_json(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            vanilla_dir = data_dir / "space-age"
+            vanilla_dir.mkdir(parents=True)
+            (vanilla_dir / "info.json").write_text(
+                json.dumps({"name": "space-age", "title": "Space Age", "version": "2.1.9"}),
+                encoding="utf-8",
+            )
+
+            mods = factorio_vanilla_mods(data_dir)
+
+        self.assertEqual(tuple(mods), ("space-age",))
+        self.assertEqual(mods["space-age"].title, "Space Age")
+        self.assertEqual(mods["space-age"].version, "2.1.9")
+
     def test_parse_factorio_mod_portal_url_rejects_non_portal_url(self) -> None:
         with self.assertRaisesRegex(ValueError, "mods.factorio.com"):
             parse_factorio_mod_portal_url("https://example.com/mod/invincible-construction-bots")
@@ -181,6 +199,55 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
         self.assertEqual(selected.file_name, "example_2.0.0.zip")
 
+    def test_select_factorio_mod_portal_release_can_select_requested_version(self) -> None:
+        old_release = _factorio_mod_portal_release_from_mapping(
+            {
+                "download_url": "/download/example/1.0.0",
+                "file_name": "example_1.0.0.zip",
+                "version": "1.0.0",
+                "sha1": "0" * 40,
+                "released_at": "2025-01-01T00:00:00.000000Z",
+                "info_json": {"factorio_version": "2.0"},
+            }
+        )
+        latest_release = _factorio_mod_portal_release_from_mapping(
+            {
+                "download_url": "/download/example/2.0.0",
+                "file_name": "example_2.0.0.zip",
+                "version": "2.0.0",
+                "sha1": "1" * 40,
+                "released_at": "2026-01-01T00:00:00.000000Z",
+                "info_json": {"factorio_version": "2.0"},
+            }
+        )
+
+        selected = _select_factorio_mod_portal_release(
+            (old_release, latest_release),
+            factorio_version=AppVersion(main="2.0.68"),
+            requested_version="1.0.0",
+        )
+
+        self.assertEqual(selected.file_name, "example_1.0.0.zip")
+
+    def test_select_factorio_mod_portal_release_rejects_incompatible_requested_version(self) -> None:
+        release = _factorio_mod_portal_release_from_mapping(
+            {
+                "download_url": "/download/example/1.0.0",
+                "file_name": "example_1.0.0.zip",
+                "version": "1.0.0",
+                "sha1": "0" * 40,
+                "released_at": "2025-01-01T00:00:00.000000Z",
+                "info_json": {"factorio_version": "1.1"},
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "not compatible"):
+            _select_factorio_mod_portal_release(
+                (release,),
+                factorio_version=AppVersion(main="2.0.68"),
+                requested_version="1.0.0",
+            )
+
     def test_factorio_mod_portal_release_extracts_required_dependencies(self) -> None:
         release = _factorio_mod_portal_release_from_mapping(
             {
@@ -193,7 +260,9 @@ class FactorioVersionDetectionTests(unittest.TestCase):
                     "factorio_version": "2.0",
                     "dependencies": [
                         "base >= 2.0.0",
+                        "base>=2.0.0",
                         "required-lib >= 1.0.0",
+                        "compact-required-lib>=1.0.0",
                         "? optional-lib",
                         "+ recommended-lib",
                         "! incompatible-lib",
@@ -204,7 +273,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(release.dependencies, ("required-lib", "hidden-required-lib"))
+        self.assertEqual(release.dependencies, ("required-lib", "compact-required-lib", "hidden-required-lib"))
 
     def test_factorio_mod_portal_resolution_ignores_recommended_dependencies(self) -> None:
         def release_payload(mod_id: str, dependencies: list[str]) -> dict[str, object]:
@@ -339,6 +408,143 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         self.assertEqual(resolution.candidates[1].required_by, ("root",))
         self.assertEqual(resolution.candidates[1].dependency_ids, ("dep-two",))
         self.assertEqual(resolution.candidates[2].required_by, ("dep-one",))
+
+    def test_factorio_mod_portal_resolution_uses_requested_root_version_dependencies(self) -> None:
+        def release_payload(
+            mod_id: str,
+            version: str,
+            dependencies: list[str],
+            released_at: str,
+        ) -> dict[str, object]:
+            return {
+                "download_url": f"/download/{mod_id}/{version}",
+                "file_name": f"{mod_id}_{version}.zip",
+                "version": version,
+                "sha1": "0" * 40,
+                "released_at": released_at,
+                "info_json": {"factorio_version": "2.0", "dependencies": dependencies},
+            }
+
+        class _FakeResponse:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.status = 200
+                self._payload = payload
+
+            async def __aenter__(self) -> "_FakeResponse":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def json(self) -> dict[str, object]:
+                return self._payload
+
+        class _FakeSession:
+            async def __aenter__(self) -> "_FakeSession":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            def get(self, url: str, **_kwargs: object) -> _FakeResponse:
+                mod_id = url.split("/api/mods/", maxsplit=1)[1].removesuffix("/full")
+                payloads: dict[str, dict[str, object]] = {
+                    "root": {
+                        "name": "root",
+                        "title": "Root Mod",
+                        "releases": [
+                            release_payload("root", "1.0.0", ["legacy-dep"], "2025-01-01T00:00:00.000000Z"),
+                            release_payload("root", "2.0.0", ["new-dep"], "2026-01-01T00:00:00.000000Z"),
+                        ],
+                    },
+                    "legacy-dep": {
+                        "name": "legacy-dep",
+                        "title": "Legacy Dependency",
+                        "releases": [release_payload("legacy-dep", "1.0.0", [], "2025-01-01T00:00:00.000000Z")],
+                    },
+                    "new-dep": {
+                        "name": "new-dep",
+                        "title": "New Dependency",
+                        "releases": [release_payload("new-dep", "1.0.0", [], "2026-01-01T00:00:00.000000Z")],
+                    },
+                }
+                return _FakeResponse(payloads[mod_id])
+
+        with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+            resolution = asyncio.run(
+                resolve_factorio_mod_portal_candidates(
+                    page_url="https://mods.factorio.com/mod/root",
+                    factorio_version=AppVersion(main="2.0.68"),
+                    requested_mod_version="1.0.0",
+                )
+            )
+
+        self.assertEqual(tuple(candidate.mod_id for candidate in resolution.candidates), ("root", "legacy-dep"))
+        self.assertEqual(resolution.candidates[0].version, "1.0.0")
+        self.assertEqual(resolution.candidates[0].dependency_ids, ("legacy-dep",))
+
+    def test_factorio_mod_portal_release_options_filter_to_installed_game_version(self) -> None:
+        class _FakeResponse:
+            status = 200
+
+            async def __aenter__(self) -> "_FakeResponse":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def json(self) -> dict[str, object]:
+                return {
+                    "name": "root",
+                    "title": "Root Mod",
+                    "releases": [
+                        {
+                            "download_url": "/download/root/1.0.0",
+                            "file_name": "root_1.0.0.zip",
+                            "version": "1.0.0",
+                            "sha1": "0" * 40,
+                            "released_at": "2025-01-01T00:00:00.000000Z",
+                            "info_json": {"factorio_version": "1.1"},
+                        },
+                        {
+                            "download_url": "/download/root/2.0.0",
+                            "file_name": "root_2.0.0.zip",
+                            "version": "2.0.0",
+                            "sha1": "0" * 40,
+                            "released_at": "2026-01-01T00:00:00.000000Z",
+                            "info_json": {"factorio_version": "2.0"},
+                        },
+                        {
+                            "download_url": "/download/root/2.1.0",
+                            "file_name": "root_2.1.0.zip",
+                            "version": "2.1.0",
+                            "sha1": "0" * 40,
+                            "released_at": "2026-02-01T00:00:00.000000Z",
+                            "info_json": {"factorio_version": "2.0"},
+                        },
+                    ],
+                }
+
+        class _FakeSession:
+            async def __aenter__(self) -> "_FakeSession":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            def get(self, _url: str, **_kwargs: object) -> _FakeResponse:
+                return _FakeResponse()
+
+        with patch("apps.factorio.aiohttp.ClientSession", return_value=_FakeSession()):
+            versions = asyncio.run(
+                list_factorio_mod_portal_release_options(
+                    page_url="https://mods.factorio.com/mod/root",
+                    factorio_version=AppVersion(main="2.0.68"),
+                )
+            )
+
+        self.assertEqual(tuple(version.version for version in versions), ("2.1.0", "2.0.0"))
+        self.assertEqual(versions[0].file_name, "root_2.1.0.zip")
 
     def test_factorio_mod_portal_resolution_tracks_shared_dependency_parents(self) -> None:
         def release_payload(mod_id: str, dependencies: list[str]) -> dict[str, object]:

@@ -17,7 +17,10 @@ from _discord import (
     App_Bound,
     DC_Bound,
     DC_Relay,
+    Fileish,
     Message,
+    OutboundRelayFormatter,
+    RelayOutboundFormatOptions,
     RelayWorkerStatus,
     URLVariant,
     normalise_attachment_relay_name,
@@ -81,6 +84,15 @@ def _make_textable_channel(
     )
 
 
+def _make_sticker(
+    *,
+    sticker_id: int = 777,
+    name: str = "Party Blob",
+    format_type: hikari.StickerFormatType = hikari.StickerFormatType.PNG,
+) -> hikari.PartialSticker:
+    return hikari.PartialSticker(id=hikari.Snowflake(sticker_id), name=name, format_type=format_type)
+
+
 class DiscordRelayAttachmentNameTests(unittest.TestCase):
     def test_attachment_name_prefers_human_title_stem_but_keeps_filename_extension(self) -> None:
         attachment = _make_attachment(title="Sweet Dreams", filename="SPOILER_abc123.png", media_type="image/png")
@@ -102,6 +114,21 @@ class DiscordRelayAttachmentNameTests(unittest.TestCase):
         result = normalise_attachment_relay_name(attachment)
 
         self.assertEqual(result, "cat photo.jpg")
+
+    def test_formatter_uses_public_source_url_for_plain_file_rendering(self) -> None:
+        payload = App_Bound(
+            _make_textable_channel(channel_id=hikari.Snowflake(1), name="relay-a"),
+            "look",
+            "Erin",
+            [Fileish("/tmp/cat.png", "cat.png", source_url="https://cdn.discordapp.com/attachments/cat.png")],
+        )
+
+        rendered = OutboundRelayFormatter.format_payload(
+            payload,
+            RelayOutboundFormatOptions(base_content=payload.content),
+        )
+
+        self.assertEqual(rendered, "look https://cdn.discordapp.com/attachments/cat.png")
 
     def test_tenor_store_cache_exposes_multiple_gif_variants(self) -> None:
         raw_html = """
@@ -896,11 +923,9 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_event_from_app_bound_preserves_discord_guild_name(self) -> None:
         relay = object.__new__(DC_Relay)
         cast(Any, relay).names = _NamesStub(relay_display_name="AliceGame")
-        cast(Any, relay).manager = SimpleNamespace(
-            bot=SimpleNamespace(
-                cache=SimpleNamespace(
-                    get_guild=lambda guild_id: SimpleNamespace(name="Friends") if int(guild_id) == 100 else None
-                )
+        cast(Any, relay).bot = SimpleNamespace(
+            cache=SimpleNamespace(
+                get_guild=lambda guild_id: SimpleNamespace(name="Friends") if int(guild_id) == 100 else None
             )
         )
         channel = hikari.TextableChannel(
@@ -1537,6 +1562,39 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(channel.send.await_args.kwargs["reply"], hikari.Snowflake(777))
 
+    async def test_send_chat_event_to_discord_uses_url_resource_for_remote_attachment(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay._channel_objects = {}
+        relay.chat_hub = ChatHub()
+        cast(Any, relay)._chat_apps = {}
+        cast(Any, relay)._discord_text_for_event = AsyncMock(return_value=("sticker; Wave", set()))
+        cast(Any, relay).resolve_channel = AsyncMock()
+        channel_id = hikari.Snowflake(111)
+        channel = SimpleNamespace(
+            id=channel_id,
+            guild_id=hikari.Snowflake(10),
+            send=AsyncMock(return_value=SimpleNamespace(id=hikari.Snowflake(903))),
+        )
+        relay._channel_objects[channel_id] = cast(Any, channel)
+        attachment_url = "https://media.discordapp.net/stickers/1175987619188977674.png?size=4096&passthrough=false"
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.discord_channel(222),
+            author=ChatAuthor(ChatAuthorKind.DISCORD_USER, "APasz", discord_user_id=42),
+            content="sticker; Wave",
+            attachments=(ChatAttachment(uri=attachment_url, name="Wave.png", source_url=attachment_url),),
+        )
+
+        await relay._send_chat_event_to_discord(event, channel_id)
+
+        channel.send.assert_awaited_once()
+        resources = channel.send.await_args.kwargs["attachments"]
+        self.assertEqual(len(resources), 1)
+        resource = resources[0]
+        self.assertIsInstance(resource, hikari.URL)
+        self.assertEqual(resource.url, attachment_url)
+        self.assertEqual(resource.filename, "Wave.png")
+
     async def test_on_dc_message_ignores_tracked_relay_echo_before_shared_room_mirroring(self) -> None:
         class _RelayApp:
             def __init__(self, *, name: str, friendly: str, scope: str, am_receiver: object) -> None:
@@ -1594,6 +1652,7 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,
@@ -1859,7 +1918,10 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(
                             content="forwarded body",
                             attachments=(object(),),
-                            stickers=(object(), object()),
+                            stickers=(
+                                _make_sticker(sticker_id=1, name="First Blob"),
+                                _make_sticker(sticker_id=2, name="Second Blob"),
+                            ),
                         ),
                     )
                 ),
@@ -1868,7 +1930,38 @@ class DiscordRelayDiscordEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         rendered = DC_Relay._forwarded_snapshot_content(message)
 
-        self.assertEqual(rendered, "forwarded body, attachment, 2 stickers")
+        self.assertEqual(rendered, "forwarded body, attachment, stickers; First Blob, Second Blob")
+
+    def test_compose_relay_message_body_uses_sticker_name_for_sticker_only_message(self) -> None:
+        rendered = DC_Relay._compose_relay_message_body(
+            "",
+            attachment_count=0,
+            sticker_count=1,
+            sticker_names=("Party Blob",),
+        )
+
+        self.assertEqual(rendered, "sticker; Party Blob")
+
+    def test_forwarded_snapshot_content_uses_sticker_name(self) -> None:
+        message = cast(
+            hikari.Message,
+            cast(
+                Any,
+                SimpleNamespace(
+                    message_snapshots=(
+                        SimpleNamespace(
+                            content="",
+                            attachments=(),
+                            stickers=(_make_sticker(name="Party Blob"),),
+                        ),
+                    )
+                ),
+            ),
+        )
+
+        rendered = DC_Relay._forwarded_snapshot_content(message)
+
+        self.assertEqual(rendered, "sticker; Party Blob")
 
 
 class DiscordRelaySeenMessageTests(unittest.TestCase):
@@ -2092,6 +2185,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,
@@ -2143,6 +2237,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,
@@ -2192,6 +2287,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 message_snapshots=(
                     SimpleNamespace(
                         content="forwarded body",
@@ -2215,6 +2311,62 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         event = cast(Any, relay)._deliver_chat_event.await_args.args[0]
         self.assertEqual(event.content, "forwarded body, attachment")
         self.assertEqual(event.reference_kind, ChatReferenceKind.FORWARD)
+
+    async def test_on_dc_message_uses_sticker_name_when_message_has_no_text(self) -> None:
+        relay = object.__new__(DC_Relay)
+        relay.bot = cast(Any, object())
+        relay._channel_objects = {}
+        relay.seen_messages_id = set()
+        relay.seen_messages_order = deque()
+        setattr(cast(Any, relay), "names", _NamesStub())
+        cast(Any, relay)._chat_author_color = AsyncMock(return_value=None)
+        cast(Any, relay)._owns_shared_relay_channel = Mock(return_value=True)
+        cast(Any, relay)._is_active_app_chat_channel = AsyncMock(return_value=True)
+        cast(Any, relay)._deliver_chat_event = AsyncMock()
+        source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
+        cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
+        channel_id = hikari.Snowflake(101)
+        app = Mock()
+        app.name = "minecraft_alpha"
+        app.chat_channel_source = SimpleNamespace(value="default")
+        app._running = False
+        app.am_receiver = None
+        DC_Relay._chat_channels = {channel_id: {cast(Any, app)}}
+
+        ctx = SimpleNamespace(
+            is_human=True,
+            author=SimpleNamespace(is_bot=False),
+            channel_id=channel_id,
+            content="",
+            message_id=hikari.Snowflake(99),
+            guild_id=hikari.Snowflake(1),
+            author_id=hikari.Snowflake(456),
+            message=SimpleNamespace(
+                author=SimpleNamespace(is_bot=False),
+                type=hikari.MessageType.DEFAULT,
+                attachments=(),
+                stickers=(_make_sticker(name="Party Blob"),),
+                get_member_mentions=Mock(return_value=hikari.UNDEFINED),
+                user_mentions=hikari.UNDEFINED,
+                referenced_message=None,
+                message_reference=None,
+            ),
+        )
+
+        try:
+            await relay.on_dc_message(cast(Any, ctx))
+        finally:
+            DC_Relay._chat_channels.clear()
+
+        cast(Any, relay)._deliver_chat_event.assert_awaited_once()
+        event = cast(Any, relay)._deliver_chat_event.await_args.args[0]
+        self.assertEqual(event.content, "sticker; Party Blob")
+        self.assertEqual(len(event.attachments), 1)
+        self.assertEqual(event.attachments[0].name, "Party Blob.png")
+        self.assertEqual(
+            event.attachments[0].uri,
+            "https://media.discordapp.net/stickers/777.png?size=4096&passthrough=false",
+        )
 
     async def test_on_dc_message_uses_one_pickup_app_for_shared_default_channel(self) -> None:
         relay = object.__new__(DC_Relay)
@@ -2255,6 +2407,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,
@@ -2314,6 +2467,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,
@@ -2336,6 +2490,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         relay = object.__new__(DC_Relay)
         relay.bot = cast(Any, object())
         relay._channel_objects = {}
+        relay.chat_hub = ChatHub()
         relay.seen_messages_id = set()
         relay.seen_messages_order = deque()
         setattr(cast(Any, relay), "names", _NamesStub())
@@ -2372,6 +2527,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,
@@ -2439,6 +2595,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(attachment,),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,
@@ -2464,6 +2621,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         relay = object.__new__(DC_Relay)
         relay.bot = cast(Any, object())
         relay._channel_objects = {}
+        relay.chat_hub = ChatHub()
         relay.seen_messages_id = set()
         relay.seen_messages_order = deque()
         setattr(cast(Any, relay), "names", _NamesStub())
@@ -2471,7 +2629,6 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
         cast(Any, relay)._owns_shared_relay_channel = Mock(return_value=False)
         cast(Any, relay)._is_active_app_chat_channel = AsyncMock(return_value=True)
         cast(Any, relay)._deliver_chat_event = AsyncMock()
-        cast(Any, relay)._record_chat_event = Mock()
         cast(Any, relay)._send_chat_event_to_app = AsyncMock()
         source_channel = _make_textable_channel(channel_id=hikari.Snowflake(101), name="relay-a")
         cast(Any, relay).resolve_channel = AsyncMock(return_value=source_channel)
@@ -2517,6 +2674,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(first_attachment, second_attachment),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,
@@ -2530,14 +2688,27 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(side_effect=(Path("/tmp/cat.png"), RuntimeError("boom"))),
             ):
                 await relay.on_dc_message(cast(Any, ctx))
+            history = relay.chat_hub.history(app.name)
         finally:
             DC_Relay._chat_channels.clear()
+            relay.chat_hub.clear_room(app.name)
 
         sent_event, sent_app = cast(Any, relay)._send_chat_event_to_app.await_args.args
         self.assertEqual(sent_event.content, "hello [1 attachment failed to download]")
-        self.assertEqual(len(sent_event.attachments), 1)
-        self.assertEqual(sent_event.attachments[0].uri, "/tmp/cat.png")
+        self.assertEqual(len(sent_event.attachments), 2)
+        self.assertEqual(
+            {attachment.uri for attachment in sent_event.attachments},
+            {"/tmp/cat.png", "https://cdn.example.invalid/dog.png"},
+        )
         self.assertIs(sent_app, app)
+        self.assertEqual(len(history), 1)
+        history_event = history[0]
+        self.assertEqual(history_event.content, "hello [1 attachment failed to download]")
+        self.assertEqual(len(history_event.attachments), 2)
+        self.assertEqual(
+            {attachment.source_url for attachment in history_event.attachments},
+            {"https://cdn.example.invalid/cat.png", "https://cdn.example.invalid/dog.png"},
+        )
 
     async def test_on_dc_message_records_history_for_all_applicable_web_chat_rooms(self) -> None:
         relay = object.__new__(DC_Relay)
@@ -2579,6 +2750,7 @@ class DiscordRelayInboundMessageTests(unittest.IsolatedAsyncioTestCase):
                 author=SimpleNamespace(is_bot=False),
                 type=hikari.MessageType.DEFAULT,
                 attachments=(),
+                stickers=(),
                 get_member_mentions=Mock(return_value=hikari.UNDEFINED),
                 user_mentions=hikari.UNDEFINED,
                 message_reference=None,

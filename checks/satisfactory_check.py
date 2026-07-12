@@ -24,7 +24,9 @@ from apps.satisfactory import (
     Satisfactory_Config,
     SatisfactoryBlueprintOwnershipStore,
     SatisfactoryNetworkQuality,
+    SatisfactoryPlayers,
     SatisfactoryPlayerSessionMatcher,
+    SatisfactoryBridge,
     SatisfactorySaveHeader,
     SatisfactoryServerOptionsSnapshot,
     SatisfactoryServerState,
@@ -831,6 +833,45 @@ class SatisfactoryTests(unittest.IsolatedAsyncioTestCase):
             await app._warm_bridge()
 
         app._players.set_state.assert_not_called()
+
+    async def test_players_stop_cancels_cross_loop_poll_task(self) -> None:
+        app = object.__new__(Satisfactory)
+        app.name = "satisfactory_alpha"
+        app.friendly = "Satisfactory"
+        app._bridge = cast(SatisfactoryBridge, self.bridge)
+        app._sync_provider_text = Mock()  # type: ignore[method-assign]
+        players = SatisfactoryPlayers(app)
+        task_ready = threading.Event()
+        loop_holder: dict[str, asyncio.AbstractEventLoop] = {}
+
+        def _run_foreign_loop() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop_holder["loop"] = loop
+            try:
+                loop.run_until_complete(players.start())
+                task_ready.set()
+                loop.run_forever()
+            finally:
+                pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.close()
+
+        thread = threading.Thread(target=_run_foreign_loop, daemon=True)
+        thread.start()
+        self.assertTrue(task_ready.wait(timeout=1.0))
+        foreign_loop = loop_holder["loop"]
+
+        try:
+            await players.stop()
+            self.assertIsNone(players._players_task)
+        finally:
+            foreign_loop.call_soon_threadsafe(foreign_loop.stop)
+            thread.join(timeout=1.0)
+            self.assertFalse(thread.is_alive())
 
     def test_server_options_snapshot_parses_pending_server_options(self) -> None:
         snapshot = SatisfactoryServerOptionsSnapshot.from_api_payload(

@@ -26,9 +26,6 @@ voices/*
 todo.txt
 configuration.json
 enabled_apps.txt
-apps/factorio/moddb;factorio.jsonl
-apps/satisfactory/instances.json
-apps/sevendays/instances.json
 voice_users.json
 
 
@@ -39,3 +36,8 @@ resources/icon/*
 resources/minecraft_default_skins/*
 .cache/*
 .yukibot/map_cache.json
+tmp*
+restart_type_sentinel.json
+.yukibot/map_cache.json
+apps/*/instances.json
+moddb;*.jsonl

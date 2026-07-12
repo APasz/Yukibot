@@ -4586,6 +4586,16 @@ class ModWebTheme:
                     border: 1px solid rgba(63, 63, 70, 0.78);
                     background: rgba(10, 10, 14, 0.72) !important;
                 }}
+                .mod-mod-details-description,
+                .mod-mod-details-update-check,
+                .mod-mod-details-classification-section {{
+                    width: calc(100% - 2.5rem) !important;
+                    max-width: calc(100% - 2.5rem);
+                    min-width: 0;
+                    align-self: center;
+                    box-sizing: border-box;
+                    margin-inline: 1.25rem;
+                }}
                 .mod-mod-details-editor {{
                     width: calc(100% - 2.5rem) !important;
                     max-width: calc(100% - 2.5rem);
@@ -4697,6 +4707,9 @@ class ModWebTheme:
                         padding: 0.85rem 0.9rem 0.7rem;
                     }}
                     .mod-mod-details-links,
+                    .mod-mod-details-description,
+                    .mod-mod-details-update-check,
+                    .mod-mod-details-classification-section,
                     .mod-mod-details-editor,
                     .mod-mod-details-danger-zone {{
                         width: calc(100% - 1.8rem) !important;
@@ -5301,7 +5314,8 @@ class ModWebTheme:
                     padding-top: 0.2rem;
                 }}
                 .mod-chat-media-card {{
-                    flex: 1 1 min(20rem, 100%);
+                    flex: 0 1 auto;
+                    width: fit-content;
                     max-width: min(28rem, 100%);
                     border: 1px solid rgba(63, 63, 70, 0.82);
                     background:
@@ -5311,31 +5325,39 @@ class ModWebTheme:
                     overflow: hidden;
                 }}
                 .mod-chat-media-card > .nicegui-content {{
+                    display: block;
+                    width: fit-content;
+                    max-width: 100%;
                     padding: 0 !important;
                 }}
                 .mod-chat-media-link {{
-                    display: flex;
+                    display: inline-flex;
                     flex-direction: column;
                     gap: 0;
+                    width: fit-content;
+                    max-width: 100%;
                     color: #e4e4e7 !important;
+                    cursor: pointer;
                     text-decoration: none !important;
                 }}
                 .mod-chat-media-image,
                 .mod-chat-media-video {{
                     display: block;
-                    width: 100%;
+                    width: auto;
+                    max-width: 100%;
                     max-height: 19rem;
                     object-fit: contain;
                     background: linear-gradient(180deg, #020204, #08080c);
                 }}
                 .mod-chat-media-audio {{
                     display: block;
-                    width: 100%;
+                    width: min(20rem, 100%);
                     min-height: 2.2rem;
                     background: #020204;
                 }}
                 .mod-chat-media-caption {{
                     display: block;
+                    max-width: 100%;
                     padding: 0.38rem 0.5rem 0.42rem;
                     border-top: 1px solid rgba(63, 63, 70, 0.72);
                     color: var(--mod-dim);

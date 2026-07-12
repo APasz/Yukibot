@@ -64,7 +64,14 @@ from .runtime_imports import (
     NodeModEntry,
     NodeModMutationAction,
     NodeModMutationResult,
+    NodeModPortalVersionEntry,
+    NodeModPortalVersionList,
+    NodeModUpdateDependencyAction,
+    NodeModUpdateCheckResult,
+    NodeModUpdateStatus,
+    NodeModUploadBatchResult,
     NodeRestartScheduleState,
+    NodeRestartState,
     NodeSystemAction,
     NodeSystemActionResult,
     Power_Level,
@@ -78,6 +85,7 @@ from .runtime_imports import (
     required_app_mutation_level,
     required_app_mutation_scope,
     required_mod_mutation_level,
+    urlencode,
 )
 from .service_base import ModWebServiceSupport
 from .types import (
@@ -296,6 +304,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         relay_notice_progress: bool | None = None,
         relay_advancements_enabled: bool | None = None,
         factorio_chat_relay_use_shout: bool | None = None,
+        rcon_requires_online_players: bool | None = None,
         disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
@@ -329,6 +338,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload["relay_advancements_enabled"] = relay_advancements_enabled
         if factorio_chat_relay_use_shout is not None:
             json_payload["factorio_chat_relay_use_shout"] = factorio_chat_relay_use_shout
+        if rcon_requires_online_players is not None:
+            json_payload["rcon_requires_online_players"] = rcon_requires_online_players
         if disabled_activity_provider_ids is not None:
             json_payload["disabled_activity_provider_ids"] = list(disabled_activity_provider_ids)
         if action is NodeAppMutationAction.UPDATE_DETAILS:
@@ -412,6 +423,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         node: ModWebNodeLink,
         action: NodeSystemAction,
         auto_restart_running_apps: bool,
+        silent: bool,
         user: ModWebUser,
     ) -> NodeSystemActionResult:
         payload = await self._remote_json_async(
@@ -424,6 +436,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload={
                 "action": action.value,
                 "auto_restart_running_apps": auto_restart_running_apps,
+                "silent": silent,
             },
         )
         return NodeSystemActionResult.from_mapping(payload)
@@ -441,6 +454,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
             user=user,
         )
         return NodeRestartScheduleState.from_mapping(payload)
+
+    async def _remote_restart_state_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> NodeRestartState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/system/restart-state",
+            scopes=(NodeApiScope.NODE_OPERATE,),
+            user=user,
+        )
+        return NodeRestartState.from_mapping(payload)
 
     async def _remote_update_restart_schedule_async(
         self,
@@ -581,6 +608,75 @@ class ModWebActionsMixin(ModWebServiceSupport):
             json_payload={"action": action.value},
         )
         return NodeModMutationResult.from_mapping(payload)
+
+    async def _check_mod_update(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        user: ModWebUser,
+        version: str | None = None,
+    ) -> NodeModUpdateCheckResult:
+        if model.app_scope != config.AppScopes.factorio.value:
+            raise ValueError(f"{model.app_friendly} does not support mod update checks yet.")
+        if not self._user_has_level(user, Power_Level.user):
+            raise PermissionError("User access is required to check mod updates.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=(
+                f"/apps/{quote(model.app_name, safe='')}/mods/{quote(entry.name, safe='')}/check-update"
+                f"{'?' + urlencode({'version': version}) if version is not None else ''}"
+            ),
+            scopes=(NodeApiScope.MODS_READ,),
+            user=user,
+        )
+        return NodeModUpdateCheckResult.from_mapping(payload)
+
+    async def _mod_versions(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        user: ModWebUser,
+    ) -> NodeModPortalVersionList:
+        if model.app_scope != config.AppScopes.factorio.value:
+            raise ValueError(f"{model.app_friendly} does not support mod version discovery yet.")
+        if not self._user_has_level(user, Power_Level.user):
+            raise PermissionError("User access is required to inspect mod versions.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=f"/apps/{quote(model.app_name, safe='')}/mods/{quote(entry.name, safe='')}/versions",
+            scopes=(NodeApiScope.MODS_READ,),
+            user=user,
+        )
+        return NodeModPortalVersionList.from_mapping(payload)
+
+    async def _update_mod(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        user: ModWebUser,
+        version: str | None = None,
+    ) -> NodeModUploadBatchResult:
+        if model.app_scope != config.AppScopes.factorio.value:
+            raise ValueError(f"{model.app_friendly} does not support mod updates yet.")
+        if entry.placement is not ModPlacement.SERVER_ENABLED:
+            raise ValueError(f"Only enabled mods can be updated: {entry.friendly}.")
+        if not self._user_has_level(user, Power_Level.user):
+            raise PermissionError("User access is required to update mods.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=f"/apps/{quote(model.app_name, safe='')}/mods/{quote(entry.name, safe='')}/update",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"version": version},
+        )
+        return NodeModUploadBatchResult.from_mapping(payload)
 
     async def _update_mod_properties(
         self,
@@ -882,6 +978,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
         relay_notice_progress: bool | None = None,
         relay_advancements_enabled: bool | None = None,
         factorio_chat_relay_use_shout: bool | None = None,
+        rcon_requires_online_players: bool | None = None,
         disabled_activity_provider_ids: tuple[str, ...] | None = None,
         running_cpu_points: int | None = None,
         running_ram_points: int | None = None,
@@ -912,6 +1009,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             relay_notice_progress=relay_notice_progress,
             relay_advancements_enabled=relay_advancements_enabled,
             factorio_chat_relay_use_shout=factorio_chat_relay_use_shout,
+            rcon_requires_online_players=rcon_requires_online_players,
             disabled_activity_provider_ids=disabled_activity_provider_ids,
             running_cpu_points=running_cpu_points,
             running_ram_points=running_ram_points,
@@ -1199,6 +1297,12 @@ class ModWebActionsMixin(ModWebServiceSupport):
         detect_metadata_button: Button | None = None
         metadata_detection_save_button: Button | None = None
         save_properties_button: Button | None = None
+        check_update_button: Button | None = None
+        check_update_version_input: Input | None = None
+        check_update_version_select: Select | None = None
+        check_update_versions_button: Button | None = None
+        check_update_versions_status_label: Label | None = None
+        check_update_status_label: Label | None = None
         mod_page_rows: list[_ModPageEditorRow] = []
         mod_pages_container: Column | None = None
         mod_page_resolution_dialog: Dialog
@@ -1222,6 +1326,13 @@ class ModWebActionsMixin(ModWebServiceSupport):
             if use_curseforge_reference_inputs
             else "Paste the exact provider file page. Leave it blank to bundle the local file."
         )
+        can_check_update: bool = (
+            model.app_scope == config.AppScopes.factorio.value
+            and entry.placement is ModPlacement.SERVER_ENABLED
+            and self._user_has_level(user, Power_Level.user)
+        )
+        available_update_result: NodeModUpdateCheckResult | None = None
+        check_update_versions: NodeModPortalVersionList | None = None
         active_metadata_panel: Literal["overrides", "launcher"] | None = None
 
         def toggle_metadata_panel(panel: Literal["overrides", "launcher"]) -> None:
@@ -2138,6 +2249,184 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 action=_save_properties,
             )
 
+        def update_check_status_text(result: NodeModUpdateCheckResult) -> str:
+            blocked_dependencies = tuple(
+                dependency
+                for dependency in result.dependencies
+                if dependency.action is NodeModUpdateDependencyAction.BLOCKED
+            )
+            if blocked_dependencies:
+                details = ", ".join(
+                    f"{dependency.title} ({dependency.block_reason or 'blocked'})"
+                    for dependency in blocked_dependencies
+                )
+                return f"Blocked dependencies: {details}"
+            pending_dependency_count = sum(
+                1
+                for dependency in result.dependencies
+                if dependency.action
+                in {
+                    NodeModUpdateDependencyAction.INSTALL,
+                    NodeModUpdateDependencyAction.UPDATE,
+                }
+            )
+            dependency_suffix = (
+                ""
+                if pending_dependency_count == 0
+                else f"; includes {pending_dependency_count} required dependenc{'ies' if pending_dependency_count != 1 else 'y'}"
+            )
+            if result.status is NodeModUpdateStatus.CURRENT:
+                return f"Current: {result.latest_version}{dependency_suffix}"
+            if result.status is NodeModUpdateStatus.UNKNOWN_CURRENT:
+                return f"Latest: {result.latest_version}; local version unknown{dependency_suffix}"
+            if result.status is NodeModUpdateStatus.UPDATE_AVAILABLE:
+                return f"Update available{dependency_suffix}."
+            assert_never(result.status)
+
+        def update_check_button_text(result: NodeModUpdateCheckResult) -> str:
+            return f"{result.current_version or 'unknown'} -> {result.latest_version}"
+
+        def mod_portal_version_option_label(version: NodeModPortalVersionEntry) -> str:
+            return version.version
+
+        def selected_update_version() -> str | None:
+            if check_update_version_select is not None:
+                selected_version = _value_as_text(check_update_version_select).strip()
+                return selected_version or None
+            if check_update_version_input is None:
+                return None
+            version = _value_as_text(check_update_version_input).strip()
+            return version or None
+
+        def reset_update_check_state(_event: object | None = None) -> None:
+            nonlocal available_update_result
+            available_update_result = None
+            if check_update_button is not None:
+                check_update_button.set_text("Check Update")
+            if check_update_status_label is not None:
+                check_update_status_label.set_text("Not checked")
+
+        async def _load_update_versions() -> None:
+            nonlocal check_update_versions
+            if check_update_versions_status_label is None:
+                raise RuntimeError("Mod update versions status label was not rendered.")
+            try:
+                loaded_versions = await self._mod_versions(
+                    model=model,
+                    entry=entry,
+                    user=user,
+                )
+            except Exception as xcp:
+                check_update_versions = None
+                check_update_versions_status_label.set_text("Version lookup failed.")
+                ui.notify(f"Mod version lookup failed: {xcp}", type="negative", multi_line=True)
+                check_update_version_control.refresh()
+                return
+            check_update_versions = loaded_versions
+            reset_update_check_state()
+            check_update_versions_status_label.set_text(
+                f"{len(loaded_versions.versions)} compatible version"
+                f"{'s' if len(loaded_versions.versions) != 1 else ''}."
+            )
+            check_update_version_control.refresh()
+
+        async def load_update_versions() -> None:
+            if check_update_versions_button is None:
+                raise RuntimeError("Mod update versions button was not rendered.")
+            await self._run_with_loading_button(
+                button=check_update_versions_button,
+                action=_load_update_versions,
+            )
+
+        async def _run_update_check() -> None:
+            nonlocal available_update_result
+            if check_update_status_label is None:
+                raise RuntimeError("Update status label was not rendered.")
+            if check_update_button is None:
+                raise RuntimeError("Check Update button was not rendered.")
+            try:
+                result = await self._check_mod_update(
+                    model=model,
+                    entry=entry,
+                    user=user,
+                    version=selected_update_version(),
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Mod update check failed: node=%s app=%s mod=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    entry.name,
+                    xcp,
+                )
+                available_update_result = None
+                check_update_button.set_text("Check Update")
+                check_update_status_label.set_text("Update check failed.")
+                ui.notify(f"Mod update check failed: {xcp}", type="negative")
+                return
+            has_blocked_dependencies = any(
+                dependency.action is NodeModUpdateDependencyAction.BLOCKED
+                for dependency in result.dependencies
+            )
+            available_update_result = (
+                result
+                if result.status is NodeModUpdateStatus.UPDATE_AVAILABLE and not has_blocked_dependencies
+                else None
+            )
+            check_update_button.set_text(
+                update_check_button_text(result)
+                if available_update_result is not None
+                else "Check Update"
+            )
+            check_update_status_label.set_text(update_check_status_text(result))
+            has_dependency_work = any(
+                dependency.action
+                in {
+                    NodeModUpdateDependencyAction.BLOCKED,
+                    NodeModUpdateDependencyAction.INSTALL,
+                    NodeModUpdateDependencyAction.UPDATE,
+                }
+                for dependency in result.dependencies
+            )
+            notify_type: Literal["positive", "warning"] = (
+                "warning"
+                if result.status is NodeModUpdateStatus.UPDATE_AVAILABLE or has_dependency_work
+                else "positive"
+            )
+            ui.notify(result.message, type=notify_type)
+
+        async def _run_mod_update() -> None:
+            nonlocal available_update_result
+            try:
+                result = await self._update_mod(
+                    model=model,
+                    entry=entry,
+                    user=user,
+                    version=selected_update_version(),
+                )
+            except Exception as xcp:
+                log.warning(
+                    "Mod update failed: node=%s app=%s mod=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    entry.name,
+                    xcp,
+                )
+                ui.notify(f"Mod update failed: {xcp}", type="negative")
+                return
+            available_update_result = None
+            dialog.close()
+            ui.notify(result.message, type="positive")
+            self._guarded_reload(ui=ui)
+
+        async def check_update() -> None:
+            if check_update_button is None:
+                raise RuntimeError("Check Update button was not rendered.")
+            await self._run_with_loading_button(
+                button=check_update_button,
+                action=_run_mod_update if available_update_result is not None else _run_update_check,
+            )
+
         async def run_mod_action(action: NodeModMutationAction) -> None:
             try:
                 result: NodeModMutationResult = await self._mutate_mod(
@@ -2230,13 +2519,67 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                         new_tab=True,
                                     ).props('rel="noopener noreferrer"').classes("mod-mod-page-link")
                     if entry.description is not None:
-                        with ui.column().classes("mod-detail-item gap-1"):
+                        with ui.column().classes("mod-detail-item gap-1 mod-mod-details-description"):
                             ui.label("Description").classes("mod-stat-label")
                             ui.label(entry.description).classes("mod-stat-value break-words")
+                    if can_check_update:
+                        with ui.column().classes("mod-detail-item gap-2 mod-mod-details-update-check"):
+                            ui.label("Updates").classes("mod-stat-label")
+                            with ui.row().classes("w-full gap-2 items-center mod-mod-details-update-version-row"):
+                                @ui.refreshable
+                                def check_update_version_control() -> None:
+                                    nonlocal check_update_version_input, check_update_version_select
+                                    check_update_version_input = None
+                                    check_update_version_select = None
+                                    if check_update_versions is None:
+                                        check_update_version_input = (
+                                            ui.input("Version", placeholder="Latest compatible")
+                                            .props(
+                                                "filled square dense clearable stack-label "
+                                                "hide-bottom-space color=accent"
+                                            )
+                                            .classes("grow mod-config-input")
+                                        )
+                                        check_update_version_input.on("update:model-value", reset_update_check_state)
+                                        check_update_version_input.on("keydown.enter", check_update)
+                                        return
+                                    loaded_versions = check_update_versions
+                                    version_options = {
+                                        "": "Latest compatible",
+                                        **{
+                                            version.version: mod_portal_version_option_label(version)
+                                            for version in loaded_versions.versions
+                                        },
+                                    }
+                                    check_update_version_select = (
+                                        ui.select(version_options, value="", label="Version")
+                                        .props(
+                                            "filled square dense stack-label hide-bottom-space "
+                                            "color=accent options-dark"
+                                        )
+                                        .classes("grow mod-config-input")
+                                    )
+                                    check_update_version_select.on("update:model-value", reset_update_check_state)
+
+                                check_update_version_control()
+                                check_update_versions_button = ui.button(
+                                    "Load Versions",
+                                    on_click=load_update_versions,
+                                ).classes("mod-list-button secondary shrink-0")
+                            with ui.row().classes("w-full gap-2 items-center flex-wrap"):
+                                check_update_versions_status_label = ui.label("").classes(
+                                    "mod-subtitle text-xs grow"
+                                )
+                            with ui.row().classes("w-full gap-2 items-center flex-wrap"):
+                                check_update_button = ui.button(
+                                    "Check Update",
+                                    on_click=check_update,
+                                ).classes("mod-list-button secondary")
+                                check_update_status_label = ui.label("Not checked").classes(
+                                    "mod-subtitle text-sm grow"
+                                )
                     if can_edit_properties:
-                        with ui.column().classes(
-                            "w-full gap-3 mod-app-details-section mod-mod-details-editor"
-                        ):
+                        with ui.column().classes("mod-detail-item gap-2 mod-mod-details-classification-section"):
                             ui.label("Classification").classes("mod-stat-label")
                             with ui.row().classes(
                                 "w-full gap-2 flex-wrap mod-mod-details-classification"
@@ -2274,6 +2617,9 @@ class ModWebActionsMixin(ModWebServiceSupport):
                                     .props("filled square dense hide-bottom-space color=accent options-dark")
                                     .classes("mod-app-details-field mod-mod-details-select")
                                 )
+                        with ui.column().classes(
+                            "w-full gap-3 mod-app-details-section mod-mod-details-editor"
+                        ):
                             with ui.column().classes("w-full gap-2 mod-mod-details-subsection"):
                                 ui.label("Mod pages").classes("mod-stat-label")
                                 ui.label(

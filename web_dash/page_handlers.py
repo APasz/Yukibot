@@ -21,6 +21,7 @@ from .runtime_imports import (
     NodeModList,
     NodeModSummary,
     NodeRestartScheduleState,
+    NodeRestartState,
     NodeSaveList,
     NodeSettingList,
     NodeStateStreamEvent,
@@ -475,6 +476,27 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 log_method("Remote restart schedules unavailable: node=%s error=%s", node.node_name, xcp)
                 return None
 
+        async def _load_restart_state(node: ModWebNodeLink) -> NodeRestartState | None:
+            try:
+                return await self._remote_restart_state_async(node, user)
+            except Exception as xcp:
+                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
+                log_method("Remote restart state unavailable: node=%s error=%s", node.node_name, xcp)
+                return None
+
+        async def _load_portal_restart_state(node: ModWebNodeLink) -> NodeRestartState | None:
+            if not self._node_is_yuki(node):
+                return None
+            portal_node = self._portal_node_link()
+            if portal_node is None:
+                return None
+            try:
+                return await self._remote_restart_state_async(portal_node, user)
+            except Exception as xcp:
+                log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
+                log_method("Remote Portal restart state unavailable: node=%s error=%s", portal_node.node_name, xcp)
+                return None
+
         async def _load_node_capacity(node: ModWebNodeLink) -> config.NodeCapacityProfile | None:
             if not self._user_has_level(user, Power_Level.root):
                 return None
@@ -510,6 +532,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 system_history,
                 app_entries,
                 restart_schedules,
+                restart_state,
+                portal_restart_state,
                 node_capacity,
                 node_font_sources,
                 node_disk_settings,
@@ -518,6 +542,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 _load_system_history(node),
                 self._remote_apps_async(node, user),
                 _load_restart_schedules(node),
+                _load_restart_state(node),
+                _load_portal_restart_state(node),
                 _load_node_capacity(node),
                 _load_node_font_sources(node),
                 _load_node_disk_settings(node),
@@ -579,6 +605,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             initial_system_history=system_history,
             initial_app_entries=app_entries,
             initial_restart_schedules=restart_schedules,
+            initial_restart_state=restart_state,
+            initial_portal_restart_state=portal_restart_state,
             initial_node_capacity=node_capacity,
             initial_node_font_sources=node_font_sources,
             initial_node_disk_settings=node_disk_settings,

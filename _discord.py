@@ -9,7 +9,7 @@ import mimetypes
 import re
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence, Sized
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -519,11 +519,14 @@ class Fileish:
 @dataclass(slots=True, frozen=True)
 class DiscordAttachmentDownloadBatch:
     files: tuple[Fileish, ...]
+    failed_files: tuple[Fileish, ...] = ()
     failed_count: int = 0
 
     def __post_init__(self) -> None:
         if self.failed_count < 0:
             raise ValueError("failed_count must not be negative.")
+        if self.failed_count != len(self.failed_files):
+            raise ValueError("failed_count must match failed_files length.")
 
     @property
     def has_failures(self) -> bool:
@@ -1108,6 +1111,15 @@ class _DiscordRelayMessageRecord:
 
 class OutboundRelayFormatter:
     @staticmethod
+    def _public_source_url(file: Fileish) -> str | None:
+        if file.source_url is None:
+            return None
+        parsed_url = urlparse(file.source_url)
+        if parsed_url.scheme in {"http", "https"} and parsed_url.netloc:
+            return file.source_url
+        return None
+
+    @staticmethod
     def public_file_url(file: Fileish) -> str:
         public_url, _ = Utilities.linkify(Path(file.uri))
         return public_url
@@ -1132,10 +1144,10 @@ class OutboundRelayFormatter:
 
         rendered_files: list[str] = []
         for file in cls._sorted_files(payload.files):
-            public_url = cls.public_file_url(file)
             if options.file_renderer is None:
-                rendered = public_url
+                rendered = cls._public_source_url(file) or cls.public_file_url(file)
             else:
+                public_url = cls._public_source_url(file) or cls.public_file_url(file)
                 rendered = options.file_renderer(file, public_url)
             if rendered is None:
                 continue
@@ -1160,7 +1172,7 @@ def relay_reference_kind_for_message(message: hikari.Message) -> RelayMessageRef
     if message.type is hikari.MessageType.REPLY:
         return RelayMessageReferenceKind.REPLY
     reference = message.message_reference
-    if reference is not None and getattr(reference, "type", None) is hikari_messages.MessageReferenceType.FORWARD:
+    if reference is not None and reference.type is hikari_messages.MessageReferenceType.FORWARD:
         return RelayMessageReferenceKind.FORWARD
     return RelayMessageReferenceKind.NONE
 
@@ -1211,8 +1223,37 @@ def _fileish(attachment: ChatAttachment) -> Fileish:
     return Fileish(uri=attachment.uri, name=attachment.name, source_url=attachment.source_url)
 
 
+def _is_public_http_url(value: str) -> bool:
+    parsed_url = urlparse(value)
+    return parsed_url.scheme in {"http", "https"} and bool(parsed_url.netloc)
+
+
+def _discord_attachment_resource(attachment: ChatAttachment) -> hikari.File | hikari.URL:
+    if _is_public_http_url(attachment.uri):
+        return hikari.URL(attachment.uri, attachment.name)
+    return hikari.File(attachment.uri, attachment.name)
+
+
 def _discord_attachment_fileish(attachment: hikari.Attachment) -> Fileish:
     return Fileish(uri=attachment.url, name=normalise_attachment_relay_name(attachment), source_url=attachment.url)
+
+
+def _sticker_image_extension(sticker: hikari.PartialSticker) -> str | None:
+    sticker_format = hikari.StickerFormatType(sticker.format_type)
+    if sticker_format is hikari.StickerFormatType.LOTTIE:
+        return None
+    if sticker_format is hikari.StickerFormatType.GIF:
+        return ".gif"
+    return ".png"
+
+
+def _discord_sticker_fileish(sticker: hikari.PartialSticker) -> Fileish | None:
+    extension = _sticker_image_extension(sticker)
+    if extension is None:
+        return None
+    stem = _normalise_attachment_stem(sticker.name) or f"sticker-{int(sticker.id)}"
+    url = str(sticker.make_url())
+    return Fileish(uri=url, name=f"{stem}{extension}", source_url=url)
 
 
 def _chat_link_variant(variant: URLVariant) -> ChatLinkVariant:
@@ -1548,6 +1589,8 @@ class DC_Relay(metaclass=Singleton):
             return None
         manager = getattr(self, "manager", None)
         bot = getattr(manager, "bot", None) if manager is not None else None
+        if bot is None:
+            bot = getattr(self, "bot", None)
         cache = getattr(bot, "cache", None) if bot is not None else None
         get_guild = getattr(cache, "get_guild", None) if cache is not None else None
         guild = get_guild(int(hikari.Snowflake(guild_id))) if callable(get_guild) else None
@@ -2270,36 +2313,76 @@ class DC_Relay(metaclass=Singleton):
         return "Unknown"
 
     def _chat_reference_content_for_discord_message(self, message: hikari.Message) -> str:
-        raw_content = str(getattr(message, "content", "") or "").strip()
+        raw_content = str(message.content or "").strip()
         if raw_content:
             parsed_content, _ = self.names.parse_mentions(raw_content)
             content = Message.demojise_discord(parsed_content).strip()
             if content:
                 return content
-        attachments = getattr(message, "attachments", ())
-        if attachments:
+        sticker_count = len(message.stickers)
+        if sticker_count > 0:
+            content = self._compose_relay_message_body(
+                "",
+                attachment_count=0,
+                sticker_count=sticker_count,
+                sticker_names=self._sticker_display_names(message.stickers),
+            )
+            if content:
+                return content
+        if message.attachments:
             return "Sent media"
         return "Sent a message"
 
     @staticmethod
-    def _collection_size(value: object | None) -> int:
-        if value is None or value is hikari.UNDEFINED:
-            return 0
-        try:
-            return len(cast(Sized, value))
-        except TypeError:
-            try:
-                return len(tuple(cast(Iterable[object], value)))
-            except TypeError:
-                return 0
+    def _sticker_display_names(
+        stickers: Sequence[hikari.PartialSticker] | hikari.UndefinedType,
+    ) -> tuple[str, ...]:
+        if stickers is hikari.UNDEFINED:
+            return ()
+
+        names: list[str] = []
+        for sticker in stickers:
+            cleaned_name = re.sub(r"\s+", " ", sticker.name).strip()
+            if cleaned_name:
+                names.append(cleaned_name)
+        return tuple(names)
+
+    @staticmethod
+    def _sticker_files(
+        stickers: Sequence[hikari.PartialSticker] | hikari.UndefinedType,
+    ) -> tuple[Fileish, ...]:
+        if stickers is hikari.UNDEFINED:
+            return ()
+        files: list[Fileish] = []
+        for sticker in stickers:
+            file = _discord_sticker_fileish(sticker)
+            if file is not None:
+                files.append(file)
+        return tuple(files)
 
     @classmethod
-    def _relay_message_extra_text(cls, *, attachment_count: int, sticker_count: int = 0) -> str:
+    def _relay_message_extra_text(
+        cls,
+        *,
+        attachment_count: int,
+        sticker_count: int = 0,
+        sticker_names: Iterable[str] = (),
+    ) -> str:
         extras: list[str] = []
         if attachment_count > 0:
             extras.append("attachment" if attachment_count == 1 else f"{attachment_count} attachments")
-        if sticker_count > 0:
-            extras.append("sticker" if sticker_count == 1 else f"{sticker_count} stickers")
+        resolved_sticker_names = tuple(name for name in sticker_names if name)
+        named_sticker_count = len(resolved_sticker_names)
+        total_sticker_count = max(sticker_count, named_sticker_count)
+        if total_sticker_count > 0:
+            if resolved_sticker_names:
+                label = "sticker" if total_sticker_count == 1 else "stickers"
+                extras.append(f"{label}; {', '.join(resolved_sticker_names)}")
+                remaining_sticker_count = total_sticker_count - named_sticker_count
+                if remaining_sticker_count > 0:
+                    extras.append("sticker" if remaining_sticker_count == 1 else f"{remaining_sticker_count} stickers")
+            else:
+                extras.append("sticker" if total_sticker_count == 1 else f"{total_sticker_count} stickers")
         return ", ".join(extras)
 
     @classmethod
@@ -2309,10 +2392,15 @@ class DC_Relay(metaclass=Singleton):
         *,
         attachment_count: int,
         sticker_count: int = 0,
+        sticker_names: Iterable[str] = (),
         include_extras_with_content: bool = False,
     ) -> str:
         content = Message.demojise_discord(raw_content).strip()
-        extras = cls._relay_message_extra_text(attachment_count=attachment_count, sticker_count=sticker_count)
+        extras = cls._relay_message_extra_text(
+            attachment_count=attachment_count,
+            sticker_count=sticker_count,
+            sticker_names=sticker_names,
+        )
         if content:
             if extras and include_extras_with_content:
                 return f"{content}, {extras}"
@@ -2321,20 +2409,16 @@ class DC_Relay(metaclass=Singleton):
 
     @classmethod
     def _forwarded_snapshot_content(cls, message: hikari.Message) -> str:
-        snapshots = getattr(message, "message_snapshots", hikari.UNDEFINED)
-        if snapshots is None or snapshots is hikari.UNDEFINED:
-            return ""
-        try:
-            snapshot_items = tuple(cast(Iterable[object], snapshots))
-        except TypeError:
+        if not message.message_snapshots:
             return ""
 
         rendered_snapshots: list[str] = []
-        for snapshot in snapshot_items:
+        for snapshot in message.message_snapshots:
             rendered = cls._compose_relay_message_body(
-                str(getattr(snapshot, "content", "") or ""),
-                attachment_count=cls._collection_size(getattr(snapshot, "attachments", None)),
-                sticker_count=cls._collection_size(getattr(snapshot, "stickers", None)),
+                str(snapshot.content or ""),
+                attachment_count=len(snapshot.attachments),
+                sticker_count=len(snapshot.stickers),
+                sticker_names=cls._sticker_display_names(snapshot.stickers),
                 include_extras_with_content=True,
             )
             if rendered:
@@ -2913,7 +2997,7 @@ class DC_Relay(metaclass=Singleton):
                 reply_must_exist=False if reply_message_id is not None else hikari.UNDEFINED,
                 mentions_reply=False if reply_message_id is not None else hikari.UNDEFINED,
                 user_mentions=list(mentions),
-                attachments=[hikari.File(attachment.uri, attachment.name) for attachment in event.attachments],
+                attachments=[_discord_attachment_resource(attachment) for attachment in event.attachments],
             )
             self._record_discord_relay_message(channel_id=channel_snowflake, message_id=sent_message.id, event=event)
             log.debug(
@@ -3145,12 +3229,14 @@ class DC_Relay(metaclass=Singleton):
         )
 
         downloaded_files: list[Fileish] = []
+        failed_files: list[Fileish] = []
         failed_count = 0
         for attachment, result in zip(attachments, download_results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result
                 failed_count += 1
+                failed_files.append(_discord_attachment_fileish(attachment))
                 log.warning(
                     "Discord attachment download failed: filename=%s url=%s error=%s",
                     getattr(attachment, "filename", "<unknown>"),
@@ -3162,7 +3248,11 @@ class DC_Relay(metaclass=Singleton):
                 Fileish(str(result), normalise_attachment_relay_name(attachment), source_url=attachment.url)
             )
 
-        return DiscordAttachmentDownloadBatch(files=tuple(downloaded_files), failed_count=failed_count)
+        return DiscordAttachmentDownloadBatch(
+            files=tuple(downloaded_files),
+            failed_files=tuple(failed_files),
+            failed_count=failed_count,
+        )
 
     async def _send_dc(self, message: DC_Bound | Message):
         if not isinstance(message, DC_Bound):
@@ -3267,6 +3357,13 @@ class DC_Relay(metaclass=Singleton):
             return
         if not content and relay_reference_kind_for_message(ctx.message) is RelayMessageReferenceKind.FORWARD:
             content = self._forwarded_snapshot_content(ctx.message)
+        if not content and ctx.message.stickers:
+            content = self._compose_relay_message_body(
+                "",
+                attachment_count=len(ctx.message.attachments),
+                sticker_count=len(ctx.message.stickers),
+                sticker_names=self._sticker_display_names(ctx.message.stickers),
+            )
 
         source_guild_id = ctx.guild_id if isinstance(ctx, hikari.GuildMessageCreateEvent) else None
         source_member = ctx.member if isinstance(ctx, hikari.GuildMessageCreateEvent) else None
@@ -3277,10 +3374,17 @@ class DC_Relay(metaclass=Singleton):
         )
 
         shushPylance = hikari.TextableChannel(app=self.bot, id=hikari.Snowflake(0), name="UNKNOWN", type=1)
-        remote_files = [_discord_attachment_fileish(attachment) for attachment in ctx.message.attachments]
+        remote_attachment_files = [_discord_attachment_fileish(attachment) for attachment in ctx.message.attachments]
+        sticker_files = self._sticker_files(ctx.message.stickers)
+        remote_files = [*remote_attachment_files, *sticker_files]
         downloaded_attachments: DiscordAttachmentDownloadBatch | None = None
         resolved_reference_message: hikari.Message | None = None
         reference_was_resolved = False
+
+        def delivery_files() -> set[Fileish]:
+            if downloaded_attachments is None:
+                return set(remote_files)
+            return set((*downloaded_attachments.files, *downloaded_attachments.failed_files, *sticker_files))
 
         async def referenced_discord_message() -> hikari.Message | None:
             nonlocal resolved_reference_message, reference_was_resolved
@@ -3340,11 +3444,11 @@ class DC_Relay(metaclass=Singleton):
                     int(ctx.channel_id),
                     can_receive_chat,
                 )
-                if remote_files and can_receive_chat and downloaded_attachments is None:
+                if ctx.message.attachments and can_receive_chat and downloaded_attachments is None:
                     downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
                     self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)
                 if can_receive_chat and downloaded_attachments is not None:
-                    message.files = set(downloaded_attachments.files)
+                    message.files = delivery_files()
                 else:
                     message.files = set(remote_files)
                 event = self._event_from_app_bound(message, app, author_color_hex=author_color_hex)
@@ -3359,11 +3463,11 @@ class DC_Relay(metaclass=Singleton):
                     app.name,
                     int(ctx.channel_id),
                 )
-                if remote_files and downloaded_attachments is None:
+                if ctx.message.attachments and downloaded_attachments is None:
                     downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
                     self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)
                 if downloaded_attachments is not None:
-                    message.files = set(downloaded_attachments.files)
+                    message.files = delivery_files()
                 event = self._event_from_app_bound(message, app, author_color_hex=author_color_hex)
                 self._record_chat_event(event)
                 await self._send_chat_event_to_app(event, app)
@@ -3373,11 +3477,11 @@ class DC_Relay(metaclass=Singleton):
                 event = self._event_from_app_bound(message, app, author_color_hex=author_color_hex)
                 self._record_chat_event(event)
                 continue
-            if remote_files and downloaded_attachments is None:
+            if ctx.message.attachments and downloaded_attachments is None:
                 downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
                 self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)
             if downloaded_attachments is not None:
-                message.files = set(downloaded_attachments.files)
+                message.files = delivery_files()
             else:
                 message.files = set(remote_files)
             event = self._event_from_app_bound(message, app, author_color_hex=author_color_hex)
@@ -3388,11 +3492,13 @@ class DC_Relay(metaclass=Singleton):
             log.debug(f"{app_name} | {send_func} | {bool(send_func)}")
             await referenced_discord_message()
             message.reference = chat_reference_from_resolved_message()
-            if remote_files and downloaded_attachments is None:
+            if ctx.message.attachments and downloaded_attachments is None:
                 downloaded_attachments = await self._download_discord_message_attachments(ctx.message.attachments)
                 self._apply_attachment_download_failure_notice(message, downloaded_attachments.failed_count)
             if downloaded_attachments is not None:
-                message.files = set(downloaded_attachments.files)
+                message.files = delivery_files()
+            else:
+                message.files = set(remote_files)
             await send_func(message)
 
 

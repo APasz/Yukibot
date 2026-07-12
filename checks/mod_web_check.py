@@ -131,7 +131,9 @@ from node_api import (
     NodeModMutationResult,
     NodeModSummary,
     NodeModUploadBatchResult,
+    NodeRestartRecord,
     NodeRestartScheduleState,
+    NodeRestartState,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveRootEntry,
@@ -146,6 +148,7 @@ from node_api import (
     NodeSystemSummary,
 )
 from node_auth import NodeApiScope, verify_node_token
+from restart_state import RestartKind
 from relay_notices import (
     AppLifecycleNotice,
     AppLifecycleState,
@@ -175,6 +178,7 @@ from web_dash.constants import (
 )
 from web_dash.home import (
     _format_restart_hours_input,
+    _format_restart_state_line,
     _format_restart_timestamp,
     _ModWebNodeDiskChoice,
     _parse_restart_hours_input,
@@ -2096,6 +2100,7 @@ class ModWebTests(unittest.TestCase):
                     node,
                     NodeSystemAction.REBOOT_HOST,
                     False,
+                    True,
                     user,
                 )
             )
@@ -2111,8 +2116,112 @@ class ModWebTests(unittest.TestCase):
             json_payload={
                 "action": NodeSystemAction.REBOOT_HOST.value,
                 "auto_restart_running_apps": False,
+                "silent": True,
             },
         )
+
+    def test_remote_app_mutation_sends_rcon_online_player_gate(self) -> None:
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        payload = {
+            "app_name": "factorio_alpha",
+            "app_friendly": "Factorio Alpha",
+            "node": "erin",
+            "action": NodeAppMutationAction.UPDATE_DETAILS.value,
+            "message": "Updated details for Factorio Alpha.",
+            "app_stats": None,
+        }
+
+        with patch.object(
+            ModWebService,
+            "_remote_json_async",
+            new=AsyncMock(return_value=payload),
+        ) as remote_json:
+            result = asyncio.run(
+                ModWebService()._remote_app_mutation_async(
+                    node,
+                    "factorio_alpha",
+                    NodeAppMutationAction.UPDATE_DETAILS,
+                    user,
+                    rcon_requires_online_players=False,
+                )
+            )
+
+        self.assertEqual(result.action, NodeAppMutationAction.UPDATE_DETAILS)
+        remote_json.assert_awaited_once_with(
+            node=node,
+            app_name="factorio_alpha",
+            path="/apps/factorio_alpha/mutate",
+            scopes=(NodeApiScope.APP_MANAGE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "action": "update_details",
+                "rcon_requires_online_players": False,
+                "running_cpu_points": None,
+                "running_ram_points": None,
+                "startup_cpu_points": None,
+                "startup_ram_points": None,
+                "steam_update_enabled": None,
+                "steam_update_selected_branch": None,
+            },
+            timeout=15.0,
+        )
+
+    def test_mutate_app_wrapper_forwards_rcon_online_player_gate(self) -> None:
+        service = ModWebService()
+        model = cast(
+            ModWebBasePageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    node_name="erin",
+                    app_name="factorio_alpha",
+                ),
+            ),
+        )
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        expected_result = object()
+
+        with (
+            patch.object(service, "_user_has_level", return_value=True),
+            patch.object(service, "_remote_node_link", return_value=node),
+            patch.object(
+                service,
+                "_remote_app_mutation_async",
+                new=AsyncMock(return_value=expected_result),
+            ) as remote_mutation,
+        ):
+            result = asyncio.run(
+                service._mutate_app(
+                    model=model,
+                    action=NodeAppMutationAction.UPDATE_DETAILS,
+                    user=user,
+                    rcon_requires_online_players=False,
+                )
+            )
+
+        self.assertIs(result, expected_result)
+        remote_mutation.assert_awaited_once()
+        self.assertIs(remote_mutation.call_args.kwargs["node"], node)
+        self.assertEqual(remote_mutation.call_args.kwargs["app_name"], "factorio_alpha")
+        self.assertIs(remote_mutation.call_args.kwargs["action"], NodeAppMutationAction.UPDATE_DETAILS)
+        self.assertFalse(remote_mutation.call_args.kwargs["rcon_requires_online_players"])
 
     def test_login_node_status_badge_marks_current_node_alive(self) -> None:
         status = ModWebNodeStatus(
@@ -2423,6 +2532,17 @@ class ModWebTests(unittest.TestCase):
             "Wed, 01 Jul 2026 · 22:30 AEST",
         )
 
+    def test_restart_state_line_formats_explicit_restart_kind(self) -> None:
+        self.assertEqual(
+            _format_restart_state_line(
+                "Bot",
+                1_782_909_000,
+                RestartKind.MANUAL_SYS.value,
+                "Australia/Melbourne",
+            ),
+            "Bot: Wed, 01 Jul 2026 · 22:30 AEST [manual_sys]",
+        )
+
     def test_restart_anchor_rejects_nonexistent_dst_time(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not exist"):
             _restart_anchor_timestamp(
@@ -2508,6 +2628,10 @@ class ModWebTests(unittest.TestCase):
             render_dashboard = Mock()
             history = NodeSystemHistory.empty()
             restart_schedules = NodeRestartScheduleState(node="erin", schedules=())
+            restart_state = NodeRestartState(
+                node="erin",
+                process=NodeRestartRecord(timestamp=1_782_909_000, kind=RestartKind.MANUAL_BOT),
+            )
             capacity = config.NodeCapacityProfile(
                 cpu_points_total=12,
                 ram_points_total=24,
@@ -2551,6 +2675,13 @@ class ModWebTests(unittest.TestCase):
                     "_remote_restart_schedules_async",
                     new=AsyncMock(return_value=restart_schedules),
                 ),
+                patch.object(
+                    service,
+                    "_remote_restart_state_async",
+                    new=AsyncMock(return_value=restart_state),
+                ),
+                patch.object(service, "_node_is_yuki", return_value=False),
+                patch.object(service, "_portal_node_link", return_value=None),
                 patch.object(service, "_node_capacity", new=AsyncMock(return_value=capacity)),
                 patch.object(service, "_node_font_sources", new=AsyncMock(return_value=font_sources)),
                 patch.object(service, "_node_disk_settings", new=AsyncMock(return_value=disk_settings)),
@@ -2572,6 +2703,8 @@ class ModWebTests(unittest.TestCase):
             self.assertEqual(render_dashboard.call_args.kwargs["initial_system_history"], history)
             self.assertEqual(render_dashboard.call_args.kwargs["initial_app_entries"], ())
             self.assertEqual(render_dashboard.call_args.kwargs["initial_restart_schedules"], restart_schedules)
+            self.assertEqual(render_dashboard.call_args.kwargs["initial_restart_state"], restart_state)
+            self.assertIsNone(render_dashboard.call_args.kwargs["initial_portal_restart_state"])
             self.assertEqual(render_dashboard.call_args.kwargs["initial_node_capacity"], capacity)
             self.assertEqual(render_dashboard.call_args.kwargs["initial_node_font_sources"], font_sources)
             self.assertEqual(render_dashboard.call_args.kwargs["initial_node_disk_settings"], disk_settings)
@@ -2657,6 +2790,7 @@ class ModWebTests(unittest.TestCase):
                 patch.object(service, "_remote_node_system_history_async", new=AsyncMock(side_effect=connection_error)),
                 patch.object(service, "_remote_apps_async", new=AsyncMock(side_effect=connection_error)),
                 patch.object(service, "_remote_restart_schedules_async", new=AsyncMock(side_effect=connection_error)),
+                patch.object(service, "_remote_restart_state_async", new=AsyncMock(side_effect=connection_error)),
                 patch.object(service, "_user_has_level", return_value=False),
                 patch.object(service, "_render_remote_node_unavailable_page", new=render_unavailable),
                 patch.object(
@@ -7031,6 +7165,20 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(service._chat_event_source_label(event), "relay-main")
 
+    def test_discord_chat_source_label_uses_discord_fallback_when_guild_id_has_no_name(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.discord_channel("123"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Yoko"),
+            content="hello",
+            source_guild_id=1,
+            source_channel_id=123,
+            source_label="relay-main",
+        )
+
+        self.assertEqual(service._chat_event_source_label(event), "Discord")
+
     def test_app_chat_source_label_uses_game_badge_text(self) -> None:
         service = ModWebService()
         event = ChatEvent(
@@ -7102,9 +7250,12 @@ class ModWebTests(unittest.TestCase):
         self.assertIsNotNone(preview)
         assert preview is not None
         markup = ModWebService._chat_media_embed_markup(preview)
+        self.assertIn('<a class="mod-chat-media-link" href="https://example.invalid/cat.gif"', markup)
+        self.assertIn('target="_blank"', markup)
+        self.assertIn('rel="noopener noreferrer"', markup)
         self.assertIn('<img class="mod-chat-media-image"', markup)
         self.assertIn('src="https://example.invalid/cat.gif"', markup)
-        self.assertIn('href="https://example.invalid/cat.gif"', markup)
+        self.assertIn('<span class="mod-chat-media-caption">cat gif</span>', markup)
 
     def test_chat_media_preview_embeds_video_attachments_by_extension(self) -> None:
         preview = ModWebService._chat_media_preview_from_attachment(
@@ -7118,6 +7269,44 @@ class ModWebTests(unittest.TestCase):
         self.assertIsNotNone(preview)
         assert preview is not None
         self.assertEqual(preview.kind, "video")
+
+    def test_chat_event_display_content_hides_previewed_sticker_fallback_text(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.discord_channel("123"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="APasz"),
+            content="sticker; Wave",
+            attachments=(
+                ChatAttachment(
+                    uri="https://media.discordapp.net/stickers/123.png",
+                    source_url="https://media.discordapp.net/stickers/123.png",
+                    name="Wave.png",
+                ),
+            ),
+        )
+
+        self.assertEqual(service._chat_event_display_content(event), "")
+        self.assertEqual(service._chat_event_copy_text(event), "sticker; Wave")
+
+    def test_chat_event_display_content_hides_previewed_media_link_url(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.discord_channel("123"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="Mea"),
+            content="https://klipy.com/gifs/frieren-anime-54",
+            links=(
+                ChatLink(
+                    url="https://klipy.com/gifs/frieren-anime-54",
+                    media_type="image/gif",
+                    is_media=True,
+                ),
+            ),
+        )
+
+        self.assertEqual(service._chat_event_display_content(event), "")
+        self.assertEqual(service._chat_event_copy_text(event), "https://klipy.com/gifs/frieren-anime-54")
 
     def test_chat_media_preview_rejects_non_http_urls(self) -> None:
         preview = ModWebService._chat_media_preview_from_link(
@@ -7140,6 +7329,7 @@ class ModWebTests(unittest.TestCase):
         assert preview is not None
         markup = ModWebService._chat_media_embed_markup(preview)
         self.assertIn("cat &quot;onerror&quot;", markup)
+        self.assertIn('<span class="mod-chat-media-caption">cat &quot;onerror&quot;</span>', markup)
         self.assertNotIn('cat "onerror"', markup)
 
     def test_chat_app_status_badge_reflects_runtime_state(self) -> None:
@@ -7664,6 +7854,7 @@ class ModWebTests(unittest.TestCase):
             node_name="yuki",
             app_name="minecraft_alpha",
             app_friendly="Minecraft Alpha",
+            app_scope="minecraft",
             app_color_hex="#22C55E",
             supports_configs=False,
             config_read_level=Power_Level.user,
@@ -7718,6 +7909,61 @@ class ModWebTests(unittest.TestCase):
                 _ModWebBadgeSpec(text="2 blocked", tone="warn"),
                 _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
                 _ModWebBadgeSpec(text="2 coremods", tone="red"),
+            ),
+        )
+
+    def test_mods_section_badges_omit_pack_version_for_apps_without_client_packs(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            app_scope="factorio",
+            app_color_hex="#22C55E",
+            supports_configs=False,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="factorio_alpha",
+                app_friendly="Factorio Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=NodeModList(
+                app_name="factorio_alpha",
+                app_friendly="Factorio Alpha",
+                node="yuki",
+                summary=NodeModSummary(
+                    total_count=1,
+                    enabled_count=1,
+                    disabled_count=0,
+                    coremod_count=0,
+                    downloadable_count=1,
+                    non_downloadable_count=0,
+                ),
+                mods=(),
+            ),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+            client_pack_published_version="2026-07-04",
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        tab = service._page_tabs(model)[0]
+
+        self.assertEqual(
+            service._page_section_badges(model=model, user=user, tab=tab),
+            (
+                _ModWebBadgeSpec(text="1 mod", tone="black"),
+                _ModWebBadgeSpec(text="1 downloadable", tone="purple"),
             ),
         )
 
@@ -8845,6 +9091,9 @@ class ModWebTests(unittest.TestCase):
 
         self.assertIn("beforeRefresh", script)
         self.assertIn("attachMediaListeners", script)
+        self.assertIn("openMediaLinkInNewTab", script)
+        self.assertIn("a.mod-chat-media-link[href]", script)
+        self.assertIn("window.open(link.href, '_blank', 'noopener,noreferrer')", script)
         self.assertIn("observeTimelineMutations", script)
         self.assertIn("jumpStateByTimeline", script)
         self.assertIn("clearScheduledJump", script)
@@ -13305,6 +13554,29 @@ class ModWebTests(unittest.TestCase):
                 include_filename=False,
             ),
             "Minecraft Alpha [2026-07-04]\n\nAlpha | Tools\nBeta",
+        )
+        self.assertEqual(
+            ModWebService._render_modlist(
+                mods,
+                instance_name="Factorio Alpha",
+                pack_version=None,
+                output_format=ModWebModlistFormat.PLAINTEXT,
+                include_version=False,
+                include_filename=False,
+                include_pack_version=False,
+            ),
+            "Factorio Alpha\n\nAlpha | Tools\nBeta",
+        )
+        self.assertEqual(
+            ModWebService._render_modlist(
+                mods,
+                instance_name="Minecraft Alpha",
+                pack_version=None,
+                output_format=ModWebModlistFormat.PLAINTEXT,
+                include_version=False,
+                include_filename=False,
+            ),
+            "Minecraft Alpha [Unpublished]\n\nAlpha | Tools\nBeta",
         )
         self.assertEqual(
             json.loads(

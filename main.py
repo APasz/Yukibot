@@ -51,6 +51,13 @@ from relay_notices import (
     render_system_notice_text,
 )
 from restart_targets import RestartTarget
+from restart_state import (
+    RestartKind,
+    mark_pending_process_restart,
+    mark_pending_process_restart_if_missing,
+    record_process_start,
+    record_voice_restart,
+)
 from web_dash.service import ModWebService
 
 log: Logger = logging.getLogger("system")
@@ -316,6 +323,7 @@ def _clear_managed_files_once(
 
 async def _run_portal() -> None:
     log.info("Starting portal profile")
+    record_process_start(start_time)
     log.info(
         "Portal authority config: mode=%s endpoint=%s token=%s",
         config.DATA_AUTHORITY_MODE.value,
@@ -339,6 +347,7 @@ async def _run_portal() -> None:
         nonlocal restart_requested
         if stop_event.is_set():
             return
+        mark_pending_process_restart_if_missing(RestartKind.MANUAL_BOT)
         restart_requested = True
         config.IS_RESTARTING = True
         log.critical("Restarting portal profile")
@@ -348,14 +357,15 @@ async def _run_portal() -> None:
     def _schedule_restart() -> None:
         loop.call_soon_threadsafe(_request_restart)
 
-    def _schedule_system_action(action: NodeSystemAction, auto_restart_running_apps: bool) -> None:
-        del auto_restart_running_apps
+    def _schedule_system_action(action: NodeSystemAction, auto_restart_running_apps: bool, silent: bool) -> None:
+        del auto_restart_running_apps, silent
         if action is NodeSystemAction.RESTART_PROCESS:
             _schedule_restart()
             return
 
         async def _reboot_portal_host() -> None:
             log.critical("Rebooting portal host from web dashboard")
+            mark_pending_process_restart(RestartKind.MANUAL_SYS)
             mod_web.begin_shutdown()
             await asyncio.to_thread(_sys.reboot_host)
 
@@ -463,7 +473,11 @@ def main():
     node_api_server = NodeApiHttpService()
     bot_runtime_loop: asyncio.AbstractEventLoop | None = None
 
-    def _schedule_node_system_action(action: NodeSystemAction, auto_restart_running_apps: bool) -> None:
+    def _schedule_node_system_action(
+        action: NodeSystemAction,
+        auto_restart_running_apps: bool,
+        silent: bool,
+    ) -> None:
         runtime_loop = bot_runtime_loop
         if runtime_loop is None:
             raise RuntimeError("Bot runtime loop is not available for node system actions.")
@@ -471,7 +485,10 @@ def main():
         async def _execute_node_system_action() -> None:
             if action is NodeSystemAction.RESTART_PORTAL:
                 log.critical("Executing web dashboard Portal restart")
-                await _sys.request_portal_process_restart(subject="web:yuki-system-action")
+                await _sys.request_portal_process_restart(
+                    subject="web:yuki-system-action",
+                    restart_kind=RestartKind.MANUAL_BOT,
+                )
                 return
             auto_start_apps = _sys.configure_restart_auto_start_apps(
                 app_manager,
@@ -492,6 +509,8 @@ def main():
                 reason=f"Web dashboard requested {action.value}.",
                 message_channel_id=None,
                 suppress_notifications=True,
+                scheduled=False,
+                silent=silent,
             )
 
         future = asyncio.run_coroutine_threadsafe(_execute_node_system_action(), runtime_loop)
@@ -812,7 +831,10 @@ def main():
         if RestartTarget.PORTAL in due_targets:
             portal_scheduled_for = maintenance.next_restart_at(RestartTarget.PORTAL, now=now)
             try:
-                await _sys.request_portal_process_restart(subject="maintenance:yuki")
+                await _sys.request_portal_process_restart(
+                    subject="maintenance:yuki",
+                    restart_kind=RestartKind.SCHEDULED_BOT,
+                )
             except (RuntimeError, requests.RequestException):
                 log.exception(
                     "Scheduled Portal restart request failed; it will be retried at the next maintenance check"
@@ -850,6 +872,7 @@ def main():
                 log.warning("Skipping scheduled voice restart because the voice service is unavailable")
                 return
             await reset_voice_runtime_services(voice_tts, music)
+            record_voice_restart(RestartKind.SCHEDULED_VOICE, restarted_at=now)
             completion_notice = maintenance.build_restart_completed_notice(
                 effective_target=effective_target,
                 matched_targets=local_due_targets,
@@ -875,6 +898,7 @@ def main():
     @bot.listen(hikari.StartedEvent)
     async def on_started(event: hikari.StartedEvent):
         log.info("Started")
+        record_process_start(start_time)
         # await client.sync_application_commands()
         await sync_bot_metadata(bot, initial=True)
         if profile.has_service(config.BotService.GAME_RELAY):

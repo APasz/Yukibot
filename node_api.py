@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -124,10 +124,14 @@ from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
 from apps._updater import AppUpdateInfo, AppUpdateStatus
 from apps.factorio import (
+    FactorioModPortalCandidate,
+    FactorioVanillaMod,
     download_factorio_mods_from_portal,
     factorio_mod_portal_credentials_from_server_settings,
     factorio_mod_settings_path,
     factorio_server_settings_path,
+    factorio_vanilla_mods,
+    list_factorio_mod_portal_release_options,
     parse_factorio_mod_portal_url,
     resolve_factorio_mod_portal_candidates,
 )
@@ -164,6 +168,7 @@ from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
 from mod_web_auth import ModWebAuthService, ModWebUser
 from node_auth import NodeAccessGrant, NodeApiScope, NodeTokenError, issue_node_token, verify_node_token
 from restart_targets import RestartTarget
+from restart_state import RestartKind, mark_pending_process_restart, read_process_restart_record, read_voice_restart_record
 
 if TYPE_CHECKING:
     from _manager import App_Manager
@@ -1304,9 +1309,21 @@ class NodeModMutationRequest(BaseModel):
     action: NodeModMutationAction
 
 
+def _normalise_factorio_mod_portal_version(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    version = raw.strip()
+    if not version:
+        return None
+    if any(character.isspace() for character in version):
+        raise ValueError("Factorio mod portal version must not contain whitespace.")
+    return version
+
+
 class NodeModPortalInstallRequest(BaseModel):
     url: str
     selected_mod_ids: tuple[str, ...] | None = None
+    version: str | None = None
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -1332,6 +1349,35 @@ class NodeModPortalInstallRequest(BaseModel):
             seen.add(mod_id)
             selected.append(mod_id)
         return tuple(selected)
+
+    @field_validator("version")
+    @classmethod
+    def validate_version(cls, raw: str | None) -> str | None:
+        return _normalise_factorio_mod_portal_version(raw)
+
+
+class NodeModUpdateRequest(BaseModel):
+    version: str | None = None
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    @field_validator("version")
+    @classmethod
+    def validate_version(cls, raw: str | None) -> str | None:
+        return _normalise_factorio_mod_portal_version(raw)
+
+
+class NodeModUpdateStatus(StrEnum):
+    UPDATE_AVAILABLE = "update_available"
+    CURRENT = "current"
+    UNKNOWN_CURRENT = "unknown_current"
+
+
+class NodeModUpdateDependencyAction(StrEnum):
+    INSTALL = "install"
+    UPDATE = "update"
+    CURRENT = "current"
+    BLOCKED = "blocked"
 
 
 class NodeModPropertiesUpdateRequest(BaseModel):
@@ -1682,6 +1728,177 @@ class NodeModDependencyResolutionResult:
 
 
 NodeModPortalResolveResult = NodeModDependencyResolutionResult
+
+
+@dataclass(frozen=True, slots=True)
+class NodeModPortalVersionEntry:
+    version: str
+    file_name: str
+    released_at: str | None
+    factorio_version: str | None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModPortalVersionEntry":
+        return cls(
+            version=_required_string(payload, "version"),
+            file_name=_required_string(payload, "file_name"),
+            released_at=_optional_string(payload, "released_at"),
+            factorio_version=_optional_string(payload, "factorio_version"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "file_name": self.file_name,
+            "released_at": self.released_at,
+            "factorio_version": self.factorio_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeModPortalVersionList:
+    app_name: str
+    app_friendly: str
+    node: str
+    url: str
+    game_version: str | None
+    versions: tuple[NodeModPortalVersionEntry, ...]
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModPortalVersionList":
+        raw_versions = payload.get("versions")
+        if isinstance(raw_versions, str) or not isinstance(raw_versions, Sequence):
+            raise ValueError("Node mod portal versions are invalid.")
+        versions: list[NodeModPortalVersionEntry] = []
+        for raw_version in raw_versions:
+            if not isinstance(raw_version, Mapping):
+                raise ValueError("Node mod portal versions are invalid.")
+            versions.append(NodeModPortalVersionEntry.from_mapping(raw_version))
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            url=_required_string(payload, "url"),
+            game_version=_optional_string(payload, "game_version"),
+            versions=tuple(versions),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "url": self.url,
+            "game_version": self.game_version,
+            "versions": [version.to_mapping() for version in self.versions],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeModUpdateDependency:
+    mod_id: str
+    title: str
+    page_url: str
+    action: NodeModUpdateDependencyAction
+    current_version: str | None
+    latest_version: str
+    latest_file_name: str
+    installed_mod_name: str | None = None
+    block_reason: str | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModUpdateDependency":
+        raw_action = _required_string(payload, "action")
+        try:
+            action = NodeModUpdateDependencyAction(raw_action)
+        except ValueError as xcp:
+            raise ValueError("Node mod update dependency action is invalid.") from xcp
+        return cls(
+            mod_id=_required_string(payload, "mod_id"),
+            title=_required_string(payload, "title"),
+            page_url=_required_string(payload, "page_url"),
+            action=action,
+            current_version=_optional_string(payload, "current_version"),
+            latest_version=_required_string(payload, "latest_version"),
+            latest_file_name=_required_string(payload, "latest_file_name"),
+            installed_mod_name=_optional_string(payload, "installed_mod_name"),
+            block_reason=_optional_string(payload, "block_reason"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "mod_id": self.mod_id,
+            "title": self.title,
+            "page_url": self.page_url,
+            "action": self.action.value,
+            "current_version": self.current_version,
+            "latest_version": self.latest_version,
+            "latest_file_name": self.latest_file_name,
+            "installed_mod_name": self.installed_mod_name,
+            "block_reason": self.block_reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeModUpdateCheckResult:
+    app_name: str
+    app_friendly: str
+    node: str
+    mod_name: str
+    mod_friendly: str
+    status: NodeModUpdateStatus
+    current_version: str | None
+    latest_version: str
+    latest_file_name: str
+    page_url: str
+    message: str
+    dependencies: tuple[NodeModUpdateDependency, ...] = ()
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeModUpdateCheckResult":
+        raw_status = _required_string(payload, "status")
+        try:
+            status_value = NodeModUpdateStatus(raw_status)
+        except ValueError as xcp:
+            raise ValueError("Node mod update status is invalid.") from xcp
+        raw_dependencies = payload.get("dependencies", ())
+        if isinstance(raw_dependencies, str) or not isinstance(raw_dependencies, Sequence):
+            raise ValueError("Node mod update dependencies are invalid.")
+        dependencies: list[NodeModUpdateDependency] = []
+        for raw_dependency in raw_dependencies:
+            if not isinstance(raw_dependency, Mapping):
+                raise ValueError("Node mod update dependencies are invalid.")
+            dependencies.append(NodeModUpdateDependency.from_mapping(raw_dependency))
+        return cls(
+            app_name=_required_string(payload, "app_name"),
+            app_friendly=_required_string(payload, "app_friendly"),
+            node=_required_string(payload, "node"),
+            mod_name=_required_string(payload, "mod_name"),
+            mod_friendly=_required_string(payload, "mod_friendly"),
+            status=status_value,
+            current_version=_optional_string(payload, "current_version"),
+            latest_version=_required_string(payload, "latest_version"),
+            latest_file_name=_required_string(payload, "latest_file_name"),
+            page_url=_required_string(payload, "page_url"),
+            message=_required_string(payload, "message"),
+            dependencies=tuple(dependencies),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "mod_name": self.mod_name,
+            "mod_friendly": self.mod_friendly,
+            "status": self.status.value,
+            "current_version": self.current_version,
+            "latest_version": self.latest_version,
+            "latest_file_name": self.latest_file_name,
+            "page_url": self.page_url,
+            "message": self.message,
+            "dependencies": [dependency.to_mapping() for dependency in self.dependencies],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -2737,7 +2954,7 @@ class NodeSystemAction(StrEnum):
     RESTART_PORTAL = "restart_portal"
 
 
-type NodeSystemActionHandler = Callable[[NodeSystemAction, bool], None]
+type NodeSystemActionHandler = Callable[[NodeSystemAction, bool, bool], None]
 
 
 _NODE_SYSTEM_ACTION_LABELS: dict[NodeSystemAction, str] = {
@@ -2775,11 +2992,62 @@ class NodeSystemActionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeRestartRecord:
+    timestamp: int
+    kind: RestartKind
+
+    def __post_init__(self) -> None:
+        if self.timestamp <= 0:
+            raise ValueError("Node restart record timestamp must be positive Unix seconds.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeRestartRecord:
+        raw_kind = _required_string(payload, "kind")
+        try:
+            kind = RestartKind(raw_kind)
+        except ValueError as xcp:
+            raise ValueError("Node restart record kind is invalid.") from xcp
+        return cls(timestamp=_required_int(payload, "timestamp"), kind=kind)
+
+    def to_mapping(self) -> dict[str, object]:
+        return {"timestamp": self.timestamp, "kind": self.kind.value}
+
+
+@dataclass(frozen=True, slots=True)
+class NodeRestartState:
+    node: str
+    process: NodeRestartRecord
+    voice: NodeRestartRecord | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeRestartState:
+        raw_process = payload.get("process")
+        if not isinstance(raw_process, Mapping):
+            raise ValueError("Node process restart record is invalid.")
+        raw_voice = payload.get("voice")
+        if raw_voice is not None and not isinstance(raw_voice, Mapping):
+            raise ValueError("Node voice restart record is invalid.")
+        return cls(
+            node=_required_string(payload, "node"),
+            process=NodeRestartRecord.from_mapping(raw_process),
+            voice=None if raw_voice is None else NodeRestartRecord.from_mapping(raw_voice),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "process": self.process.to_mapping(),
+            "voice": None if self.voice is None else self.voice.to_mapping(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NodeRestartScheduleEntry:
     target: RestartTarget
     enabled: bool
     interval_minutes: int
     anchor_timestamp: int | None
+    last_triggered_timestamp: int | None
     next_restart_timestamp: int | None
     skipped_through_timestamp: int | None
 
@@ -2792,6 +3060,7 @@ class NodeRestartScheduleEntry:
             raise ValueError("Disabled node restart schedules cannot have a next-restart timestamp.")
         for field_name, value in (
             ("anchor_timestamp", self.anchor_timestamp),
+            ("last_triggered_timestamp", self.last_triggered_timestamp),
             ("next_restart_timestamp", self.next_restart_timestamp),
             ("skipped_through_timestamp", self.skipped_through_timestamp),
         ):
@@ -2806,12 +3075,17 @@ class NodeRestartScheduleEntry:
         except ValueError as xcp:
             raise ValueError("Node restart schedule target is invalid.") from xcp
         raw_anchor_timestamp = payload.get("anchor_timestamp")
+        raw_last_triggered_timestamp = payload.get("last_triggered_timestamp")
         raw_next_restart_timestamp = payload.get("next_restart_timestamp")
         raw_skipped_through_timestamp = payload.get("skipped_through_timestamp")
         if isinstance(raw_anchor_timestamp, bool) or (
             raw_anchor_timestamp is not None and not isinstance(raw_anchor_timestamp, int)
         ):
             raise ValueError("Node restart schedule anchor timestamp is invalid.")
+        if isinstance(raw_last_triggered_timestamp, bool) or (
+            raw_last_triggered_timestamp is not None and not isinstance(raw_last_triggered_timestamp, int)
+        ):
+            raise ValueError("Node restart schedule last triggered timestamp is invalid.")
         if isinstance(raw_next_restart_timestamp, bool) or (
             raw_next_restart_timestamp is not None and not isinstance(raw_next_restart_timestamp, int)
         ):
@@ -2825,6 +3099,7 @@ class NodeRestartScheduleEntry:
             enabled=_required_bool(payload, "enabled"),
             interval_minutes=_required_int(payload, "interval_minutes"),
             anchor_timestamp=raw_anchor_timestamp,
+            last_triggered_timestamp=raw_last_triggered_timestamp,
             next_restart_timestamp=raw_next_restart_timestamp,
             skipped_through_timestamp=raw_skipped_through_timestamp,
         )
@@ -2835,6 +3110,7 @@ class NodeRestartScheduleEntry:
             "enabled": self.enabled,
             "interval_minutes": self.interval_minutes,
             "anchor_timestamp": self.anchor_timestamp,
+            "last_triggered_timestamp": self.last_triggered_timestamp,
             "next_restart_timestamp": self.next_restart_timestamp,
             "skipped_through_timestamp": self.skipped_through_timestamp,
         }
@@ -4586,6 +4862,8 @@ class NodeApiService:
                 raise _http_exception(404, "Process restart is only available on the Portal node.")
             if self._process_restart_handler is None:
                 raise _http_exception(503, "Portal process restart handler is unavailable.")
+            restart_kind = await self._portal_process_restart_kind(request)
+            mark_pending_process_restart(restart_kind)
             asyncio.get_running_loop().call_later(
                 _NODE_RESTART_DELAY_SECONDS,
                 self._process_restart_handler,
@@ -4608,6 +4886,12 @@ class NodeApiService:
             traffic_log.info("Node API system history request: node=%s", self.node_name)
             self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
             return self.build_system_history().to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/restart-state")
+        async def _restart_state(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API restart state request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+            return self.read_restart_state().to_mapping()
 
         @nicegui_app.post(f"{_NODE_API_PREFIX}/system/actions")
         async def _system_action(
@@ -4639,9 +4923,13 @@ class NodeApiService:
             auto_restart_running_apps = payload.get("auto_restart_running_apps", True)
             if not isinstance(auto_restart_running_apps, bool):
                 raise _http_exception(400, "Node system action auto-restart option must be boolean.")
+            silent = payload.get("silent", False)
+            if not isinstance(silent, bool):
+                raise _http_exception(400, "Node system action silent option must be boolean.")
             result = await self.schedule_system_action(
                 action=action,
                 auto_restart_running_apps=auto_restart_running_apps,
+                silent=silent,
                 actor_user_id=actor_user_id,
             )
             return result.to_mapping()
@@ -5391,6 +5679,7 @@ class NodeApiService:
                 url=install_request.url,
                 actor_user_id=actor_user_id,
                 selected_mod_ids=install_request.selected_mod_ids,
+                version=install_request.version,
             )
             audit_log(
                 "mod.link_installed",
@@ -5413,7 +5702,25 @@ class NodeApiService:
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
             resolve_request = NodeModPortalInstallRequest.model_validate(payload)
             app = self._resolve_app(app_name)
-            result = await self.resolve_mod_link_dependencies(app=app, url=resolve_request.url)
+            result = await self.resolve_mod_link_dependencies(
+                app=app,
+                url=resolve_request.url,
+                version=resolve_request.version,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/resolve-link/versions")
+        async def _resolve_mod_link_versions(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API mod link version list request: node=%s app=%s", self.node_name, app_name)
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+            resolve_request = NodeModPortalInstallRequest.model_validate(payload)
+            app = self._resolve_app(app_name)
+            result = await self.list_mod_link_versions(app=app, url=resolve_request.url)
             return result.to_mapping()
 
         @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/mutate")
@@ -5440,6 +5747,84 @@ class NodeApiService:
                 mod_name=mod_name,
                 action=mutation_request.action,
                 actor_user_id=actor_user_id,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/check-update")
+        async def _check_mod_update(
+            app_name: str,
+            mod_name: str,
+            request: Request,
+            version: str | None = None,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API mod update check request: node=%s app=%s mod=%s",
+                self.node_name,
+                app_name,
+                mod_name,
+            )
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+            update_request = NodeModUpdateRequest.model_validate({"version": version})
+            app = self._resolve_app(app_name)
+            result = await self.check_mod_update(app=app, mod_name=mod_name, version=update_request.version)
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/versions")
+        async def _list_mod_versions(
+            app_name: str,
+            mod_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API mod version list request: node=%s app=%s mod=%s",
+                self.node_name,
+                app_name,
+                mod_name,
+            )
+            self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
+            app = self._resolve_app(app_name)
+            result = await self.list_installed_mod_versions(app=app, mod_name=mod_name)
+            return result.to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/update")
+        async def _update_mod(
+            app_name: str,
+            mod_name: str,
+            request: Request,
+            payload: dict[str, object] | None = None,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info(
+                "Node API mod update request: node=%s app=%s mod=%s",
+                self.node_name,
+                app_name,
+                mod_name,
+            )
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+            update_request = NodeModUpdateRequest.model_validate(payload or {})
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            app = self._resolve_app(app_name)
+            result = await self.update_mod(
+                app=app,
+                mod_name=mod_name,
+                actor_user_id=actor_user_id,
+                version=update_request.version,
+            )
+            audit_log(
+                "mod.updated",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                mod_name=",".join(mod.name for mod in result.mods),
+                required_level=Power_Level.user.name,
             )
             return result.to_mapping()
 
@@ -8744,11 +9129,30 @@ class NodeApiService:
         manager = self._require_manager()
         return manager.discord_settings()
 
+    async def _portal_process_restart_kind(self, request: Request) -> RestartKind:
+        try:
+            payload: object = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, Mapping):
+            raise _http_exception(400, "Portal restart payload is invalid.")
+        raw_kind = payload.get("restart_kind", RestartKind.MANUAL_BOT.value)
+        if not isinstance(raw_kind, str):
+            raise _http_exception(400, "Portal restart kind is invalid.")
+        try:
+            restart_kind = RestartKind(raw_kind)
+        except ValueError as xcp:
+            raise _http_exception(400, "Portal restart kind is invalid.") from xcp
+        if restart_kind not in {RestartKind.SCHEDULED_BOT, RestartKind.MANUAL_BOT}:
+            raise _http_exception(400, "Portal restart kind must be scheduled_bot or manual_bot.")
+        return restart_kind
+
     async def schedule_system_action(
         self,
         *,
         action: NodeSystemAction,
         auto_restart_running_apps: bool,
+        silent: bool,
         actor_user_id: int,
     ) -> NodeSystemActionResult:
         await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
@@ -8777,7 +9181,7 @@ class NodeApiService:
 
         def _dispatch() -> None:
             try:
-                handler(action, auto_restart_running_apps)
+                handler(action, auto_restart_running_apps, silent)
             except Exception:
                 with self._system_action_lock:
                     self._pending_system_action = None
@@ -8795,6 +9199,20 @@ class NodeApiService:
             message=f"Scheduled {action_label} for {self.node_name}.",
         )
 
+    def read_restart_state(self) -> NodeRestartState:
+        process_start_timestamp = int(psutil.Process().create_time())
+        process_record = read_process_restart_record(default_timestamp=process_start_timestamp)
+        voice_record = read_voice_restart_record()
+        return NodeRestartState(
+            node=self.node_name,
+            process=NodeRestartRecord(timestamp=process_record.timestamp, kind=process_record.kind),
+            voice=(
+                None
+                if voice_record is None
+                else NodeRestartRecord(timestamp=voice_record.timestamp, kind=voice_record.kind)
+            ),
+        )
+
     def read_restart_schedules(self) -> NodeRestartScheduleState:
         maintenance = self._maintenance_service
         if maintenance is None:
@@ -8808,6 +9226,7 @@ class NodeApiService:
                     enabled=(schedule := maintenance.schedule_for(target)).enabled,
                     interval_minutes=schedule.interval_minutes,
                     anchor_timestamp=schedule.anchor_timestamp,
+                    last_triggered_timestamp=schedule.last_triggered_timestamp,
                     next_restart_timestamp=(
                         int(next_restart.timestamp())
                         if (next_restart := maintenance.next_restart_at(target)) is not None
@@ -9964,6 +10383,7 @@ class NodeApiService:
         url: str,
         actor_user_id: int,
         selected_mod_ids: Sequence[str] | None = None,
+        version: str | None = None,
     ) -> NodeModUploadBatchResult:
         if app.scope != config.AppScopes.factorio.value:
             raise _http_exception(400, f"{app.friendly} does not support Factorio mod portal links.")
@@ -9983,6 +10403,7 @@ class NodeApiService:
                     factorio_version=app.detect_installed_version() or app.cfg.version,
                     credentials=credentials,
                     selected_mod_ids=selected_mod_ids,
+                    requested_mod_version=version,
                 )
             except ValueError as xcp:
                 raise _http_exception(400, str(xcp)) from xcp
@@ -9998,13 +10419,20 @@ class NodeApiService:
                 placement=ModPlacement.SERVER_ENABLED,
             )
 
-    async def resolve_mod_link_dependencies(self, *, app: App, url: str) -> NodeModDependencyResolutionResult:
+    async def resolve_mod_link_dependencies(
+        self,
+        *,
+        app: App,
+        url: str,
+        version: str | None = None,
+    ) -> NodeModDependencyResolutionResult:
         if app.scope != config.AppScopes.factorio.value:
             raise _http_exception(400, f"{app.friendly} does not support Factorio mod portal links.")
         try:
             resolution = await resolve_factorio_mod_portal_candidates(
                 page_url=url,
                 factorio_version=app.detect_installed_version() or app.cfg.version,
+                requested_mod_version=version,
             )
         except ValueError as xcp:
             raise _http_exception(400, str(xcp)) from xcp
@@ -10012,6 +10440,15 @@ class NodeApiService:
             raise _http_exception(502, str(xcp)) from xcp
 
         installed_ids = self._factorio_installed_mod_ids(app)
+        vanilla_mods = self._factorio_vanilla_mods(app)
+        satisfied_ids = installed_ids | frozenset(vanilla_mods)
+
+        def dependency_title(candidate: FactorioModPortalCandidate) -> str:
+            vanilla_mod = vanilla_mods.get(candidate.mod_id)
+            if vanilla_mod is not None:
+                return vanilla_mod.title
+            return candidate.title
+
         return NodeModDependencyResolutionResult(
             app_name=app.name,
             app_friendly=app.friendly,
@@ -10021,47 +10458,452 @@ class NodeApiService:
             dependencies=tuple(
                 NodeModDependencyEntry(
                     mod_id=candidate.mod_id,
-                    title=candidate.title,
+                    title=dependency_title(candidate),
                     page_url=candidate.page_url,
                     version=candidate.version,
                     file_name=candidate.file_name,
                     parent_mod_ids=candidate.required_by,
                     dependency_mod_ids=candidate.dependency_ids,
                     selected_by_default=(
-                        candidate.mod_id == resolution.requested_mod_id or candidate.mod_id not in installed_ids
+                        candidate.mod_id == resolution.requested_mod_id or candidate.mod_id not in satisfied_ids
                     ),
-                    installed=candidate.mod_id in installed_ids,
+                    installed=candidate.mod_id in satisfied_ids,
                     is_root=candidate.mod_id == resolution.requested_mod_id,
                 )
                 for candidate in resolution.candidates
             ),
         )
 
+    async def list_mod_link_versions(
+        self,
+        *,
+        app: App,
+        url: str,
+    ) -> NodeModPortalVersionList:
+        if app.scope != config.AppScopes.factorio.value:
+            raise _http_exception(400, f"{app.friendly} does not support Factorio mod portal links.")
+        return await self._factorio_mod_versions(app=app, url=url)
+
+    async def list_installed_mod_versions(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+    ) -> NodeModPortalVersionList:
+        if app.scope != config.AppScopes.factorio.value:
+            raise _http_exception(400, f"{app.friendly} does not support Factorio mod portal links.")
+        if app.mods is None:
+            raise _http_exception(409, f"{app.friendly} does not support mods.")
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        mod = _get_mod_or_404(manager, mod_name)
+        return await self._factorio_mod_versions(app=app, url=self._factorio_mod_update_page_url(mod))
+
+    async def _factorio_mod_versions(self, *, app: App, url: str) -> NodeModPortalVersionList:
+        game_version = app.detect_installed_version() or app.cfg.version
+        try:
+            versions = await list_factorio_mod_portal_release_options(
+                page_url=url,
+                factorio_version=game_version,
+            )
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise _http_exception(502, str(xcp)) from xcp
+        return NodeModPortalVersionList(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            url=url,
+            game_version=None if game_version is None else game_version.main,
+            versions=tuple(
+                NodeModPortalVersionEntry(
+                    version=release.version,
+                    file_name=release.file_name,
+                    released_at=release.released_at,
+                    factorio_version=release.factorio_version,
+                )
+                for release in versions
+            ),
+        )
+
     @staticmethod
     def _factorio_installed_mod_ids(app: App) -> frozenset[str]:
+        return frozenset(NodeApiService._factorio_installed_mods_by_id(app))
+
+    @staticmethod
+    def _factorio_vanilla_mods(app: App) -> Mapping[str, FactorioVanillaMod]:
+        try:
+            return factorio_vanilla_mods(app.directory / "data")
+        except (OSError, ValueError) as xcp:
+            log.warning("Failed to inspect Factorio vanilla mods: app=%s error=%s", app.name, xcp)
+            return {}
+
+    @staticmethod
+    def _factorio_installed_mods_by_id(app: App) -> Mapping[str, Mod]:
         if app.mods is None:
-            return frozenset()
-        installed_ids: set[str] = set()
+            return {}
+        installed_mods: dict[str, Mod] = {}
         try:
             mods = app.has_mod_manager.list_mods()
         except Exception as xcp:
             log.warning("Failed to inspect installed Factorio mods for dependencies: app=%s error=%s", app.name, xcp)
-            return frozenset()
+            return {}
         for mod in mods:
             try:
                 native_id = mod.native_metadata_id()
             except Exception:
                 native_id = None
             if native_id is not None:
-                installed_ids.add(native_id)
-                continue
+                installed_mods.setdefault(native_id, mod)
             try:
                 fallback_id = mod.metadata_fallback_id()
             except Exception:
                 fallback_id = None
             if fallback_id is not None:
-                installed_ids.add(fallback_id)
-        return frozenset(installed_ids)
+                installed_mods.setdefault(fallback_id, mod)
+        return installed_mods
+
+    async def check_mod_update(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        version: str | None = None,
+    ) -> NodeModUpdateCheckResult:
+        if app.scope != config.AppScopes.factorio.value:
+            raise _http_exception(400, f"{app.friendly} does not support mod update checks yet.")
+        if app.mods is None:
+            raise _http_exception(409, f"{app.friendly} does not support mods.")
+
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        mod = _get_mod_or_404(manager, mod_name)
+        return await self._check_factorio_mod_update(app=app, mod=mod, version=version)
+
+    async def update_mod(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        actor_user_id: int,
+        version: str | None = None,
+    ) -> NodeModUploadBatchResult:
+        if app.scope != config.AppScopes.factorio.value:
+            raise _http_exception(400, f"{app.friendly} does not support mod updates yet.")
+        if app.mods is None:
+            raise _http_exception(409, f"{app.friendly} does not support mods.")
+
+        added_mods: list[Mod] = []
+        dependency_actions: tuple[NodeModUpdateDependency, ...] = ()
+        try:
+            require_app_stopped_for_mod_mutation(app)
+            manager: Mod_Manager = app.has_mod_manager
+            await manager.reload_mods()
+            mod = _get_mod_or_404(manager, mod_name)
+            if mod.cfg.placement is not ModPlacement.SERVER_ENABLED:
+                raise _http_exception(409, f"Only enabled mods can be updated: {mod.friendly}.")
+            update_check = await self._check_factorio_mod_update(app=app, mod=mod, version=version)
+            if update_check.status is not NodeModUpdateStatus.UPDATE_AVAILABLE:
+                raise _http_exception(409, update_check.message)
+            blocked_dependencies = tuple(
+                dependency
+                for dependency in update_check.dependencies
+                if dependency.action is NodeModUpdateDependencyAction.BLOCKED
+            )
+            if blocked_dependencies:
+                details = ", ".join(
+                    f"{dependency.title} ({dependency.block_reason or 'blocked'})"
+                    for dependency in blocked_dependencies
+                )
+                raise _http_exception(409, f"Cannot update while required dependencies are blocked: {details}.")
+            dependency_actions = tuple(
+                dependency
+                for dependency in update_check.dependencies
+                if dependency.action in {
+                    NodeModUpdateDependencyAction.INSTALL,
+                    NodeModUpdateDependencyAction.UPDATE,
+                }
+            )
+            selected_mod_ids = (
+                parse_factorio_mod_portal_url(update_check.page_url),
+                *(dependency.mod_id for dependency in dependency_actions),
+            )
+            try:
+                credentials = factorio_mod_portal_credentials_from_server_settings(
+                    factorio_server_settings_path(app.directory)
+                )
+            except ValueError as xcp:
+                raise _http_exception(400, str(xcp)) from xcp
+            except OSError as xcp:
+                raise _http_exception(404, f"Factorio server settings could not be read: {xcp}") from xcp
+
+            with tempfile.TemporaryDirectory(prefix="yukibot-factorio-mod-update-") as temp_dir:
+                temp_path = Path(temp_dir)
+                backup_dir = temp_path / "previous"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    downloads = await download_factorio_mods_from_portal(
+                        page_url=update_check.page_url,
+                        destination_dir=temp_path,
+                        factorio_version=app.detect_installed_version() or app.cfg.version,
+                        credentials=credentials,
+                        selected_mod_ids=selected_mod_ids,
+                        requested_mod_version=version,
+                    )
+                except ValueError as xcp:
+                    raise _http_exception(400, str(xcp)) from xcp
+                except RuntimeError as xcp:
+                    raise _http_exception(502, str(xcp)) from xcp
+                if len(downloads) != len(selected_mod_ids):
+                    raise _http_exception(502, "Factorio mod update did not download every selected archive.")
+                remove_mods: list[Mod] = [mod]
+                for dependency in dependency_actions:
+                    if dependency.action is not NodeModUpdateDependencyAction.UPDATE:
+                        continue
+                    if dependency.installed_mod_name is None:
+                        raise _http_exception(
+                            502,
+                            f"Factorio dependency update is missing installed mod name: {dependency.mod_id}.",
+                        )
+                    remove_mods.append(_get_mod_or_404(manager, dependency.installed_mod_name))
+                for old_mod in remove_mods:
+                    backup_path = backup_dir / old_mod.name
+                    await asyncio.to_thread(File_Utils.copy, old_mod.storage_path, backup_path, True)
+                try:
+                    for old_mod in remove_mods:
+                        await manager.remove(old_mod, override_coremod=old_mod.is_protected)
+                    for download in downloads:
+                        added_mods.append(
+                            await manager.add(
+                                download.archive_path,
+                                atomic=True,
+                                placement=ModPlacement.SERVER_ENABLED,
+                            )
+                        )
+                except Exception:
+                    log.exception(
+                        "Factorio mod update failed after removing old mods; attempting restore: app=%s mod=%s",
+                        app.name,
+                        mod.name,
+                    )
+                    for added_mod in tuple(added_mods):
+                        try:
+                            await manager.remove(added_mod, override_coremod=True)
+                        except Exception:
+                            log.exception(
+                                "Factorio mod rollback failed to remove added mod: app=%s mod=%s",
+                                app.name,
+                                added_mod.name,
+                            )
+                    try:
+                        for old_mod in remove_mods:
+                            backup_path = backup_dir / old_mod.name
+                            if not backup_path.exists():
+                                continue
+                            await manager.add(
+                                backup_path,
+                                atomic=True,
+                                placement=ModPlacement.SERVER_ENABLED,
+                            )
+                    except Exception:
+                        log.exception("Factorio mod restore failed: app=%s mod=%s", app.name, mod.name)
+                    raise
+        except RunningAppModMutationError as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+        except HTTPException:
+            raise
+        except FileNotFoundError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        except FileExistsError as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except Exception as xcp:
+            raise _http_exception(500, f"Mod update failed: {xcp}") from xcp
+
+        traffic_log.info(
+            "Node API mod updated: node=%s app=%s old_mod=%s new_mod=%s actor=%s",
+            self.node_name,
+            app.name,
+            mod.name,
+            ",".join(updated_mod.name for updated_mod in added_mods),
+            actor_user_id,
+        )
+        self._invalidate_client_pack_content(app)
+        self._invalidate_mod_inventory(app.name)
+        updated_entries = tuple(self._mod_entry(updated_mod) for updated_mod in added_mods)
+        dependency_change_count = len(dependency_actions)
+        dependency_suffix = (
+            ""
+            if dependency_change_count == 0
+            else f" Updated {dependency_change_count} required dependenc{'ies' if dependency_change_count != 1 else 'y'}."
+        )
+        return NodeModUploadBatchResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            message=(
+                f"Updated `{mod.friendly}` from {update_check.current_version} "
+                f"to {update_check.latest_version}.{dependency_suffix}"
+            ),
+            mods=updated_entries,
+        )
+
+    async def _check_factorio_mod_update(
+        self,
+        *,
+        app: App,
+        mod: Mod,
+        version: str | None = None,
+    ) -> NodeModUpdateCheckResult:
+        page_url = self._factorio_mod_update_page_url(mod)
+        try:
+            resolution = await resolve_factorio_mod_portal_candidates(
+                page_url=page_url,
+                factorio_version=app.detect_installed_version() or app.cfg.version,
+                requested_mod_version=version,
+            )
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise _http_exception(502, str(xcp)) from xcp
+
+        root_candidate = next(
+            (candidate for candidate in resolution.candidates if candidate.mod_id == resolution.requested_mod_id),
+            None,
+        )
+        if root_candidate is None:
+            raise _http_exception(502, "Factorio mod portal response did not include the requested mod.")
+        installed_mods_by_id = self._factorio_installed_mods_by_id(app)
+        vanilla_mods = self._factorio_vanilla_mods(app)
+        dependency_updates = tuple(
+            self._factorio_dependency_update_entry(
+                candidate=candidate,
+                installed_mod=installed_mods_by_id.get(candidate.mod_id),
+                vanilla_mod=vanilla_mods.get(candidate.mod_id),
+            )
+            for candidate in resolution.candidates
+            if candidate.mod_id != resolution.requested_mod_id
+        )
+
+        current_version = mod.version
+        if current_version is None:
+            update_status = NodeModUpdateStatus.UNKNOWN_CURRENT
+            message = f"{mod.friendly}: latest portal version is {root_candidate.version}; local version is unknown."
+        elif current_version == root_candidate.version:
+            update_status = NodeModUpdateStatus.CURRENT
+            message = f"{mod.friendly} is current at {current_version}."
+        else:
+            update_status = NodeModUpdateStatus.UPDATE_AVAILABLE
+            message = f"{mod.friendly}: update available {current_version} -> {root_candidate.version}."
+        dependency_message = self._factorio_dependency_update_summary(dependency_updates)
+        if dependency_message is not None:
+            message = f"{message} {dependency_message}"
+
+        return NodeModUpdateCheckResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            mod_name=mod.name,
+            mod_friendly=mod.friendly,
+            status=update_status,
+            current_version=current_version,
+            latest_version=root_candidate.version,
+            latest_file_name=root_candidate.file_name,
+            page_url=root_candidate.page_url,
+            message=message,
+            dependencies=dependency_updates,
+        )
+
+    @staticmethod
+    def _factorio_dependency_update_entry(
+        *,
+        candidate: FactorioModPortalCandidate,
+        installed_mod: Mod | None,
+        vanilla_mod: FactorioVanillaMod | None = None,
+    ) -> NodeModUpdateDependency:
+        if vanilla_mod is not None:
+            return NodeModUpdateDependency(
+                mod_id=candidate.mod_id,
+                title=vanilla_mod.title,
+                page_url=candidate.page_url,
+                action=NodeModUpdateDependencyAction.CURRENT,
+                current_version=vanilla_mod.version,
+                latest_version=candidate.version,
+                latest_file_name=candidate.file_name,
+            )
+        if installed_mod is None:
+            return NodeModUpdateDependency(
+                mod_id=candidate.mod_id,
+                title=candidate.title,
+                page_url=candidate.page_url,
+                action=NodeModUpdateDependencyAction.INSTALL,
+                current_version=None,
+                latest_version=candidate.version,
+                latest_file_name=candidate.file_name,
+            )
+        if installed_mod.cfg.placement is not ModPlacement.SERVER_ENABLED:
+            return NodeModUpdateDependency(
+                mod_id=candidate.mod_id,
+                title=candidate.title,
+                page_url=candidate.page_url,
+                action=NodeModUpdateDependencyAction.BLOCKED,
+                current_version=installed_mod.version,
+                latest_version=candidate.version,
+                latest_file_name=candidate.file_name,
+                installed_mod_name=installed_mod.name,
+                block_reason=f"installed dependency is {installed_mod.cfg.placement.label.lower()}",
+            )
+        if installed_mod.version == candidate.version:
+            action = NodeModUpdateDependencyAction.CURRENT
+        else:
+            action = NodeModUpdateDependencyAction.UPDATE
+        return NodeModUpdateDependency(
+            mod_id=candidate.mod_id,
+            title=candidate.title,
+            page_url=candidate.page_url,
+            action=action,
+            current_version=installed_mod.version,
+            latest_version=candidate.version,
+            latest_file_name=candidate.file_name,
+            installed_mod_name=installed_mod.name,
+        )
+
+    @staticmethod
+    def _factorio_dependency_update_summary(
+        dependencies: Iterable[NodeModUpdateDependency],
+    ) -> str | None:
+        install_count = 0
+        update_count = 0
+        blocked_count = 0
+        for dependency in dependencies:
+            if dependency.action is NodeModUpdateDependencyAction.INSTALL:
+                install_count += 1
+            elif dependency.action is NodeModUpdateDependencyAction.UPDATE:
+                update_count += 1
+            elif dependency.action is NodeModUpdateDependencyAction.BLOCKED:
+                blocked_count += 1
+        parts: list[str] = []
+        if install_count:
+            parts.append(f"install {install_count} required dependency{'ies' if install_count != 1 else ''}")
+        if update_count:
+            parts.append(f"update {update_count} required dependency{'ies' if update_count != 1 else ''}")
+        if blocked_count:
+            parts.append(f"{blocked_count} required dependency{'ies are' if blocked_count != 1 else ' is'} blocked")
+        if not parts:
+            return None
+        return f"Dependencies: {', '.join(parts)}."
+
+    @staticmethod
+    def _factorio_mod_update_page_url(mod: Mod) -> str:
+        for page in mod.cfg.mod_pages:
+            if known_mod_page_provider_for_url(page.url) is KnownModPageProvider.FACTORIO_MODS:
+                return page.url
+        mod_id = mod.native_metadata_id()
+        if mod_id is None:
+            raise _http_exception(400, f"{mod.friendly} does not have a Factorio mod portal identity.")
+        return f"https://mods.factorio.com/mod/{quote(mod_id, safe='')}"
 
     async def upload_mod_paths(
         self,

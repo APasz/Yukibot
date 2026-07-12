@@ -10,6 +10,7 @@ import hikari
 import _sys
 import config
 from node_auth import NodeAccessGrant, NodeApiScope
+from restart_state import RestartKind
 
 
 class ScheduledRestartTests(unittest.IsolatedAsyncioTestCase):
@@ -22,6 +23,7 @@ class ScheduledRestartTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("_sys._prepare_restart", new=AsyncMock()) as prepare_restart,
             patch("_sys._finish_restart", new=AsyncMock()) as finish_restart,
+            patch("_sys.mark_pending_process_restart") as mark_restart,
             patch("_sys.Path.write_text", new=Mock()),
             patch("_sys.asyncio.sleep", new=AsyncMock()) as sleep_mock,
         ):
@@ -34,6 +36,7 @@ class ScheduledRestartTests(unittest.IsolatedAsyncioTestCase):
                 suppress_notifications=True,
             )
 
+        mark_restart.assert_called_once_with(RestartKind.SCHEDULED_SYS)
         prepare_restart.assert_awaited_once()
         finish_restart.assert_awaited_once_with(restart_sys=True, ctx=None)
         bot.rest.create_message.assert_awaited_once_with(
@@ -52,6 +55,7 @@ class ScheduledRestartTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("_sys._prepare_restart", new=AsyncMock()),
             patch("_sys._finish_restart", new=AsyncMock()),
+            patch("_sys.mark_pending_process_restart") as mark_restart,
             patch("_sys.Path.write_text", new=Mock()),
             patch("_sys.asyncio.sleep", new=AsyncMock()),
         ):
@@ -63,11 +67,40 @@ class ScheduledRestartTests(unittest.IsolatedAsyncioTestCase):
                 message_channel_id=1234,
             )
 
+        mark_restart.assert_called_once_with(RestartKind.SCHEDULED_BOT)
         bot.rest.create_message.assert_awaited_once_with(
             1234,
             "Scheduled maintenance restarting `bot` at `04:30`.",
             flags=hikari.UNDEFINED,
         )
+
+    async def test_scheduled_restart_writes_silent_sentinel_when_requested(self) -> None:
+        bot = SimpleNamespace(
+            update_presence=AsyncMock(),
+            rest=SimpleNamespace(create_message=AsyncMock()),
+        )
+
+        with (
+            patch("_sys._prepare_restart", new=AsyncMock()),
+            patch("_sys._finish_restart", new=AsyncMock()) as finish_restart,
+            patch("_sys.mark_pending_process_restart") as mark_restart,
+            patch("_sys.Path") as path_cls,
+        ):
+            await _sys.scheduled_restart(
+                bot=bot,
+                manager=object(),
+                restart_type="bot",
+                reason="Web dashboard requested restart_process.",
+                message_channel_id=None,
+                scheduled=False,
+                silent=True,
+            )
+
+        mark_restart.assert_called_once_with(RestartKind.MANUAL_BOT)
+        path_cls.assert_called_once_with("silent_restart")
+        path_cls.return_value.touch.assert_called_once_with()
+        finish_restart.assert_awaited_once_with(restart_sys=False, ctx=None)
+        bot.rest.create_message.assert_not_called()
 
 
 class PortalRestartTests(unittest.IsolatedAsyncioTestCase):
@@ -101,6 +134,7 @@ class PortalRestartTests(unittest.IsolatedAsyncioTestCase):
         )
         post_mock.assert_called_once_with(
             "https://portal.example/api/node/restart",
+            json={"restart_kind": "manual_bot"},
             headers={"Authorization": "Bearer restart-token"},
             timeout=10,
         )
@@ -179,7 +213,11 @@ class PortalRestartTests(unittest.IsolatedAsyncioTestCase):
             patch("_sys.requests.post", return_value=response),
             self.assertRaises(_sys.requests.HTTPError) as raised,
         ):
-            _sys._request_portal_restart("https://portal.example/api/node/restart", "restart-token")
+            _sys._request_portal_restart(
+                "https://portal.example/api/node/restart",
+                "restart-token",
+                RestartKind.MANUAL_BOT,
+            )
 
         self.assertIn("Node token was issued for a different node.", str(raised.exception))
 

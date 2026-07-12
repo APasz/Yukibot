@@ -57,6 +57,7 @@ from .runtime_imports import (
     NodeFactorioModSettings,
     NodeModEntry,
     NodeModDependencyResolutionResult,
+    NodeModPortalVersionList,
     NodeModUploadBatchResult,
     NodeSaveEntry,
     NodeSaveList,
@@ -2696,6 +2697,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         url_to_install: str,
         user: ModWebUser,
         selected_mod_ids: tuple[str, ...] | None = None,
+        version: str | None = None,
     ) -> NodeModUploadBatchResult:
         if not self._user_has_level(user, Power_Level.user):
             raise PermissionError(f"User access is required to install mods for {model.app_friendly}.")
@@ -2710,6 +2712,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             url,
             user,
             selected_mod_ids,
+            version,
         )
 
     async def _resolve_mod_link(
@@ -2718,6 +2721,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         model: ModWebPageModel,
         url_to_install: str,
         user: ModWebUser,
+        version: str | None = None,
     ) -> NodeModDependencyResolutionResult:
         if not self._user_has_level(user, Power_Level.user):
             raise PermissionError(f"User access is required to install mods for {model.app_friendly}.")
@@ -2727,6 +2731,28 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         node = self._remote_node_link(model.node_name)
         return await asyncio.to_thread(
             self._remote_mod_link_resolve,
+            node,
+            model.app_name,
+            url,
+            user,
+            version,
+        )
+
+    async def _mod_link_versions(
+        self,
+        *,
+        model: ModWebPageModel,
+        url_to_install: str,
+        user: ModWebUser,
+    ) -> NodeModPortalVersionList:
+        if not self._user_has_level(user, Power_Level.user):
+            raise PermissionError(f"User access is required to inspect mod versions for {model.app_friendly}.")
+        url = url_to_install.strip()
+        if not url:
+            raise ValueError("A mod link is required.")
+        node = self._remote_node_link(model.node_name)
+        return await asyncio.to_thread(
+            self._remote_mod_link_versions,
             node,
             model.app_name,
             url,

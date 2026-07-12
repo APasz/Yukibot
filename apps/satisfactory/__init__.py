@@ -1665,14 +1665,9 @@ class SatisfactoryPlayers:
 
     async def stop(self) -> None:
         self._running = False
-        if self._players_task is None:
-            return
-        self._players_task.cancel()
-        try:
-            await self._players_task
-        except asyncio.CancelledError:
-            pass
+        task = self._players_task
         self._players_task = None
+        await self.app._cancel_background_task(cast(asyncio.Task[object] | None, task), label="player poll task")
 
     async def _poll(self) -> None:
         while self._running:

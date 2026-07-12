@@ -85,7 +85,12 @@ from apps._updater import (
     AppUpdateStatus,
     Update_Manager,
 )
-from apps.factorio import FactorioModPortalCandidate, FactorioModPortalResolution
+from apps.factorio import (
+    FactorioModPortalCandidate,
+    FactorioModPortalDownload,
+    FactorioModPortalReleaseOption,
+    FactorioModPortalResolution,
+)
 from apps.minecraft import (
     Minecraft,
     MinecraftItemRegistrySnapshot,
@@ -145,12 +150,21 @@ from node_api import (
     NodeModPageResolveRequest,
     NodeModPortalInstallRequest,
     NodeModPortalResolveResult,
+    NodeModPortalVersionEntry,
+    NodeModPortalVersionList,
     NodeModPropertiesUpdateRequest,
+    NodeModUpdateDependency,
+    NodeModUpdateDependencyAction,
+    NodeModUpdateCheckResult,
+    NodeModUpdateRequest,
+    NodeModUpdateStatus,
     NodeModUploadBatchResult,
     NodeModUploadResult,
     NodeModUploadSource,
     NodeRelayTTSRequest,
+    NodeRestartRecord,
     NodeRestartScheduleState,
+    NodeRestartState,
     NodeSaveList,
     NodeSaveMutationResult,
     NodeSettingEntry,
@@ -171,6 +185,7 @@ from node_api import (
 )
 from node_auth import NodeApiScope, verify_node_token
 from restart_targets import RestartTarget
+from restart_state import RestartKind, RestartRecord
 
 
 class _DummyApp(App[Any]):
@@ -764,7 +779,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(result.text, "[Server] hi")
         self.assertEqual(result.source, ConsoleResponseSource.RCON)
 
-    def test_execute_console_action_blocks_rcon_when_no_players_are_online(self) -> None:
+    def test_execute_console_action_skips_player_gate_for_manual_rcon_action(self) -> None:
         execute = AsyncMock(return_value=ConsoleActionResult(summary="ok"))
         action = ConsoleAction(
             key="say",
@@ -782,16 +797,13 @@ class NodeApiTests(unittest.TestCase):
         service = NodeApiService()
         service.set_acl(cast(Any, acl))
 
-        with self.assertRaises(HTTPException) as raised:
-            asyncio.run(service.execute_console_action(app=app, action_key="say", raw_value=None, actor_user_id=42))
-
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(
-            str(raised.exception.detail),
-            "Minecraft Alpha has no players online, so RCON commands are currently gated.",
+        result: NodeConsoleActionExecutionResult = asyncio.run(
+            service.execute_console_action(app=app, action_key="say", raw_value=None, actor_user_id=42)
         )
-        app.player_count.assert_awaited_once()
-        execute.assert_not_awaited()
+
+        self.assertTrue(result.success)
+        app.player_count.assert_not_awaited()
+        execute.assert_awaited_once_with(app, None)
 
     def test_execute_console_action_skips_player_gate_when_rcon_override_is_disabled(self) -> None:
         execute = AsyncMock(return_value=ConsoleActionResult(summary="ok"))
@@ -1438,6 +1450,38 @@ class NodeApiTests(unittest.TestCase):
 
         mapped = result.to_mapping()
         restored = NodeModMutationResult.from_mapping(mapped)
+
+        self.assertEqual(restored, result)
+
+    def test_mod_update_check_result_round_trips_mapping(self) -> None:
+        result = NodeModUpdateCheckResult(
+            app_name="factorio_lab",
+            app_friendly="Factorio Lab",
+            node="erin",
+            mod_name="root_1.0.0.zip",
+            mod_friendly="Root Mod",
+            status=NodeModUpdateStatus.UPDATE_AVAILABLE,
+            current_version="1.0.0",
+            latest_version="1.1.0",
+            latest_file_name="root_1.1.0.zip",
+            page_url="https://mods.factorio.com/mod/root",
+            message="Root Mod: update available 1.0.0 -> 1.1.0.",
+            dependencies=(
+                NodeModUpdateDependency(
+                    mod_id="dependency",
+                    title="Dependency",
+                    page_url="https://mods.factorio.com/mod/dependency",
+                    action=NodeModUpdateDependencyAction.UPDATE,
+                    current_version="1.0.0",
+                    latest_version="1.2.0",
+                    latest_file_name="dependency_1.2.0.zip",
+                    installed_mod_name="dependency_1.0.0.zip",
+                ),
+            ),
+        )
+
+        mapped = result.to_mapping()
+        restored = NodeModUpdateCheckResult.from_mapping(mapped)
 
         self.assertEqual(restored, result)
 
@@ -2343,10 +2387,180 @@ class NodeApiTests(unittest.TestCase):
             {
                 "url": "https://mods.factorio.com/mod/root",
                 "selected_mod_ids": ["root", "dep-one", "dep-one"],
+                "version": " 1.2.3 ",
             }
         )
 
         self.assertEqual(request.selected_mod_ids, ("root", "dep-one"))
+        self.assertEqual(request.version, "1.2.3")
+
+    def test_mod_update_request_normalises_blank_version(self) -> None:
+        request = NodeModUpdateRequest.model_validate({"version": " "})
+
+        self.assertIsNone(request.version)
+
+    def test_mod_portal_version_list_round_trips_mapping(self) -> None:
+        versions = NodeModPortalVersionList.from_mapping(
+            {
+                "app_name": "factorio_lab",
+                "app_friendly": "Factorio Lab",
+                "node": "erin",
+                "url": "https://mods.factorio.com/mod/root",
+                "game_version": "2.0.68",
+                "versions": [
+                    {
+                        "version": "2.1.0",
+                        "file_name": "root_2.1.0.zip",
+                        "released_at": "2026-02-01T00:00:00.000000Z",
+                        "factorio_version": "2.0",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            versions.versions,
+            (
+                NodeModPortalVersionEntry(
+                    version="2.1.0",
+                    file_name="root_2.1.0.zip",
+                    released_at="2026-02-01T00:00:00.000000Z",
+                    factorio_version="2.0",
+                ),
+            ),
+        )
+        self.assertEqual(versions.to_mapping()["game_version"], "2.0.68")
+
+    def test_install_mod_from_link_passes_requested_factorio_version(self) -> None:
+        manager = Mock()
+        app = SimpleNamespace(
+            name="factorio_lab",
+            friendly="Factorio Lab",
+            scope="factorio",
+            directory=Path("."),
+            mods=manager,
+            has_mod_manager=manager,
+            cfg=App_Config(
+                name="factorio_lab",
+                instance_key="lab",
+                friendly_name="Factorio Lab",
+                directory=Path("."),
+                apps_dir=Path("."),
+                scope="factorio",
+                version=AppVersion(main="2.0.68"),
+            ),
+            detect_installed_version=Mock(return_value=AppVersion(main="2.0.68")),
+        )
+
+        async def fake_download(
+            *,
+            page_url: str,
+            destination_dir: Path,
+            factorio_version: AppVersion | None,
+            credentials: object,
+            selected_mod_ids: tuple[str, ...] | None,
+            requested_mod_version: str | None,
+        ) -> tuple[FactorioModPortalDownload, ...]:
+            del credentials, selected_mod_ids
+            archive_path = destination_dir / "root_1.2.3.zip"
+            archive_path.write_bytes(b"downloaded")
+            self.assertEqual(page_url, "https://mods.factorio.com/mod/root")
+            self.assertEqual(factorio_version, AppVersion(main="2.0.68"))
+            self.assertEqual(requested_mod_version, "1.2.3")
+            return (
+                FactorioModPortalDownload(
+                    mod_id="root",
+                    page_url=page_url,
+                    file_name="root_1.2.3.zip",
+                    version="1.2.3",
+                    archive_path=archive_path,
+                ),
+            )
+
+        expected = NodeModUploadBatchResult(
+            app_name="factorio_lab",
+            app_friendly="Factorio Lab",
+            node="erin",
+            message="Uploaded 1 mod.",
+            mods=(),
+        )
+        service = NodeApiService()
+        with (
+            patch("node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
+            patch("node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+            patch.object(service, "upload_mod_paths", new=AsyncMock(return_value=expected)) as upload,
+        ):
+            result = asyncio.run(
+                service.install_mod_from_link(
+                    app=cast(App[Any], cast(object, app)),
+                    url="https://mods.factorio.com/mod/root",
+                    actor_user_id=42,
+                    version="1.2.3",
+                )
+            )
+
+        self.assertEqual(result, expected)
+        upload.assert_awaited_once()
+
+    def test_list_installed_mod_versions_uses_current_factorio_version(self) -> None:
+        mod = Mock()
+        mod.name = "root_1.0.0.zip"
+        mod.friendly = "Root Mod"
+        mod.cfg = Mod_Config(
+            name="root_1.0.0.zip",
+            directory=Path("."),
+            mod_pages=(ModPageLink(name="Factorio Mods", url="https://mods.factorio.com/mod/root"),),
+        )
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        manager.get.return_value = mod
+        app = SimpleNamespace(
+            name="factorio_lab",
+            friendly="Factorio Lab",
+            scope="factorio",
+            directory=Path("."),
+            mods=manager,
+            has_mod_manager=manager,
+            cfg=App_Config(
+                name="factorio_lab",
+                instance_key="lab",
+                friendly_name="Factorio Lab",
+                directory=Path("."),
+                apps_dir=Path("."),
+                scope="factorio",
+                version=AppVersion(main="1.1.107"),
+            ),
+            detect_installed_version=Mock(return_value=AppVersion(main="2.0.68")),
+        )
+
+        async def fake_versions(
+            *,
+            page_url: str,
+            factorio_version: AppVersion | None,
+        ) -> tuple[FactorioModPortalReleaseOption, ...]:
+            self.assertEqual(page_url, "https://mods.factorio.com/mod/root")
+            self.assertEqual(factorio_version, AppVersion(main="2.0.68"))
+            return (
+                FactorioModPortalReleaseOption(
+                    version="2.1.0",
+                    file_name="root_2.1.0.zip",
+                    released_at="2026-02-01T00:00:00.000000Z",
+                    factorio_version="2.0",
+                ),
+            )
+
+        with patch("node_api.list_factorio_mod_portal_release_options", new=AsyncMock(side_effect=fake_versions)):
+            result = asyncio.run(
+                NodeApiService().list_installed_mod_versions(
+                    app=cast(App[Any], cast(object, app)),
+                    mod_name="root_1.0.0.zip",
+                )
+            )
+
+        manager.reload_mods.assert_awaited_once()
+        manager.get.assert_called_once_with("root_1.0.0.zip")
+        self.assertEqual(result.game_version, "2.0.68")
+        self.assertEqual(tuple(version.version for version in result.versions), ("2.1.0",))
 
     def test_resolve_mod_link_dependencies_marks_installed_dependencies(self) -> None:
         installed_mod = Mock()
@@ -2419,6 +2633,676 @@ class NodeApiTests(unittest.TestCase):
         self.assertTrue(result.dependencies[0].is_root)
         self.assertEqual(result.dependencies[0].dependency_mod_ids, ("dep-new", "dep-installed"))
         self.assertEqual(result.dependencies[1].parent_mod_ids, ("root",))
+
+    def test_resolve_mod_link_dependencies_marks_vanilla_dependencies_installed(self) -> None:
+        manager = Mock()
+        manager.list_mods.return_value = ()
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir)
+            vanilla_dir = root_dir / "data" / "space-age"
+            vanilla_dir.mkdir(parents=True)
+            (vanilla_dir / "info.json").write_text(
+                json.dumps({"name": "space-age", "title": "Space Age", "version": "2.1.9"}),
+                encoding="utf-8",
+            )
+            app = SimpleNamespace(
+                name="factorio_lab",
+                friendly="Factorio Lab",
+                scope="factorio",
+                directory=root_dir,
+                cfg=App_Config(
+                    name="factorio_lab",
+                    instance_key="lab",
+                    friendly_name="Factorio Lab",
+                    directory=root_dir,
+                    apps_dir=root_dir,
+                    scope="factorio",
+                    version=AppVersion(main="2.1.9"),
+                ),
+                mods=manager,
+                has_mod_manager=manager,
+                detect_installed_version=Mock(return_value=AppVersion(main="2.1.9")),
+            )
+            resolution = FactorioModPortalResolution(
+                requested_mod_id="root",
+                candidates=(
+                    FactorioModPortalCandidate(
+                        mod_id="root",
+                        title="Root Mod",
+                        page_url="https://mods.factorio.com/mod/root",
+                        file_name="root_1.0.0.zip",
+                        version="1.0.0",
+                        required_by=(),
+                        dependency_ids=("space-age",),
+                    ),
+                    FactorioModPortalCandidate(
+                        mod_id="space-age",
+                        title="[reserved]",
+                        page_url="https://mods.factorio.com/mod/space-age",
+                        file_name="space-age_2.1.9.zip",
+                        version="2.1.9",
+                        required_by=("root",),
+                        dependency_ids=(),
+                    ),
+                ),
+            )
+
+            with patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+                result = asyncio.run(
+                    NodeApiService().resolve_mod_link_dependencies(
+                        app=cast(App[Any], cast(object, app)),
+                        url="https://mods.factorio.com/mod/root",
+                    )
+                )
+
+        self.assertEqual(tuple(entry.mod_id for entry in result.dependencies), ("root", "space-age"))
+        self.assertEqual(result.dependencies[1].title, "Space Age")
+        self.assertFalse(result.dependencies[1].selected_by_default)
+        self.assertTrue(result.dependencies[1].installed)
+
+    def test_check_mod_update_reports_available_factorio_release(self) -> None:
+        class _FactorioTestMod(_TestMod):
+            def native_metadata_id(self) -> str:
+                return "root"
+
+        mod = _FactorioTestMod(
+            Mod_Config(
+                name="root_1.0.0.zip",
+                directory=Path("."),
+                version="1.0.0",
+            ),
+            nice_name="Root Mod",
+        )
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        manager.get.return_value = mod
+        manager.list_mods.return_value = (mod,)
+        app = SimpleNamespace(
+            name="factorio_lab",
+            friendly="Factorio Lab",
+            scope="factorio",
+            directory=Path("."),
+            mods=manager,
+            has_mod_manager=manager,
+            cfg=App_Config(
+                name="factorio_lab",
+                instance_key="lab",
+                friendly_name="Factorio Lab",
+                directory=Path("."),
+                apps_dir=Path("."),
+                scope="factorio",
+                version=AppVersion(main="2.0.68"),
+            ),
+            detect_installed_version=Mock(return_value=AppVersion(main="2.0.68")),
+        )
+        resolution = FactorioModPortalResolution(
+            requested_mod_id="root",
+            candidates=(
+                FactorioModPortalCandidate(
+                    mod_id="root",
+                    title="Root Mod",
+                    page_url="https://mods.factorio.com/mod/root",
+                    file_name="root_1.1.0.zip",
+                    version="1.1.0",
+                    required_by=(),
+                    dependency_ids=(),
+                ),
+            ),
+        )
+
+        with patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)) as resolve:
+            result = asyncio.run(
+                NodeApiService().check_mod_update(
+                    app=cast(App[Any], cast(object, app)),
+                    mod_name="root_1.0.0.zip",
+                    version="1.1.0",
+                )
+            )
+
+        manager.reload_mods.assert_awaited_once()
+        manager.get.assert_called_once_with("root_1.0.0.zip")
+        resolve.assert_awaited_once_with(
+            page_url="https://mods.factorio.com/mod/root",
+            factorio_version=AppVersion(main="2.0.68"),
+            requested_mod_version="1.1.0",
+        )
+        self.assertEqual(result.status, NodeModUpdateStatus.UPDATE_AVAILABLE)
+        self.assertEqual(result.current_version, "1.0.0")
+        self.assertEqual(result.latest_version, "1.1.0")
+        self.assertIn("1.0.0 -> 1.1.0", result.message)
+
+    def test_check_mod_update_treats_vanilla_factorio_dependency_as_current(self) -> None:
+        class _FactorioTestMod(_TestMod):
+            def native_metadata_id(self) -> str:
+                return "root"
+
+        with TemporaryDirectory() as temp_dir:
+            root_dir = Path(temp_dir)
+            vanilla_dir = root_dir / "data" / "space-age"
+            vanilla_dir.mkdir(parents=True)
+            (vanilla_dir / "info.json").write_text(
+                json.dumps({"name": "space-age", "title": "Space Age", "version": "2.1.9"}),
+                encoding="utf-8",
+            )
+            mod = _FactorioTestMod(
+                Mod_Config(
+                    name="root_1.0.0.zip",
+                    directory=root_dir / "mods",
+                    version="1.0.0",
+                ),
+                nice_name="Root Mod",
+            )
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = mod
+            manager.list_mods.return_value = (mod,)
+            app = SimpleNamespace(
+                name="factorio_lab",
+                friendly="Factorio Lab",
+                scope="factorio",
+                directory=root_dir,
+                mods=manager,
+                has_mod_manager=manager,
+                cfg=App_Config(
+                    name="factorio_lab",
+                    instance_key="lab",
+                    friendly_name="Factorio Lab",
+                    directory=root_dir,
+                    apps_dir=root_dir,
+                    scope="factorio",
+                    version=AppVersion(main="2.1.9"),
+                ),
+                detect_installed_version=Mock(return_value=AppVersion(main="2.1.9")),
+            )
+            resolution = FactorioModPortalResolution(
+                requested_mod_id="root",
+                candidates=(
+                    FactorioModPortalCandidate(
+                        mod_id="root",
+                        title="Root Mod",
+                        page_url="https://mods.factorio.com/mod/root",
+                        file_name="root_1.1.0.zip",
+                        version="1.1.0",
+                        required_by=(),
+                        dependency_ids=("space-age",),
+                    ),
+                    FactorioModPortalCandidate(
+                        mod_id="space-age",
+                        title="[reserved]",
+                        page_url="https://mods.factorio.com/mod/space-age",
+                        file_name="space-age_2.1.9.zip",
+                        version="2.1.9",
+                        required_by=("root",),
+                        dependency_ids=(),
+                    ),
+                ),
+            )
+
+            with patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+                result = asyncio.run(
+                    NodeApiService().check_mod_update(
+                        app=cast(App[Any], cast(object, app)),
+                        mod_name="root_1.0.0.zip",
+                    )
+                )
+
+        self.assertEqual(tuple(dependency.mod_id for dependency in result.dependencies), ("space-age",))
+        self.assertEqual(result.dependencies[0].title, "Space Age")
+        self.assertEqual(result.dependencies[0].action, NodeModUpdateDependencyAction.CURRENT)
+        self.assertEqual(result.dependencies[0].current_version, "2.1.9")
+
+    def test_update_mod_replaces_enabled_factorio_mod_with_latest_release(self) -> None:
+        class _FactorioTestMod(_TestMod):
+            def native_metadata_id(self) -> str:
+                return "root"
+
+        with TemporaryDirectory() as temp_dir:
+            mods_dir = Path(temp_dir) / "mods"
+            mods_dir.mkdir()
+            old_path = mods_dir / "root_1.0.0.zip"
+            old_path.write_bytes(b"old")
+            latest_path = mods_dir / "root_1.1.0.zip"
+            latest_path.write_bytes(b"new")
+            old_mod = _FactorioTestMod(
+                Mod_Config(
+                    name=old_path.name,
+                    directory=mods_dir,
+                    version="1.0.0",
+                ),
+                nice_name="Root Mod",
+            )
+            updated_mod = _FactorioTestMod(
+                Mod_Config(
+                    name=latest_path.name,
+                    directory=mods_dir,
+                    version="1.1.0",
+                ),
+                nice_name="Root Mod",
+            )
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.return_value = old_mod
+            manager.list_mods.return_value = (old_mod,)
+            manager.remove = AsyncMock(return_value=old_mod)
+            manager.add = AsyncMock(return_value=updated_mod)
+            app = SimpleNamespace(
+                name="factorio_lab",
+                friendly="Factorio Lab",
+                scope="factorio",
+                directory=Path("."),
+                mods=manager,
+                has_mod_manager=manager,
+                cfg=App_Config(
+                    name="factorio_lab",
+                    instance_key="lab",
+                    friendly_name="Factorio Lab",
+                    directory=Path("."),
+                    apps_dir=Path("."),
+                    scope="factorio",
+                    version=AppVersion(main="2.0.68"),
+                ),
+                detect_installed_version=Mock(return_value=AppVersion(main="2.0.68")),
+                check_running=Mock(return_value=False),
+                invalidate_client_pack_content=Mock(),
+            )
+            resolution = FactorioModPortalResolution(
+                requested_mod_id="root",
+                candidates=(
+                    FactorioModPortalCandidate(
+                        mod_id="root",
+                        title="Root Mod",
+                        page_url="https://mods.factorio.com/mod/root",
+                        file_name="root_1.1.0.zip",
+                        version="1.1.0",
+                        required_by=(),
+                        dependency_ids=(),
+                    ),
+                ),
+            )
+
+            async def fake_download(
+                *,
+                page_url: str,
+                destination_dir: Path,
+                factorio_version: AppVersion | None,
+                credentials: object,
+                selected_mod_ids: tuple[str, ...],
+                requested_mod_version: str | None,
+            ) -> tuple[FactorioModPortalDownload, ...]:
+                del credentials
+                archive_path = destination_dir / "root_1.1.0.zip"
+                archive_path.write_bytes(b"downloaded")
+                self.assertEqual(page_url, "https://mods.factorio.com/mod/root")
+                self.assertEqual(factorio_version, AppVersion(main="2.0.68"))
+                self.assertEqual(selected_mod_ids, ("root",))
+                self.assertEqual(requested_mod_version, "1.1.0")
+                return (
+                    FactorioModPortalDownload(
+                        mod_id="root",
+                        page_url=page_url,
+                        file_name="root_1.1.0.zip",
+                        version="1.1.0",
+                        archive_path=archive_path,
+                    ),
+                )
+
+            with (
+                patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
+                patch("node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
+                patch("node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+            ):
+                result = asyncio.run(
+                    NodeApiService().update_mod(
+                        app=cast(App[Any], cast(object, app)),
+                        mod_name=old_path.name,
+                        actor_user_id=42,
+                        version="1.1.0",
+                    )
+                )
+
+            manager.remove.assert_awaited_once_with(old_mod, override_coremod=False)
+            add_kwargs = manager.add.await_args.kwargs
+            self.assertEqual(add_kwargs["placement"], ModPlacement.SERVER_ENABLED)
+            self.assertTrue(str(manager.add.await_args.args[0]).endswith("root_1.1.0.zip"))
+            self.assertEqual(tuple(mod.name for mod in result.mods), ("root_1.1.0.zip",))
+            self.assertIn("1.0.0 to 1.1.0", result.message)
+
+    def test_update_mod_installs_and_updates_required_factorio_dependencies(self) -> None:
+        class _FactorioTestMod(_TestMod):
+            def __init__(self, cfg: Mod_Config, *, native_id: str, nice_name: str) -> None:
+                super().__init__(cfg, nice_name=nice_name)
+                self._native_id = native_id
+
+            def native_metadata_id(self) -> str:
+                return self._native_id
+
+        with TemporaryDirectory() as temp_dir:
+            mods_dir = Path(temp_dir) / "mods"
+            mods_dir.mkdir()
+            old_root_path = mods_dir / "root_1.0.0.zip"
+            old_root_path.write_bytes(b"old-root")
+            old_dependency_path = mods_dir / "dep-old_1.0.0.zip"
+            old_dependency_path.write_bytes(b"old-dependency")
+            old_root = _FactorioTestMod(
+                Mod_Config(
+                    name=old_root_path.name,
+                    directory=mods_dir,
+                    version="1.0.0",
+                ),
+                native_id="root",
+                nice_name="Root Mod",
+            )
+            old_dependency = _FactorioTestMod(
+                Mod_Config(
+                    name=old_dependency_path.name,
+                    directory=mods_dir,
+                    version="1.0.0",
+                ),
+                native_id="dep-old",
+                nice_name="Old Dependency",
+            )
+            updated_root = _FactorioTestMod(
+                Mod_Config(
+                    name="root_1.1.0.zip",
+                    directory=mods_dir,
+                    version="1.1.0",
+                ),
+                native_id="root",
+                nice_name="Root Mod",
+            )
+            new_dependency = _FactorioTestMod(
+                Mod_Config(
+                    name="dep-new_1.0.0.zip",
+                    directory=mods_dir,
+                    version="1.0.0",
+                ),
+                native_id="dep-new",
+                nice_name="New Dependency",
+            )
+            updated_dependency = _FactorioTestMod(
+                Mod_Config(
+                    name="dep-old_2.0.0.zip",
+                    directory=mods_dir,
+                    version="2.0.0",
+                ),
+                native_id="dep-old",
+                nice_name="Old Dependency",
+            )
+            installed_by_name = {
+                old_root.name: old_root,
+                old_dependency.name: old_dependency,
+            }
+            added_by_name = {
+                updated_root.name: updated_root,
+                new_dependency.name: new_dependency,
+                updated_dependency.name: updated_dependency,
+            }
+            manager = Mock()
+            manager.reload_mods = AsyncMock()
+            manager.get.side_effect = lambda name: installed_by_name.get(name)
+            manager.list_mods.return_value = (old_root, old_dependency)
+            manager.remove = AsyncMock()
+
+            async def add_mod(
+                archive_path: Path,
+                *,
+                atomic: bool,
+                placement: ModPlacement,
+            ) -> _FactorioTestMod:
+                self.assertTrue(atomic)
+                self.assertIs(placement, ModPlacement.SERVER_ENABLED)
+                return added_by_name[archive_path.name]
+
+            manager.add = AsyncMock(side_effect=add_mod)
+            app = SimpleNamespace(
+                name="factorio_lab",
+                friendly="Factorio Lab",
+                scope="factorio",
+                directory=Path("."),
+                mods=manager,
+                has_mod_manager=manager,
+                cfg=App_Config(
+                    name="factorio_lab",
+                    instance_key="lab",
+                    friendly_name="Factorio Lab",
+                    directory=Path("."),
+                    apps_dir=Path("."),
+                    scope="factorio",
+                    version=AppVersion(main="2.0.68"),
+                ),
+                detect_installed_version=Mock(return_value=AppVersion(main="2.0.68")),
+                check_running=Mock(return_value=False),
+                invalidate_client_pack_content=Mock(),
+            )
+            resolution = FactorioModPortalResolution(
+                requested_mod_id="root",
+                candidates=(
+                    FactorioModPortalCandidate(
+                        mod_id="root",
+                        title="Root Mod",
+                        page_url="https://mods.factorio.com/mod/root",
+                        file_name="root_1.1.0.zip",
+                        version="1.1.0",
+                        required_by=(),
+                        dependency_ids=("dep-new", "dep-old"),
+                    ),
+                    FactorioModPortalCandidate(
+                        mod_id="dep-new",
+                        title="New Dependency",
+                        page_url="https://mods.factorio.com/mod/dep-new",
+                        file_name="dep-new_1.0.0.zip",
+                        version="1.0.0",
+                        required_by=("root",),
+                        dependency_ids=(),
+                    ),
+                    FactorioModPortalCandidate(
+                        mod_id="dep-old",
+                        title="Old Dependency",
+                        page_url="https://mods.factorio.com/mod/dep-old",
+                        file_name="dep-old_2.0.0.zip",
+                        version="2.0.0",
+                        required_by=("root",),
+                        dependency_ids=(),
+                    ),
+                ),
+            )
+
+            async def fake_download(
+                *,
+                page_url: str,
+                destination_dir: Path,
+                factorio_version: AppVersion | None,
+                credentials: object,
+                selected_mod_ids: tuple[str, ...],
+                requested_mod_version: str | None,
+            ) -> tuple[FactorioModPortalDownload, ...]:
+                del credentials
+                self.assertEqual(page_url, "https://mods.factorio.com/mod/root")
+                self.assertEqual(factorio_version, AppVersion(main="2.0.68"))
+                self.assertEqual(selected_mod_ids, ("root", "dep-new", "dep-old"))
+                self.assertIsNone(requested_mod_version)
+                file_names_by_id = {
+                    "root": "root_1.1.0.zip",
+                    "dep-new": "dep-new_1.0.0.zip",
+                    "dep-old": "dep-old_2.0.0.zip",
+                }
+                versions_by_id = {
+                    "root": "1.1.0",
+                    "dep-new": "1.0.0",
+                    "dep-old": "2.0.0",
+                }
+                downloads: list[FactorioModPortalDownload] = []
+                for mod_id in selected_mod_ids:
+                    archive_path = destination_dir / file_names_by_id[mod_id]
+                    archive_path.write_bytes(b"downloaded")
+                    downloads.append(
+                        FactorioModPortalDownload(
+                            mod_id=mod_id,
+                            page_url=f"https://mods.factorio.com/mod/{mod_id}",
+                            file_name=file_names_by_id[mod_id],
+                            version=versions_by_id[mod_id],
+                            archive_path=archive_path,
+                        )
+                    )
+                return tuple(downloads)
+
+            with (
+                patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
+                patch("node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
+                patch("node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+            ):
+                result = asyncio.run(
+                    NodeApiService().update_mod(
+                        app=cast(App[Any], cast(object, app)),
+                        mod_name=old_root_path.name,
+                        actor_user_id=42,
+                    )
+                )
+
+            self.assertEqual([await_call.args[0] for await_call in manager.remove.await_args_list], [old_root, old_dependency])
+            self.assertEqual(manager.add.await_count, 3)
+            self.assertEqual(
+                tuple(mod.name for mod in result.mods),
+                ("root_1.1.0.zip", "dep-new_1.0.0.zip", "dep-old_2.0.0.zip"),
+            )
+            self.assertIn("Updated 2 required dependencies", result.message)
+
+    def test_update_mod_rejects_blocked_factorio_dependency(self) -> None:
+        class _FactorioTestMod(_TestMod):
+            def __init__(self, cfg: Mod_Config, *, native_id: str, nice_name: str) -> None:
+                super().__init__(cfg, nice_name=nice_name)
+                self._native_id = native_id
+
+            def native_metadata_id(self) -> str:
+                return self._native_id
+
+        old_root = _FactorioTestMod(
+            Mod_Config(
+                name="root_1.0.0.zip",
+                directory=Path("."),
+                version="1.0.0",
+            ),
+            native_id="root",
+            nice_name="Root Mod",
+        )
+        disabled_dependency = _FactorioTestMod(
+            Mod_Config(
+                name="dep_1.0.0.zip",
+                directory=Path("."),
+                placement=ModPlacement.SERVER_DISABLED,
+                version="1.0.0",
+            ),
+            native_id="dep",
+            nice_name="Dependency",
+        )
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        manager.get.return_value = old_root
+        manager.list_mods.return_value = (old_root, disabled_dependency)
+        manager.remove = AsyncMock()
+        app = SimpleNamespace(
+            name="factorio_lab",
+            friendly="Factorio Lab",
+            scope="factorio",
+            directory=Path("."),
+            mods=manager,
+            has_mod_manager=manager,
+            cfg=App_Config(
+                name="factorio_lab",
+                instance_key="lab",
+                friendly_name="Factorio Lab",
+                directory=Path("."),
+                apps_dir=Path("."),
+                scope="factorio",
+                version=AppVersion(main="2.0.68"),
+            ),
+            detect_installed_version=Mock(return_value=AppVersion(main="2.0.68")),
+            check_running=Mock(return_value=False),
+        )
+        resolution = FactorioModPortalResolution(
+            requested_mod_id="root",
+            candidates=(
+                FactorioModPortalCandidate(
+                    mod_id="root",
+                    title="Root Mod",
+                    page_url="https://mods.factorio.com/mod/root",
+                    file_name="root_1.1.0.zip",
+                    version="1.1.0",
+                    required_by=(),
+                    dependency_ids=("dep",),
+                ),
+                FactorioModPortalCandidate(
+                    mod_id="dep",
+                    title="Dependency",
+                    page_url="https://mods.factorio.com/mod/dep",
+                    file_name="dep_1.0.0.zip",
+                    version="1.0.0",
+                    required_by=("root",),
+                    dependency_ids=(),
+                ),
+            ),
+        )
+
+        with (
+            patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
+            patch("node_api.factorio_mod_portal_credentials_from_server_settings") as credentials,
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(
+                    NodeApiService().update_mod(
+                        app=cast(App[Any], cast(object, app)),
+                        mod_name="root_1.0.0.zip",
+                        actor_user_id=42,
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("required dependencies are blocked", str(raised.exception.detail))
+        manager.remove.assert_not_awaited()
+        credentials.assert_not_called()
+
+    def test_update_mod_rejects_disabled_factorio_mods(self) -> None:
+        mod = _TestMod(
+            Mod_Config(
+                name="root_1.0.0.zip",
+                directory=Path("."),
+                placement=ModPlacement.SERVER_DISABLED,
+                version="1.0.0",
+            ),
+            nice_name="Root Mod",
+        )
+        manager = Mock()
+        manager.reload_mods = AsyncMock()
+        manager.get.return_value = mod
+        app = SimpleNamespace(
+            name="factorio_lab",
+            friendly="Factorio Lab",
+            scope="factorio",
+            mods=manager,
+            has_mod_manager=manager,
+            cfg=App_Config(
+                name="factorio_lab",
+                instance_key="lab",
+                friendly_name="Factorio Lab",
+                directory=Path("."),
+                apps_dir=Path("."),
+                scope="factorio",
+            ),
+            check_running=Mock(return_value=False),
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(
+                NodeApiService().update_mod(
+                    app=cast(App[Any], cast(object, app)),
+                    mod_name="root_1.0.0.zip",
+                    actor_user_id=42,
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("Only enabled mods", str(raised.exception.detail))
+        manager.reload_mods.assert_awaited_once()
 
     def test_upload_mod_path_passes_client_only_placement_to_manager(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -6263,6 +7147,7 @@ class NodeApiTests(unittest.TestCase):
                 result = await service.schedule_system_action(
                     action=NodeSystemAction.RESTART_PROCESS,
                     auto_restart_running_apps=False,
+                    silent=True,
                     actor_user_id=42,
                 )
 
@@ -6270,12 +7155,13 @@ class NodeApiTests(unittest.TestCase):
             self.assertEqual(result.action, NodeSystemAction.RESTART_PROCESS)
             dispatch = call_later.call_args.args[1]
             dispatch()
-            handler.assert_called_once_with(NodeSystemAction.RESTART_PROCESS, False)
+            handler.assert_called_once_with(NodeSystemAction.RESTART_PROCESS, False, True)
 
             with self.assertRaises(HTTPException) as raised:
                 await service.schedule_system_action(
                     action=NodeSystemAction.REBOOT_HOST,
                     auto_restart_running_apps=True,
+                    silent=False,
                     actor_user_id=42,
                 )
             self.assertEqual(raised.exception.status_code, 409)
@@ -6294,12 +7180,13 @@ class NodeApiTests(unittest.TestCase):
                 result = await service.schedule_system_action(
                     action=NodeSystemAction.RESTART_PORTAL,
                     auto_restart_running_apps=True,
+                    silent=False,
                     actor_user_id=42,
                 )
 
             self.assertEqual(result.message, f"Scheduled Portal restart for {service.node_name}.")
             call_later.call_args.args[1]()
-            handler.assert_called_once_with(NodeSystemAction.RESTART_PORTAL, True)
+            handler.assert_called_once_with(NodeSystemAction.RESTART_PORTAL, True, False)
             self.assertIsNone(service._pending_system_action)  # type: ignore[attr-defined]
 
         asyncio.run(exercise())
@@ -6315,6 +7202,8 @@ class NodeApiTests(unittest.TestCase):
                         anchor_timestamp=int(datetime.fromisoformat("2026-07-01T10:00:00+10:00").timestamp()),
                         saved_at_timestamp=int(datetime.fromisoformat("2026-07-01T08:00:00+10:00").timestamp()),
                     )
+                    triggered_at = datetime.fromisoformat("2026-07-01T10:30:00+10:00")
+                    maintenance.mark_triggered((RestartTarget.BOT,), triggered_at=triggered_at)
                     service = NodeApiService()
                     acl = AsyncMock()
                     service.set_acl(cast(Access_Control, acl))
@@ -6328,6 +7217,7 @@ class NodeApiTests(unittest.TestCase):
                     self.assertEqual([entry.target for entry in state.schedules], [RestartTarget.BOT, RestartTarget.SYSTEM])
                     self.assertTrue(state.schedules[0].enabled)
                     self.assertEqual(state.schedules[0].interval_minutes, 90)
+                    self.assertEqual(state.schedules[0].last_triggered_timestamp, int(triggered_at.timestamp()))
 
                     updated = await service.update_restart_schedule(
                         target=RestartTarget.SYSTEM,
@@ -6342,6 +7232,33 @@ class NodeApiTests(unittest.TestCase):
                     self.assertEqual(system_schedule.interval_minutes, 7 * 24 * 60)
 
         asyncio.run(exercise())
+
+    def test_restart_state_uses_process_sentinel_and_optional_voice_record(self) -> None:
+        service = NodeApiService()
+        with (
+            patch("node_api.psutil.Process") as process_cls,
+            patch(
+                "node_api.read_process_restart_record",
+                return_value=RestartRecord(timestamp=1_782_909_000, kind=RestartKind.MANUAL_SYS),
+            ) as read_process,
+            patch(
+                "node_api.read_voice_restart_record",
+                return_value=RestartRecord(timestamp=1_782_912_600, kind=RestartKind.MANUAL_VOICE),
+            ),
+        ):
+            process_cls.return_value.create_time.return_value = 1_782_800_000
+            state = service.read_restart_state()
+
+        read_process.assert_called_once_with(default_timestamp=1_782_800_000)
+        self.assertEqual(
+            state,
+            NodeRestartState(
+                node=service.node_name,
+                process=NodeRestartRecord(timestamp=1_782_909_000, kind=RestartKind.MANUAL_SYS),
+                voice=NodeRestartRecord(timestamp=1_782_912_600, kind=RestartKind.MANUAL_VOICE),
+            ),
+        )
+        self.assertEqual(NodeRestartState.from_mapping(state.to_mapping()), state)
 
     def test_skip_restart_schedule_requires_sudo_and_advances_next_restart(self) -> None:
         async def exercise() -> None:

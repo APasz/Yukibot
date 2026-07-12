@@ -44,8 +44,10 @@ from .runtime_imports import (
     NodeModList,
     NodeModMutationResult,
     NodeModDependencyResolutionResult,
+    NodeModPortalVersionList,
     NodeModUploadBatchResult,
     NodeRestartScheduleState,
+    NodeRestartState,
     NodeSaveList,
     NodeSaveMutationResult,
     NodeSettingList,
@@ -658,7 +660,16 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_mod_link_resolve"]) -> Callable[..., NodeModDependencyResolutionResult]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_remote_mod_link_versions"]) -> Callable[..., NodeModPortalVersionList]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_remote_node_link"]) -> Callable[..., ModWebNodeLink]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_is_yuki"]) -> Callable[[ModWebNodeLink], bool]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_portal_node_link"]) -> Callable[[], ModWebNodeLink | None]: ...
 
     @overload
     def __getattr__(
@@ -673,12 +684,17 @@ class ModWebServiceSupport:
     @overload
     def __getattr__(
         self, name: Literal["_remote_node_system_action_async"]
-    ) -> Callable[[ModWebNodeLink, NodeSystemAction, bool, ModWebUser], Awaitable[NodeSystemActionResult]]: ...
+    ) -> Callable[[ModWebNodeLink, NodeSystemAction, bool, bool, ModWebUser], Awaitable[NodeSystemActionResult]]: ...
 
     @overload
     def __getattr__(
         self, name: Literal["_remote_restart_schedules_async"]
     ) -> Callable[[ModWebNodeLink, ModWebUser], Awaitable[NodeRestartScheduleState]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_restart_state_async"]
+    ) -> Callable[[ModWebNodeLink, ModWebUser], Awaitable[NodeRestartState]]: ...
 
     @overload
     def __getattr__(
@@ -1005,6 +1021,11 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_resolve_mod_link"]
     ) -> Callable[..., Awaitable[NodeModDependencyResolutionResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_mod_link_versions"]
+    ) -> Callable[..., Awaitable[NodeModPortalVersionList]]: ...
 
     @overload
     def __getattr__(self, name: Literal["_warn_page_section_load_failure"]) -> Callable[..., None]: ...

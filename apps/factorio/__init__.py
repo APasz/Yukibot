@@ -107,7 +107,7 @@ _FACTORIO_MOD_VERSION_RE: Pattern[str] = re.compile(
 _FACTORIO_MOD_PORTAL_HOST = "mods.factorio.com"
 _FACTORIO_MOD_PORTAL_BASE_URL = f"https://{_FACTORIO_MOD_PORTAL_HOST}"
 _FACTORIO_MOD_PORTAL_ID_RE: Pattern[str] = re.compile(r"^[A-Za-z0-9_-]+$")
-_FACTORIO_MOD_DEPENDENCY_RE: Pattern[str] = re.compile(r"^(?P<mod_id>[A-Za-z0-9_-]+)(?:\s|$)")
+_FACTORIO_MOD_DEPENDENCY_RE: Pattern[str] = re.compile(r"^(?P<mod_id>[A-Za-z0-9_-]+)(?=\s|[<>=!~]|$)")
 _FACTORIO_CONFIG_FILENAMES: tuple[str, ...] = (
     "server-settings.json",
     "map-settings.json",
@@ -209,6 +209,13 @@ class FactorioModPortalCredentials:
 
 
 @dataclass(frozen=True, slots=True)
+class FactorioVanillaMod:
+    name: str
+    title: str
+    version: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class FactorioModPortalRelease:
     download_url: str
     file_name: str
@@ -217,6 +224,14 @@ class FactorioModPortalRelease:
     released_at: str | None
     factorio_version: str | None
     dependencies: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioModPortalReleaseOption:
+    version: str
+    file_name: str
+    released_at: str | None
+    factorio_version: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +329,26 @@ def factorio_server_settings_path(directory: Path) -> Path:
 
 def factorio_mod_settings_path(directory: Path) -> Path:
     return directory.absolute() / "mods" / _FACTORIO_MOD_SETTINGS_FILENAME
+
+
+def factorio_vanilla_mods(data_dir: Path) -> Mapping[str, FactorioVanillaMod]:
+    if not data_dir.exists():
+        return {}
+    if not data_dir.is_dir():
+        raise ValueError(f"Factorio data path is not a directory: {data_dir}")
+    mods: dict[str, FactorioVanillaMod] = {}
+    for info_path in sorted(data_dir.glob("*/info.json")):
+        payload = _load_json_object(info_path.read_text(config.STR_ENCODE), label=f"{info_path} metadata")
+        raw_name = payload.get("name")
+        if not isinstance(raw_name, str) or not _FACTORIO_MOD_PORTAL_ID_RE.fullmatch(raw_name.strip()):
+            raise ValueError(f"Factorio vanilla mod metadata name is invalid: {info_path}")
+        name = raw_name.strip()
+        raw_title = payload.get("title")
+        title = raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else name
+        raw_version = payload.get("version")
+        version = raw_version.strip() if isinstance(raw_version, str) and raw_version.strip() else None
+        mods[name] = FactorioVanillaMod(name=name, title=title, version=version)
+    return mods
 
 
 def factorio_config_path(directory: Path, filename: str) -> Path:
@@ -540,8 +575,22 @@ def _select_factorio_mod_portal_release(
     releases: Iterable[FactorioModPortalRelease],
     *,
     factorio_version: AppVersion | None,
+    requested_version: str | None = None,
 ) -> FactorioModPortalRelease:
     release_list = tuple(releases)
+    requested = requested_version.strip() if requested_version is not None else ""
+    if requested:
+        matching = tuple(release for release in release_list if release.version == requested)
+        if not matching:
+            raise ValueError(f"Factorio mod portal release version was not found: {requested}.")
+        compatible_matching = tuple(
+            release for release in matching if _factorio_mod_release_matches_game_version(release, factorio_version)
+        )
+        if not compatible_matching:
+            raise ValueError(
+                f"Factorio mod portal release {requested} is not compatible with this Factorio version."
+            )
+        return max(compatible_matching, key=lambda release: release.released_at or "")
     compatible = tuple(
         release for release in release_list if _factorio_mod_release_matches_game_version(release, factorio_version)
     )
@@ -595,6 +644,7 @@ async def _resolve_factorio_mod_portal_candidates_with_session(
     session: aiohttp.ClientSession,
     requested_mod_id: str,
     factorio_version: AppVersion | None,
+    requested_mod_version: str | None,
 ) -> tuple[FactorioModPortalResolution, dict[str, FactorioModPortalRelease]]:
     pending: deque[str] = deque([requested_mod_id])
     seen: set[str] = set()
@@ -612,6 +662,7 @@ async def _resolve_factorio_mod_portal_candidates_with_session(
         release = _select_factorio_mod_portal_release(
             _factorio_mod_portal_releases(payload),
             factorio_version=factorio_version,
+            requested_version=requested_mod_version if mod_id == requested_mod_id else None,
         )
         ordered_ids.append(mod_id)
         payloads[mod_id] = payload
@@ -637,6 +688,7 @@ async def resolve_factorio_mod_portal_candidates(
     *,
     page_url: str,
     factorio_version: AppVersion | None,
+    requested_mod_version: str | None = None,
 ) -> FactorioModPortalResolution:
     mod_id = parse_factorio_mod_portal_url(page_url)
     timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=300)
@@ -645,8 +697,35 @@ async def resolve_factorio_mod_portal_candidates(
             session=session,
             requested_mod_id=mod_id,
             factorio_version=factorio_version,
+            requested_mod_version=requested_mod_version,
         )
     return resolution
+
+
+async def list_factorio_mod_portal_release_options(
+    *,
+    page_url: str,
+    factorio_version: AppVersion | None,
+) -> tuple[FactorioModPortalReleaseOption, ...]:
+    mod_id = parse_factorio_mod_portal_url(page_url)
+    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=300)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        payload = await _factorio_mod_portal_metadata(session, mod_id)
+    releases = tuple(
+        release
+        for release in _factorio_mod_portal_releases(payload)
+        if _factorio_mod_release_matches_game_version(release, factorio_version)
+    )
+    sorted_releases = tuple(sorted(releases, key=lambda release: release.released_at or "", reverse=True))
+    return tuple(
+        FactorioModPortalReleaseOption(
+            version=release.version,
+            file_name=release.file_name,
+            released_at=release.released_at,
+            factorio_version=release.factorio_version,
+        )
+        for release in sorted_releases
+    )
 
 
 def _verify_factorio_mod_download_sha1(archive_path: Path, expected_sha1: str) -> None:
@@ -668,6 +747,7 @@ async def download_factorio_mod_from_portal(
     destination_dir: Path,
     factorio_version: AppVersion | None,
     credentials: FactorioModPortalCredentials,
+    requested_mod_version: str | None = None,
 ) -> FactorioModPortalDownload:
     downloads = await download_factorio_mods_from_portal(
         page_url=page_url,
@@ -675,6 +755,7 @@ async def download_factorio_mod_from_portal(
         factorio_version=factorio_version,
         credentials=credentials,
         selected_mod_ids=None,
+        requested_mod_version=requested_mod_version,
     )
     if len(downloads) != 1:
         raise RuntimeError("Single Factorio mod download unexpectedly resolved multiple archives.")
@@ -688,6 +769,7 @@ async def download_factorio_mods_from_portal(
     factorio_version: AppVersion | None,
     credentials: FactorioModPortalCredentials,
     selected_mod_ids: Iterable[str] | None,
+    requested_mod_version: str | None = None,
 ) -> tuple[FactorioModPortalDownload, ...]:
     mod_id = parse_factorio_mod_portal_url(page_url)
     selected_ids: set[str] | None = None if selected_mod_ids is None else set(selected_mod_ids)
@@ -697,6 +779,7 @@ async def download_factorio_mods_from_portal(
             session=session,
             requested_mod_id=mod_id,
             factorio_version=factorio_version,
+            requested_mod_version=requested_mod_version,
         )
         if selected_ids is None:
             selected_ids = {mod_id}
