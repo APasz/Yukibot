@@ -2486,8 +2486,8 @@ class NodeApiTests(unittest.TestCase):
         )
         service = NodeApiService()
         with (
-            patch("node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
-            patch("node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+            patch("apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
+            patch("apps.factorio.node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
             patch.object(service, "upload_mod_paths", new=AsyncMock(return_value=expected)) as upload,
         ):
             result = asyncio.run(
@@ -2549,7 +2549,7 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
 
-        with patch("node_api.list_factorio_mod_portal_release_options", new=AsyncMock(side_effect=fake_versions)):
+        with patch("apps.factorio.node_api.list_factorio_mod_portal_release_options", new=AsyncMock(side_effect=fake_versions)):
             result = asyncio.run(
                 NodeApiService().list_installed_mod_versions(
                     app=cast(App[Any], cast(object, app)),
@@ -2618,7 +2618,7 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-        with patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+        with patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
             result = asyncio.run(
                 NodeApiService().resolve_mod_link_dependencies(
                     app=cast(App[Any], cast(object, app)),
@@ -2687,7 +2687,7 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
 
-            with patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+            with patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
                 result = asyncio.run(
                     NodeApiService().resolve_mod_link_dependencies(
                         app=cast(App[Any], cast(object, app)),
@@ -2750,7 +2750,7 @@ class NodeApiTests(unittest.TestCase):
             ),
         )
 
-        with patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)) as resolve:
+        with patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)) as resolve:
             result = asyncio.run(
                 NodeApiService().check_mod_update(
                     app=cast(App[Any], cast(object, app)),
@@ -2838,7 +2838,7 @@ class NodeApiTests(unittest.TestCase):
                 ),
             )
 
-            with patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
+            with patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)):
                 result = asyncio.run(
                     NodeApiService().check_mod_update(
                         app=cast(App[Any], cast(object, app)),
@@ -2947,9 +2947,9 @@ class NodeApiTests(unittest.TestCase):
                 )
 
             with (
-                patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
-                patch("node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
-                patch("node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+                patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
+                patch("apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
+                patch("apps.factorio.node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
             ):
                 result = asyncio.run(
                     NodeApiService().update_mod(
@@ -3147,9 +3147,9 @@ class NodeApiTests(unittest.TestCase):
                 return tuple(downloads)
 
             with (
-                patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
-                patch("node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
-                patch("node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
+                patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
+                patch("apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings", return_value=Mock()),
+                patch("apps.factorio.node_api.download_factorio_mods_from_portal", new=AsyncMock(side_effect=fake_download)),
             ):
                 result = asyncio.run(
                     NodeApiService().update_mod(
@@ -3244,8 +3244,8 @@ class NodeApiTests(unittest.TestCase):
         )
 
         with (
-            patch("node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
-            patch("node_api.factorio_mod_portal_credentials_from_server_settings") as credentials,
+            patch("apps.factorio.node_api.resolve_factorio_mod_portal_candidates", new=AsyncMock(return_value=resolution)),
+            patch("apps.factorio.node_api.factorio_mod_portal_credentials_from_server_settings") as credentials,
         ):
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(
