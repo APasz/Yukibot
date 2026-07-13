@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import json
+import signal
+import subprocess
 import tarfile
 import unittest
 import zipfile
@@ -2151,6 +2153,95 @@ class FactorioStopTests(unittest.IsolatedAsyncioTestCase):
         app._relay.teardown.assert_awaited_once()
         app._terminate.assert_awaited_once()
 
+    async def test_stop_uses_sigint_graceful_shutdown_when_process_is_running(self) -> None:
+        class _Process:
+            stdin = None
+            sent_signal: signal.Signals | None = None
+            wait_timeout: float | None = None
+
+            def poll(self) -> int | None:
+                return None
+
+            def send_signal(self, stop_signal: signal.Signals) -> None:
+                self.sent_signal = stop_signal
+
+            def wait(self, timeout: float) -> int:
+                self.wait_timeout = timeout
+                return 0
+
+        app = cast(Factorio, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app._running = True
+        app._activities = SimpleNamespace(stop=AsyncMock())
+        app._players = SimpleNamespace(stop=AsyncMock())
+        app._relay = SimpleNamespace(is_connected=True, send=AsyncMock(return_value="saved"), teardown=AsyncMock())
+        tail = SimpleNamespace(stop=AsyncMock())
+        app._tail = tail
+        app._bridge_events_tail = None
+        process = _Process()
+        app.process = process
+        app._stop_bridge_events_tail = AsyncMock()
+        app._terminate = AsyncMock()
+        app._drain_stderr_task = AsyncMock()
+        app._lock = Path("/tmp/factorio-test.lock")
+
+        with patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            result = await Factorio.stop(app)
+
+        self.assertTrue(result)
+        self.assertEqual(process.sent_signal, signal.SIGINT)
+        self.assertEqual(process.wait_timeout, 30.0)
+        app._relay.send.assert_not_awaited()
+        app._terminate.assert_not_awaited()
+        app._drain_stderr_task.assert_awaited_once()
+        tail.stop.assert_awaited_once()
+        app._stop_bridge_events_tail.assert_awaited_once()
+        app._relay.teardown.assert_awaited_once()
+        sleep_mock.assert_awaited_once_with(0.5)
+        self.assertIsNone(app.process)
+
+    async def test_stop_falls_back_to_save_and_terminate_when_graceful_shutdown_times_out(self) -> None:
+        class _Process:
+            stdin = None
+
+            def poll(self) -> int | None:
+                return None
+
+            def send_signal(self, _stop_signal: signal.Signals) -> None:
+                return None
+
+            def wait(self, timeout: float) -> int:
+                raise subprocess.TimeoutExpired("factorio", timeout)
+
+        app = cast(Factorio, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app._running = True
+        app._activities = SimpleNamespace(stop=AsyncMock())
+        app._players = SimpleNamespace(stop=AsyncMock())
+        app._relay = SimpleNamespace(is_connected=True, send=AsyncMock(return_value="saved"), teardown=AsyncMock())
+        app._tail = None
+        app._bridge_events_tail = None
+        app.process = _Process()
+        app._stop_bridge_events_tail = AsyncMock()
+        app._terminate = AsyncMock()
+        app._drain_stderr_task = AsyncMock()
+        app._lock = Path("/tmp/factorio-test.lock")
+
+        with patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            result = await Factorio.stop(app)
+
+        self.assertTrue(result)
+        app._relay.send.assert_awaited_once_with("/server-save", reconnect_on_failure=False)
+        self.assertEqual(
+            sleep_mock.await_args_list,
+            [
+                call(1.0),
+                call(0.5),
+            ],
+        )
+        app._terminate.assert_awaited_once()
+        app._relay.teardown.assert_awaited_once()
+
     async def test_stop_waits_after_save_request_before_terminating(self) -> None:
         app = cast(Factorio, object.__new__(Factorio))
         app._running = True
@@ -2199,6 +2290,7 @@ class FactorioStopTests(unittest.IsolatedAsyncioTestCase):
         app.process = SimpleNamespace(stdin=_BrokenStdin())
         app._stop_bridge_events_tail = AsyncMock()
         app._terminate = AsyncMock()
+        app._request_graceful_process_stop = AsyncMock(return_value=False)
         app._lock = Path("/tmp/factorio-test.lock")
 
         with patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock:

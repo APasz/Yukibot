@@ -12,9 +12,11 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+from logging import Logger
 from pathlib import Path
+from re import Pattern
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Protocol, SupportsInt, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, SupportsInt, cast, runtime_checkable
 from urllib.parse import urlparse
 
 import aiohttp
@@ -95,21 +97,28 @@ class DiscordRelayTTSService(RelayTTSService, Protocol):
     ) -> tuple[str, int]: ...
 
 
-log = logging.getLogger(__name__)
-tts_log = logging.getLogger(config.LOGGER_TTS)
+log: Logger = logging.getLogger(__name__)
+tts_log: Logger = logging.getLogger(config.LOGGER_TTS)
 
-DISCORD_EMOJI_REGEX = re.compile(r"<a?:(\w+):\d+>")
-DISCORD_USER_MENTION_REGEX = re.compile(r"<@!?(\d+)>")
-_KLIPY_MEDIA_URL_RE = re.compile(
+DISCORD_EMOJI_REGEX: Pattern[str] = re.compile(r"<a?:(\w+):\d+>")
+DISCORD_USER_MENTION_REGEX: Pattern[str] = re.compile(r"<@!?(\d+)>")
+_KLIPY_MEDIA_URL_RE: Pattern[str] = re.compile(
     r"https://static\.klipy\.com/[^\s\"'<>]+\.(?:gif|png|jpe?g|webp|mp4|webm)", re.IGNORECASE
 )
-_GIPHY_ID_RE = re.compile(r"^(?P<slug>.+)-(?P<gif_id>[A-Za-z0-9]+)$")
-_TENOR_VIEW_POST_ID_RE = re.compile(r"-(?P<post_id>\d+)$")
-_TENOR_STORE_CACHE_RE = re.compile(r'<script id="store-cache"[^>]*>(?P<payload>.*?)</script>', re.IGNORECASE | re.DOTALL)
-_TENOR_GIF_VARIANT_ORDER = ("gif", "mediumgif", "tinygif", "nanogif")
-_ATTACHMENT_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,16}$")
-_ATTACHMENT_UNSAFE_NAME_CHARS_RE = re.compile(r"[\r\n\t,\[\]]+")
-_ATTACHMENT_MULTI_SPACE_RE = re.compile(r"\s+")
+_GIPHY_ID_RE: Pattern[str] = re.compile(r"^(?P<slug>.+)-(?P<gif_id>[A-Za-z0-9]+)$")
+_TENOR_VIEW_POST_ID_RE: Pattern[str] = re.compile(r"-(?P<post_id>\d+)$")
+_TENOR_STORE_CACHE_RE: Pattern[str] = re.compile(
+    r'<script id="store-cache"[^>]*>(?P<payload>.*?)</script>', re.IGNORECASE | re.DOTALL
+)
+_TENOR_GIF_VARIANT_ORDER: tuple[Literal["gif"], Literal["mediumgif"], Literal["tinygif"], Literal["nanogif"]] = (
+    "gif",
+    "mediumgif",
+    "tinygif",
+    "nanogif",
+)
+_ATTACHMENT_EXTENSION_RE: Pattern[str] = re.compile(r"\.[A-Za-z0-9]{1,16}$")
+_ATTACHMENT_UNSAFE_NAME_CHARS_RE: Pattern[str] = re.compile(r"[\r\n\t,\[\]]+")
+_ATTACHMENT_MULTI_SPACE_RE: Pattern[str] = re.compile(r"\s+")
 _TENOR_GRABBER_MODULE: ModuleType = tenorgrabber
 
 
@@ -122,7 +131,7 @@ def color_int_to_hex(color: int | None) -> str | None:
 def _role_color_value(role: Role | None) -> int | None:
     if role is None:
         return None
-    role_color = int(role.color)
+    role_color: int = int(role.color)
     if role_color == 0:
         return None
     return role_color
@@ -145,23 +154,23 @@ class _RoleBearingMember(Protocol):
 def _role_like_color_value(role: _RoleLike | None) -> int | None:
     if role is None:
         return None
-    role_color = int(role.color)
+    role_color: int = int(role.color)
     if role_color == 0:
         return None
     return role_color
 
 
 def _member_roles_by_position(member: _RoleBearingMember) -> tuple[_RoleLike, ...]:
-    roles = tuple(member.get_roles())
+    roles: tuple[_RoleLike, ...] = tuple[_RoleLike, ...](member.get_roles())
     if roles:
-        return tuple(sorted(roles, key=lambda role: role.position, reverse=True))
-    top_role = member.get_top_role()
+        return tuple[_RoleLike, ...](sorted(roles, key=lambda role: role.position, reverse=True))
+    top_role: _RoleLike | None = member.get_top_role()
     return (top_role,) if top_role is not None else ()
 
 
 def member_role_color(member: Member | _RoleBearingMember) -> int | None:
     for role in _member_roles_by_position(member):
-        role_color = _role_like_color_value(role)
+        role_color: int | None = _role_like_color_value(role)
         if role_color is not None:
             return role_color
     return None
@@ -198,7 +207,7 @@ def cached_top_role_color(
 def _normalise_attachment_extension(raw: str | None) -> str | None:
     if raw is None:
         return None
-    text = raw.strip().lower()
+    text: str = raw.strip().lower()
     if not text:
         return None
     if not text.startswith("."):
@@ -213,13 +222,13 @@ def _normalise_attachment_extension(raw: str | None) -> str | None:
 def _guess_attachment_extension(media_type: str | None) -> str | None:
     if media_type is None:
         return None
-    guessed = mimetypes.guess_extension(media_type, strict=False)
+    guessed: str | None = mimetypes.guess_extension(media_type, strict=False)
     return _normalise_attachment_extension(guessed)
 
 
 def _media_extension_from_url(url: str, *, supported_extensions: Collection[str]) -> str | None:
-    path = urlparse(url).path
-    normalised = _normalise_attachment_extension(Path(path).suffix)
+    path: str = urlparse(url).path
+    normalised: str | None = _normalise_attachment_extension(Path(path).suffix)
     if normalised is None:
         return None
     extension = normalised.removeprefix(".")
@@ -238,30 +247,30 @@ def _guess_media_type_from_url(url: str) -> str | None:
 def _normalise_attachment_stem(raw: str | None) -> str | None:
     if raw is None:
         return None
-    text = _ATTACHMENT_UNSAFE_NAME_CHARS_RE.sub(" ", raw.strip())
+    text: str = _ATTACHMENT_UNSAFE_NAME_CHARS_RE.sub(" ", raw.strip())
     text = _ATTACHMENT_MULTI_SPACE_RE.sub(" ", text).strip(" .")
     if not text:
         return None
-    sanitised = sanitize_filename(text, platform="universal").strip(" .")
+    sanitised: str = sanitize_filename(text, platform="universal").strip(" .")
     if not sanitised:
         return None
     return sanitised
 
 
 def normalise_attachment_relay_name(attachment: hikari.Attachment) -> str:
-    title_name = attachment.title.strip() if attachment.title is not None else ""
-    filename_name = attachment.filename.strip()
-    title_path = Path(title_name) if title_name else None
-    filename_path = Path(filename_name)
+    title_name: str = attachment.title.strip() if attachment.title is not None else ""
+    filename_name: str = attachment.filename.strip()
+    title_path: Path | None = Path(title_name) if title_name else None
+    filename_path: Path = Path(filename_name)
 
-    extension = (
+    extension: str | None = (
         _normalise_attachment_extension(filename_path.suffix)
         or _normalise_attachment_extension(title_path.suffix if title_path is not None else None)
         or _guess_attachment_extension(attachment.media_type)
     )
-    preferred_stem = _normalise_attachment_stem(title_path.stem if title_path is not None else None)
-    fallback_stem = _normalise_attachment_stem(filename_path.stem or filename_path.name)
-    stem = preferred_stem or fallback_stem or "attachment"
+    preferred_stem: str | None = _normalise_attachment_stem(title_path.stem if title_path is not None else None)
+    fallback_stem: str | None = _normalise_attachment_stem(filename_path.stem or filename_path.name)
+    stem: str = preferred_stem or fallback_stem or "attachment"
     if extension is None:
         return stem
     return f"{stem}{extension}"
@@ -272,8 +281,8 @@ class AM_Receiver(Protocol):
 
 
 class Distils:
-    file = File_Utils()
-    util = Utilities()
+    file: File_Utils = File_Utils()
+    util: Utilities = Utilities()
 
     @classmethod
     async def _deliver_files(
@@ -290,8 +299,8 @@ class Distils:
         if not paths:
             raise ValueError("paths list must not be empty")
 
-        zip_name = base_name + ".zip" if not base_name.endswith(".zip") else ""
-        delivery_paths = paths
+        zip_name: str = base_name + ".zip" if not base_name.endswith(".zip") else ""
+        delivery_paths: list[Path] = paths
         if force_zip:
             delivery_paths = [await cls.file.compress(paths, zip_name)]
 
@@ -301,7 +310,7 @@ class Distils:
 
         if len(delivery_paths) <= 10:
             try:
-                total_size = sum(cls.file.pointer_size(path) for path in delivery_paths)
+                total_size: int = sum(cls.file.pointer_size(path) for path in delivery_paths)
                 if total_size < config.DISCORD_UPLOAD_LIMIT:
                     await send_many_files(
                         f"Here ya go, `{base_name}`",
@@ -311,7 +320,7 @@ class Distils:
             except Exception:
                 log.warning("Failed size pre-check, continuing anyway")
 
-        zip_path = await cls.file.compress(delivery_paths, zip_name)
+        zip_path: Path = await cls.file.compress(delivery_paths, zip_name)
         try:
             if cls.file.pointer_size(zip_path) < config.DISCORD_UPLOAD_LIMIT:
                 await send_single_file(f"Your file sweets, `{base_name}`", hikari.File(str(zip_path)))
@@ -336,7 +345,7 @@ class Distils:
         force_download: bool = False,
         force_zip: bool = False,
     ) -> FileDeliveryMode:
-        base_name = f"{app_name}_{display_name}" if app_name else display_name
+        base_name: str = f"{app_name}_{display_name}" if app_name else display_name
         return await cls._deliver_files(
             paths,
             base_name=base_name,

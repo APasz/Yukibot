@@ -523,6 +523,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_register_client_cleanup"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_ui_client_is_alive"]) -> Callable[..., bool]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_resolved_app_color_hex"]) -> Callable[..., str | None]: ...
 
     @overload

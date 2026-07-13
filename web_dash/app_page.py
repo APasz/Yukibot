@@ -3619,6 +3619,8 @@ class ModWebAppPageMixin(
                 ui.label("Loading tab…").classes("mod-subtitle text-sm mod-tab-loading")
             try:
                 loaded = await load_tab(next_tab_id)
+                if not self._ui_client_is_alive(ui=ui):
+                    return
                 tab = next(tab for tab in tabs if tab.tab_id == next_tab_id)
                 render_section(
                     tab=tab,
@@ -3634,6 +3636,8 @@ class ModWebAppPageMixin(
                     next_tab_id,
                     xcp,
                 )
+                if not self._ui_client_is_alive(ui=ui):
+                    return
                 target_panel.clear()
                 with target_panel:
                     self._render_flat_tab_empty_state(

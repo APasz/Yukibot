@@ -4,7 +4,9 @@ import hashlib
 import json
 import logging
 import re
+import signal
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -115,6 +117,7 @@ _FACTORIO_CONFIG_FILENAMES: tuple[str, ...] = (
 )
 _FACTORIO_MOD_SETTINGS_FILENAME = "mod-settings.dat"
 _FACTORIO_STOP_SAVE_GRACE_SECONDS = 1.0
+_FACTORIO_GRACEFUL_STOP_TIMEOUT_SECONDS = 30.0
 _FACTORIO_RESEARCH_FINISHED_RE: Pattern[str] = re.compile(r"\[RESEARCH FINISHED\]\s+(?P<research>.+)$", re.IGNORECASE)
 _FACTORIO_YUKI_BRIDGE_EVENT_RE: Pattern[str] = re.compile(r"\[Yuki\]\s+(?P<payload>\{.+\})\s*$")
 _FACTORIO_ERROR_RE: Pattern[str] = re.compile(r"^\s*\d+\.\d+\s+Error\s+(?P<source>\S+:\d+):\s+(?P<message>.+)$")
@@ -2034,10 +2037,67 @@ class Factorio(App[App_Config]):
         self._running = False
         await self._activities.stop()
         await self._players.stop()
+        stopped_gracefully = await self._request_graceful_process_stop()
+        if not stopped_gracefully:
+            save_requested = await self._request_stop_save()
+            if save_requested:
+                await asyncio.sleep(_FACTORIO_STOP_SAVE_GRACE_SECONDS)
+            await self._terminate()
+        if self._tail:
+            await self._tail.stop()
+            self._tail = None
+        await self._stop_bridge_events_tail()
+        await self._relay.teardown()
+        await asyncio.sleep(0.5)
+        File_Utils.remove(self._lock, silent=True, resolve=True)  # Sometimes it doesn't get removed
+        return True
+
+    async def _request_graceful_process_stop(self) -> bool:
+        process = self.process
+        if process is None:
+            return False
+        if process.poll() is not None:
+            await self._drain_stderr_task()
+            if self.process is process:
+                self.process = None
+            return True
+
+        log.info(
+            "Requesting graceful Factorio shutdown for %s with SIGINT; timeout=%ss",
+            self.name,
+            _FACTORIO_GRACEFUL_STOP_TIMEOUT_SECONDS,
+        )
+        try:
+            process.send_signal(signal.SIGINT)
+            await asyncio.to_thread(process.wait, _FACTORIO_GRACEFUL_STOP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            log.warning(
+                "%s did not stop after SIGINT within %ss.",
+                self.name,
+                _FACTORIO_GRACEFUL_STOP_TIMEOUT_SECONDS,
+            )
+            return False
+        except ProcessLookupError:
+            log.info("%s process exited before SIGINT could be delivered.", self.name)
+        except Exception:
+            log.exception("Failed to request graceful Factorio shutdown for %s.", self.name)
+            return False
+
+        await self._drain_stderr_task()
+        if self.process is process:
+            self.process = None
+        log.info("%s stopped gracefully after SIGINT.", self.name)
+        return True
+
+    async def _request_stop_save(self) -> bool:
         save_requested = False
         ok: str | None = None
         if self._relay.is_connected:
-            ok = await self.send_player_gated_rcon("/server-save", reconnect_on_failure=False)
+            ok = await self.send_player_gated_rcon(
+                "/server-save",
+                reconnect_on_failure=False,
+                check_player_gate=False,
+            )
             save_requested = ok is not None
         if not ok:
             if self.process and self.process.stdin:
@@ -2048,17 +2108,7 @@ class Factorio(App[App_Config]):
                     save_requested = True
                 except (BrokenPipeError, OSError, ValueError) as xcp:
                     log.warning("Factorio stdin save fallback failed for %s: %s", self.name, xcp)
-        if save_requested:
-            await asyncio.sleep(_FACTORIO_STOP_SAVE_GRACE_SECONDS)
-        if self._tail:
-            await self._tail.stop()
-            self._tail = None
-        await self._stop_bridge_events_tail()
-        await self._relay.teardown()
-        await self._terminate()
-        await asyncio.sleep(0.5)
-        File_Utils.remove(self._lock, silent=True, resolve=True)  # Sometimes it doesn't get removed
-        return True
+        return save_requested
 
     async def kill(self) -> bool:
         self._running = False

@@ -2659,27 +2659,25 @@ class ModWebChatMixin(ModWebServiceSupport):
         if self._chat_event_hides_body_content(event):
             return ""
         content = self._chat_event_content(event).strip()
-        if self._chat_event_content_is_redundant_media(event, content):
+        if self._chat_event_content_is_redundant_asset(event, content):
             return ""
         return content
 
     @classmethod
-    def _chat_event_content_is_redundant_media(cls, event: ChatEvent, content: str) -> bool:
+    def _chat_event_content_is_redundant_asset(cls, event: ChatEvent, content: str) -> bool:
         if not content:
             return False
-        return cls._chat_content_matches_previewed_link(event, content) or cls._chat_content_matches_previewed_sticker(
+        return cls._chat_content_matches_rendered_link(event, content) or cls._chat_content_matches_previewed_sticker(
             event,
             content,
         )
 
     @classmethod
-    def _chat_content_matches_previewed_link(cls, event: ChatEvent, content: str) -> bool:
+    def _chat_content_matches_rendered_link(cls, event: ChatEvent, content: str) -> bool:
         content_text = content.strip()
         if not content_text:
             return False
         for link in event.links:
-            if cls._chat_media_preview_from_link(link) is None:
-                continue
             if content_text in {link.url, link.original_url}:
                 return True
         return False

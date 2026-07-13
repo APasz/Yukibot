@@ -319,8 +319,9 @@ class _FakeQueryParams:
 
 
 class _FakeCleanupClient:
-    def __init__(self) -> None:
+    def __init__(self, *, deleted: bool = False) -> None:
         self.delete_handlers: list[Callable[..., object]] = []
+        self._deleted = deleted
 
     def on_delete(self, handler: Callable[..., object]) -> None:
         self.delete_handlers.append(handler)
@@ -353,6 +354,79 @@ class _FakeCleanupTimer:
         if self.raise_deleted_parent_slot:
             raise RuntimeError("The parent slot of the element has been deleted.")
         return nullcontext()
+
+
+class _FakeTabbedSectionContainer:
+    class_value: str | None = None
+    added_style: str | None = None
+    removed_style: str | None = None
+
+    def classes(self, value: str) -> "_FakeTabbedSectionContainer":
+        self.class_value = value
+        return self
+
+    def style(self, *, add: str | None = None, remove: str | None = None) -> "_FakeTabbedSectionContainer":
+        self.added_style = add
+        self.removed_style = remove
+        return self
+
+    def clear(self) -> None:
+        return None
+
+    def __enter__(self) -> "_FakeTabbedSectionContainer":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool:
+        del exc_type, exc, traceback
+        return False
+
+
+class _FakeTabbedSectionUi:
+    def __init__(self, *, client: object | None = None) -> None:
+        self.context = SimpleNamespace(client=client) if client is not None else None
+        self.tab_change_handler: Callable[[object], object] | None = None
+        self.navigate = SimpleNamespace(to=Mock())
+        self.javascript_calls: list[str] = []
+
+    def column(self) -> _FakeTabbedSectionContainer:
+        return _FakeTabbedSectionContainer()
+
+    def row(self) -> _FakeTabbedSectionContainer:
+        return _FakeTabbedSectionContainer()
+
+    def element(self, tag: str) -> _FakeTabbedSectionContainer:
+        del tag
+        return _FakeTabbedSectionContainer()
+
+    def label(self, text: str) -> _FakeTabbedSectionContainer:
+        del text
+        return _FakeTabbedSectionContainer()
+
+    def tabs(self, *, value: str, on_change: object) -> _FakeTabbedSectionContainer:
+        del value
+        self.tab_change_handler = cast(Callable[[object], object], on_change)
+        return _FakeTabbedSectionContainer()
+
+    def tab(self, tab_id: str, *, label: str) -> object:
+        del tab_id, label
+        return object()
+
+    def tab_panels(self, tabs: object, *, value: str, animated: bool) -> _FakeTabbedSectionContainer:
+        del tabs, value, animated
+        return _FakeTabbedSectionContainer()
+
+    def tab_panel(self, tab: object) -> _FakeTabbedSectionContainer:
+        del tab
+        return _FakeTabbedSectionContainer()
+
+    def run_javascript(self, script: str, *, timeout: float = 1.0) -> None:
+        del timeout
+        self.javascript_calls.append(script)
 
 
 class ModWebTests(unittest.TestCase):
@@ -1410,6 +1484,56 @@ class ModWebTests(unittest.TestCase):
             app_friendly="Minecraft Alpha",
             node="yuki",
             actions=(),
+        )
+
+    @staticmethod
+    def _overview_model_with_config_and_chat() -> ModWebOverviewPageModel:
+        return ModWebOverviewPageModel(
+            node_name="yuki",
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            supports_configs=True,
+            config_read_level=Power_Level.user,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="minecraft_alpha",
+                app_friendly="Minecraft Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            supports_chat=True,
+            chat_url="/mod-web/chat/minecraft_alpha",
+        )
+
+    @staticmethod
+    def _chat_surface_with_map() -> _ModWebChatSurfaceConfig:
+        initial_snapshot = NodeChatRoomSnapshot(
+            room_id="minecraft_alpha",
+            endpoint_count=1,
+            events=(),
+            endpoint_summaries=(NodeChatEndpointSummary(label="Game: Minecraft Alpha"),),
+        )
+        return _ModWebChatSurfaceConfig(
+            panel=_ModWebChatPanelConfig(
+                initial_snapshot=initial_snapshot,
+                refresh_snapshot=AsyncMock(return_value=initial_snapshot),
+                send_message=None,
+            ),
+            node_name="yuki",
+            app_friendly="Minecraft Alpha",
+            app_color_hex="#22C55E",
+            app_stats=None,
+            popout_url="/mod-web/chat/minecraft_alpha",
+            map_url="https://example.invalid/squaremap/?world=minecraft_overworld",
         )
 
     def test_build_home_node_stat_specs_groups_metrics_per_node(self) -> None:
@@ -7308,6 +7432,28 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(service._chat_event_display_content(event), "")
         self.assertEqual(service._chat_event_copy_text(event), "https://klipy.com/gifs/frieren-anime-54")
 
+    def test_chat_event_display_content_hides_rendered_link_url(self) -> None:
+        service = ModWebService()
+        event = ChatEvent(
+            room_id="factorio_alpha",
+            source=ChatEndpointId.discord_channel("123"),
+            author=ChatAuthor(kind=ChatAuthorKind.DISCORD_USER, display_name="CoffeeCreamTV"),
+            content="https://mods.factorio.com/mod/factorio-rate-calculator-tooltip",
+            links=(
+                ChatLink(
+                    url="https://mods.factorio.com/mod/factorio-rate-calculator-tooltip",
+                    label="https://mods.factorio.com/mod/factorio-rate-calculator-tooltip",
+                    is_media=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(service._chat_event_display_content(event), "")
+        self.assertEqual(
+            service._chat_event_copy_text(event),
+            "https://mods.factorio.com/mod/factorio-rate-calculator-tooltip",
+        )
+
     def test_chat_media_preview_rejects_non_http_urls(self) -> None:
         preview = ModWebService._chat_media_preview_from_link(
             ChatLink(url="javascript:alert(1)", label="bad", media_type="image/png", is_media=True)
@@ -12612,6 +12758,14 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(timer.cancel_calls, [True])
         self.assertTrue(timer._deleted)
 
+    def test_ui_client_is_alive_rejects_deleted_nicegui_client(self) -> None:
+        service = ModWebService()
+        deleted_ui = SimpleNamespace(context=SimpleNamespace(client=_FakeCleanupClient(deleted=True)))
+        live_ui = SimpleNamespace(context=SimpleNamespace(client=_FakeCleanupClient()))
+
+        self.assertFalse(service._ui_client_is_alive(ui=cast(ModWebUi, cast(object, deleted_ui))))
+        self.assertTrue(service._ui_client_is_alive(ui=cast(ModWebUi, cast(object, live_ui))))
+
     def test_config_options_use_root_and_relative_path_labels(self) -> None:
         configs = (
             self._config_entry(root_id="server", root_label="Server Properties", relative_path="server.properties"),
@@ -15571,123 +15725,11 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(service.rendered_tab_ids, ["map"])
 
     def test_render_tabbed_page_sections_includes_chat_map_badge_link(self) -> None:
-        class FakeContainer:
-            class_value: str | None = None
-            added_style: str | None = None
-            removed_style: str | None = None
-
-            def classes(self, value: str) -> "FakeContainer":
-                self.class_value = value
-                return self
-
-            def style(self, *, add: str | None = None, remove: str | None = None) -> "FakeContainer":
-                self.added_style = add
-                self.removed_style = remove
-                return self
-
-            def clear(self) -> None:
-                return None
-
-            def __enter__(self) -> "FakeContainer":
-                return self
-
-            def __exit__(
-                self,
-                exc_type: type[BaseException] | None,
-                exc: BaseException | None,
-                traceback: object | None,
-            ) -> bool:
-                del exc_type, exc, traceback
-                return False
-
-        class FakeUi:
-            def __init__(self) -> None:
-                self.tab_change_handler: Callable[[object], object] | None = None
-                self.navigate = SimpleNamespace(to=Mock())
-                self.javascript_calls: list[str] = []
-
-            def column(self) -> FakeContainer:
-                return FakeContainer()
-
-            def row(self) -> FakeContainer:
-                return FakeContainer()
-
-            def element(self, tag: str) -> FakeContainer:
-                del tag
-                return FakeContainer()
-
-            def label(self, text: str) -> FakeContainer:
-                del text
-                return FakeContainer()
-
-            def tabs(self, *, value: str, on_change: object) -> FakeContainer:
-                del value
-                self.tab_change_handler = cast(Callable[[object], object], on_change)
-                return FakeContainer()
-
-            def tab(self, tab_id: str, *, label: str) -> object:
-                del tab_id, label
-                return object()
-
-            def tab_panels(self, tabs: object, *, value: str, animated: bool) -> FakeContainer:
-                del tabs, value, animated
-                return FakeContainer()
-
-            def tab_panel(self, tab: object) -> FakeContainer:
-                del tab
-                return FakeContainer()
-
-            def run_javascript(self, script: str, *, timeout: float = 1.0) -> None:
-                del timeout
-                self.javascript_calls.append(script)
-
         service = ModWebService()
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
-        model = ModWebOverviewPageModel(
-            node_name="yuki",
-            app_name="minecraft_alpha",
-            app_friendly="Minecraft Alpha",
-            app_color_hex="#22C55E",
-            supports_configs=True,
-            config_read_level=Power_Level.user,
-            config_write_level=Power_Level.sudo,
-            supports_save_uploads=False,
-            supports_save_rename=False,
-            save_write_level=Power_Level.user,
-            configs=NodeConfigList(
-                app_name="minecraft_alpha",
-                app_friendly="Minecraft Alpha",
-                node="yuki",
-                configs=(),
-            ),
-            saves=None,
-            app_stats=None,
-            app_start_blocked=False,
-            settings=None,
-            console_actions=None,
-            supports_chat=True,
-            chat_url="/mod-web/chat/minecraft_alpha",
-        )
-        initial_snapshot = NodeChatRoomSnapshot(
-            room_id="minecraft_alpha",
-            endpoint_count=1,
-            events=(),
-            endpoint_summaries=(NodeChatEndpointSummary(label="Game: Minecraft Alpha"),),
-        )
-        chat_surface = _ModWebChatSurfaceConfig(
-            panel=_ModWebChatPanelConfig(
-                initial_snapshot=initial_snapshot,
-                refresh_snapshot=AsyncMock(return_value=initial_snapshot),
-                send_message=None,
-            ),
-            node_name="yuki",
-            app_friendly="Minecraft Alpha",
-            app_color_hex="#22C55E",
-            app_stats=None,
-            popout_url="/mod-web/chat/minecraft_alpha",
-            map_url="https://example.invalid/squaremap/?world=minecraft_overworld",
-        )
-        ui = FakeUi()
+        model = self._overview_model_with_config_and_chat()
+        chat_surface = self._chat_surface_with_map()
+        ui = _FakeTabbedSectionUi()
         tabs = service._page_tabs(model)
         load_tab = AsyncMock(return_value=ModWebAppTabLoadResult(model=model))
 
@@ -15729,6 +15771,50 @@ class ModWebTests(unittest.TestCase):
         load_tab.assert_awaited_once_with("configs")
         ui.navigate.to.assert_not_called()
         self.assertTrue(any("history.replaceState" in script for script in ui.javascript_calls))
+
+    def test_render_tabbed_page_sections_skips_failed_lazy_tab_fallback_after_client_delete(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        model = self._overview_model_with_config_and_chat()
+        chat_surface = self._chat_surface_with_map()
+        client = _FakeCleanupClient()
+        ui = _FakeTabbedSectionUi(client=client)
+        tabs = service._page_tabs(model)
+
+        async def load_deleted_tab(tab_id: str) -> ModWebAppTabLoadResult:
+            del tab_id
+            client._deleted = True
+            raise RuntimeError("client closed")
+
+        load_tab = AsyncMock(side_effect=load_deleted_tab)
+
+        with (
+            patch.object(
+                ModWebService,
+                "_render_chat_endpoint_badge",
+                return_value=(cast(Any, object()), cast(Any, object()), cast(Any, object())),
+            ),
+            patch.object(ModWebService, "_badge_link"),
+            patch.object(ModWebService, "_action_link"),
+            patch.object(ModWebService, "_render_page_section", return_value=None),
+            patch.object(ModWebService, "_render_flat_tab_empty_state") as render_empty_state,
+        ):
+            service._render_tabbed_page_sections(
+                ui=cast(ModWebUi, cast(object, ui)),
+                model=model,
+                user=user,
+                current_url="/mod-web/apps/minecraft_alpha?tab=chat",
+                tabs=tabs,
+                chat_surface=chat_surface,
+                load_tab=load_tab,
+            )
+
+            self.assertIsNotNone(ui.tab_change_handler)
+            assert ui.tab_change_handler is not None
+            asyncio.run(cast(Any, ui.tab_change_handler)(SimpleNamespace(value="configs")))
+
+        load_tab.assert_awaited_once_with("configs")
+        render_empty_state.assert_not_called()
 
     def test_additional_app_tabs_stay_hidden_when_conditions_are_not_met(self) -> None:
         class HiddenTabService(ModWebService):

@@ -3649,6 +3649,17 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         on_delete(_run_cleanup)
 
     @staticmethod
+    def _ui_client_is_alive(*, ui: ModWebUi) -> bool:
+        ui_context: object | None = getattr(cast(object, ui), "context", None)
+        client: object | None = getattr(ui_context, "client", None) if ui_context is not None else None
+        if client is None:
+            return True
+        deleted: object | None = getattr(client, "_deleted", None)
+        if isinstance(deleted, bool):
+            return not deleted
+        return True
+
+    @staticmethod
     def _register_element_cleanup(*, element: object, cleanup: Callable[[], None]) -> None:
         handle_delete_candidate: object | None = getattr(element, "_handle_delete", None)
         if not callable(handle_delete_candidate):
