@@ -225,18 +225,18 @@ class App_Manager(metaclass=config.Singleton):
         self._bot_configuration_path = self._BOT_CONFIGURATION_PATH
 
     def _managed_shutdown_name_keys(self) -> set[str]:
-        managed_shutdown_names = getattr(self, "_managed_shutdown_names", None)
-        if managed_shutdown_names is None:
-            managed_shutdown_names = set()
-            self._managed_shutdown_names = managed_shutdown_names
-        return managed_shutdown_names
+        try:
+            return self._managed_shutdown_names
+        except AttributeError:
+            self._managed_shutdown_names = set()
+            return self._managed_shutdown_names
 
     def _pending_start_name_keys(self) -> set[str]:
-        pending_start_names = getattr(self, "_pending_start_names", None)
-        if pending_start_names is None:
-            pending_start_names = set()
-            self._pending_start_names = pending_start_names
-        return pending_start_names
+        try:
+            return self._pending_start_names
+        except AttributeError:
+            self._pending_start_names = set()
+            return self._pending_start_names
 
     async def post_init(self, bot: hikari.GatewayBot, activity_manager: "Activity_Manager"):
         self.bot = bot
@@ -247,12 +247,9 @@ class App_Manager(metaclass=config.Singleton):
         self._update_task = asyncio.create_task(self.monitor_apps())
 
     def running_apps(self) -> tuple[ManagedApp, ...]:
-        apps = getattr(self, "apps", None)
-        if not isinstance(apps, dict):
-            return ()
         return tuple(
             sorted(
-                (app for app in apps.values() if app.check_running()),
+                (app for app in self._apps_mapping().values() if app.check_running()),
                 key=lambda item: item.name.casefold(),
             )
         )
@@ -277,34 +274,35 @@ class App_Manager(metaclass=config.Singleton):
         return target[0].name
 
     def starting_apps(self) -> tuple[ManagedApp, ...]:
-        apps = getattr(self, "apps", None)
-        if not isinstance(apps, dict):
-            return ()
         pending_names = self._pending_start_name_keys()
         return tuple(
             sorted(
-                (app for app in apps.values() if app.name.casefold() in pending_names),
+                (app for app in self._apps_mapping().values() if app.name.casefold() in pending_names),
                 key=lambda item: item.name.casefold(),
             )
         )
 
     def _start_admission_apps(self, *, exclude_name: str | None = None) -> tuple[ManagedApp, ...]:
-        apps = getattr(self, "apps", None)
-        if not isinstance(apps, dict):
-            return ()
         pending_names = self._pending_start_name_keys()
         excluded_key = exclude_name.casefold() if isinstance(exclude_name, str) else None
         return tuple(
             sorted(
                 (
                     app
-                    for app in apps.values()
+                    for app in self._apps_mapping().values()
                     if (excluded_key is None or app.name.casefold() != excluded_key)
                     and (app.check_running() or app.name.casefold() in pending_names)
                 ),
                 key=lambda item: item.name.casefold(),
             )
         )
+
+    def _apps_mapping(self) -> dict[str, ManagedApp]:
+        try:
+            return self.apps
+        except AttributeError:
+            self.apps = {}
+            return self.apps
 
     def running_scope_conflict(self, app: ManagedApp) -> ManagedApp | None:
         for active_app in self._start_admission_apps(exclude_name=app.name):
@@ -411,7 +409,7 @@ class App_Manager(metaclass=config.Singleton):
             await app.handle_unexpected_stop()
         except Exception:
             log.exception("Failed to finalise inactive app: %s", app.name)
-        runtime_fault = getattr(app, "runtime_fault", None)
+        runtime_fault = app.runtime_fault
         if runtime_fault is not None and runtime_fault.kind is AppRuntimeFaultKind.CRASH:
             self._notify_app_crash(app, summary=runtime_fault.summary, uptime=uptime)
         elif started_at is not None and not was_manager_initiated_shutdown:
@@ -526,7 +524,7 @@ class App_Manager(metaclass=config.Singleton):
             app.verify_published_client_pack()
             self._notify_app_lifecycle(app, started=True)
         except Exception:
-            runtime_fault = getattr(app, "runtime_fault", None)
+            runtime_fault = app.runtime_fault
             if not app.check_running() or runtime_fault is not None:
                 await self._handle_inactive_app(app)
             raise
@@ -1293,12 +1291,11 @@ class App_Manager(metaclass=config.Singleton):
         if override_channels:
             return override_channels, override_channels, RelayChannelSource.INSTANCE
 
-        default_chat_channels = cast(tuple[hikari.Snowflake, ...], getattr(self, "default_chat_channels", ()))
+        default_chat_channels, default_chat_channel, default_source = self._default_chat_channel_state()
         if default_chat_channels:
-            return tuple(str(channel_id) for channel_id in default_chat_channels), (), self.default_chat_channel_source
-        default_chat_channel = cast(hikari.Snowflake | None, getattr(self, "default_chat_channel", None))
+            return tuple(str(channel_id) for channel_id in default_chat_channels), (), default_source
         if default_chat_channel is not None:
-            return (str(default_chat_channel),), (), self.default_chat_channel_source
+            return (str(default_chat_channel),), (), default_source
         return (), (), RelayChannelSource.NONE
 
     @staticmethod
@@ -1314,13 +1311,32 @@ class App_Manager(metaclass=config.Singleton):
             payload.pop("chat_channel", None)
 
     def _default_chat_channel_texts(self) -> frozenset[str]:
-        channels = cast(tuple[hikari.Snowflake, ...], getattr(self, "default_chat_channels", ()))
-        if channels:
-            return frozenset(str(hikari.Snowflake(channel_id)) for channel_id in channels)
-        channel = cast(hikari.Snowflake | None, getattr(self, "default_chat_channel", None))
-        if channel is not None:
-            return frozenset({str(hikari.Snowflake(channel))})
+        default_chat_channels, default_chat_channel, _default_source = self._default_chat_channel_state()
+        if default_chat_channels:
+            return frozenset(str(hikari.Snowflake(channel_id)) for channel_id in default_chat_channels)
+        if default_chat_channel is not None:
+            return frozenset({str(hikari.Snowflake(default_chat_channel))})
         return frozenset()
+
+    def _default_chat_channel_state(
+        self,
+    ) -> tuple[tuple[hikari.Snowflake, ...], hikari.Snowflake | None, RelayChannelSource]:
+        try:
+            default_chat_channels = self.default_chat_channels
+        except AttributeError:
+            default_chat_channels = ()
+            self.default_chat_channels = default_chat_channels
+        try:
+            default_chat_channel = self.default_chat_channel
+        except AttributeError:
+            default_chat_channel = None
+            self.default_chat_channel = default_chat_channel
+        try:
+            default_source = self.default_chat_channel_source
+        except AttributeError:
+            default_source = RelayChannelSource.NONE
+            self.default_chat_channel_source = default_source
+        return default_chat_channels, default_chat_channel, default_source
 
     @staticmethod
     def _app_override_channel_texts(instance_payload: Mapping[str, object]) -> tuple[str, ...]:
@@ -1641,11 +1657,11 @@ class App_Manager(metaclass=config.Singleton):
         return None
 
     def _lookup_mapping(self) -> dict[str, str]:
-        lookup = getattr(self, "_lookup", None)
-        if lookup is None:
-            lookup = {}
-            self._lookup = lookup
-        return lookup
+        try:
+            return self._lookup
+        except AttributeError:
+            self._lookup = {}
+            return self._lookup
 
     @staticmethod
     def _find_instance_template(
@@ -1658,7 +1674,11 @@ class App_Manager(metaclass=config.Singleton):
         return None
 
     def _load_bot_configuration(self) -> config.BotConfiguration:
-        bot_configuration_path = getattr(self, "_bot_configuration_path", self._BOT_CONFIGURATION_PATH)
+        try:
+            bot_configuration_path = self._bot_configuration_path
+        except AttributeError:
+            bot_configuration_path = self._BOT_CONFIGURATION_PATH
+            self._bot_configuration_path = bot_configuration_path
         if not bot_configuration_path.exists():
             return config.BotConfiguration()
         return config.load_bot_configuration(bot_configuration_path)

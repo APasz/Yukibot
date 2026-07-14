@@ -126,6 +126,8 @@ class ModWebTheme:
                     background: transparent !important;
                 }}
                 .q-notification {{
+                    position: relative !important;
+                    overflow: hidden !important;
                     border-radius: 0 !important;
                     border: 1px solid rgba(82, 82, 91, 0.88) !important;
                     background:
@@ -141,6 +143,17 @@ class ModWebTheme:
                 .q-notification__caption,
                 .q-notification .q-icon {{
                     color: inherit !important;
+                }}
+                .q-notification .mod-toast-progress {{
+                    --mod-toast-progress-scale: 1;
+                    position: absolute;
+                    inset: 0 auto 0 0;
+                    width: 4px;
+                    pointer-events: none;
+                    transform: scaleY(var(--mod-toast-progress-scale));
+                    transform-origin: bottom;
+                    background: currentColor;
+                    opacity: 0.78;
                 }}
                 .q-notification.bg-positive,
                 .q-notification--standard.bg-positive {{
@@ -534,6 +547,7 @@ class ModWebTheme:
                     margin: 0 !important;
                     padding: 0.4rem 0.72rem !important;
                     border-top: 0 !important;
+                    pointer-events: auto;
                 }}
                 .mod-app-node-badge {{
                     border-left: 0 !important;
@@ -1289,6 +1303,110 @@ class ModWebTheme:
                     line-height: 1.5;
                     overflow-wrap: normal;
                     white-space: pre;
+                }}
+                .mod-save-upload-panel {{
+                    padding: 0.85rem;
+                    border: 1px solid rgba(82, 82, 91, 0.68);
+                    background:
+                        linear-gradient(180deg, rgba(196, 181, 253, 0.05), rgba(196, 181, 253, 0)),
+                        rgba(10, 10, 14, 0.72) !important;
+                    box-shadow:
+                        inset 0 1px 0 rgba(255, 255, 255, 0.03),
+                        0 12px 28px rgba(0, 0, 0, 0.18) !important;
+                }}
+                .mod-save-upload-panel-title {{
+                    letter-spacing: 0.01em;
+                }}
+                .mod-save-upload-panel-detail {{
+                    line-height: 1.45;
+                }}
+                .mod-save-upload-field {{
+                    flex: 0 1 auto;
+                    min-width: 0;
+                }}
+                .mod-save-upload-target-static {{
+                    width: 100%;
+                    min-height: 2.35rem;
+                    display: flex;
+                    align-items: center;
+                    padding: 0.45rem 0.7rem;
+                    border: 1px solid rgba(63, 63, 70, 0.82);
+                    background: rgba(13, 13, 18, 0.94) !important;
+                    color: var(--mod-text) !important;
+                    font-size: 0.88rem;
+                    font-weight: 850 !important;
+                    overflow-wrap: anywhere;
+                }}
+                .mod-save-upload-target-list {{
+                    display: grid !important;
+                    grid-template-columns: minmax(0, 1fr);
+                }}
+                .mod-save-upload-target-button {{
+                    width: 100%;
+                    justify-content: flex-start !important;
+                    text-align: left !important;
+                    min-height: 2.35rem !important;
+                }}
+                .mod-save-upload-target-button .q-btn__content {{
+                    justify-content: flex-start !important;
+                    min-width: 0;
+                    overflow-wrap: anywhere;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone).q-uploader {{
+                    width: 100%;
+                    min-height: 0 !important;
+                    max-height: none !important;
+                    border-radius: 0 !important;
+                    border: 1px solid rgba(139, 92, 246, 0.48) !important;
+                    background: rgba(13, 13, 18, 0.96) !important;
+                    color: var(--mod-text) !important;
+                    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24) !important;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__header {{
+                    min-height: 2.5rem;
+                    border-radius: 0 !important;
+                    background: var(--mod-purple-dark) !important;
+                    color: #fff !important;
+                    border-bottom: 1px solid rgba(139, 92, 246, 0.52) !important;
+                    box-shadow: none !important;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__title,
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__subtitle,
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__header .q-btn,
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__header .q-icon {{
+                    color: #fff !important;
+                    opacity: 1 !important;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__title {{
+                    font-weight: 900 !important;
+                    letter-spacing: 0.02em;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__subtitle {{
+                    color: rgba(245, 243, 255, 0.74) !important;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__list {{
+                    min-height: 0 !important;
+                    max-height: 8rem !important;
+                    padding: 0.45rem !important;
+                    background: rgba(8, 8, 12, 0.96) !important;
+                    color: var(--mod-text) !important;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__list:empty {{
+                    display: none !important;
+                    padding: 0 !important;
+                    border: 0 !important;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__file,
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__file-header,
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__file-name,
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__file-size,
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__file-status {{
+                    color: var(--mod-text) !important;
+                }}
+                :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__file {{
+                    border-radius: 0 !important;
+                    background: rgba(24, 24, 31, 0.9) !important;
+                    border: 1px solid rgba(63, 63, 70, 0.82) !important;
                 }}
                 .mod-list-button {{
                     border-radius: 0 !important;

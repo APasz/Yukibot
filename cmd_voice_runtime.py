@@ -22,6 +22,7 @@ import hikariwave
 from hikari import messages as hikari_messages
 
 import config
+from _async_utils import run_blocking
 from cmd_voice_common import (
     CHANNEL_MENTION_RE,
     DISCORD_CUSTOM_EMOJI_RE,
@@ -1106,7 +1107,7 @@ class VoiceTTSRuntimeMixin:
 
         model_path = self._piper_model_path(voice)
         if self._piper_python_loader and model_path:
-            return await asyncio.to_thread(self._synth_text_piper_python, text, voice, variant)
+            return await run_blocking(self._synth_text_piper_python, text, voice, variant)
         if self._engine == "python":
             log.warning(f"TTS synth failed voice={self._voice_spec(voice, variant)} reason=no_piper_model")
             return b""

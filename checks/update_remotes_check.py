@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path, PurePosixPath
 
 import rupdater
+from restart_state import RestartKind
 
 
 class UpdateRemotesTests(unittest.TestCase):
@@ -130,6 +131,34 @@ class UpdateRemotesTests(unittest.TestCase):
         self.assertEqual(
             command,
             'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"; cd /srv/yukibot && uv sync',
+        )
+
+    def test_build_pending_restart_kind_write_command_writes_update_restart_sentinel(self) -> None:
+        command = rupdater.build_pending_restart_kind_write_command(RestartKind.UPDATE_BOT)
+
+        self.assertEqual(command, """printf '%s\\n' '{"kind": "update_bot"}' > pending_restart_type_sentinel.json""")
+
+    def test_build_pending_restart_kind_write_command_rejects_voice_restart_kind(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not a process restart kind"):
+            rupdater.build_pending_restart_kind_write_command(RestartKind.MANUAL_VOICE)
+
+    def test_build_remote_restart_command_sets_update_restart_kind_before_restart(self) -> None:
+        target = rupdater.RemoteTarget(
+            name=rupdater.TargetName.WAKUSEI,
+            host="wakusei.apasz.com",
+            user="bot",
+            password="secret",
+            remote_root=PurePosixPath("/srv/yukibot"),
+            restart_command="systemctl --user restart yukibot",
+        )
+
+        command = rupdater.build_remote_project_command(target, rupdater.build_remote_restart_command(target))
+
+        self.assertEqual(
+            command,
+            'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"; '
+            """cd /srv/yukibot && printf '%s\\n' '{"kind": "update_bot"}' > """
+            "pending_restart_type_sentinel.json && systemctl --user restart yukibot",
         )
 
     def test_build_remote_command_path_check_command_fails_loudly_when_missing(self) -> None:

@@ -22,6 +22,7 @@ import hikari
 from pydantic import field_validator
 
 import config
+from _async_utils import run_blocking
 from _discord import (
     App_Bound,
     DC_Bound,
@@ -2909,7 +2910,7 @@ class Minecraft(App[Minecraft_Config]):
         self._sync_kubejs_yuki_log_script()
         self._sync_kubejs_recipe_script()
         self._sync_kubejs_item_registry_script()
-        await asyncio.to_thread(self._minecraft_item_icon_archive_paths_by_namespace)
+        await run_blocking(self._minecraft_item_icon_archive_paths_by_namespace)
 
     @property
     def console_actions(self) -> tuple[ConsoleAction, ...]:

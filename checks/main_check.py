@@ -354,12 +354,15 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.REMOTE),
-            patch("main.asyncio.to_thread", side_effect=_run_in_thread) as to_thread,
+            patch("main.run_blocking", side_effect=_run_in_thread) as run_blocking_mock,
             patch.object(config, "fetch_remote_bot_registry") as fetch_remote_bot_registry,
         ):
             await main._refresh_portal_remote_state(acl)
 
-        self.assertEqual(to_thread.call_args_list, [call(acl.reload), call(fetch_remote_bot_registry)])
+        self.assertEqual(
+            run_blocking_mock.call_args_list,
+            [call(acl.reload), call(fetch_remote_bot_registry)],
+        )
         acl.reload.assert_called_once_with()
         fetch_remote_bot_registry.assert_called_once_with()
 
@@ -368,11 +371,11 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.LOCAL),
-            patch("main.asyncio.to_thread", new=AsyncMock()) as to_thread,
+            patch("main.run_blocking", new=AsyncMock()) as run_blocking_mock,
         ):
             await main._refresh_portal_remote_state(acl)
 
-        to_thread.assert_not_awaited()
+        run_blocking_mock.assert_not_awaited()
 
     async def test_portal_restart_request_exits_main_process_with_failure(self) -> None:
         restart_handler: Callable[[], None] = Mock()

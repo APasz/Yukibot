@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import enum
 import hashlib
 import logging
@@ -9,6 +8,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from logging import Logger
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlencode
@@ -19,10 +19,11 @@ from fastapi import Request  # pyright: ignore[reportMissingImports]
 from starlette.responses import RedirectResponse, Response  # pyright: ignore[reportMissingImports]
 
 import config
+from _async_utils import run_blocking
 from _audit import audit_log
 from _security import Access_Control, Power_Level
 
-log = logging.getLogger(__name__)
+log: Logger = logging.getLogger(__name__)
 
 _DISCORD_AUTHORIZE_URL = "https://discord.com/oauth2/authorize"
 _DISCORD_TOKEN_URL = "https://discord.com/api/v10/oauth2/token"
@@ -194,8 +195,8 @@ class ModWebAuthService:
             self._config.redirect_url,
         )
         pending = self._consume_state(request=request, state=state)
-        token = await asyncio.to_thread(self._exchange_code, code)
-        user = await asyncio.to_thread(self._fetch_user, token)
+        token = await run_blocking(self._exchange_code, code)
+        user = await run_blocking(self._fetch_user, token)
 
         response = RedirectResponse(pending.next_path)
         self._set_session_cookie(response, self._create_session(user, persistence=pending.persistence))

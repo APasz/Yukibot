@@ -23,6 +23,7 @@ class RestartKind(StrEnum):
     SCHEDULED_SYS = "scheduled_sys"
     MANUAL_BOT = "manual_bot"
     MANUAL_SYS = "manual_sys"
+    UPDATE_BOT = "update_bot"
     SCHEDULED_VOICE = "scheduled_voice"
     MANUAL_VOICE = "manual_voice"
 
@@ -33,6 +34,7 @@ _PROCESS_RESTART_KINDS: frozenset[RestartKind] = frozenset[RestartKind](
         RestartKind.SCHEDULED_SYS,
         RestartKind.MANUAL_BOT,
         RestartKind.MANUAL_SYS,
+        RestartKind.UPDATE_BOT,
     }
 )
 _VOICE_RESTART_KINDS: frozenset[RestartKind] = frozenset[RestartKind](
@@ -77,8 +79,12 @@ def process_restart_kind(*, scheduled: bool, restart_sys: bool) -> RestartKind:
     return RestartKind.MANUAL_SYS if restart_sys else RestartKind.MANUAL_BOT
 
 
+def is_process_restart_kind(kind: RestartKind) -> bool:
+    return kind in _PROCESS_RESTART_KINDS
+
+
 def mark_pending_process_restart(kind: RestartKind) -> None:
-    if kind not in _PROCESS_RESTART_KINDS:
+    if not is_process_restart_kind(kind):
         raise ValueError(f"{kind.value!r} is not a process restart kind.")
     _write_json(PENDING_PROCESS_RESTART_KIND_PATH, {"kind": kind.value})
 
@@ -142,7 +148,7 @@ def _consume_pending_process_restart_kind() -> RestartKind:
     except ValueError:
         log.warning("Ignoring unknown pending restart kind sentinel: %r", raw_kind)
         return RestartKind.EXTERNAL
-    if kind not in _PROCESS_RESTART_KINDS:
+    if not is_process_restart_kind(kind):
         log.warning("Ignoring non-process pending restart kind sentinel: %s", kind.value)
         return RestartKind.EXTERNAL
     return kind

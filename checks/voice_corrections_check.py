@@ -1740,7 +1740,7 @@ class VoiceCorrectionTests(unittest.TestCase):
     def test_direct_hf_model_url_is_validated_without_scanning_repo(self) -> None:
         runtime = _HFScanRuntime(is_candidate=True)
 
-        with patch("cmd_voice_core.asyncio.to_thread", new=_immediate_to_thread):
+        with patch("cmd_voice_core.run_blocking", new=_immediate_to_thread):
             repo_ref, candidates = asyncio.run(
                 runtime.scan_piper_models_from_hf(
                     "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/fi/fi_FI/harri/low/fi_FI-harri-low.onnx"
@@ -1758,7 +1758,7 @@ class VoiceCorrectionTests(unittest.TestCase):
     def test_direct_hf_model_url_rejects_invalid_piper_config(self) -> None:
         runtime = _HFScanRuntime(is_candidate=False)
 
-        with patch("cmd_voice_core.asyncio.to_thread", new=_immediate_to_thread):
+        with patch("cmd_voice_core.run_blocking", new=_immediate_to_thread):
             with self.assertRaisesRegex(LookupError, "not Piper-compatible"):
                 asyncio.run(
                     runtime.scan_piper_models_from_hf(

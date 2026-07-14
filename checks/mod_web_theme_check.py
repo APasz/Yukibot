@@ -62,6 +62,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-corner-badge-row-fill", css)
         self.assertIn(".mod-app-node-badge", css)
         self.assertIn(".mod-app-node-badge-wrap", css)
+        self.assertRegex(css, r"(?s)\.mod-app-corner-badge \{.*?pointer-events: auto;")
         self.assertIn(".mod-card-hero", css)
         self.assertIn(".mod-card-hero::after", css)
         self.assertIn("container-name: mod-app-hero", css)
@@ -273,6 +274,27 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertIn(".mod-toolbar-menu-item-danger", css)
         self.assertIn(".mod-modlist-dialog-card", css)
+        self.assertIn(".mod-save-upload-panel", css)
+        self.assertIn(".mod-file-upload-zone", css)
+        self.assertIn(".mod-save-upload-zone", css)
+        self.assertIn(".mod-save-upload-target-static", css)
+        self.assertIn(".mod-save-upload-target-button", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-save-upload-target-static \{.*?color: var\(--mod-text\) !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s):is\(\.mod-file-upload-zone, \.mod-save-upload-zone\) \.q-uploader__header \{.*?color: #fff !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s):is\(\.mod-file-upload-zone, \.mod-save-upload-zone\) \.q-uploader__list \{.*?color: var\(--mod-text\) !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s):is\(\.mod-file-upload-zone, \.mod-save-upload-zone\) \.q-uploader__list:empty \{.*?display: none !important;",
+        )
         self.assertNotIn(".mod-dialog-card::before", css)
         self.assertNotIn("@keyframes mod-dialog-accent-arrive", css)
         self.assertIn(".mod-dialog-card:focus-within", css)
@@ -619,9 +641,15 @@ class ModWebThemeTests(unittest.TestCase):
     def test_toast_client_queues_timers_and_pauses_on_hover(self) -> None:
         self.assertIn("const activeRecord", MOD_WEB_TOAST_JAVASCRIPT)
         self.assertIn("remainingMilliseconds", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn("const attachProgress", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn("const startProgressAnimation", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn("window.cancelAnimationFrame", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn("mod-toast-progress", MOD_WEB_TOAST_JAVASCRIPT)
         self.assertIn("document.addEventListener('mouseover'", MOD_WEB_TOAST_JAVASCRIPT)
         self.assertIn("document.addEventListener('mouseout'", MOD_WEB_TOAST_JAVASCRIPT)
         self.assertIn("timeout: 0", MOD_WEB_TOAST_JAVASCRIPT)
+        self.assertIn(".q-notification .mod-toast-progress", MOD_WEB_THEME_STYLESHEET)
+        self.assertIn("--mod-toast-progress-scale", MOD_WEB_THEME_STYLESHEET)
 
     def test_action_base_class_stays_on_mod_action_system(self) -> None:
         self.assertIn("mod-action", MOD_WEB_ACTION_BASE_CLASSES)

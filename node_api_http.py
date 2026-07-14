@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI
 
 import config
+from _async_utils import run_blocking
 from _manager import App_Manager
 from _security import Access_Control
 from node_api import NodeApiService, NodeSystemActionHandler, RelayTTSQueue
@@ -68,7 +69,7 @@ class NodeApiHttpService:
             server.force_exit = True
         thread = self._server_thread
         if thread is not None and thread.is_alive():
-            await asyncio.to_thread(thread.join, 5.0)
+            await run_blocking(thread.join, 5.0)
         self._server = None
         self._server_thread = None
         self._started = False
@@ -116,7 +117,7 @@ class NodeApiHttpService:
             )
             self._server_thread.start()
 
-            started = await asyncio.to_thread(self._startup_signal.wait, _NODE_API_STARTUP_TIMEOUT_SECONDS)
+            started = await run_blocking(self._startup_signal.wait, _NODE_API_STARTUP_TIMEOUT_SECONDS)
             if not started:
                 raise TimeoutError("Timed out while starting the node API server.")
             if self._startup_error is not None:

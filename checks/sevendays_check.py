@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,7 +10,7 @@ from unittest.mock import AsyncMock, call, patch
 
 import config
 from _discord import Fileish, OutboundRelayFormatter, RelayMessageReferenceKind, RelayOutboundFormatOptions
-from _mod_ops import download_entries
+from _mod_ops import ModArchiveEntry, _write_mod_archive, download_entries
 from _security import Power_Level
 from _utils import Utilities
 from apps._config import (
@@ -39,6 +40,8 @@ from apps.sevendays import (
     _preferred_sevendays_runtime_log,
     _sevendays_telnet_port,
     detect_sevendays_version,
+    extract_sevendays_save_archive,
+    inspect_sevendays_save_archive,
     parse_admin_add_value,
     parse_gamestat_value,
 )
@@ -161,6 +164,63 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             self.assertFalse((mods_dir / "ExampleMod.client").exists())
             self.assertIs(mod.cfg.placement, ModPlacement.CLIENT_ONLY)
             self.assertEqual(mod.storage_path, mod_dir)
+
+    def test_client_pack_download_strips_modinfo_client_marker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mods_dir = root / "Mods"
+            mod_dir = mods_dir / "ExampleMod"
+            mod_dir.mkdir(parents=True)
+            (mod_dir / "ModInfo.xml.client").write_text("<mod />", encoding="utf-8")
+            (mod_dir / "Config" / "settings.xml").parent.mkdir()
+            (mod_dir / "Config" / "settings.xml").write_text("<settings />", encoding="utf-8")
+            mod = Mod_7D2D(
+                Mod_Config(
+                    name="ExampleMod",
+                    directory=mods_dir,
+                    placement=ModPlacement.CLIENT_ONLY,
+                    mod_type=ModType.CLIENT,
+                )
+            )
+            entries = (ModArchiveEntry.from_mod(mod),)
+
+            archive_path = root / "client-pack.zip"
+            _write_mod_archive(entries, archive_path)
+
+            with zipfile.ZipFile(archive_path) as archive:
+                names = set(archive.namelist())
+
+            self.assertIn("ExampleMod/ModInfo.xml", names)
+            self.assertIn("ExampleMod/Config/settings.xml", names)
+            self.assertNotIn("ExampleMod/ModInfo.xml.client", names)
+
+    def test_disabled_mod_download_strips_modinfo_disabled_marker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mods_dir = root / "Mods"
+            mod_dir = mods_dir / "ExampleMod"
+            mod_dir.mkdir(parents=True)
+            (mod_dir / "ModInfo.xml.disabled").write_text("<mod />", encoding="utf-8")
+            (mod_dir / "Config" / "settings.xml").parent.mkdir()
+            (mod_dir / "Config" / "settings.xml").write_text("<settings />", encoding="utf-8")
+            mod = Mod_7D2D(
+                Mod_Config(
+                    name="ExampleMod",
+                    directory=mods_dir,
+                    placement=ModPlacement.SERVER_DISABLED,
+                )
+            )
+            entries = (ModArchiveEntry.from_mod(mod),)
+
+            archive_path = root / "disabled-mod.zip"
+            _write_mod_archive(entries, archive_path)
+
+            with zipfile.ZipFile(archive_path) as archive:
+                names = set(archive.namelist())
+
+            self.assertIn("ExampleMod/ModInfo.xml", names)
+            self.assertIn("ExampleMod/Config/settings.xml", names)
+            self.assertNotIn("ExampleMod/ModInfo.xml.disabled", names)
 
     def test_detect_version_reads_modinfo_xml(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -527,6 +587,194 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
 
             self.assertEqual(deleted.label, "AlphaWorld")
             self.assertFalse(save_dir.exists())
+
+    def test_sevendays_save_archive_inspection_accepts_direct_save_contents(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "Archive.zip"
+            destination = root / "extracted"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("main.ttw", "main")
+                archive.writestr("ConfigsDump/events.xml", "<events />")
+
+            inspection = extract_sevendays_save_archive(archive_path=archive_path, destination=destination)
+
+            self.assertEqual(inspection.content_prefix, ())
+            self.assertIsNone(inspection.game_world)
+            self.assertIsNone(inspection.game_name)
+            self.assertEqual((destination / "main.ttw").read_text(encoding="utf-8"), "main")
+            self.assertFalse((destination / "Archive" / "main.ttw").exists())
+
+    def test_sevendays_save_archive_inspection_accepts_game_folder_layer(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "woabewbies.zip"
+            destination = root / "extracted"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("woabewbies/main.ttw", "main")
+                archive.writestr("woabewbies/Region/r.0.0.7rg", "region")
+
+            inspection = extract_sevendays_save_archive(archive_path=archive_path, destination=destination)
+
+            self.assertEqual(inspection.content_prefix, ("woabewbies",))
+            self.assertIsNone(inspection.game_world)
+            self.assertEqual(inspection.game_name, "woabewbies")
+            self.assertEqual((destination / "main.ttw").read_text(encoding="utf-8"), "main")
+            self.assertFalse((destination / "woabewbies" / "main.ttw").exists())
+
+    def test_sevendays_save_archive_inspection_accepts_world_and_game_folder_layers(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "Wizefoco Mountains.zip"
+            destination = root / "extracted"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("Wizefoco Mountains/woabewbies/main.ttw", "main")
+                archive.writestr("Wizefoco Mountains/woabewbies/Player/player.ttp", "player")
+
+            inspection = extract_sevendays_save_archive(archive_path=archive_path, destination=destination)
+
+            self.assertEqual(inspection.content_prefix, ("Wizefoco Mountains", "woabewbies"))
+            self.assertEqual(inspection.game_world, "Wizefoco Mountains")
+            self.assertEqual(inspection.game_name, "woabewbies")
+            self.assertEqual((destination / "main.ttw").read_text(encoding="utf-8"), "main")
+            self.assertFalse((destination / "Wizefoco Mountains" / "woabewbies" / "main.ttw").exists())
+
+    def test_sevendays_save_archive_inspection_rejects_multiple_save_roots(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "bad.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("Alpha/main.ttw", "main")
+                archive.writestr("Bravo/main.ttw", "main")
+
+            with self.assertRaisesRegex(ValueError, "multiple save roots"):
+                inspect_sevendays_save_archive(archive_path)
+
+    def test_upload_save_file_requires_stopped_server(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            save_dir = userdata_dir / "Saves" / "Navezgane" / "AlphaWorld"
+            archive_path = root / "upload.zip"
+            app_dir.mkdir()
+            save_dir.mkdir(parents=True)
+            (app_dir / "serverconfig.xml").write_text(
+                f"""<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+</ServerSettings>
+""",
+                encoding="utf-8",
+            )
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("AlphaWorld/main.ttw", "save-data")
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.check_running = lambda: True
+
+            save_root_id = app.save_file_roots[0].id
+            with self.assertRaisesRegex(ValueError, "Stop the server"):
+                app.upload_save_file(root_id=save_root_id, upload_name="upload.zip", source_path=archive_path)
+
+    def test_upload_save_file_replaces_existing_save_with_archive_content_root(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            save_dir = userdata_dir / "Saves" / "Navezgane" / "AlphaWorld"
+            archive_path = root / "upload.zip"
+            app_dir.mkdir()
+            save_dir.mkdir(parents=True)
+            (save_dir / "old.txt").write_text("old", encoding="utf-8")
+            (app_dir / "serverconfig.xml").write_text(
+                f"""<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+</ServerSettings>
+""",
+                encoding="utf-8",
+            )
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("Wizefoco Mountains/woabewbies/main.ttw", "main")
+                archive.writestr("Wizefoco Mountains/woabewbies/Region/r.0.0.7rg", "region")
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.check_running = lambda: False
+
+            uploaded = app.upload_save_file(
+                root_id=app.save_file_roots[0].id,
+                upload_name="upload.zip",
+                source_path=archive_path,
+            )
+
+            self.assertEqual(uploaded.label, "AlphaWorld")
+            self.assertEqual((save_dir / "main.ttw").read_text(encoding="utf-8"), "main")
+            self.assertEqual((save_dir / "Region" / "r.0.0.7rg").read_text(encoding="utf-8"), "region")
+            self.assertFalse((save_dir / "Wizefoco Mountains" / "woabewbies" / "main.ttw").exists())
+            self.assertFalse((save_dir / "old.txt").exists())
+
+    def test_upload_new_save_file_creates_requested_world_and_save_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            archive_path = root / "upload.zip"
+            app_dir.mkdir()
+            (app_dir / "serverconfig.xml").write_text(
+                f"""<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+</ServerSettings>
+""",
+                encoding="utf-8",
+            )
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("ImportedSave/main.ttw", "save-data")
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.check_running = lambda: False
+
+            uploaded = app.upload_save_file(
+                root_id=SevenDays.new_save_upload_root_id(game_world="RWG", game_name="ImportedSave"),
+                upload_name="upload.zip",
+                source_path=archive_path,
+            )
+
+            self.assertEqual(uploaded.root_label, "RWG")
+            self.assertEqual(uploaded.label, "ImportedSave")
+            self.assertEqual((userdata_dir / "Saves" / "RWG" / "ImportedSave" / "main.ttw").read_text(), "save-data")
+
+    def test_upload_new_save_file_rejects_existing_save_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            save_dir = userdata_dir / "Saves" / "RWG" / "ImportedSave"
+            archive_path = root / "upload.zip"
+            app_dir.mkdir()
+            save_dir.mkdir(parents=True)
+            (save_dir / "main.ttw").write_text("existing", encoding="utf-8")
+            (app_dir / "serverconfig.xml").write_text(
+                f"""<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+</ServerSettings>
+""",
+                encoding="utf-8",
+            )
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("ImportedSave/main.ttw", "replacement")
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.check_running = lambda: False
+
+            with self.assertRaisesRegex(FileExistsError, "already exists"):
+                app.upload_save_file(
+                    root_id=SevenDays.new_save_upload_root_id(game_world="RWG", game_name="ImportedSave"),
+                    upload_name="upload.zip",
+                    source_path=archive_path,
+                )
+            self.assertEqual((save_dir / "main.ttw").read_text(encoding="utf-8"), "existing")
 
     def test_parse_gamestat_value_returns_none_for_empty_value(self) -> None:
         self.assertIsNone(parse_gamestat_value(""))

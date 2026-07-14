@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import Mock
 
 from modmux.models import Provider
 
@@ -991,6 +992,18 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
                     selected_mod_names=frozenset({disabled.name}),
                     supplied=True,
                 ),
+                client_overrides_dir=None,
+            )
+
+    def test_client_pack_rejects_duplicate_resolved_mods(self) -> None:
+        manager = self._build_manager()
+        selected = self._insert_existing_mod(manager, "duplicate.zip")
+        manager.list_mods = Mock(return_value=[selected, selected])
+
+        with self.assertRaisesRegex(ClientPackValidationError, "duplicate.zip"):
+            build_client_pack_entries(
+                manager,
+                ClientPackSelection(),
                 client_overrides_dir=None,
             )
 

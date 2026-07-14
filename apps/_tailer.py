@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import IO, Any
 
 import config
+from _async_utils import run_blocking
 
 log = logging.getLogger(__name__)
 
@@ -277,14 +278,14 @@ class Tailer:
                         line = ""
 
                 elif self.breader:
-                    raw = await asyncio.to_thread(self.breader.readline)
+                    raw = await run_blocking(self.breader.readline)
                     if raw:
                         line = raw.decode(config.STR_ENCODE, "replace")
                     else:
                         line = ""
 
                 elif self.reader:
-                    line = await asyncio.to_thread(self.reader.readline)
+                    line = await run_blocking(self.reader.readline)
 
                 if line is None:
                     await asyncio.sleep(0.1)

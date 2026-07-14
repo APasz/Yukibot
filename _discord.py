@@ -31,6 +31,7 @@ from pathvalidate import sanitize_filename
 from TenorGrabber import tenorgrabber
 
 import config
+from _async_utils import run_blocking
 from _audit import tenor_log
 from _authority import AuthorityResource, read_json_object
 from _file import File_Utils
@@ -901,7 +902,7 @@ class Message:
                         return variant.url
                 return tenor_variants[0].url
             try:
-                return await asyncio.to_thread(self._resolve_tenor_media_url, url)
+                return await run_blocking(self._resolve_tenor_media_url, url)
             except Exception:
                 return None
         if provider is MediaProvider.GIPHY:

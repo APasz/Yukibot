@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import logging
 import re
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -232,6 +233,21 @@ class ClientPackModSnapshot(BaseModel):
     @classmethod
     def validate_optional_version(cls, raw: object) -> str | None:
         return normalise_optional_text(raw)
+
+
+def normalise_client_pack_mod_snapshots(
+    mods: Iterable[ClientPackModSnapshot],
+) -> tuple[ClientPackModSnapshot, ...]:
+    snapshots = tuple(mods)
+    name_counts = Counter(mod.name.casefold() for mod in snapshots)
+    duplicate_names = sorted(
+        {mod.name for mod in snapshots if name_counts[mod.name.casefold()] > 1},
+        key=str.casefold,
+    )
+    if duplicate_names:
+        duplicate_list = ", ".join(duplicate_names)
+        raise ValueError(f"client pack published mods must be unique: {duplicate_list}")
+    return tuple(sorted(snapshots, key=lambda mod: mod.friendly.casefold()))
 
 
 _CLIENT_PACK_KUBEJS_SCRIPT_ROOTS = frozenset({"server_scripts", "startup_scripts"})
@@ -1922,10 +1938,7 @@ class App_Config(BaseModel):
         cls,
         mods: tuple[ClientPackModSnapshot, ...],
     ) -> tuple[ClientPackModSnapshot, ...]:
-        names = [mod.name.casefold() for mod in mods]
-        if len(names) != len(set(names)):
-            raise ValueError("client pack published mods must be unique")
-        return tuple(sorted(mods, key=lambda mod: mod.friendly.casefold()))
+        return normalise_client_pack_mod_snapshots(mods)
 
     @field_validator("client_pack_published_changelog", mode="before")
     @classmethod

@@ -12,6 +12,8 @@ from urllib.parse import parse_qsl, quote, urlsplit
 
 import requests
 
+from _async_utils import run_blocking
+
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -140,7 +142,7 @@ class FontAssetRegistry:
 
     async def refresh_startup_assets(self) -> None:
         try:
-            result = await asyncio.to_thread(self._refresh_font_assets)
+            result = await run_blocking(self._refresh_font_assets)
         except Exception:
             log.exception("Font asset refresh failed")
         else:

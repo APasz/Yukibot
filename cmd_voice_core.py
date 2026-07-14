@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import json
 import logging
 import re
@@ -29,6 +28,7 @@ from modmux.providers.wube import WubeCreds
 from pydantic import SecretStr
 
 import config
+from _async_utils import run_blocking
 from cmd_voice_common import (
     MAX_TTS_VOICES,
     VARIANT_FILE_RE,
@@ -2579,9 +2579,7 @@ class VoiceTTSCoreMixin:
         /,
         *args: object,
     ) -> BlockingReturnT:
-        loop = asyncio.get_running_loop()
-        call = functools.partial(func, *args)
-        return await loop.run_in_executor(None, call)
+        return await run_blocking(func, *args)
 
     async def available_variants(self, force_refresh: bool = False) -> list[str]:
         if self._available_variants and not force_refresh:

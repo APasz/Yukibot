@@ -24,7 +24,7 @@ from yarl import URL
 import config
 from _minecraft_heads import minecraft_dev_bypass_head_data_uri
 from _security import Access_Control, Power_Level
-from apps._app import AppRuntimeFault, AppRuntimeFaultKind, ChatRelaySupport
+from apps._app import AppRuntimeFault, AppRuntimeFaultKind, AppVersionSource, ChatRelaySupport
 from apps._config import (
     AppTitleFont,
     BulkLauncherMetadataDiscovery,
@@ -4890,13 +4890,13 @@ class ModWebTests(unittest.TestCase):
                     text="3 (5)",
                     tone="black",
                     icon="speed",
-                    tooltip_text="CPU resource points — running: 3; startup: 5",
+                    tooltip_text="CPU points required for running (starting)",
                 ),
                 _ModWebBadgeSpec(
                     text="8",
                     tone="black",
                     icon="memory",
-                    tooltip_text="RAM resource points: 8",
+                    tooltip_text="RAM points required for running",
                 ),
             ),
         )
@@ -5936,7 +5936,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(service._chat_event_content(event), "Yoko joined Minecraft Alpha")
 
-    def test_chat_event_content_includes_client_pack_details_for_web_chat(self) -> None:
+    def test_chat_event_content_omits_client_pack_details_for_web_chat(self) -> None:
         service = ModWebService()
         service.set_manager(
             _manager_stub(
@@ -5958,10 +5958,7 @@ class ModWebTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(
-            service._chat_event_content(event),
-            "Yoko joined Minecraft Alpha (Pack: 2026-07-04 [Unpublished Changes])",
-        )
+        self.assertEqual(service._chat_event_content(event), "Yoko joined Minecraft Alpha")
 
     def test_chat_event_content_prefers_embed_description_for_web_chat(self) -> None:
         service = ModWebService()
@@ -12339,11 +12336,46 @@ class ModWebTests(unittest.TestCase):
 
         details = ModWebService()._app_hero_runtime_details(stats)
 
-        self.assertEqual(details.relay_badge, _ModWebBadgeSpec(text="Game <-> Chat", tone="grey"))
-        self.assertEqual(details.version_badge, _ModWebBadgeSpec(text="1.20.4", tone="black"))
+        self.assertEqual(
+            details.relay_badge,
+            _ModWebBadgeSpec(text="Game <-> Chat", tone="grey", tooltip_text="Chat bridge support"),
+        )
+        self.assertEqual(
+            details.version_badge,
+            _ModWebBadgeSpec(
+                text="1.20.4",
+                tone="black",
+                tooltip_text="Game version updated upon start",
+            ),
+        )
         self.assertEqual(details.player_count_badge, _ModWebBadgeSpec(text="3 / 20", tone="purple"))
         self.assertEqual(details.status_text, "Running")
         self.assertEqual(details.status_tone, "purple")
+
+    def test_app_hero_runtime_details_show_live_version_tooltip_for_installed_file_source(self) -> None:
+        stats = NodeAppRuntimeSummary(
+            running=True,
+            enabled=True,
+            version="2.0.72",
+            player_count=None,
+            player_capacity=None,
+            relay_support=ChatRelaySupport.NONE,
+            version_source=AppVersionSource.INSTALLED_FILES,
+            storage_percent=58,
+            storage_free_bytes=120 * 1024**3,
+            storage_total_bytes=256 * 1024**3,
+        )
+
+        details = ModWebService()._app_hero_runtime_details(stats)
+
+        self.assertEqual(
+            details.version_badge,
+            _ModWebBadgeSpec(
+                text="2.0.72",
+                tone="black",
+                tooltip_text="Game version updated live",
+            ),
+        )
 
     def test_app_hero_runtime_details_render_unlimited_player_capacity(self) -> None:
         stats = NodeAppRuntimeSummary(
@@ -12484,13 +12516,13 @@ class ModWebTests(unittest.TestCase):
                     text="3 (5)",
                     tone="black",
                     icon="speed",
-                    tooltip_text="CPU resource points — running: 3; startup: 5",
+                    tooltip_text="CPU points required for running (starting)",
                 ),
                 _ModWebBadgeSpec(
                     text="8",
                     tone="black",
                     icon="memory",
-                    tooltip_text="RAM resource points: 8",
+                    tooltip_text="RAM points required for running",
                 ),
             ),
         )
@@ -12937,6 +12969,23 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(ModWebService._setting_control_kind(setting), ModWebSettingControlKind.CHOICE_SELECT)
 
+    def test_setting_control_kind_uses_editable_select_for_non_strict_choices(self) -> None:
+        setting = self._setting_entry(
+            key="GameWorld",
+            label="Game World",
+            type_name="str",
+            value_text="Navezgane",
+            current_input_value="Navezgane",
+            strict_choice=False,
+            allows_text_input=True,
+            choices=(
+                NodeSettingChoice(label="Navezgane", raw_value="Navezgane"),
+                NodeSettingChoice(label="Wizefoco Mountains", raw_value="Wizefoco Mountains"),
+            ),
+        )
+
+        self.assertEqual(ModWebService._setting_control_kind(setting), ModWebSettingControlKind.EDITABLE_CHOICE_SELECT)
+
     def test_setting_control_kind_keeps_binary_integer_choices_as_dropdowns(self) -> None:
         setting = self._setting_entry(
             key="enemy_difficulty",
@@ -13258,6 +13307,13 @@ class ModWebTests(unittest.TestCase):
             "filled square dense hide-bottom-space color=accent options-dense popup-content-class=mod-setting-menu",
         )
 
+    def test_setting_editable_choice_select_props_allow_free_text(self) -> None:
+        self.assertEqual(
+            ModWebService._setting_editable_choice_select_props(),
+            "filled square dense clearable hide-bottom-space color=accent options-dense "
+            "popup-content-class=mod-setting-menu use-input new-value-mode=add input-debounce=0",
+        )
+
     def test_setting_aux_select_props_adds_integrated_prefix(self) -> None:
         self.assertEqual(
             ModWebService._setting_aux_select_props(prefix="Preset"),
@@ -13508,6 +13564,25 @@ class ModWebTests(unittest.TestCase):
             ),
         )
 
+    def test_replace_save_upload_target_options_only_include_discovered_saves(self) -> None:
+        saves = (
+            NodeSaveEntry(
+                id="save-alpha/A Game World",
+                label="A Game World",
+                relative_path="A Game World",
+                root_id="save-alpha",
+                root_label="Navezgane",
+                kind="directory",
+                size_bytes=0,
+                size_text="Directory",
+                modified_at="2026-05-28 12:00:00",
+            ),
+        )
+
+        options = ModWebService._replace_save_upload_target_options(saves)
+
+        self.assertEqual(options, {"save-alpha": "Navezgane / A Game World"})
+
     def test_filter_save_entries_matches_search_query(self) -> None:
         saves = (
             NodeSaveEntry(
@@ -13571,6 +13646,101 @@ class ModWebTests(unittest.TestCase):
 
         self.assertFalse(ModWebService._save_shows_size_badge(directory_entry))
         self.assertTrue(ModWebService._save_shows_size_badge(file_entry))
+
+    def test_save_tile_omits_redundant_root_and_directory_badges(self) -> None:
+        class FakeElement:
+            class_value: str | None = None
+
+            def classes(self, value: str) -> "FakeElement":
+                self.class_value = value
+                return self
+
+            def props(self, value: str) -> "FakeElement":
+                del value
+                return self
+
+            def on(self, event: str, handler: object) -> "FakeElement":
+                del event, handler
+                return self
+
+            def __enter__(self) -> "FakeElement":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeLabel(FakeElement):
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.labels: list[FakeLabel] = []
+
+            def card(self) -> FakeElement:
+                return FakeElement()
+
+            def column(self) -> FakeElement:
+                return FakeElement()
+
+            def row(self) -> FakeElement:
+                return FakeElement()
+
+            def label(self, text: str) -> FakeLabel:
+                label = FakeLabel(text)
+                self.labels.append(label)
+                return label
+
+            def button(self, text: str, *, on_click: object) -> FakeElement:
+                del text, on_click
+                return FakeElement()
+
+        service = ModWebService()
+        ui = FakeUi()
+        save = NodeSaveEntry(
+            id="navezgane/woabewbies",
+            label="woabewbies",
+            relative_path="woabewbies",
+            root_id="navezgane",
+            root_label="Navezgane",
+            kind="directory",
+            size_bytes=0,
+            size_text="Directory",
+            modified_at="2026-07-14 11:55:50",
+        )
+        model = cast(
+            ModWebBasePageModel,
+            cast(
+                object,
+                SimpleNamespace(
+                    app_friendly="7 Days to Die",
+                    supports_save_rename=False,
+                ),
+            ),
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        service._render_save_tile(
+            ui=cast(ModWebUi, cast(object, ui)),
+            model=model,
+            user=user,
+            save=save,
+            root_count=2,
+            can_write=True,
+        )
+
+        labels = [label.text for label in ui.labels]
+        self.assertIn("woabewbies", labels)
+        self.assertIn("Navezgane / woabewbies", labels)
+        self.assertIn("Modified 2026-07-14 11:55:50", labels)
+        self.assertNotIn("Navezgane", labels)
+        self.assertNotIn("Directory", labels)
 
     def test_builtin_mod_detection_uses_block_reason(self) -> None:
         builtin_entry = SimpleNamespace(mod_type=ModType.BUILTIN)

@@ -132,6 +132,7 @@ def _bundled_mod_entry(entry: ModArchiveEntry, *, override_root: str = "override
     return ArchiveEntry(
         source_path=entry.source_path,
         archive_path=PurePosixPath(override_root) / _mod_destination(entry),
+        path_rewrites=entry.path_rewrites,
     )
 
 

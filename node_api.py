@@ -41,6 +41,7 @@ from pydantic.config import ConfigDict
 from starlette.middleware.cors import CORSMiddleware
 
 import config
+from _async_utils import run_blocking
 from _audit import audit_log
 from _authority import AuthorityResource, read_json_object
 from _file import File_Utils
@@ -67,7 +68,7 @@ from _mod_ops import (
 from _security import Access_Control, Power_Level
 from _sys import Stats_System, StatsDiskSnapshot, StatsSystemSnapshot
 from _utils import Utilities
-from apps._app import App, AppRuntimeFault, AppStdoutTail, ChatRelaySupport
+from apps._app import App, AppRuntimeFault, AppStdoutTail, AppVersionSource, ChatRelaySupport
 from apps._blueprint_files import (
     AppBlueprintEntry,
     AppBlueprintFileEntry,
@@ -124,13 +125,29 @@ from apps._mod import Mod, Mod_Manager
 from apps._node_api import (
     JsonValue,
     NodeModUploadSource,
+)
+from apps._node_api import (
     optional_int as _optional_int,
+)
+from apps._node_api import (
     optional_string as _optional_string,
+)
+from apps._node_api import (
     power_level as _power_level,
+)
+from apps._node_api import (
     required_bool as _required_bool,
+)
+from apps._node_api import (
     required_int as _required_int,
+)
+from apps._node_api import (
     required_string as _required_string,
+)
+from apps._node_api import (
     required_text as _required_text,
+)
+from apps._node_api import (
     string_tuple as _string_tuple,
 )
 from apps._save_files import AppSaveEntry, AppSaveEntryKind
@@ -156,20 +173,50 @@ from apps.factorio.node_api import (
     NodeModUpdateDependencyAction,
     NodeModUpdateRequest,
     NodeModUpdateStatus,
+)
+from apps.factorio.node_api import (
     build_factorio_mod_settings_download_response as _build_factorio_mod_settings_download_response,
+)
+from apps.factorio.node_api import (
     build_factorio_mod_settings_state as _build_factorio_mod_settings_state,
+)
+from apps.factorio.node_api import (
     check_factorio_mod_update as _check_factorio_mod_update,
+)
+from apps.factorio.node_api import (
     check_mod_update as _check_factorio_mod_update_by_name,
+)
+from apps.factorio.node_api import (
     factorio_dependency_update_entry as _factorio_dependency_update_entry,
+)
+from apps.factorio.node_api import (
     factorio_dependency_update_summary as _factorio_dependency_update_summary,
+)
+from apps.factorio.node_api import (
     factorio_installed_mods_by_id as _factorio_installed_mods_by_id,
+)
+from apps.factorio.node_api import (
     factorio_mod_update_page_url as _factorio_mod_update_page_url,
-    factorio_vanilla_mods_by_id as _factorio_vanilla_mods,
+)
+from apps.factorio.node_api import (
     factorio_mod_versions as _factorio_mod_versions,
+)
+from apps.factorio.node_api import (
+    factorio_vanilla_mods_by_id as _factorio_vanilla_mods,
+)
+from apps.factorio.node_api import (
     install_mod_from_link as _install_factorio_mod_from_link,
+)
+from apps.factorio.node_api import (
     list_installed_mod_versions as _list_installed_factorio_mod_versions,
+)
+from apps.factorio.node_api import (
     list_mod_link_versions as _list_factorio_mod_link_versions,
+)
+from apps.factorio.node_api import (
     resolve_mod_link_dependencies as _resolve_factorio_mod_link_dependencies,
+)
+from apps.factorio.node_api import (
     update_mod as _update_factorio_mod,
 )
 from apps.minecraft import (
@@ -183,9 +230,17 @@ from apps.minecraft.node_api import (
     NodeMinecraftRecipeMutationRequest,
     NodeMinecraftRecipeMutationResult,
     NodeMinecraftRecipeWorkspaceState,
+)
+from apps.minecraft.node_api import (
     apply_minecraft_recipe_mutation as _apply_minecraft_recipe_mutation,
+)
+from apps.minecraft.node_api import (
     build_minecraft_item_icon_response as _build_minecraft_item_icon_response,
+)
+from apps.minecraft.node_api import (
     build_minecraft_recipe_workspace_state as _build_minecraft_recipe_workspace_state,
+)
+from apps.minecraft.node_api import (
     minecraft_item_icon_placeholder_svg as _minecraft_item_icon_placeholder_svg,
 )
 from apps.minecraft.pack_export import (
@@ -200,6 +255,8 @@ from apps.minecraft.pack_export import (
 from apps.sevendays import SevenDays
 from apps.sevendays.node_api import (
     NodeSevenDaysSandboxOptionsState,
+)
+from apps.sevendays.node_api import (
     build_sevendays_sandbox_options_state as _build_sevendays_sandbox_options_state,
 )
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub, ChatRoomUpdate
@@ -288,8 +345,12 @@ traffic_log = logging.getLogger(config.LOGGER_TRAFFIC)
 _NODE_API_COMPAT_EXPORTS: tuple[type[object], ...] = (
     NodeMinecraftItemRegistryState,
     NodeMinecraftRecipeBookState,
+    NodeModDependencyEntry,
     NodeModPortalDependencyEntry,
     NodeModPortalResolveResult,
+    NodeModPortalVersionEntry,
+    NodeModUpdateDependencyAction,
+    NodeModUpdateStatus,
 )
 
 def _is_executor_shutdown_error(error: BaseException) -> bool:
@@ -1684,6 +1745,7 @@ class NodeAppRuntimeSummary:
     storage_percent: int | None
     storage_free_bytes: int | None
     storage_total_bytes: int | None
+    version_source: AppVersionSource = AppVersionSource.STARTUP
     footprint_bytes: int | None = None
     runtime_fault: AppRuntimeFault | None = None
     transition_state: NodeAppTransitionState = NodeAppTransitionState.NONE
@@ -1695,6 +1757,7 @@ class NodeAppRuntimeSummary:
         running = payload.get("running")
         enabled = payload.get("enabled")
         version = payload.get("version")
+        raw_version_source = payload.get("version_source", AppVersionSource.STARTUP.value)
         transition_state = _app_transition_state(payload, "transition_state")
         player_count = _optional_int(payload, "player_count")
         player_capacity = _optional_int(payload, "player_capacity")
@@ -1715,11 +1778,17 @@ class NodeAppRuntimeSummary:
             raise ValueError("Node app runtime summary version is invalid.")
         if not isinstance(relay_support, str):
             raise ValueError("Node app runtime summary relay_support is invalid.")
+        if not isinstance(raw_version_source, str):
+            raise ValueError("Node app runtime summary version_source is invalid.")
 
         try:
             parsed_relay_support = ChatRelaySupport(relay_support)
         except ValueError as xcp:
             raise ValueError("Node app runtime summary relay_support is invalid.") from xcp
+        try:
+            version_source = AppVersionSource(raw_version_source)
+        except ValueError as xcp:
+            raise ValueError("Node app runtime summary version_source is invalid.") from xcp
         if raw_runtime_fault is not None and not isinstance(raw_runtime_fault, Mapping):
             raise ValueError("Node app runtime summary runtime_fault is invalid.")
         if not isinstance(raw_activity_providers, list | tuple):
@@ -1735,6 +1804,7 @@ class NodeAppRuntimeSummary:
             player_count=player_count,
             player_capacity=player_capacity,
             relay_support=parsed_relay_support,
+            version_source=version_source,
             storage_percent=storage_percent,
             storage_free_bytes=storage_free_bytes,
             storage_total_bytes=storage_total_bytes,
@@ -1759,6 +1829,7 @@ class NodeAppRuntimeSummary:
             "player_capacity": self.player_capacity,
             "connected_player_names": self.connected_player_names,
             "relay_support": self.relay_support.value,
+            "version_source": self.version_source.value,
             "storage_percent": self.storage_percent,
             "storage_free_bytes": self.storage_free_bytes,
             "storage_total_bytes": self.storage_total_bytes,
@@ -3863,7 +3934,7 @@ class RemoteRelayTTSForwarder:
                 expires_at=int(time.time()) + _RELAY_TTS_FORWARD_TTL_SECONDS,
             ),
         )
-        response = await asyncio.to_thread(
+        response = await run_blocking(
             self._post_relay_tts,
             mod_web.node_api_base_url.rstrip("/") + "/relay/tts",
             token,
@@ -4632,7 +4703,7 @@ class NodeApiService:
             )
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_READ,))
             app = self._resolve_app(app_name)
-            return await asyncio.to_thread(self.build_minecraft_item_icon_response, app, item_id=item_id)
+            return await run_blocking(self.build_minecraft_item_icon_response, app, item_id=item_id)
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/manifest")
         async def _map_manifest(
@@ -4643,7 +4714,7 @@ class NodeApiService:
             traffic_log.info("Node API map manifest request: node=%s app=%s", self.node_name, app_name)
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
             app = self._resolve_app(app_name)
-            manifest, source = await asyncio.to_thread(self._build_map_manifest_result, app)
+            manifest, source = await run_blocking(self._build_map_manifest_result, app)
             return Response(
                 content=json.dumps(manifest.to_mapping()),
                 media_type="application/json",
@@ -4659,7 +4730,7 @@ class NodeApiService:
             traffic_log.info("Node API map annotation list request: node=%s app=%s", self.node_name, app_name)
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
             app = self._resolve_app(app_name)
-            annotations = await asyncio.to_thread(self.build_map_annotation_list, app)
+            annotations = await run_blocking(self.build_map_annotation_list, app)
             return annotations.to_mapping()
 
         @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/annotations")
@@ -4682,7 +4753,7 @@ class NodeApiService:
             draft = MapAnnotationDraft.from_mapping(payload)
             user: ModWebUser | None = None if self._web_auth is None else self._web_auth.current_user(request)
             created_by_name = self._map_annotation_creator_name(app, actor_user_id=actor_user_id, user=user)
-            result = await asyncio.to_thread(
+            result = await run_blocking(
                 self.create_map_annotation,
                 app,
                 draft,
@@ -4706,7 +4777,7 @@ class NodeApiService:
             )
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_WRITE,))
             app = self._resolve_app(app_name)
-            result = await asyncio.to_thread(self.delete_map_annotation, app, annotation_id)
+            result = await run_blocking(self.delete_map_annotation, app, annotation_id)
             return result.to_mapping()
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/map/players")
@@ -4718,7 +4789,7 @@ class NodeApiService:
             traffic_log.info("Node API map players request: node=%s app=%s", self.node_name, app_name)
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
             app = self._resolve_app(app_name)
-            proxy_response = await asyncio.to_thread(
+            proxy_response = await run_blocking(
                 self._squaremap_proxy_response,
                 app,
                 "tiles/players.json",
@@ -4745,7 +4816,7 @@ class NodeApiService:
             )
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
             app = self._resolve_app(app_name)
-            proxy_response = await asyncio.to_thread(
+            proxy_response = await run_blocking(
                 self._squaremap_proxy_response,
                 app,
                 f"tiles/{quote(world_name, safe='')}/settings.json",
@@ -4773,7 +4844,7 @@ class NodeApiService:
             )
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
             app = self._resolve_app(app_name)
-            proxy_response = await asyncio.to_thread(
+            proxy_response = await run_blocking(
                 self._squaremap_proxy_response,
                 app,
                 f"tiles/{quote(world_name, safe='')}/markers.json",
@@ -4805,7 +4876,7 @@ class NodeApiService:
             )
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
             app = self._resolve_app(app_name)
-            proxy_response = await asyncio.to_thread(
+            proxy_response = await run_blocking(
                 self._squaremap_proxy_response,
                 app,
                 f"tiles/{quote(world_name, safe='')}/{z}/{quote(tile_name, safe='')}",
@@ -4832,7 +4903,7 @@ class NodeApiService:
             )
             self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MAP_READ,))
             app = self._resolve_app(app_name)
-            proxy_response = await asyncio.to_thread(
+            proxy_response = await run_blocking(
                 self._squaremap_proxy_response,
                 app,
                 f"images/{quote(asset_path, safe='/')}",
@@ -6950,7 +7021,7 @@ class NodeApiService:
                     storage_total_bytes = storage_disk.total_bytes
         if include_footprint and not config.IS_SHUTTINGDOWN and not self._shutting_down:
             try:
-                footprint_bytes = await asyncio.to_thread(self._app_footprint_size_bytes, app)
+                footprint_bytes = await run_blocking(self._app_footprint_size_bytes, app)
             except Exception as xcp:
                 if not (config.IS_SHUTTINGDOWN and _is_executor_shutdown_error(xcp)):
                     log.warning("Node API footprint stats failed: node=%s app=%s error=%s", self.node_name, app.name, xcp)
@@ -6980,6 +7051,7 @@ class NodeApiService:
             player_count=player_count,
             player_capacity=player_capacity,
             relay_support=app.chat_relay_support,
+            version_source=app.version_source,
             storage_percent=storage_percent,
             storage_free_bytes=storage_free_bytes,
             storage_total_bytes=storage_total_bytes,
@@ -8799,7 +8871,7 @@ class NodeApiService:
             hash_context_payload["include_servers_dat"] = metadata.include_servers_dat
             hash_context_payload["include_options_txt"] = metadata.include_options_txt
         hash_context = json.dumps(hash_context_payload, sort_keys=True)
-        return await asyncio.to_thread(client_pack_content_hash, entries, format_name=hash_context)
+        return await run_blocking(client_pack_content_hash, entries, format_name=hash_context)
 
     @staticmethod
     def _client_overrides_dir_for_pack(app: App) -> Path | None:
@@ -9301,7 +9373,7 @@ class NodeApiService:
         try:
             target = factorio_mod_settings_path(app.directory)
             target.parent.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(File_Utils.copy, temp_path, target, True)
+            await run_blocking(File_Utils.copy, temp_path, target, True)
         finally:
             temp_path.unlink(missing_ok=True)
         traffic_log.info("Node API uploaded Factorio mod settings: node=%s app=%s", self.node_name, app.name)
@@ -9774,7 +9846,7 @@ class NodeApiService:
             with tempfile.TemporaryDirectory(prefix="yukibot-mod-upload-") as temp_dir:
                 for upload_source in resolved_upload_sources:
                     staged_path: Path = Path(temp_dir) / upload_source.upload_name
-                    await asyncio.to_thread(File_Utils.copy, upload_source.source_path, staged_path, True)
+                    await run_blocking(File_Utils.copy, upload_source.source_path, staged_path, True)
                     uploaded_mods.append(
                         await manager.add(staged_path, atomic=True, placement=placement)
                     )

@@ -21,6 +21,7 @@ from modmux.utils.urls import parse_url
 from pydantic import SecretStr
 
 import config
+from _async_utils import run_blocking
 from apps._config import (
     BulkLauncherMetadataDiscovery,
     BulkLauncherMetadataEntry,
@@ -1285,7 +1286,7 @@ async def _bulk_local_file_identities(
 
     async def calculate(target: BulkLauncherMetadataTarget) -> tuple[str, _LocalFileIdentity]:
         async with semaphore:
-            identity = await asyncio.to_thread(
+            identity = await run_blocking(
                 _local_file_identity,
                 target.local_path,
                 logical_filename=target.mod_name,
@@ -1705,7 +1706,7 @@ async def discover_mod_pages(
     if not unresolved_providers:
         raise ValueError("Mod Pages already contains all supported project providers.")
 
-    local = await asyncio.to_thread(
+    local = await run_blocking(
         _local_file_identity,
         local_path,
         logical_filename=local_filename,
@@ -1811,7 +1812,7 @@ async def discover_launcher_metadata(
             "No unresolved Modrinth or CurseForge project pages were found in Mod Pages."
         )
 
-    local = await asyncio.to_thread(
+    local = await run_blocking(
         _local_file_identity,
         local_path,
         logical_filename=local_filename,
@@ -1930,7 +1931,7 @@ async def resolve_launcher_metadata_resolution(
             None
             if local_path is None or Provider.MODRINTH not in supplied_urls
             else (
-                await asyncio.to_thread(
+                await run_blocking(
                     _local_file_identity,
                     local_path,
                     logical_filename=local_filename,

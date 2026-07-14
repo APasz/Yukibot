@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import zipfile
+from collections import Counter
 from collections.abc import Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 import hikari
 
 import config
+from _async_utils import run_blocking
 from _file import File_Utils
 from _security import Access_Control
 from apps._app import App
@@ -31,9 +33,27 @@ class ModMutationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ArchivePathRewrite:
+    source_relative_path: PurePosixPath
+    archive_relative_path: PurePosixPath
+
+    def __post_init__(self) -> None:
+        _validate_archive_relative_path(self.source_relative_path)
+        _validate_archive_relative_path(self.archive_relative_path)
+
+
+@dataclass(frozen=True, slots=True)
 class ArchiveEntry:
     source_path: Path
     archive_path: PurePosixPath
+    path_rewrites: tuple[ArchivePathRewrite, ...] = field(default=(), kw_only=True)
+
+    def archive_path_for_relative(self, relative_path: PurePosixPath) -> PurePosixPath:
+        _validate_archive_relative_path(relative_path)
+        for rewrite in self.path_rewrites:
+            if rewrite.source_relative_path == relative_path:
+                return self.archive_path / rewrite.archive_relative_path
+        return self.archive_path / relative_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +88,10 @@ class ModArchiveEntry(ArchiveEntry):
         return cls(
             source_path=mod.storage_path,
             archive_path=archive_path,
+            path_rewrites=tuple(
+                ArchivePathRewrite(source_relative_path=source, archive_relative_path=destination)
+                for source, destination in mod.download_archive_path_rewrites()
+            ),
             mod_name=mod.name,
             placement=mod.cfg.placement,
             mod_type=mod.mod_type,
@@ -114,8 +138,12 @@ def client_pack_content_hash(entries: Collection[WritableArchiveEntry], *, forma
         else:
             raise ClientPackValidationError(f"Client-pack entry is missing: {source}")
         for path in files:
-            relative = path.relative_to(source) if source.is_dir() else Path(path.name)
-            archive_path = entry.archive_path.joinpath(*relative.parts).as_posix()
+            relative = (
+                PurePosixPath(path.relative_to(source).as_posix())
+                if source.is_dir()
+                else PurePosixPath(path.name)
+            )
+            archive_path = entry.archive_path_for_relative(relative).as_posix()
             _update_content_hash(digest, archive_path.encode("utf-8"))
             with path.open("rb") as handle:
                 while chunk := handle.read(1024 * 1024):
@@ -259,6 +287,15 @@ def build_client_pack_entries(
             )
         selected_mods.append(explicitly_selected[0] if explicitly_selected else defaults[0])
 
+    selected_name_counts = Counter(mod.name.casefold() for mod in selected_mods)
+    duplicate_names = sorted(
+        {mod.name for mod in selected_mods if selected_name_counts[mod.name.casefold()] > 1},
+        key=str.casefold,
+    )
+    if duplicate_names:
+        names = ", ".join(duplicate_names)
+        raise ClientPackValidationError(f"Client pack contains duplicate mods: {names}")
+
     entries: list[ArchiveEntry] = [ModArchiveEntry.from_mod(mod) for mod in selected_mods]
     if client_overrides_dir is not None:
         overrides_path = client_overrides_dir.resolve()
@@ -287,6 +324,11 @@ def build_admin_pack_entries(manager: Mod_Manager) -> tuple[ModArchiveEntry, ...
 def _validate_archive_path(archive_path: PurePosixPath) -> None:
     if archive_path.is_absolute() or not archive_path.parts or ".." in archive_path.parts:
         raise ValueError(f"Invalid archive path: {archive_path}")
+
+
+def _validate_archive_relative_path(relative_path: PurePosixPath) -> None:
+    if relative_path.is_absolute() or not relative_path.parts or ".." in relative_path.parts:
+        raise ValueError(f"Invalid archive relative path: {relative_path}")
 
 
 def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: Path) -> None:
@@ -354,7 +396,8 @@ def _write_mod_archive(entries: Collection[WritableArchiveEntry], archive_path: 
                     source_file = root_path / file_name
                     if source_file.is_symlink():
                         raise ValueError(f"Archive directory cannot contain symbolic links: {source_file}")
-                    archive_file = archive_root / file_name
+                    relative_file = PurePosixPath(source_file.relative_to(source_path).as_posix())
+                    archive_file = entry.archive_path_for_relative(relative_file)
                     archive.write(
                         source_file,
                         reserve_archive_path(archive_file),
@@ -380,7 +423,7 @@ async def compress_archive_entries(
             raise FileExistsError(f"Mod archive already exists: {archive_path}")
         archive_path.unlink()
     try:
-        await asyncio.to_thread(_write_mod_archive, ordered_entries, archive_path)
+        await run_blocking(_write_mod_archive, ordered_entries, archive_path)
     except Exception:
         archive_path.unlink(missing_ok=True)
         raise

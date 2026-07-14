@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi.exceptions import RequestValidationError
 
+from _async_utils import run_blocking
 from relay_notices import (
     AppLifecycleNotice,
     AppLifecycleState,
@@ -131,7 +132,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
     @classmethod
     async def _sync_name_cache_with_authority_if_remote_async(cls, *, name_cache: config.Name_Cache) -> None:
-        await asyncio.to_thread(cls._sync_name_cache_with_authority_if_remote, name_cache=name_cache)
+        await run_blocking(cls._sync_name_cache_with_authority_if_remote, name_cache=name_cache)
 
     @classmethod
     def _persist_alias_dialog_draft(

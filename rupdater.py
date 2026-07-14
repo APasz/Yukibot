@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import os
 import shlex
 import shutil
@@ -18,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from subprocess import CompletedProcess
 from typing import Final
 
+from restart_state import PENDING_PROCESS_RESTART_KIND_PATH, RestartKind, is_process_restart_kind
 from restart_targets import PORTAL_SYSTEMD_UNIT
 
 REPO_ROOT: Path = Path(__file__).resolve().parent
@@ -466,6 +468,20 @@ def build_remote_project_command(target: RemoteTarget, command: str) -> str:
     return f"{build_remote_path_setup_command()}cd {shlex.quote(target.remote_root.as_posix())} && {command}"
 
 
+def build_pending_restart_kind_write_command(kind: RestartKind) -> str:
+    if not is_process_restart_kind(kind):
+        raise ValueError(f"{kind.value!r} is not a process restart kind")
+    payload: str = json.dumps({"kind": kind.value}, sort_keys=True)
+    sentinel_path: str = shlex.quote(PENDING_PROCESS_RESTART_KIND_PATH.as_posix())
+    return f"printf '%s\\n' {shlex.quote(payload)} > {sentinel_path}"
+
+
+def build_remote_restart_command(target: RemoteTarget, kind: RestartKind = RestartKind.UPDATE_BOT) -> str:
+    if target.restart_command is None:
+        raise ValueError(f"{target.name.value} restart_command is not configured")
+    return f"{build_pending_restart_kind_write_command(kind)} && {target.restart_command}"
+
+
 def build_remote_program_check_command(program_name: str) -> str:
     quoted_program_name: str = shlex.quote(program_name)
     return (
@@ -555,14 +571,14 @@ def print_synced_files(target: RemoteTarget, files: list[Path], delete_files: li
 
 
 def restart_remote(session: RemoteSession) -> None:
-    if session.target.restart_command is None:
-        raise ValueError(f"{session.target.name.value} restart_command is not configured")
     run_checked(
         [
             "ssh",
             *ssh_connection_options(session.control_path),
             session.target.ssh_destination,
-            session.target.restart_command,
+            build_remote_shell_command(
+                build_remote_project_command(session.target, build_remote_restart_command(session.target))
+            ),
         ],
         password=None,
     )

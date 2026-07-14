@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import json
 import logging
@@ -6,7 +5,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import aiofiles
@@ -14,6 +13,7 @@ from modmux import parse_url
 from modmux.models import Provider
 
 import config
+from _async_utils import run_blocking
 from _file import File_Utils
 from apps._config import (
     App_Config,
@@ -179,6 +179,9 @@ class Mod(ABC):
     @property
     def logical_archive_name(self) -> str:
         return self.name
+
+    def download_archive_path_rewrites(self) -> tuple[tuple[PurePosixPath, PurePosixPath], ...]:
+        return ()
 
     @property
     def mod_type(self) -> ModType:
@@ -429,11 +432,11 @@ class Mod(ABC):
         raise RuntimeError("Coremod")
 
     async def _handle_drop(self, src: Path, atomic: bool = True):
-        await asyncio.to_thread(File_Utils.move, src, self.path, atomic)
+        await run_blocking(File_Utils.move, src, self.path, atomic)
         log.info(f"Copied mod; {self.name}: {self.path}")
 
     async def _handle_extr(self, src: Path, atomic: bool = True):
-        await asyncio.to_thread(File_Utils.extract, src, self.path.parent, atomic)
+        await run_blocking(File_Utils.extract, src, self.path.parent, atomic)
         log.info(f"Extracted mod; {self.name}: {self.path}")
 
     @abstractmethod
@@ -443,7 +446,7 @@ class Mod(ABC):
     async def uninstall(self, override_coremod: bool = False) -> bool:
         if not override_coremod:
             self.is_coremod()
-        return await asyncio.to_thread(File_Utils.remove, self.path)
+        return await run_blocking(File_Utils.remove, self.path)
 
     async def _enable_file(self, override_coremod: bool = False) -> Path:
         if self.cfg.placement is ModPlacement.CLIENT_ONLY:
@@ -451,7 +454,7 @@ class Mod(ABC):
         if not override_coremod:
             self.is_coremod()
         target = self.enabled_path
-        await asyncio.to_thread(File_Utils.move, self.disabled_path, target)
+        await run_blocking(File_Utils.move, self.disabled_path, target)
         self.cfg.set_placement(ModPlacement.SERVER_ENABLED)
         return target
 
@@ -469,7 +472,7 @@ class Mod(ABC):
         if not override_coremod:
             self.is_coremod()
         target = self.disabled_path
-        await asyncio.to_thread(File_Utils.move, self.enabled_path, target)
+        await run_blocking(File_Utils.move, self.enabled_path, target)
         self.cfg.set_placement(ModPlacement.SERVER_DISABLED)
         return target
 
@@ -863,7 +866,7 @@ class Mod_Manager:
             )
         if placement is ModPlacement.CLIENT_ONLY:
             mod.storage_path.parent.mkdir(parents=True, exist_ok=True)
-            await asyncio.to_thread(File_Utils.move, src, mod.storage_path, atomic)
+            await run_blocking(File_Utils.move, src, mod.storage_path, atomic)
         else:
             await mod.install(src, atomic)
         mod.sync_metadata()
@@ -879,7 +882,7 @@ class Mod_Manager:
         mod = self.get(mod_name)
         self.validate_client_pack_configuration(entry for entry in self.index.values() if entry is not mod)
         if mod.cfg.placement is ModPlacement.CLIENT_ONLY:
-            await asyncio.to_thread(File_Utils.remove, mod.storage_path)
+            await run_blocking(File_Utils.remove, mod.storage_path)
         else:
             await mod.uninstall(override_coremod)
         del self.index[mod.name]

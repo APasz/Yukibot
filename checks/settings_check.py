@@ -856,6 +856,48 @@ class SettingTests(unittest.TestCase):
             self.assertIn('name="UserDataFolder" value="userdata"', saved)
             self.assertNotIn('name="UserDataFolder" value="/var/lib/7d2d"', saved)
 
+    def test_sevendays_game_world_and_name_choices_use_discovered_saves(self) -> None:
+        property_values = {
+            "UserDataFolder": "userdata",
+            "ServerName": "Choice Test",
+            "GameWorld": "Navezgane",
+            "GameName": "CurrentSave",
+        }
+
+        with TemporaryDirectory[str]() as temp_dir:
+            root = Path(temp_dir)
+            pointer, _ = _write_sevendays_xml_files(root, server_properties=property_values)
+            (root / "userdata" / "Saves" / "Navezgane" / "CurrentSave").mkdir(parents=True)
+            (root / "userdata" / "Saves" / "Wizefoco Mountains" / "ImportedSave").mkdir(parents=True)
+            (root / "userdata" / "Saves" / ".HiddenWorld" / "HiddenSave").mkdir(parents=True)
+            (root / "userdata" / "Saves" / "Navezgane" / ".HiddenSave").mkdir(parents=True)
+
+            settings = SevenDays_Settings(pointer)
+            listed_settings = {setting.key: setting for setting in settings.options}
+            game_world = listed_settings["GameWorld"]
+            game_name = listed_settings["GameName"]
+
+            self.assertFalse(game_world.strict_choice)
+            self.assertFalse(game_name.strict_choice)
+            self.assertEqual(
+                game_world.choice_items(),
+                (
+                    ("Navezgane", "Navezgane"),
+                    ("Wizefoco Mountains", "Wizefoco Mountains"),
+                ),
+            )
+            self.assertEqual(
+                game_name.choice_items(),
+                (
+                    ("CurrentSave", "CurrentSave"),
+                    ("ImportedSave", "ImportedSave"),
+                ),
+            )
+            game_world.update("Brand New World")
+            game_name.update("Brand New Save")
+            self.assertEqual(game_world.value, "Brand New World")
+            self.assertEqual(game_name.value, "Brand New Save")
+
     def test_sevendays_settings_clamp_loaded_transfer_speed_without_startup_error(self) -> None:
         property_values = {
             "ServerName": "Clamp Test",

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from modmux.models import ModID, Provider
 
+from apps._app import AppVersionSource
 from apps._config import (
     App_Config,
     AppVersion,
@@ -1000,7 +1001,18 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         self.assertEqual(result.file_name, "example_1.0.0.zip")
         self.assertTrue(get_calls[-1]["allow_redirects"])
 
-    def test_detect_factorio_version_from_local_log(self) -> None:
+    def test_detect_factorio_version_from_base_info_json(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            info_path = root / "data" / "base" / "info.json"
+            info_path.parent.mkdir(parents=True)
+            info_path.write_text(json.dumps({"name": "base", "version": "2.0.72"}), encoding="utf-8")
+
+            version = detect_factorio_version(directory=root)
+
+        self.assertEqual(version, AppVersion(main="2.0.72"))
+
+    def test_detect_factorio_version_falls_back_to_local_log(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "factorio-current.log").write_text(
@@ -1011,6 +1023,11 @@ class FactorioVersionDetectionTests(unittest.TestCase):
             version = detect_factorio_version(directory=root)
 
         self.assertEqual(version, AppVersion(main="1.1.107"))
+
+    def test_factorio_version_source_uses_installed_files(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+
+        self.assertIs(app.version_source, AppVersionSource.INSTALLED_FILES)
 
     def test_manager_ignores_factorio_metadata_files_and_uses_mod_list_state(self) -> None:
         with TemporaryDirectory() as tmp:

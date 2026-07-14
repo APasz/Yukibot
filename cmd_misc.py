@@ -22,6 +22,7 @@ import lightbulb
 
 import _errors
 import config
+from _async_utils import run_blocking
 from _discord import Distils
 from _security import Access_Control
 from _utils import Utilities
@@ -476,7 +477,7 @@ async def _load_store_path(path: Path) -> dict[str, Any]:
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
 
-    return await asyncio.to_thread(_read)
+    return await run_blocking(_read)
 
 
 async def _save_store_path(path: Path, data: dict[str, Any]) -> None:
@@ -488,7 +489,7 @@ async def _save_store_path(path: Path, data: dict[str, Any]) -> None:
             json.dump(data, f, ensure_ascii=False, indent=4)
         tmp.replace(path)
 
-    await asyncio.to_thread(_write)
+    await run_blocking(_write)
 
 
 async def _load_user_store(user_id: hikari.Snowflakeish) -> dict[str, Any]:

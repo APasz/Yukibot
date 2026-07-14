@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _async_utils import run_blocking
+
 from . import avatars as mod_web_avatars
 from .actions import ModWebActionsMixin
 from .app_page import ModWebAppPageMixin
@@ -229,7 +231,7 @@ class ModWebService(
             )
             self._server_thread.start()
 
-            started = await asyncio.to_thread(self._startup_signal.wait, _MOD_WEB_STARTUP_TIMEOUT_SECONDS)
+            started = await run_blocking(self._startup_signal.wait, _MOD_WEB_STARTUP_TIMEOUT_SECONDS)
             if not started:
                 raise TimeoutError("Timed out while starting the mod web server.")
             if self._startup_error is not None:

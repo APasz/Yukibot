@@ -1,4 +1,3 @@
-import asyncio
 import enum
 import importlib
 import importlib.util
@@ -9,15 +8,19 @@ import subprocess
 import tempfile
 import zipfile
 from collections.abc import AsyncIterator, Collection
+from logging import Logger
 from pathlib import Path, PurePosixPath
+from subprocess import CompletedProcess
+from types import ModuleType
 from typing import cast
 
 import aiofiles
 import hikari
 
 import config
+from _async_utils import run_blocking
 
-log = logging.getLogger(__name__)
+log: Logger = logging.getLogger(__name__)
 
 
 class ArchiveKind(enum.StrEnum):
@@ -36,7 +39,7 @@ class File_Utils:
 
     @staticmethod
     def _normalise_archive_member_path(member_name: str) -> Path:
-        resolved = PurePosixPath(member_name)
+        resolved: PurePosixPath = PurePosixPath(member_name)
         if not member_name or resolved.is_absolute() or ".." in resolved.parts:
             raise ValueError(f"Archive member path is invalid: {member_name}")
         return Path(*resolved.parts)
@@ -45,11 +48,11 @@ class File_Utils:
     def _extract_zip_archive(cls, archive_path: Path, staging_dir: Path) -> None:
         with zipfile.ZipFile(archive_path, "r") as archive:
             for member in archive.infolist():
-                member_name = member.filename
+                member_name: str = member.filename
                 if not member_name:
                     continue
-                relative_path = cls._normalise_archive_member_path(member_name)
-                target_path = staging_dir / relative_path
+                relative_path: Path = cls._normalise_archive_member_path(member_name)
+                target_path: Path = staging_dir / relative_path
                 if member_name.endswith("/"):
                     target_path.mkdir(parents=True, exist_ok=True)
                     continue
@@ -60,24 +63,26 @@ class File_Utils:
     @staticmethod
     def _extract_7z_archive(archive_path: Path, staging_dir: Path) -> None:
         if importlib.util.find_spec("py7zr") is not None:
-            py7zr_module = importlib.import_module("py7zr")
+            py7zr_module: ModuleType = importlib.import_module("py7zr")
             seven_zip_file_cls = getattr(py7zr_module, "SevenZipFile")
             with seven_zip_file_cls(archive_path, mode="r") as archive:
                 archive.extractall(path=staging_dir)
             return
 
         for executable_name in ("7zz", "7z", "7za"):
-            executable = shutil.which(executable_name)
+            executable: str | None = shutil.which(executable_name)
             if executable is None:
                 continue
-            result = subprocess.run(
+            result: CompletedProcess[str] = subprocess.run(
                 [executable, "x", "-y", f"-o{staging_dir}", str(archive_path)],
                 check=False,
                 capture_output=True,
                 text=True,
             )
             if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip() or f"{executable_name} exited {result.returncode}"
+                detail: str = (
+                    result.stderr.strip() or result.stdout.strip() or f"{executable_name} exited {result.returncode}"
+                )
                 raise RuntimeError(f"7z extraction failed: {detail}")
             return
 
@@ -98,7 +103,7 @@ class File_Utils:
 
     @staticmethod
     def _resolved_archive_root(staging_dir: Path) -> Path:
-        entries = tuple(staging_dir.iterdir())
+        entries: tuple[Path, ...] = tuple[Path, ...](staging_dir.iterdir())
         if len(entries) == 1 and entries[0].is_dir():
             return entries[0]
         return staging_dir
@@ -116,7 +121,7 @@ class File_Utils:
     @staticmethod
     def append_num(pointer: Path) -> Path:
         for i in range(1, 100):
-            candidate = pointer.with_stem(f"{pointer.stem}_{i}")
+            candidate: Path = pointer.with_stem(f"{pointer.stem}_{i}")
             if not candidate.exists():
                 return candidate
         raise RuntimeError("Too many conflicting zip names")
@@ -125,7 +130,7 @@ class File_Utils:
     def remove(target: Path, *, silent: bool = False, resolve: bool = False) -> bool:
         log.debug(f"File.Remove; S={int(silent)} R={int(resolve)}: {target=}")
         try:
-            path = target.resolve() if resolve else target
+            path: Path = target.resolve() if resolve else target
         except FileNotFoundError:
             if silent:
                 return True
@@ -158,7 +163,7 @@ class File_Utils:
                 dst = cls.append_num(dst)
             elif dst.exists():
                 raise FileExistsError(f"Can't link to existing {dst=}")
-            pointer = dst
+            pointer: Path = dst
             pointer.symlink_to(cls._symlink_target(src, pointer), src.is_dir())
         except Exception:
             log.exception(f"link failed: {overwrite=}\n{src}\n{dst}")
@@ -339,9 +344,9 @@ class File_Utils:
         if isinstance(target, Path):
             cls.ensure_valid_path(target)
             if target.is_file():
-                await asyncio.to_thread(cls.compress_file, target, zip_path)
+                await run_blocking(cls.compress_file, target, zip_path)
             elif target.is_dir():
-                await asyncio.to_thread(cls.compress_dir, target, zip_path, arc_base)
+                await run_blocking(cls.compress_dir, target, zip_path, arc_base)
             else:
                 raise ValueError(f"Unsupported path type: {target}")
         else:
@@ -349,12 +354,12 @@ class File_Utils:
             for p in paths:
                 cls.ensure_valid_path(p)
             if all(p.is_file() for p in paths):
-                await asyncio.to_thread(cls.compress_files, paths, zip_path, arc_base)
+                await run_blocking(cls.compress_files, paths, zip_path, arc_base)
 
             elif all(p.is_dir() for p in paths):
-                await asyncio.to_thread(cls.compress_dirs, paths, zip_path, arc_base)
+                await run_blocking(cls.compress_dirs, paths, zip_path, arc_base)
             else:
-                await asyncio.to_thread(cls.compress_paths, paths, zip_path, arc_base)
+                await run_blocking(cls.compress_paths, paths, zip_path, arc_base)
 
         return zip_path
 

@@ -67,7 +67,7 @@ from _discord import cached_member_role_color, color_int_to_hex
 from _manager import App_Manager, ManagedApp, app_scope_from_name
 from _security import Access_Control, Power_Level
 from _utils import Utilities
-from apps._app import App, AppRuntimeFault
+from apps._app import App, AppRuntimeFault, AppVersionSource
 from apps._config import (
     AppTitleFont,
     BulkLauncherMetadataDiscovery,
@@ -94,7 +94,27 @@ from apps._config import (
     steam_update_preset_for_scope,
 )
 from apps._updater import AppUpdateInfo, AppUpdateOperationKind, AppUpdateState, AppUpdateStatus
+from apps._node_api import NodeModUploadSource
+from apps.factorio.node_api import (
+    NodeFactorioModSettings,
+    NodeModDependencyEntry,
+    NodeModDependencyResolutionResult,
+    NodeModPortalDependencyEntry,
+    NodeModPortalResolveResult,
+    NodeModPortalVersionEntry,
+    NodeModPortalVersionList,
+    NodeModUpdateCheckResult,
+    NodeModUpdateDependency,
+    NodeModUpdateDependencyAction,
+    NodeModUpdateStatus,
+)
+from apps.minecraft.node_api import (
+    NodeMinecraftRecipeMutationAction,
+    NodeMinecraftRecipeMutationResult,
+    NodeMinecraftRecipeWorkspaceState,
+)
 from apps.minecraft.pack_export import PackFormat, PackPurpose
+from apps.sevendays.node_api import NodeSevenDaysSandboxOptionsState
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
     ChatAttachment,
@@ -146,29 +166,14 @@ from node_api import (
     NodeDiskEntry,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
-    NodeFactorioModSettings,
     NodeFontSourceSettingsMutationResult,
-    NodeMinecraftRecipeMutationAction,
-    NodeMinecraftRecipeMutationResult,
-    NodeMinecraftRecipeWorkspaceState,
     NodeModEntry,
     NodeModList,
-    NodeModDependencyEntry,
-    NodeModDependencyResolutionResult,
     NodeModMutationAction,
     NodeModMutationResult,
-    NodeModPortalDependencyEntry,
-    NodeModPortalResolveResult,
-    NodeModPortalVersionEntry,
-    NodeModPortalVersionList,
     NodeModSummary,
-    NodeModUpdateDependency,
-    NodeModUpdateDependencyAction,
-    NodeModUpdateCheckResult,
-    NodeModUpdateStatus,
     NodeModUploadBatchResult,
     NodeModUploadResult,
-    NodeModUploadSource,
     NodeRestartRecord,
     NodeRestartScheduleEntry,
     NodeRestartScheduleState,
@@ -181,7 +186,6 @@ from node_api import (
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
-    NodeSevenDaysSandboxOptionsState,
     NodeStateStreamEvent,
     NodeStateTopic,
     NodeSystemAction,
@@ -208,6 +212,7 @@ __all__: tuple[str, ...] = (
     "AppRuntimeFault",
     "AsyncIterator",
     "AppTitleFont",
+    "AppVersionSource",
     "BulkLauncherMetadataDiscovery",
     "BulkLauncherMetadataEntry",
     "BulkLauncherMetadataStatus",

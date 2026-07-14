@@ -17,6 +17,7 @@ import psutil
 import requests
 
 import config
+from _async_utils import run_blocking
 from _manager import App_Manager
 from config import Singleton
 from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
@@ -791,7 +792,7 @@ async def request_portal_process_restart(
             expires_at=int(time.time()) + _PORTAL_RESTART_TOKEN_TTL_SECONDS,
         ),
     )
-    await asyncio.to_thread(
+    await run_blocking(
         _request_portal_restart,
         portal_target.restart_url,
         token,

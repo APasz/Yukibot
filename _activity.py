@@ -107,7 +107,7 @@ class Activity_Manager(config.Activity_Manager):
 
     @staticmethod
     def _provider_activity_field(provider: config.Activity_Provider) -> config.DiscordActivityField | None:
-        field = getattr(provider, "activity_field", None)
+        field = provider.activity_field
         if isinstance(field, config.DiscordActivityField):
             return field
         return None
@@ -148,7 +148,7 @@ class Activity_Manager(config.Activity_Manager):
         return normalised_target_name or None
 
     def _provider_matches_rotation_target(self, provider: config.Activity_Provider) -> bool:
-        scope_name = getattr(provider, "activity_scope_name", None)
+        scope_name = provider.activity_scope_name
         if scope_name is None:
             return True
         normalised_scope_name = scope_name.strip()

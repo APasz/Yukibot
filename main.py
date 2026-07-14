@@ -12,6 +12,10 @@ from logging import Logger
 from pathlib import Path
 from typing import Any, Protocol
 
+from startup_logging import install_startup_exception_logger
+
+install_startup_exception_logger()
+
 import hikari
 import hikariwave
 import lightbulb
@@ -19,6 +23,7 @@ import requests
 
 import _sys
 import config
+from _async_utils import run_blocking
 from _activity import Activity_Manager, Provider_CPU, Provider_DISK, Provider_RAM
 from _authority_server import AuthorityServer
 from _discord import DC_Relay, Distils, Resolutator, cached_member_role_color, color_int_to_hex
@@ -367,7 +372,7 @@ async def _run_portal() -> None:
             log.critical("Rebooting portal host from web dashboard")
             mark_pending_process_restart(RestartKind.MANUAL_SYS)
             mod_web.begin_shutdown()
-            await asyncio.to_thread(_sys.reboot_host)
+            await run_blocking(_sys.reboot_host)
 
         asyncio.run_coroutine_threadsafe(_reboot_portal_host(), loop)
 
@@ -397,9 +402,9 @@ async def _run_portal() -> None:
 async def _refresh_portal_remote_state(acl: Access_Control) -> None:
     if config.DATA_AUTHORITY_MODE is not config.DataAuthorityMode.REMOTE:
         return
-    await asyncio.to_thread(acl.reload)
+    await run_blocking(acl.reload)
     try:
-        await asyncio.to_thread(config.fetch_remote_bot_registry)
+        await run_blocking(config.fetch_remote_bot_registry)
     except Exception as xcp:
         log.warning("Portal bot registry refresh failed; keeping cached node metadata: %s", xcp)
 
@@ -727,7 +732,7 @@ def main():
                     config.ACTIVE_BOT_PROFILE.name.value,
                     install_types_text,
                 )
-            bot_config = await asyncio.to_thread(
+            bot_config = await run_blocking(
                 config.sync_local_oauth_configuration,
                 Path("configuration.json"),
                 supported_install_types=supported_install_types,
@@ -772,26 +777,26 @@ def main():
         )
         if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.LOCAL:
             try:
-                await asyncio.to_thread(config.upsert_known_bot_snapshot, Path("configuration.json"), snapshot)
+                await run_blocking(config.upsert_known_bot_snapshot, Path("configuration.json"), snapshot)
             except Exception as xcp:
                 log.warning(f"Local bot metadata persist failed; node switcher may miss this node: {xcp}")
             return
 
         try:
-            await asyncio.to_thread(config.fetch_remote_bot_registry)
+            await run_blocking(config.fetch_remote_bot_registry)
         except Exception as xcp:
             log.warning(f"Bot registry refresh failed; node switcher may use stale cache: {xcp}")
         try:
-            await asyncio.to_thread(config.sync_remote_bot_metadata, snapshot)
+            await run_blocking(config.sync_remote_bot_metadata, snapshot)
         except Exception as xcp:
             log.warning(f"Bot metadata sync failed; keeping local snapshot only: {xcp}")
 
     @client.task(lightbulb.uniformtrigger(minutes=1, wait_first=False), max_failures=100)
     async def task_authority_refresh(acl: Access_Control, names: Name_Cache, bot: hikari.GatewayBot):
         if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
-            await asyncio.to_thread(names.flush_pending_mutations)
-            await asyncio.to_thread(acl.reload)
-            await asyncio.to_thread(names.refresh_from_authority)
+            await run_blocking(names.flush_pending_mutations)
+            await run_blocking(acl.reload)
+            await run_blocking(names.refresh_from_authority)
         await sync_bot_metadata(bot, initial=False)
 
     @client.task(lightbulb.uniformtrigger(minutes=1, wait_first=False), max_failures=100)
@@ -907,7 +912,7 @@ def main():
         hydrated_presence_count = online_tracker.hydrate_cached_presences(bot)
         if hydrated_presence_count:
             log.info("Hydrated %s tracked presence snapshot(s) from cache on startup", hydrated_presence_count)
-        synced_name_count = await asyncio.to_thread(name_cache.sync_cached_members, bot.cache)
+        synced_name_count = await run_blocking(name_cache.sync_cached_members, bot.cache)
         if synced_name_count:
             log.info(f"Synced {synced_name_count} cached member identities on startup")
 
@@ -965,7 +970,7 @@ def main():
     @bot.listen(hikari.GuildAvailableEvent)
     async def _on_guild(event: hikari.GuildAvailableEvent):
         if guild := event.get_guild():
-            synced_name_count = await asyncio.to_thread(name_cache.sync_members, event.members.values())
+            synced_name_count = await run_blocking(name_cache.sync_members, event.members.values())
             if synced_name_count:
                 log.info(f"Synced {synced_name_count} member identities for guild {event.guild_id}")
             if config.CLEAR_CMDS:
@@ -987,28 +992,28 @@ def main():
 
     @bot.listen(hikari.GuildJoinEvent)
     async def _on_guild_join(event: hikari.GuildJoinEvent):
-        synced_name_count = await asyncio.to_thread(name_cache.sync_members, event.members.values())
+        synced_name_count = await run_blocking(name_cache.sync_members, event.members.values())
         if synced_name_count:
             log.info(f"Synced {synced_name_count} member identities for joined guild {event.guild_id}")
 
     @bot.listen(hikari.MemberCreateEvent)
     async def _on_member_create(event: hikari.MemberCreateEvent):
-        await asyncio.to_thread(name_cache.set_names, event.member)
+        await run_blocking(name_cache.set_names, event.member)
 
     @bot.listen(hikari.MemberUpdateEvent)
     async def _on_member_update(event: hikari.MemberUpdateEvent):
-        await asyncio.to_thread(name_cache.set_names, event.member)
+        await run_blocking(name_cache.set_names, event.member)
 
     @bot.listen(hikari.MemberDeleteEvent)
     async def _on_member_delete(event: hikari.MemberDeleteEvent):
-        await asyncio.to_thread(name_cache.remove_guild_name, int(event.user.id), event.guild_id)
+        await run_blocking(name_cache.remove_guild_name, int(event.user.id), event.guild_id)
 
     @bot.listen(hikari.InteractionCreateEvent)
     async def _route_alias_editor(event: hikari.InteractionCreateEvent):
         interaction = event.interaction
         interaction_user = getattr(interaction, "user", None)
         if interaction_user is not None and not interaction_user.is_bot:
-            await asyncio.to_thread(name_cache.set_names, getattr(interaction, "member", None) or interaction_user)
+            await run_blocking(name_cache.set_names, getattr(interaction, "member", None) or interaction_user)
         if isinstance(interaction, hikari.ComponentInteraction):
             handled = await alias_editor.route_component(
                 interaction,

@@ -32,6 +32,7 @@ from apps._app import (
     AppActivityProviderMetadata,
     AppRuntimeFault,
     AppRuntimeFaultKind,
+    AppVersionSource,
     ChatRelaySupport,
 )
 from apps._config import (
@@ -1514,6 +1515,7 @@ class NodeApiTests(unittest.TestCase):
             player_count=2,
             player_capacity=8,
             relay_support=ChatRelaySupport.BIDIRECTIONAL,
+            version_source=AppVersionSource.INSTALLED_FILES,
             storage_percent=None,
             storage_free_bytes=None,
             storage_total_bytes=None,
@@ -1539,7 +1541,25 @@ class NodeApiTests(unittest.TestCase):
         mapped = event.to_mapping()
         restored = NodeChatStreamEvent.from_mapping(mapped)
 
+        self.assertEqual(mapped["app_stats"]["version_source"], AppVersionSource.INSTALLED_FILES.value)
         self.assertEqual(restored, event)
+
+    def test_app_runtime_summary_defaults_version_source_to_startup(self) -> None:
+        restored = NodeAppRuntimeSummary.from_mapping(
+            {
+                "running": True,
+                "enabled": True,
+                "version": "1.20.1",
+                "player_count": None,
+                "player_capacity": None,
+                "relay_support": ChatRelaySupport.NONE.value,
+                "storage_percent": None,
+                "storage_free_bytes": None,
+                "storage_total_bytes": None,
+            }
+        )
+
+        self.assertIs(restored.version_source, AppVersionSource.STARTUP)
 
     def test_console_stdout_append_event_round_trips_and_applies(self) -> None:
         initial = NodeConsoleStdoutSnapshot(
@@ -5591,6 +5611,23 @@ class NodeApiTests(unittest.TestCase):
         )
         self.assertFalse(app.cfg.client_pack_content_dirty)
 
+    def test_publish_client_pack_rejects_duplicate_mod_snapshots_before_persisting(self) -> None:
+        app = _build_app(Mock())
+        app.cfg.client_pack_content_dirty = True
+
+        with self.assertRaisesRegex(ValueError, "duplicate.jar"):
+            app.publish_client_pack(
+                "a" * 64,
+                changelog="Initial release.",
+                mods=(
+                    ClientPackModSnapshot(name="duplicate.jar", friendly="Duplicate"),
+                    ClientPackModSnapshot(name="duplicate.jar", friendly="Duplicate"),
+                ),
+            )
+
+        self.assertEqual(app.cfg.client_pack_published_mods, ())
+        self.assertTrue(app.cfg.client_pack_content_dirty)
+
     def test_publish_client_pack_retains_previous_release_changelogs(self) -> None:
         app = _build_app(Mock())
         app.cfg.client_pack_published_hash = "a" * 64
@@ -7594,6 +7631,26 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(tuple(entry.source_path for entry in archive_entries), (mod_path,))
         self.assertEqual(tuple(entry.archive_path.as_posix() for entry in archive_entries), ("DirectoryMod",))
         self.assertEqual(archive_name, "Minecraft_Alpha_DirectoryMod.zip")
+
+    def test_single_disabled_file_mod_download_uses_logical_filename(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            disabled_path = temp_path / "disabled.jar.disabled"
+            disabled_path.write_bytes(b"disabled")
+            mod = _TestMod(
+                Mod_Config(
+                    name="disabled.jar",
+                    directory=temp_path,
+                    placement=ModPlacement.SERVER_DISABLED,
+                )
+            )
+            app = _build_app(Mock(get=Mock(return_value=mod), reload_mods=AsyncMock()))
+
+            download = asyncio.run(NodeApiService()._single_mod_download_file(app=app, mod=mod))
+
+        self.assertFalse(download.is_archive)
+        self.assertEqual(download.path, disabled_path)
+        self.assertEqual(download.filename, "disabled.jar")
 
     def test_selected_mod_download_creates_archive_from_selected_mods(self) -> None:
         with TemporaryDirectory() as temp_dir:

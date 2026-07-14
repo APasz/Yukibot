@@ -14,6 +14,7 @@ from typing import Protocol
 
 import _errors
 import config
+from _async_utils import run_blocking
 from apps._config import App_Config, AppVersion, SteamUpdateBranch, SteamUpdateConfig
 
 log = logging.getLogger(__name__)
@@ -472,8 +473,8 @@ class SteamCmd_Update_Manager(Update_Manager):
             completed = await self._run_steamcmd(branch=branch, validate=validate)
             if not completed:
                 raise RuntimeError(f"SteamCMD did not complete {kind.value} for {self.app.friendly}.")
-            manifest_state = await asyncio.to_thread(self._safe_read_installed_manifest)
-            detected_version = await asyncio.to_thread(self._detect_installed_version)
+            manifest_state = await run_blocking(self._safe_read_installed_manifest)
+            detected_version = await run_blocking(self._detect_installed_version)
             resolved_version = self._version_with_manifest_data(detected_version, manifest_state)
             version_text: str | None = None
             if resolved_version is not None:

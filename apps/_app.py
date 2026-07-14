@@ -22,6 +22,7 @@ from hikari.snowflakes import Snowflake
 
 import _errors
 import config
+from _async_utils import run_blocking
 from _security import Power_Level
 from apps._blueprint_files import AppBlueprintEntry
 from apps._config import (
@@ -36,6 +37,7 @@ from apps._config import (
     mod_capabilities_for_scope,
     next_client_pack_version,
     normalise_app_version,
+    normalise_client_pack_mod_snapshots,
 )
 from apps._config_files import (
     AppConfigFile,
@@ -100,6 +102,11 @@ class ChatRelaySupport(enum.StrEnum):
     @property
     def supports_outbound(self) -> bool:
         return self in {ChatRelaySupport.OUTBOUND, ChatRelaySupport.BIDIRECTIONAL}
+
+
+class AppVersionSource(enum.StrEnum):
+    STARTUP = "startup"
+    INSTALLED_FILES = "installed_files"
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,8 +191,11 @@ class AppActivityProvider(ABC, Generic[AppProviderT]):
 
     def __init__(self, app: AppProviderT) -> None:
         self.app: AppProviderT = app
-        self.activity_scope_name = getattr(app, "name", None)
-        self.task_funcs = tuple(getattr(self, "task_funcs", ()))
+        self.activity_scope_name = app.name
+        try:
+            self.task_funcs = tuple(self.task_funcs)
+        except AttributeError:
+            self.task_funcs = ()
 
     @property
     def provider_id(self) -> str:
@@ -328,9 +338,18 @@ class App(Generic[ConfigT], ABC):
         self.providers = []
         self.lifecycle_started_at = None
         self.runtime_fault = None
-        self.proc_name = getattr(self, "proc_name", "")
-        self.proc_cmd = getattr(self, "proc_cmd", [])
-        self.cmd_start = getattr(self, "cmd_start", [])
+        try:
+            self.proc_name = self.proc_name
+        except AttributeError:
+            self.proc_name = ""
+        try:
+            self.proc_cmd = self.proc_cmd
+        except AttributeError:
+            self.proc_cmd = []
+        try:
+            self.cmd_start = self.cmd_start
+        except AttributeError:
+            self.cmd_start = []
         self.config_file_read_level_override = cfg.config_file_read_level_override
         self.config_file_write_level_override = cfg.config_file_write_level_override
         self.save_file_write_level_override = cfg.save_file_write_level_override
@@ -350,8 +369,7 @@ class App(Generic[ConfigT], ABC):
     def published_client_pack_version(self) -> str | None:
         if not self.mod_capabilities.supports_client_pack:
             return None
-        cfg = getattr(self, "cfg", None)
-        raw_version = getattr(cfg, "client_pack_published_version", None)
+        raw_version = self.cfg.client_pack_published_version
         if not isinstance(raw_version, str):
             return None
         published_version = raw_version.strip()
@@ -361,8 +379,7 @@ class App(Generic[ConfigT], ABC):
     def has_unpublished_client_pack_changes(self) -> bool:
         if self.published_client_pack_version is None:
             return False
-        cfg = getattr(self, "cfg", None)
-        return bool(getattr(cfg, "client_pack_content_dirty", False))
+        return self.cfg.client_pack_content_dirty
 
     @property
     def published_client_pack_text(self) -> str | None:
@@ -515,6 +532,10 @@ class App(Generic[ConfigT], ABC):
     def detect_installed_version(self) -> AppVersion | None:
         return None
 
+    @property
+    def version_source(self) -> AppVersionSource:
+        return AppVersionSource.STARTUP
+
     def apply_version(self, version: AppVersion | str | None, *, persist: bool) -> bool:
         normalised_version = normalise_app_version(version)
         if normalised_version is None or self.cfg.version == normalised_version:
@@ -546,6 +567,7 @@ class App(Generic[ConfigT], ABC):
             raise ValueError(
                 f"Client pack changelog must be at most {CLIENT_PACK_CHANGELOG_MAX_LENGTH} characters."
             )
+        published_mods = None if mods is None else normalise_client_pack_mod_snapshots(mods)
         releases = list(self.client_pack_releases)
         self.cfg.client_pack_current_hash = content_hash
         published_version = self.cfg.client_pack_published_version
@@ -562,8 +584,8 @@ class App(Generic[ConfigT], ABC):
         else:
             releases.append(release)
         self.cfg.client_pack_releases = tuple(releases)
-        if mods is not None:
-            self.cfg.client_pack_published_mods = tuple(sorted(mods, key=lambda mod: mod.friendly.casefold()))
+        if published_mods is not None:
+            self.cfg.client_pack_published_mods = published_mods
         self.cfg.client_pack_content_dirty = False
         self.persist_instance_config_overrides()
         return published_version
@@ -620,10 +642,12 @@ class App(Generic[ConfigT], ABC):
 
     @property
     def activity_providers(self) -> tuple[AppActivityProvider[Any], ...]:
-        app_providers = getattr(self, "providers", None)
-        if isinstance(app_providers, list | tuple):
-            return tuple(cast(AppActivityProvider[Any], provider) for provider in app_providers)
-        return ()
+        try:
+            app_providers = self.providers
+        except AttributeError:
+            self.providers = []
+            return ()
+        return tuple(app_providers)
 
     @classmethod
     def activity_provider_id(cls, provider: AppActivityProvider[Any]) -> str:
@@ -635,12 +659,12 @@ class App(Generic[ConfigT], ABC):
 
     @property
     def disabled_activity_provider_ids(self) -> tuple[str, ...]:
-        configured_ids = getattr(self.cfg, "disabled_activity_provider_ids", ())
+        configured_ids = self.cfg.disabled_activity_provider_ids
         known_ids = {self.activity_provider_id(provider).casefold() for provider in self.activity_providers}
         return tuple(
             provider_id
             for provider_id in configured_ids
-            if isinstance(provider_id, str) and provider_id.casefold() in known_ids
+            if provider_id.casefold() in known_ids
         )
 
     def activity_provider_enabled(self, provider: AppActivityProvider[Any]) -> bool:
@@ -747,7 +771,7 @@ class App(Generic[ConfigT], ABC):
     def rcon_requires_online_players_enabled(self) -> bool | None:
         if not self.supports_rcon_console_actions:
             return None
-        override = getattr(self.cfg, "rcon_requires_online_players", None)
+        override = self.cfg.rcon_requires_online_players
         if override is None:
             return self.rcon_requires_online_players_default
         return override
@@ -789,10 +813,7 @@ class App(Generic[ConfigT], ABC):
     def relay_notice_player_session_enabled(self) -> bool | None:
         if not self.relay_notice_player_session_supported:
             return None
-        cfg = getattr(self, "cfg", None)
-        if cfg is None:
-            return True
-        return cfg.relay_notice_player_session
+        return self.cfg.relay_notice_player_session
 
     def apply_relay_notice_player_session_enabled(self, enabled: bool) -> None:
         if not self.relay_notice_player_session_supported:
@@ -817,10 +838,7 @@ class App(Generic[ConfigT], ABC):
     def relay_notice_player_death_enabled(self) -> bool | None:
         if not self.relay_notice_player_death_supported:
             return None
-        cfg = getattr(self, "cfg", None)
-        if cfg is None:
-            return True
-        return cfg.relay_notice_player_death
+        return self.cfg.relay_notice_player_death
 
     def apply_relay_notice_player_death_enabled(self, enabled: bool) -> None:
         if not self.relay_notice_player_death_supported:
@@ -831,10 +849,7 @@ class App(Generic[ConfigT], ABC):
     def relay_notice_progress_enabled(self) -> bool | None:
         if not self.relay_notice_progress_supported:
             return None
-        cfg = getattr(self, "cfg", None)
-        if cfg is None:
-            return True
-        return cfg.relay_notice_progress
+        return self.cfg.relay_notice_progress
 
     def apply_relay_notice_progress_enabled(self, enabled: bool) -> None:
         if not self.relay_notice_progress_supported:
@@ -846,7 +861,7 @@ class App(Generic[ConfigT], ABC):
         return self.relay_advancement_term
 
     def clear_runtime_fault(self) -> bool:
-        if getattr(self, "runtime_fault", None) is None:
+        if self.runtime_fault is None:
             return False
         self.runtime_fault = None
         return True
@@ -864,7 +879,7 @@ class App(Generic[ConfigT], ABC):
             stripped_summary = summary.strip()
             normalised_summary = stripped_summary or None
         next_fault = AppRuntimeFault(kind=kind, summary=normalised_summary)
-        if getattr(self, "runtime_fault", None) == next_fault:
+        if self.runtime_fault == next_fault:
             return False
         self.runtime_fault = next_fault
         return True
@@ -927,8 +942,11 @@ class App(Generic[ConfigT], ABC):
         return ()
 
     def available_console_actions(self, actions: tuple[ConsoleAction, ...]) -> tuple[ConsoleAction, ...]:
-        cfg = getattr(self, "cfg", None)
-        app_version = normalise_app_version(getattr(cfg, "version", None))
+        try:
+            raw_version = self.cfg.version
+        except AttributeError:
+            raw_version = None
+        app_version = normalise_app_version(raw_version)
         return tuple(action for action in actions if action.supports_app_version(app_version))
 
     @property
@@ -1197,7 +1215,7 @@ class App(Generic[ConfigT], ABC):
 
     async def handle_unexpected_stop(self) -> None:
         self._running = False
-        process = getattr(self, "process", None)
+        process = self.process
         if process is not None and process.poll() is not None:
             await self._drain_stderr_task()
             self.process = None
@@ -1212,7 +1230,7 @@ class App(Generic[ConfigT], ABC):
         if not stream:
             return
         with dest.open("w") as f:
-            while line := await asyncio.to_thread(stream.readline):
+            while line := await run_blocking(stream.readline):
                 if not line:
                     break
                 f.write(line)
@@ -1354,7 +1372,7 @@ class App(Generic[ConfigT], ABC):
 
             try:
                 process.terminate()
-                await asyncio.to_thread(process.wait, 5)
+                await run_blocking(process.wait, 5)
                 await self._drain_stderr_task()
             except Exception as xcp:
                 log.exception(f"Termination failed: {xcp}")
@@ -1366,7 +1384,7 @@ class App(Generic[ConfigT], ABC):
             else:
                 try:
                     process.kill()
-                    await asyncio.to_thread(process.wait, 5)
+                    await run_blocking(process.wait, 5)
                     await self._drain_stderr_task()
                     log.warning(f"{self.name} kill escalation")
                 except Exception as xcp:
@@ -1378,7 +1396,7 @@ class App(Generic[ConfigT], ABC):
             log.warning("No process name specified for process scan")
             return
 
-        await asyncio.to_thread(self._terminate_leftover_processes_sync)
+        await run_blocking(self._terminate_leftover_processes_sync)
 
     def _terminate_leftover_processes_sync(self) -> None:
         if not self.proc_name:

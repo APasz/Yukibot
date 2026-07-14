@@ -23,6 +23,7 @@ MOD_WEB_TOAST_JAVASCRIPT = r"""
     let nextId = 1;
 
     const now = () => window.performance.now();
+    const progressSelectorFor = (record) => `.q-notification[data-mod-toast-id="${record.id}"] .mod-toast-progress`;
     const queueFor = (position) => {
       let queue = queuesByPosition.get(position);
       if (queue === undefined) {
@@ -31,14 +32,90 @@ MOD_WEB_TOAST_JAVASCRIPT = r"""
       }
       return queue;
     };
+    const progressRatioFor = (record) => (
+      record.durationMilliseconds > 0
+        ? Math.max(0, Math.min(1, record.remainingMilliseconds / record.durationMilliseconds))
+        : 0
+    );
+    const setProgressRatio = (record, ratio) => {
+      const progressElement = record.progressElement;
+      if (progressElement === null) {
+        return;
+      }
+      progressElement.style.setProperty('--mod-toast-progress-scale', String(ratio));
+    };
+    const renderProgress = (record) => {
+      if (record.durationMilliseconds <= 0) {
+        return;
+      }
+      const elapsedMilliseconds = record.timerId === null ? 0 : now() - record.startedAt;
+      const visibleMilliseconds = Math.max(0, record.remainingMilliseconds - elapsedMilliseconds);
+      setProgressRatio(record, visibleMilliseconds / record.durationMilliseconds);
+    };
+    const stopProgressAnimation = (record) => {
+      if (record.progressFrameId === null) {
+        return;
+      }
+      window.cancelAnimationFrame(record.progressFrameId);
+      record.progressFrameId = null;
+    };
+    const detachProgress = (record) => {
+      stopProgressAnimation(record);
+      const existingProgress = record.progressElement ?? document.querySelector(progressSelectorFor(record));
+      if (existingProgress instanceof HTMLElement) {
+        existingProgress.remove();
+      }
+      record.progressElement = null;
+    };
+    const startProgressAnimation = (record) => {
+      if (record.durationMilliseconds <= 0 || record.progressFrameId !== null) {
+        return;
+      }
+      const tick = () => {
+        if (record.removed || record.timerId === null) {
+          record.progressFrameId = null;
+          renderProgress(record);
+          return;
+        }
+        renderProgress(record);
+        record.progressFrameId = window.requestAnimationFrame(tick);
+      };
+      renderProgress(record);
+      record.progressFrameId = window.requestAnimationFrame(tick);
+    };
+    const attachProgress = (record) => {
+      if (record.removed || record.durationMilliseconds <= 0) {
+        detachProgress(record);
+        return;
+      }
+      const existingProgress = document.querySelector(progressSelectorFor(record));
+      if (existingProgress instanceof HTMLElement) {
+        record.progressElement = existingProgress;
+        setProgressRatio(record, progressRatioFor(record));
+        return;
+      }
+      const notification = document.querySelector(`.q-notification[data-mod-toast-id="${record.id}"]`);
+      if (!(notification instanceof HTMLElement)) {
+        window.setTimeout(() => attachProgress(record), 16);
+        return;
+      }
+      const progressElement = document.createElement('div');
+      progressElement.className = 'mod-toast-progress';
+      progressElement.setAttribute('aria-hidden', 'true');
+      notification.prepend(progressElement);
+      record.progressElement = progressElement;
+      setProgressRatio(record, progressRatioFor(record));
+    };
     const pause = (record) => {
       if (record.timerId === null) {
         return;
       }
+      stopProgressAnimation(record);
       window.clearTimeout(record.timerId);
       record.timerId = null;
       record.remainingMilliseconds = Math.max(0, record.remainingMilliseconds - (now() - record.startedAt));
       record.startedAt = 0;
+      setProgressRatio(record, progressRatioFor(record));
     };
     const activeRecord = (queue) => {
       for (let index = queue.length - 1; index >= 0; index -= 1) {
@@ -65,17 +142,21 @@ MOD_WEB_TOAST_JAVASCRIPT = r"""
       }
       active.startedAt = now();
       active.timerId = window.setTimeout(() => {
+        stopProgressAnimation(active);
         active.timerId = null;
         active.startedAt = 0;
         active.remainingMilliseconds = 0;
+        setProgressRatio(active, 0);
         dismiss(active);
       }, active.remainingMilliseconds);
+      startProgressAnimation(active);
     };
     const remove = (record) => {
       if (record.removed) {
         return;
       }
       pause(record);
+      stopProgressAnimation(record);
       record.removed = true;
       recordsById.delete(record.id);
       if (record.groupKey !== null && recordsByGroup.get(record.groupKey) === record) {
@@ -169,6 +250,8 @@ MOD_WEB_TOAST_JAVASCRIPT = r"""
           hovered: false,
           removed: false,
           nativeDismiss: null,
+          progressElement: null,
+          progressFrameId: null,
         };
       } else {
         pause(record);
@@ -197,6 +280,7 @@ MOD_WEB_TOAST_JAVASCRIPT = r"""
         return false;
       }
       record.nativeDismiss = nativeDismiss;
+      attachProgress(record);
       if (isNewRecord) {
         queueFor(position).push(record);
         recordsById.set(record.id, record);

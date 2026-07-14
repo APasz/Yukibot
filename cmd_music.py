@@ -25,6 +25,7 @@ from hikariwave.config import validate_volume
 from yt_dlp.YoutubeDL import YoutubeDL as YT
 
 import config
+from _async_utils import run_blocking
 from _security import Access_Control
 from voice_common import cached_user_voice_channel, cached_voice_channel_occupants, wav_audio_duration_seconds
 
@@ -110,7 +111,7 @@ class ConfiguredYouTubeAudioSource(YouTubeAudioSource):
             with self._new_yt_dlp(self._yt_dlp_options(metadata_only=False)) as ydl:
                 return self._extract_info_dict(ydl, self._url)
 
-        info: dict[str, Any] = await asyncio.to_thread(extract)
+        info: dict[str, Any] = await run_blocking(extract)
 
         self._content = info["url"]
         self._headers = self._info_headers(info)
@@ -122,7 +123,7 @@ class ConfiguredYouTubeAudioSource(YouTubeAudioSource):
             with self._new_yt_dlp(self._yt_dlp_options(metadata_only=True)) as ydl:
                 return self._extract_info_dict(ydl, self._url)
 
-        info: dict[str, Any] = await asyncio.to_thread(extract)
+        info: dict[str, Any] = await run_blocking(extract)
 
         self._metadata = info
         self._duration = self._info_duration(info)

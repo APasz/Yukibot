@@ -437,7 +437,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.player_id, 42)
         app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
 
-    async def test_note_join_includes_client_pack_details_when_published(self) -> None:
+    async def test_note_join_omits_client_pack_details_from_message_when_published(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
         app.name = "minecraft_demo"
         app.friendly = "Minecraft Demo"
@@ -458,10 +458,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
 
         add_mock.assert_called_once()
         relayed_message = add_mock.call_args.args[0]
-        self.assertEqual(
-            relayed_message.content,
-            "Alice joined Minecraft Demo (Pack: 2026-07-04 [Unpublished Changes])",
-        )
+        self.assertEqual(relayed_message.content, "Alice joined Minecraft Demo")
         self.assertIsInstance(relayed_message.notice, PlayerSessionNotice)
         assert isinstance(relayed_message.notice, PlayerSessionNotice)
         self.assertEqual(relayed_message.notice.pack_version, "2026-07-04")

@@ -4,18 +4,21 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import tempfile
 import xml.etree.ElementTree as ET
+import zipfile
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import hikari
 
 import config
+from _async_utils import run_blocking
 from _discord import (
     App_Bound,
     DC_Bound,
@@ -46,7 +49,6 @@ from apps._save_files import (
     AppSaveRootMode,
     describe_app_save_path,
     get_app_save_root,
-    replace_directory_from_zip,
 )
 from apps._settings import (
     App_Settings,
@@ -77,6 +79,22 @@ log = logging.getLogger(__name__)
 type GameStatValue = int | float | str | bool | None
 type SevenDaysRuntimeLogSignature = tuple[int, int, int, int]
 
+
+@dataclass(frozen=True, slots=True)
+class SevenDaysSaveArchiveInspection:
+    content_prefix: tuple[str, ...]
+    game_world: str | None
+    game_name: str | None
+    file_count: int
+
+    @property
+    def missing_game_world(self) -> bool:
+        return self.game_world is None
+
+    @property
+    def missing_game_name(self) -> bool:
+        return self.game_name is None
+
 _SEVENDAYS_NEXUSMODS_GAME_DOMAIN = "7daystodie"
 _SEVENDAYS_VERSION_RE = re.compile(
     r"Version:\s*V\s*(?P<version>\d+(?:\.\d+)*(?:\s*\([^)]+\)|\s*[bB]\d+)?)",
@@ -85,6 +103,33 @@ _SEVENDAYS_VERSION_RE = re.compile(
 _SEVENDAYS_GAME_VERSION_RE = re.compile(
     r"GamePref\.GameVersion\s*=\s*V\s*(?P<version>\d+(?:\.\d+)*)",
     re.IGNORECASE,
+)
+_SEVENDAYS_NEW_SAVE_ROOT_PREFIX = "new-save:"
+_SEVENDAYS_GAME_WORLD_SETTING_KEY = "GameWorld"
+_SEVENDAYS_GAME_NAME_SETTING_KEY = "GameName"
+_SEVENDAYS_SAVE_ROOT_FILE_MARKERS: frozenset[str] = frozenset(
+    {
+        "blocklimits.dat",
+        "blockmappings.nim",
+        "decoration.7dt",
+        "drones.dat",
+        "gameoptions.sdf",
+        "itemmappings.nim",
+        "main.ttw",
+        "multiblocks.7dt",
+        "players.xml",
+        "power.dat",
+        "turrets.dat",
+        "vehicles.dat",
+    }
+)
+_SEVENDAYS_SAVE_ROOT_DIRECTORY_MARKERS: frozenset[str] = frozenset(
+    {
+        "configsdump",
+        "dynamicmeshes",
+        "player",
+        "region",
+    }
 )
 _SEVENDAYS_VERSION_BUILD_RE = re.compile(
     r"(?P<main>\d+(?:\.\d+)*)(?:\s*\((?P<parenthesized>[^)]+)\)|\s*(?P<suffix>[bB]\d+))",
@@ -504,6 +549,124 @@ def _is_non_negative_int(raw_value: str) -> bool:
 
 def _is_non_empty_text(raw_value: str) -> bool:
     return bool(raw_value.strip())
+
+
+def _normalise_sevendays_save_segment(raw_value: str, *, label: str) -> str:
+    value = raw_value.strip()
+    if not value:
+        raise ValueError(f"{label} is required.")
+    path = PurePosixPath(value)
+    if path.is_absolute() or path.parts != (value,) or value in {".", ".."} or "\x00" in value:
+        raise ValueError(f"{label} must be a single directory name.")
+    if value.startswith("."):
+        raise ValueError(f"{label} must not start with a dot.")
+    return value
+
+
+def inspect_sevendays_save_archive(archive_path: Path) -> SevenDaysSaveArchiveInspection:
+    entries = _sevendays_save_archive_entries(archive_path)
+    file_paths = [path for member, path in entries if not member.is_dir()]
+    if not file_paths:
+        raise ValueError("7 Days to Die save archive does not contain any files.")
+
+    marker_prefixes: set[tuple[str, ...]] = set()
+    for path in file_paths:
+        marker_prefix = _sevendays_save_marker_prefix(path)
+        if marker_prefix is not None:
+            marker_prefixes.add(marker_prefix)
+    if not marker_prefixes:
+        raise ValueError("7 Days to Die save archive does not contain recognizable save files.")
+    if len(marker_prefixes) > 1:
+        labels = ", ".join(sorted(PurePosixPath(*prefix).as_posix() or "." for prefix in marker_prefixes))
+        raise ValueError(f"7 Days to Die save archive contains multiple save roots: {labels}")
+
+    content_prefix = next(iter(marker_prefixes))
+    for path in file_paths:
+        if _sevendays_archive_path_is_ignorable(path):
+            continue
+        if path.parts[: len(content_prefix)] != content_prefix:
+            raise ValueError(f"7 Days to Die save archive contains files outside the save root: {path.as_posix()}")
+
+    game_world: str | None = None
+    game_name: str | None = None
+    if len(content_prefix) >= 2:
+        game_world = content_prefix[-2]
+        game_name = content_prefix[-1]
+    elif len(content_prefix) == 1:
+        game_name = content_prefix[0]
+    return SevenDaysSaveArchiveInspection(
+        content_prefix=content_prefix,
+        game_world=game_world,
+        game_name=game_name,
+        file_count=len(file_paths),
+    )
+
+
+def extract_sevendays_save_archive(*, archive_path: Path, destination: Path) -> SevenDaysSaveArchiveInspection:
+    inspection = inspect_sevendays_save_archive(archive_path)
+    entries = _sevendays_save_archive_entries(archive_path)
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        for member, path in entries:
+            if _sevendays_archive_path_is_ignorable(path):
+                continue
+            relative_path = _strip_sevendays_archive_content_prefix(path, inspection.content_prefix)
+            if relative_path is None:
+                continue
+            target = destination.joinpath(*relative_path.parts)
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member, "r") as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+    return inspection
+
+
+def _sevendays_save_archive_entries(archive_path: Path) -> list[tuple[zipfile.ZipInfo, PurePosixPath]]:
+    if not zipfile.is_zipfile(archive_path):
+        raise ValueError(f"7 Days to Die save upload is not a zip archive: {archive_path.name}")
+
+    entries: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        for member in archive.infolist():
+            raw_name = member.filename.strip("/")
+            if not raw_name:
+                continue
+            path = PurePosixPath(raw_name)
+            if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+                raise ValueError(f"7 Days to Die save archive member path is invalid: {member.filename}")
+            entries.append((member, path))
+    return entries
+
+
+def _sevendays_save_marker_prefix(path: PurePosixPath) -> tuple[str, ...] | None:
+    parts = path.parts
+    if not parts:
+        return None
+    if parts[-1].casefold() in _SEVENDAYS_SAVE_ROOT_FILE_MARKERS:
+        return parts[:-1]
+    for index, part in enumerate(parts[:-1]):
+        if part.casefold() in _SEVENDAYS_SAVE_ROOT_DIRECTORY_MARKERS:
+            return parts[:index]
+    return None
+
+
+def _sevendays_archive_path_is_ignorable(path: PurePosixPath) -> bool:
+    return any(part.startswith(".") or part == "__MACOSX" for part in path.parts)
+
+
+def _strip_sevendays_archive_content_prefix(
+    path: PurePosixPath,
+    content_prefix: tuple[str, ...],
+) -> PurePosixPath | None:
+    parts = path.parts
+    if parts[: len(content_prefix)] != content_prefix:
+        return None
+    parts = parts[len(content_prefix) :]
+    if not parts:
+        return None
+    return PurePosixPath(*parts)
 
 
 _GAME_DIFFICULTY_CHOICES = ChoiceSpec(
@@ -1009,6 +1172,16 @@ class Mod_7D2D(Mod):
         """The whole mod directory remains in place when ModInfo.xml is disabled."""
         return self.enabled_path
 
+    def download_archive_path_rewrites(self) -> tuple[tuple[PurePosixPath, PurePosixPath], ...]:
+        if self.cfg.placement is ModPlacement.SERVER_ENABLED:
+            return ()
+        return (
+            (
+                PurePosixPath(_SEVENDAYS_MOD_INFO_FILENAMES[self.cfg.placement]),
+                PurePosixPath(_SEVENDAYS_MOD_INFO_FILENAMES[ModPlacement.SERVER_ENABLED]),
+            ),
+        )
+
     def default_mod_type(self) -> ModType:
         if self.name in _SEVENDAYS_BUILTIN_MOD_NAMES:
             return ModType.BUILTIN
@@ -1079,14 +1252,14 @@ class Mod_7D2D(Mod):
     async def _enable_file(self, override_coremod: bool = False) -> Path:
         if not override_coremod:
             self.is_coremod()
-        await asyncio.to_thread(File_Utils.move, self.mod_info_disabled_path, self.mod_info_enabled_path)
+        await run_blocking(File_Utils.move, self.mod_info_disabled_path, self.mod_info_enabled_path)
         self.cfg.set_placement(ModPlacement.SERVER_ENABLED)
         return self.enabled_path
 
     async def _disable_file(self, override_coremod: bool = False) -> Path:
         if not override_coremod:
             self.is_coremod()
-        await asyncio.to_thread(File_Utils.move, self.mod_info_enabled_path, self.mod_info_disabled_path)
+        await run_blocking(File_Utils.move, self.mod_info_enabled_path, self.mod_info_disabled_path)
         self.cfg.set_placement(ModPlacement.SERVER_DISABLED)
         return self.enabled_path
 
@@ -1651,6 +1824,90 @@ class SevenDays_Settings(App_Settings):
         ]
         super().__init__(pointer, options, version_getter=version_getter)
 
+    @property
+    def options(self) -> list[Setting[Any]]:
+        self._refresh_save_setting_choices()
+        return super().options
+
+    def _refresh_save_setting_choices(self) -> None:
+        world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
+        name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
+        save_targets = self._discovered_save_targets()
+        self._set_non_strict_string_choices(
+            world_setting,
+            self._unique_save_setting_choices(
+                *(world for world, _name in save_targets),
+                self._setting_text_value(world_setting),
+            ),
+        )
+        self._set_non_strict_string_choices(
+            name_setting,
+            self._unique_save_setting_choices(
+                *(name for _world, name in save_targets),
+                self._setting_text_value(name_setting),
+            ),
+        )
+
+    @staticmethod
+    def _setting_text_value(setting: Setting[Any]) -> str | None:
+        if not isinstance(setting.value, str):
+            return None
+        return setting.value.strip() or None
+
+    @staticmethod
+    def _unique_save_setting_choices(*values: str | None) -> tuple[str, ...]:
+        choices: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if value is None:
+                continue
+            choice = value.strip()
+            key = choice.casefold()
+            if not choice or key in seen:
+                continue
+            choices.append(choice)
+            seen.add(key)
+        return tuple(choices)
+
+    @staticmethod
+    def _set_non_strict_string_choices(setting: Setting[Any], choices: tuple[str, ...]) -> None:
+        if not isinstance(setting.spec, StringSettingSpec):
+            raise TypeError(f"7D2D save setting {setting.key!r} must be a string setting.")
+        setting.spec.choice_spec = (
+            ChoiceSpec(*(ChoiceOption(choice) for choice in choices), strict=False)
+            if choices
+            else None
+        )
+
+    def _settings_userdata_root_path(self) -> Path | None:
+        raw_value = _read_serverconfig_value(self.pointer, "UserDataFolder")
+        if raw_value is None:
+            return None
+        candidate = Path(raw_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = (self.pointer.parent / candidate).resolve()
+        return candidate
+
+    def _discovered_save_targets(self) -> tuple[tuple[str, str], ...]:
+        saves_root = self._settings_userdata_root_path()
+        if saves_root is None:
+            return ()
+        saves_root = saves_root / "Saves"
+        if not saves_root.is_dir():
+            return ()
+        save_targets: list[tuple[str, str]] = []
+        world_directories = sorted(
+            (path for path in saves_root.iterdir() if path.is_dir() and not path.name.startswith(".")),
+            key=lambda path: path.name.casefold(),
+        )
+        for world_directory in world_directories:
+            save_directories = sorted(
+                (path for path in world_directory.iterdir() if path.is_dir() and not path.name.startswith(".")),
+                key=lambda path: path.name.casefold(),
+            )
+            save_targets.extend((world_directory.name, save_directory.name) for save_directory in save_directories)
+        return tuple(save_targets)
+
     def _rwgmixer_tree(self) -> ET.ElementTree[ET.Element[str]]:
         if not self.rwgmixer_pointer.exists():
             raise FileNotFoundError(f"7D2D rwgmixer.xml missing: {self.rwgmixer_pointer}")
@@ -1885,14 +2142,18 @@ class SevenDays(App[App_Config]):
 
     @property
     def supports_save_uploads(self) -> bool:
-        return bool(self.save_file_roots)
+        return self._save_container_path() is not None
 
     @property
     def supports_save_delete(self) -> bool:
         return bool(self.save_file_roots)
 
     def upload_save_file(self, *, root_id: str, upload_name: str, source_path: Path) -> AppSaveEntry:
-        root = get_app_save_root(self.save_file_roots, root_id)
+        if self.check_running():
+            raise ValueError("Stop the server before uploading 7 Days to Die saves.")
+        root, is_new_save = self._save_upload_target(root_id)
+        if is_new_save and root.resolved_path.exists():
+            raise FileExistsError(f"7 Days to Die save already exists: {root.label} / {root.path.name}")
         if Path(upload_name).suffix.casefold() != ".zip":
             raise ValueError("7 Days to Die save uploads must be .zip archives.")
         destination = root.resolved_path
@@ -1900,10 +2161,36 @@ class SevenDays(App[App_Config]):
         temp_parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=temp_parent) as temp_dir:
             extracted_path = Path(temp_dir) / destination.name
-            replace_directory_from_zip(archive_path=source_path, destination=extracted_path)
+            extract_sevendays_save_archive(archive_path=source_path, destination=extracted_path)
             File_Utils.remove(destination, silent=True, resolve=False)
             File_Utils.move(extracted_path, destination, overwrite=False)
         return describe_app_save_path(root=root, path=destination, relative_path=destination.name)
+
+    @staticmethod
+    def new_save_upload_root_id(*, game_world: str, game_name: str) -> str:
+        normalised_world = _normalise_sevendays_save_segment(game_world, label="Game world")
+        normalised_name = _normalise_sevendays_save_segment(game_name, label="Save name")
+        return (
+            f"{_SEVENDAYS_NEW_SAVE_ROOT_PREFIX}"
+            f"{quote(normalised_world, safe='')}/{quote(normalised_name, safe='')}"
+        )
+
+    def _save_upload_target(self, root_id: str) -> tuple[AppSaveRoot, bool]:
+        if root_id.startswith(_SEVENDAYS_NEW_SAVE_ROOT_PREFIX):
+            return self._new_save_upload_target(root_id), True
+        return get_app_save_root(self.save_file_roots, root_id), False
+
+    def _new_save_upload_target(self, root_id: str) -> AppSaveRoot:
+        saves_root = self._save_container_path()
+        if saves_root is None:
+            raise ValueError("7 Days to Die save uploads require a configured UserDataFolder.")
+        encoded_target = root_id.removeprefix(_SEVENDAYS_NEW_SAVE_ROOT_PREFIX)
+        encoded_world, separator, encoded_name = encoded_target.partition("/")
+        if not separator:
+            raise ValueError("New 7 Days to Die save target is invalid.")
+        game_world = _normalise_sevendays_save_segment(unquote(encoded_world), label="Game world")
+        game_name = _normalise_sevendays_save_segment(unquote(encoded_name), label="Save name")
+        return self._save_root_for_path(saves_root=saves_root, save_path=saves_root / game_world / game_name)
 
     def delete_save_file(self, *, file_id: str) -> AppSaveEntry:
         if self.check_running():

@@ -5,7 +5,7 @@ import hashlib
 from functools import lru_cache
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypedDict
 
 from apps._config import (
     APP_FRIENDLY_NAME_MAX_LENGTH,
@@ -61,6 +61,7 @@ from .nicegui_protocols import (
 )
 from .runtime_imports import (
     AbstractEventLoop,
+    AppVersionSource,
     Awaitable,
     BadgeTone,
     BulkLauncherMetadataStatus,
@@ -76,7 +77,6 @@ from .runtime_imports import (
     Html,
     Input,
     Label,
-    Literal,
     LiteralString,
     Mapping,
     ModPlacement,
@@ -90,10 +90,10 @@ from .runtime_imports import (
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
     NodeConsoleActionList,
-    NodeModEntry,
-    NodeModMutationAction,
     NodeModDependencyEntry,
     NodeModDependencyResolutionResult,
+    NodeModEntry,
+    NodeModMutationAction,
     NodeModPortalVersionEntry,
     NodeModPortalVersionList,
     NodeModSummary,
@@ -205,7 +205,7 @@ class _ModWebDependencySelectionSummary:
     installed_count: int
 
 
-type _VirtualModAction = Literal["details", "download"]
+_VirtualModAction: TypeAlias = Literal["details", "download"]
 
 __all__ = (
     "ModWebAppPageMixin",
@@ -587,8 +587,12 @@ class ModWebAppPageMixin(
 
     def _app_hero_runtime_details(self, app_stats: NodeAppRuntimeSummary | None) -> _ModWebAppHeroRuntimeDetails:
         if app_stats is None:
-            relay_badge = _ModWebBadgeSpec(text="Unknown", tone="grey")
-            version_badge = _ModWebBadgeSpec(text="Unknown", tone="black")
+            relay_badge = _ModWebBadgeSpec(text="Unknown", tone="grey", tooltip_text="Chat bridge support")
+            version_badge = _ModWebBadgeSpec(
+                text="Unknown",
+                tone="black",
+                tooltip_text=self._app_version_badge_tooltip(AppVersionSource.STARTUP),
+            )
             return _ModWebAppHeroRuntimeDetails(
                 status_text="Unknown",
                 status_tone="grey",
@@ -618,8 +622,16 @@ class ModWebAppPageMixin(
             status_text = "Stopped"
             status_tone = "warn"
 
-        relay_badge = _ModWebBadgeSpec(text=f"{app_stats.relay_support.display_value}", tone="grey")
-        version_badge = _ModWebBadgeSpec(text=f"{app_stats.version or 'Unknown'}", tone="black")
+        relay_badge = _ModWebBadgeSpec(
+            text=f"{app_stats.relay_support.display_value}",
+            tone="grey",
+            tooltip_text="Chat bridge support",
+        )
+        version_badge = _ModWebBadgeSpec(
+            text=f"{app_stats.version or 'Unknown'}",
+            tone="black",
+            tooltip_text=self._app_version_badge_tooltip(app_stats.version_source),
+        )
         player_count_badge: _ModWebBadgeSpec | None = None
         if app_stats.player_count is not None and app_stats.player_capacity is not None:
             player_tone = "purple" if app_stats.player_count > 0 else "grey"
@@ -640,6 +652,12 @@ class ModWebAppPageMixin(
 
     def _app_page_hero_badges(self, model: ModWebBasePageModel) -> tuple[_ModWebBadgeSpec, ...]:
         return self._app_resource_point_badges(model)
+
+    @staticmethod
+    def _app_version_badge_tooltip(version_source: AppVersionSource) -> str:
+        if version_source is AppVersionSource.INSTALLED_FILES:
+            return "Game version updated live"
+        return "Game version updated upon start"
 
     @staticmethod
     def _enabled_app_activity_providers(model: ModWebBasePageModel) -> tuple[NodeAppActivityProviderEntry, ...]:
@@ -800,8 +818,8 @@ class ModWebAppPageMixin(
         startup_points: int,
     ) -> str:
         if startup_points == running_points:
-            return f"{resource_name} resource points: {running_points}"
-        return f"{resource_name} resource points — running: {running_points}; startup: {startup_points}"
+            return f"{resource_name} points required for running"
+        return f"{resource_name} points required for running (starting)"
 
     @staticmethod
     def _app_resource_point_badge_text(*, running_points: int, startup_points: int) -> str:
@@ -865,7 +883,7 @@ class ModWebAppPageMixin(
                     text=node_name,
                     tone=initial_node_badge_tone,
                     extra_classes="mod-app-corner-badge mod-app-node-badge",
-                    tooltip_text=f"Node: {node_name}",
+                    tooltip_text="Node owning this app",
                 )
                 if color_hex := self._node_role_color_hex(node_name=node_name):
                     node_badge.style(self._node_badge_style(color_hex))
@@ -874,14 +892,14 @@ class ModWebAppPageMixin(
                     text=initial_runtime_details.relay_badge.text,
                     tone=initial_runtime_details.relay_badge.tone,
                     extra_classes="mod-app-corner-badge",
-                    tooltip_text=f"Chat relay support: {initial_runtime_details.relay_badge.text}",
+                    tooltip_text=initial_runtime_details.relay_badge.tooltip_text,
                 )
                 version_badge = self._badge(
                     ui=ui,
                     text=initial_runtime_details.version_badge.text,
                     tone=initial_runtime_details.version_badge.tone,
                     extra_classes="mod-app-corner-badge",
-                    tooltip_text=f"Application version: {initial_runtime_details.version_badge.text}",
+                    tooltip_text=initial_runtime_details.version_badge.tooltip_text,
                 )
                 for badge in top_badges:
                     self._badge_spec(ui=ui, badge=badge, extra_classes="mod-app-corner-badge")
@@ -6543,7 +6561,7 @@ class ModWebAppPageMixin(
                         label="",
                         auto_upload=True,
                         multiple=True,
-                    ).classes("mod-mod-list-dropzone w-full")
+                    ).classes("mod-file-upload-zone mod-mod-list-dropzone w-full")
                     inline_upload_control.props["batch"] = True
                     inline_upload_control.props["field-name"] = "upload"
                     inline_upload_control.on("start", direct_upload_started, args=[])

@@ -3,7 +3,9 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
+from _async_utils import run_blocking
 from apps._blueprint_files import BlueprintUploadPair, classify_blueprint_upload_filenames
+from apps.sevendays import SevenDaysSaveArchiveInspection, inspect_sevendays_save_archive
 
 from .constants import (
     _CONFIG_EDITOR_DOCKERFILE_LANGUAGE,
@@ -136,6 +138,7 @@ _UPLOAD_PROGRESS_CHUNK_BYTES = 1024 * 1024
 _UPLOAD_RECEIVE_PROGRESS_PERCENT = 72.0
 _UPLOAD_APPLY_PROGRESS_PERCENT = 92.0
 _TRANSFER_CAPACITY_WAIT_SECONDS = 0.2
+_SEVENDAYS_NEW_SAVE_ROOT_PREFIX = "new-save:"
 
 
 class _ModWebSelectOptionsControl(Protocol):
@@ -791,10 +794,16 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         save_root_options: dict[str, str] = {root.id: root.label for root in saves.roots}
         selected_root_id: str | None = saves.roots[0].id if saves.roots else None
         can_write: bool = self._user_has_level(user, model.save_write_level)
+        app_scope: object = getattr(model, "app_scope", None)
+        is_sevendays_app: bool = app_scope == config.AppScopes.sevendays.value
+        replace_save_target_options: dict[str, str] = self._replace_save_upload_target_options(saves.saves)
+        selected_replace_root_id: str | None = next(iter(replace_save_target_options), None)
         show_search: bool = len(save_options) > 1
         show_sort: bool = len(save_options) > 1
-        show_root_selector: bool = model.supports_save_uploads and len(saves.roots) > 1
-        show_upload_action: bool = model.supports_save_uploads and can_write and selected_root_id is not None
+        show_root_selector: bool = not is_sevendays_app and model.supports_save_uploads and len(saves.roots) > 1
+        show_upload_action: bool = model.supports_save_uploads and can_write and (
+            selected_root_id is not None or is_sevendays_app
+        )
         show_write_lock_note: bool = (model.supports_save_uploads or model.supports_save_rename) and not can_write
         current_search_query: str = model.search_query
         current_sort_order: ModWebFileSortOrder = ModWebFileSortOrder.LATEST_MODIFIED
@@ -802,6 +811,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
         root_select: Select | None = None
         save_upload_control: Upload | None = None
+        sevendays_replace_upload_control: Upload | None = None
+        sevendays_world_input: Input | None = None
+        sevendays_name_input: Input | None = None
+        sevendays_replace_target_buttons: dict[str, Button] = {}
+        sevendays_new_staged_path: Path | None = None
+        sevendays_new_staged_upload_name: str | None = None
+        sevendays_new_inspection: SevenDaysSaveArchiveInspection | None = None
         direct_save_transfer_id: int | None = None
 
         def ensure_direct_save_transfer() -> int | None:
@@ -849,18 +865,114 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 raise ValueError(f"Unknown save root: {root_id}")
             return root_id
 
-        def refresh_direct_save_upload_target() -> None:
-            if save_upload_control is None:
-                raise RuntimeError("Save upload control is not available.")
-            root_id: str = selected_save_root_id()
+        def sevendays_new_save_root_id() -> str:
+            game_world, game_name = sevendays_new_save_target_segments()
+            return (
+                f"{_SEVENDAYS_NEW_SAVE_ROOT_PREFIX}"
+                f"{quote(game_world, safe='')}/{quote(game_name, safe='')}"
+            )
+
+        def sevendays_existing_save_targets() -> frozenset[tuple[str, str]]:
+            return frozenset((save.root_label, save.label) for save in saves.saves)
+
+        def sevendays_nonconflicting_game_name(*, game_world: str, preferred_game_name: str) -> str:
+            existing_targets = sevendays_existing_save_targets()
+            candidate = preferred_game_name
+            if (game_world, candidate) not in existing_targets:
+                return candidate
+            suffix = 2
+            while True:
+                candidate = f"{preferred_game_name}-{suffix}"
+                if (game_world, candidate) not in existing_targets:
+                    return candidate
+                suffix += 1
+
+        def sevendays_default_world_name(inspection: SevenDaysSaveArchiveInspection) -> str:
+            if inspection.game_world is not None:
+                return inspection.game_world
+            if saves.saves:
+                return saves.saves[0].root_label
+            return "Navezgane"
+
+        def sevendays_default_game_name(
+            *,
+            inspection: SevenDaysSaveArchiveInspection,
+            game_world: str,
+            upload_name: str,
+        ) -> str:
+            preferred = inspection.game_name or Path(upload_name).stem or "ImportedSave"
+            return sevendays_nonconflicting_game_name(game_world=game_world, preferred_game_name=preferred)
+
+        def sevendays_new_save_target_segments() -> tuple[str, str]:
+            if sevendays_new_inspection is None or sevendays_new_staged_upload_name is None:
+                raise ValueError("Upload and inspect a save archive before importing it.")
+            default_world = sevendays_default_world_name(sevendays_new_inspection)
+            game_world = (
+                _value_as_text(sevendays_world_input)
+                if sevendays_world_input is not None
+                else default_world
+            )
+            game_world = self._normalise_sevendays_save_segment(game_world, label="Game world")
+            default_game = sevendays_default_game_name(
+                inspection=sevendays_new_inspection,
+                game_world=game_world,
+                upload_name=sevendays_new_staged_upload_name,
+            )
+            game_name = (
+                _value_as_text(sevendays_name_input)
+                if sevendays_name_input is not None
+                else default_game
+            )
+            game_name = self._normalise_sevendays_save_segment(game_name, label="Save name")
+            if (game_world, game_name) in sevendays_existing_save_targets():
+                raise FileExistsError(f"Save already exists: {game_world} / {game_name}")
+            return game_world, game_name
+
+        def cleanup_sevendays_new_staging() -> None:
+            nonlocal sevendays_new_staged_path, sevendays_new_staged_upload_name, sevendays_new_inspection
+            if sevendays_new_staged_path is not None:
+                sevendays_new_staged_path.unlink(missing_ok=True)
+            sevendays_new_staged_path = None
+            sevendays_new_staged_upload_name = None
+            sevendays_new_inspection = None
+
+        def refresh_direct_save_upload_target(upload_control: Upload, *, root_id: str) -> None:
             target: ModWebDirectUploadTarget = self._direct_save_upload_target(model=model, user=user)
-            save_upload_control.props["url"] = target.url
-            save_upload_control.props["headers"] = [
+            upload_control.props["url"] = target.url
+            upload_control.props["headers"] = [
                 {"name": "Authorization", "value": target.authorization_header},
             ]
-            save_upload_control.props["form-fields"] = [
+            upload_control.props["form-fields"] = [
                 {"name": "root_id", "value": root_id},
             ]
+
+        def refresh_generic_save_upload_target() -> None:
+            if save_upload_control is None:
+                raise RuntimeError("Save upload control is not available.")
+            refresh_direct_save_upload_target(save_upload_control, root_id=selected_save_root_id())
+
+        def refresh_sevendays_replace_upload_target() -> None:
+            if sevendays_replace_upload_control is None:
+                raise RuntimeError("7D2D replace save upload control is not available.")
+            if selected_replace_root_id is None:
+                raise ValueError("Select an existing 7D2D save before uploading a replacement.")
+            refresh_direct_save_upload_target(sevendays_replace_upload_control, root_id=selected_replace_root_id)
+
+        def apply_sevendays_replace_target_button_classes() -> None:
+            for root_id, button in sevendays_replace_target_buttons.items():
+                state_class = "state-enabled" if root_id == selected_replace_root_id else "secondary"
+                button.classes(
+                    replace=f"mod-list-button {state_class} mod-save-upload-target-button"
+                )
+
+        def choose_sevendays_replace_target(root_id: str) -> None:
+            nonlocal selected_replace_root_id
+            if root_id not in replace_save_target_options:
+                raise ValueError(f"Unknown 7D2D replacement save target: {root_id}")
+            selected_replace_root_id = root_id
+            apply_sevendays_replace_target_button_classes()
+            if sevendays_replace_upload_control is not None:
+                refresh_sevendays_replace_upload_target()
 
         def direct_save_upload_started() -> None:
             ui.notify(
@@ -895,42 +1007,211 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 type="warning",
             )
 
+        async def stage_sevendays_new_save(event: "MultiUploadEventArguments") -> None:
+            nonlocal sevendays_new_staged_path, sevendays_new_staged_upload_name, sevendays_new_inspection
+            upload_files = tuple(event.files)
+            if len(upload_files) != 1:
+                ui.notify("Choose one 7D2D save archive.", type="warning")
+                return
+            upload_file = upload_files[0]
+            cleanup_sevendays_new_staging()
+            staged_path: Path | None = None
+            try:
+                staged_path = await self._persist_uploaded_file(upload_file)
+                inspection = await run_blocking(inspect_sevendays_save_archive, staged_path)
+            except Exception as xcp:
+                if staged_path is not None:
+                    staged_path.unlink(missing_ok=True)
+                ui.notify(f"Could not inspect save archive: {xcp}", type="negative", multi_line=True)
+                return
+            sevendays_new_staged_path = staged_path
+            sevendays_new_staged_upload_name = upload_file.name
+            sevendays_new_inspection = inspection
+            sevendays_new_import_controls.refresh()
+
+        async def apply_staged_sevendays_new_save() -> None:
+            if sevendays_new_staged_path is None or sevendays_new_staged_upload_name is None:
+                ui.notify("Upload a 7D2D save archive before importing.", type="warning")
+                return
+            try:
+                root_id = sevendays_new_save_root_id()
+                result = await self._upload_save_path(
+                    model=model,
+                    root_id=root_id,
+                    upload_name=sevendays_new_staged_upload_name,
+                    source_path=sevendays_new_staged_path,
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Save import failed: {xcp}", type="negative", multi_line=True)
+                return
+            cleanup_sevendays_new_staging()
+            upload_dialog.close()
+            ui.notify(result.message, type="positive")
+            self._guarded_reload(ui=ui)
+
+        @ui.refreshable
+        def sevendays_new_import_controls() -> None:
+            nonlocal sevendays_world_input, sevendays_name_input
+            sevendays_world_input = None
+            sevendays_name_input = None
+            if sevendays_new_inspection is None or sevendays_new_staged_upload_name is None:
+                ui.upload(
+                    label="Choose Save Archive",
+                    auto_upload=True,
+                    multiple=True,
+                    max_files=1,
+                    on_multi_upload=stage_sevendays_new_save,
+                ).props("accept=.zip").classes("mod-save-upload-zone")
+                ui.label("The archive is inspected before a target world/save is requested.").classes(
+                    "mod-subtitle text-sm mod-save-upload-panel-detail"
+                )
+                return
+
+            inspection = sevendays_new_inspection
+            default_world = sevendays_default_world_name(inspection)
+            default_game = sevendays_default_game_name(
+                inspection=inspection,
+                game_world=default_world,
+                upload_name=sevendays_new_staged_upload_name,
+            )
+            detected_target = " / ".join(
+                part for part in (inspection.game_world, inspection.game_name) if part is not None
+            )
+            ui.label(f"Archive: {sevendays_new_staged_upload_name}").classes("mod-subtitle text-sm break-all")
+            if detected_target:
+                ui.label(f"Detected target: {detected_target}").classes("mod-subtitle text-sm break-all")
+            if inspection.game_world is None:
+                sevendays_world_input = (
+                    ui.input("Game World", value=default_world)
+                    .props("filled square dense hide-bottom-space color=accent")
+                    .classes("mod-config-input mod-save-upload-field w-full")
+                )
+            else:
+                ui.label(f"Game World: {inspection.game_world}").classes("mod-save-upload-target-static")
+
+            show_game_input = (
+                inspection.game_name is None
+                or inspection.game_world is None
+                or (default_world, inspection.game_name) in sevendays_existing_save_targets()
+            )
+            if show_game_input:
+                sevendays_name_input = (
+                    ui.input("Save Name", value=default_game)
+                    .props("filled square dense hide-bottom-space color=accent")
+                    .classes("mod-config-input mod-save-upload-field w-full")
+                )
+            else:
+                ui.label(f"Save Name: {inspection.game_name}").classes("mod-save-upload-target-static")
+            ui.button("Import Save", on_click=apply_staged_sevendays_new_save).classes("mod-list-button")
+
+        def close_upload_dialog() -> None:
+            cleanup_sevendays_new_staging()
+            upload_dialog.close()
+
         with ui.dialog() as upload_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
                     with ui.column().classes("gap-0"):
-                        ui.label("Upload Save").classes("text-xl font-black mod-title-small")
-                        ui.label("Upload a replacement save archive for this app.").classes("mod-subtitle text-sm")
-                    if show_root_selector:
-                        root_select = (
-                            ui.select(save_root_options, value=selected_root_id)
-                            .props("filled square dense hide-bottom-space color=accent")
-                            .classes("mod-config-select")
+                        title = "Upload 7D2D Save" if is_sevendays_app else "Upload Save"
+                        description = (
+                            "Replace an existing save or import a new world/save directory."
+                            if is_sevendays_app
+                            else "Upload a replacement save archive for this app."
                         )
-                    save_upload_control = ui.upload(
-                        label="Choose Save Archive",
-                        auto_upload=True,
-                    ).classes("mod-list-button")
-                    if show_upload_action:
-                        save_upload_control.props["field-name"] = "upload"
-                        save_upload_control.on("start", direct_save_upload_started, args=[])
-                        save_upload_control.on("uploaded", direct_save_upload_succeeded, args=[])
-                        save_upload_control.on("failed", direct_save_upload_failed, args=[])
-                        save_upload_control.on("rejected", direct_save_upload_rejected, args=[])
-                        refresh_direct_save_upload_target()
+                        ui.label(title).classes("text-xl font-black mod-title-small")
+                        ui.label(description).classes("mod-subtitle text-sm")
+                    if is_sevendays_app:
+                        if selected_replace_root_id is not None:
+                            with ui.column().classes("mod-save-upload-panel w-full gap-2"):
+                                ui.label("Replace Existing Save").classes(
+                                    "text-sm font-bold mod-title-small mod-save-upload-panel-title"
+                                )
+                                if len(replace_save_target_options) == 1:
+                                    ui.label(replace_save_target_options[selected_replace_root_id]).classes(
+                                        "mod-save-upload-target-static"
+                                    )
+                                else:
+                                    with ui.column().classes("mod-save-upload-target-list w-full gap-2"):
+                                        for root_id, label in replace_save_target_options.items():
+                                            sevendays_replace_target_buttons[root_id] = ui.button(
+                                                label,
+                                                on_click=lambda _event=None, root_id=root_id: choose_sevendays_replace_target(
+                                                    root_id
+                                                ),
+                                            )
+                                    apply_sevendays_replace_target_button_classes()
+                                ui.label(
+                                    "The selected target is replaced after the archive is accepted. "
+                                    "The server must be stopped."
+                                ).classes("mod-subtitle text-sm mod-save-upload-panel-detail")
+                                sevendays_replace_upload_control = ui.upload(
+                                    label="Choose Replacement ZIP",
+                                    auto_upload=True,
+                                ).classes("mod-save-upload-zone")
+                                sevendays_replace_upload_control.props["field-name"] = "upload"
+                                sevendays_replace_upload_control.on("start", direct_save_upload_started, args=[])
+                                sevendays_replace_upload_control.on(
+                                    "uploaded", direct_save_upload_succeeded, args=[]
+                                )
+                                sevendays_replace_upload_control.on("failed", direct_save_upload_failed, args=[])
+                                sevendays_replace_upload_control.on(
+                                    "rejected", direct_save_upload_rejected, args=[]
+                                )
+                                refresh_sevendays_replace_upload_target()
+
+                        with ui.column().classes("mod-save-upload-panel w-full gap-2"):
+                            ui.label("Import New Save").classes(
+                                "text-sm font-bold mod-title-small mod-save-upload-panel-title"
+                            )
+                            ui.label(
+                                "Upload a ZIP first. The archive structure is inspected before the target is chosen."
+                            ).classes("mod-subtitle text-sm mod-save-upload-panel-detail")
+                            sevendays_new_import_controls()
+
                         direct_save_upload_token_timer: Timer = ui.timer(
                             _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
-                            refresh_direct_save_upload_target,
+                            lambda: refresh_sevendays_replace_upload_target()
+                            if sevendays_replace_upload_control is not None
+                            else None,
                         )
                         self._register_timer_cleanup(ui=ui, timer=direct_save_upload_token_timer)
                         self._register_client_cleanup(ui=ui, cleanup=interrupt_direct_save_transfer)
-                        if root_select is not None:
-                            root_select.on("update:model-value", lambda: refresh_direct_save_upload_target())
-                    ui.label("ZIP archives are uploaded directly into the selected save target.").classes(
-                        "mod-subtitle text-sm"
-                    )
+                        self._register_client_cleanup(ui=ui, cleanup=cleanup_sevendays_new_staging)
+                    else:
+                        if show_root_selector:
+                            root_select = (
+                                ui.select(save_root_options, value=selected_root_id)
+                                .props(
+                                    "filled square dense hide-bottom-space color=accent "
+                                    "options-dense popup-content-class=mod-setting-menu"
+                                )
+                                .classes("mod-config-select")
+                            )
+                        save_upload_control = ui.upload(
+                            label="Choose Save Archive",
+                            auto_upload=True,
+                        ).classes("mod-file-upload-zone")
+                        if show_upload_action:
+                            save_upload_control.props["field-name"] = "upload"
+                            save_upload_control.on("start", direct_save_upload_started, args=[])
+                            save_upload_control.on("uploaded", direct_save_upload_succeeded, args=[])
+                            save_upload_control.on("failed", direct_save_upload_failed, args=[])
+                            save_upload_control.on("rejected", direct_save_upload_rejected, args=[])
+                            refresh_generic_save_upload_target()
+                            direct_save_upload_token_timer = ui.timer(
+                                _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
+                                refresh_generic_save_upload_target,
+                            )
+                            self._register_timer_cleanup(ui=ui, timer=direct_save_upload_token_timer)
+                            self._register_client_cleanup(ui=ui, cleanup=interrupt_direct_save_transfer)
+                            if root_select is not None:
+                                root_select.on("update:model-value", lambda: refresh_generic_save_upload_target())
+                        ui.label("ZIP archives are uploaded directly into the selected save target.").classes(
+                            "mod-subtitle text-sm"
+                        )
                     with ui.row().classes("w-full justify-end"):
-                        ui.button("Close", on_click=upload_dialog.close).classes("mod-list-button secondary")
+                        ui.button("Close", on_click=close_upload_dialog).classes("mod-list-button secondary")
 
         with ui.card().classes(self._flat_tab_card_classes()):
             with ui.column().classes(self._tab_section_body_classes()):
@@ -1093,7 +1374,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             multiple=True,
                             max_files=2,
                             on_multi_upload=upload_blueprints,
-                        ).props("accept=.sbp,.sbpcfg").classes("mod-list-button")
+                        ).props("accept=.sbp,.sbpcfg").classes("mod-file-upload-zone")
                     ui.label(
                         "Config files are optional, but they must be uploaded alongside a matching `.sbp` file."
                     ).classes(
@@ -1476,9 +1757,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                     if detail_path_text is not None:
                         ui.label(detail_path_text).classes("mod-subtitle text-sm break-all mod-save-card-path")
                 with ui.row().classes("gap-2 flex-wrap"):
-                    if root_count > 1:
-                        self._badge(ui=ui, text=save.root_label, tone="grey")
-                    self._badge(ui=ui, text=save.kind.title(), tone="grey")
                     if self._save_shows_size_badge(save):
                         self._badge(ui=ui, text=save.size_text, tone="black")
                     self._badge(ui=ui, text=f"Modified {save.modified_at}", tone="purple")
@@ -1779,9 +2057,23 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         )
                         if not setting.can_edit:
                             switch_control.disable()
-                    elif control_kind is ModWebSettingControlKind.CHOICE_SELECT:
+                    elif control_kind in {
+                        ModWebSettingControlKind.CHOICE_SELECT,
+                        ModWebSettingControlKind.EDITABLE_CHOICE_SELECT,
+                    }:
                         if not isinstance(draft_value, str):
                             raise TypeError(f"Choice setting {setting.key!r} requires a string draft value.")
+                        is_editable_choice = control_kind is ModWebSettingControlKind.EDITABLE_CHOICE_SELECT
+                        choice_options: dict[str, str] = (
+                            {choice.raw_value: choice.label for choice in setting.choices}
+                            if is_editable_choice
+                            else {choice.label: choice.label for choice in setting.choices}
+                        )
+                        choice_props: str = (
+                            self._setting_editable_choice_select_props()
+                            if is_editable_choice
+                            else self._setting_choice_select_props()
+                        )
 
                         def sync_choice_value(event: ModWebValueContainer) -> None:
                             set_draft_value(setting, _value_as_text(event), setting.value_is_hidden)
@@ -1790,11 +2082,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         with ui.column().classes(control_surface_classes):
                             choice_select = (
                                 ui.select(
-                                    {choice.label: choice.label for choice in setting.choices},
+                                    choice_options,
                                     value=draft_value or None,
                                     on_change=sync_choice_value if setting.can_edit else None,
                                 )
-                                .props(self._setting_choice_select_props())
+                                .props(choice_props)
                                 .classes("mod-setting-field mod-setting-field-primary")
                             )
                         if not setting.can_edit:
@@ -2219,7 +2511,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         on_multi_upload=upload_mod_settings,
                     )
                     .props("accept=.dat")
-                    .classes("mod-list-button")
+                    .classes("mod-file-upload-zone")
                 )
                 if not can_write:
                     upload_control.disable()
@@ -2427,7 +2719,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 detail_text=f"Installing mods for {model.app_friendly}.",
             )
             node = self._remote_node_link(model.node_name)
-            result = await asyncio.to_thread(
+            result = await run_blocking(
                 self._remote_mod_uploads,
                 node,
                 model.app_name,
@@ -2471,30 +2763,84 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             active_detail_text=f"Receiving save for {model.app_friendly}.",
         )
         try:
-            self._mark_transfers_applying(
+            result = await self._apply_save_upload_path(
+                model=model,
+                root_id=root_id,
+                upload_name=upload_file.name,
+                source_path=temp_path,
+                user=user,
                 transfer_ids=transfer_ids,
-                detail_text=f"Applying save to {model.app_friendly}.",
-            )
-            node = self._remote_node_link(model.node_name)
-            result = await asyncio.to_thread(
-                self._remote_save_upload,
-                node,
-                model.app_name,
-                root_id,
-                temp_path,
-                upload_file.name,
-                user,
             )
         except Exception as xcp:
             for transfer_id in transfer_ids:
                 self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Save upload failed: {xcp}")
             raise
         else:
-            for transfer_id in transfer_ids:
-                self._backend.complete_transfer(transfer_id=transfer_id, detail_text=f"Saved to {model.app_friendly}.")
             return result
         finally:
             temp_path.unlink(missing_ok=True)
+
+    async def _upload_save_path(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        root_id: str,
+        upload_name: str,
+        source_path: Path,
+        user: ModWebUser,
+    ) -> NodeSaveMutationResult:
+        if not self._user_has_level(user, model.save_write_level):
+            raise PermissionError(
+                f"{model.save_write_level.name.title()} access is required to upload saves for {model.app_friendly}."
+            )
+        transfer_ids = self._backend.start_upload_transfers(
+            user_id=user.discord_id,
+            filenames=(upload_name,),
+            detail_text=f"Staging save for {model.app_friendly}.",
+            node_color_hex=self._node_role_color_hex(node_name=model.node_name),
+            app_color_hex=model.app_color_hex,
+        )
+        try:
+            return await self._apply_save_upload_path(
+                model=model,
+                root_id=root_id,
+                upload_name=upload_name,
+                source_path=source_path,
+                user=user,
+                transfer_ids=transfer_ids,
+            )
+        except Exception as xcp:
+            for transfer_id in transfer_ids:
+                self._backend.fail_transfer(transfer_id=transfer_id, detail_text=f"Save upload failed: {xcp}")
+            raise
+
+    async def _apply_save_upload_path(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        root_id: str,
+        upload_name: str,
+        source_path: Path,
+        user: ModWebUser,
+        transfer_ids: tuple[int, ...],
+    ) -> NodeSaveMutationResult:
+        self._mark_transfers_applying(
+            transfer_ids=transfer_ids,
+            detail_text=f"Applying save to {model.app_friendly}.",
+        )
+        node = self._remote_node_link(model.node_name)
+        result = await run_blocking(
+            self._remote_save_upload,
+            node,
+            model.app_name,
+            root_id,
+            source_path,
+            upload_name,
+            user,
+        )
+        for transfer_id in transfer_ids:
+            self._backend.complete_transfer(transfer_id=transfer_id, detail_text=f"Saved to {model.app_friendly}.")
+        return result
 
     async def _upload_factorio_mod_settings(
         self,
@@ -2529,7 +2875,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 detail_text=f"Applying mod settings to {model.app_friendly}.",
             )
             node = self._remote_node_link(model.node_name)
-            result = await asyncio.to_thread(
+            result = await run_blocking(
                 self._remote_factorio_mod_settings_upload,
                 node,
                 model.app_name,
@@ -2599,7 +2945,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 detail_text=f"Applying blueprint files to {model.app_friendly}.",
             )
             node = self._remote_node_link(model.node_name)
-            result = await asyncio.to_thread(
+            result = await run_blocking(
                 self._remote_blueprint_upload,
                 node,
                 model.app_name,
@@ -2705,7 +3051,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not url:
             raise ValueError("A mod link is required.")
         node = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(
+        return await run_blocking(
             self._remote_mod_link_install,
             node,
             model.app_name,
@@ -2729,7 +3075,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not url:
             raise ValueError("A mod link is required.")
         node = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(
+        return await run_blocking(
             self._remote_mod_link_resolve,
             node,
             model.app_name,
@@ -2751,7 +3097,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         if not url:
             raise ValueError("A mod link is required.")
         node = self._remote_node_link(model.node_name)
-        return await asyncio.to_thread(
+        return await run_blocking(
             self._remote_mod_link_versions,
             node,
             model.app_name,
@@ -3053,6 +3399,22 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     @staticmethod
     def _save_option_label(entry: NodeSaveEntry) -> str:
         return f"{entry.root_label} / {entry.relative_path}"
+
+    @classmethod
+    def _replace_save_upload_target_options(cls, saves: tuple[NodeSaveEntry, ...]) -> dict[str, str]:
+        return {save.root_id: cls._save_option_label(save) for save in saves}
+
+    @staticmethod
+    def _normalise_sevendays_save_segment(raw_value: str, *, label: str) -> str:
+        value = raw_value.strip()
+        if not value:
+            raise ValueError(f"{label} is required.")
+        path = PurePosixPath(value)
+        if path.is_absolute() or path.parts != (value,) or value in {".", ".."} or "\x00" in value:
+            raise ValueError(f"{label} must be a single directory name.")
+        if value.startswith("."):
+            raise ValueError(f"{label} must not start with a dot.")
+        return value
 
     @staticmethod
     def _blueprint_option_label(entry: NodeBlueprintEntry) -> str:
@@ -3412,6 +3774,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             return ModWebSettingControlKind.BOOLEAN_SWITCH
         if setting.choices and setting.strict_choice:
             return ModWebSettingControlKind.CHOICE_SELECT
+        if setting.choices and setting.allows_text_input:
+            return ModWebSettingControlKind.EDITABLE_CHOICE_SELECT
         return ModWebSettingControlKind.TEXT_INPUT
 
     @classmethod
@@ -3614,6 +3978,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     @staticmethod
     def _setting_choice_select_props() -> str:
         return "filled square dense hide-bottom-space color=accent options-dense popup-content-class=mod-setting-menu"
+
+    @staticmethod
+    def _setting_editable_choice_select_props() -> str:
+        return (
+            "filled square dense clearable hide-bottom-space color=accent options-dense "
+            "popup-content-class=mod-setting-menu use-input new-value-mode=add input-debounce=0"
+        )
 
     @staticmethod
     def _setting_aux_select_props(*, prefix: Literal["Preset", "Recent"]) -> str:

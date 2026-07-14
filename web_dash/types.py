@@ -1062,6 +1062,7 @@ class ModWebAppTabDefinition:
 class ModWebSettingControlKind(Enum):
     BOOLEAN_SWITCH = "boolean_switch"
     CHOICE_SELECT = "choice_select"
+    EDITABLE_CHOICE_SELECT = "editable_choice_select"
     TEXT_INPUT = "text_input"
 
 

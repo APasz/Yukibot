@@ -609,11 +609,7 @@ def render_player_session_pack_text(notice: PlayerSessionNotice) -> str | None:
 def render_notice_body(notice: RelayNotice, *, app_name: str) -> str:
     if isinstance(notice, PlayerSessionNotice):
         if notice.action is PlayerSessionAction.JOINED:
-            body = f"joined {app_name}"
-            pack_text = render_player_session_pack_text(notice)
-            if pack_text is None:
-                return body
-            return f"{body} ({pack_text})"
+            return f"joined {app_name}"
         return f"left {app_name}"
     if isinstance(notice, GameDeathNotice):
         if notice.detail_text is not None:

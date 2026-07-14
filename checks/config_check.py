@@ -17,6 +17,7 @@ from apps._config import (
     App_Config,
     ClientPackKubeJsScript,
     ClientPackMetadataConfig,
+    ClientPackModSnapshot,
     ClientPackRelease,
     ModDistributionMode,
     mod_capabilities_for_scope,
@@ -105,6 +106,22 @@ class AppModCapabilitiesTests(unittest.TestCase):
             app_config.client_pack_excluded_kubejs_scripts,
             ("server_scripts/events.js", "startup_scripts/registry.js"),
         )
+
+    def test_app_config_reports_duplicate_client_pack_published_mod_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Duplicate Mod"):
+            App_Config(
+                name="minecraft_test",
+                instance_key="test",
+                friendly_name="Test",
+                directory=Path("/tmp/minecraft-test"),
+                apps_dir=Path("/tmp"),
+                mods_dir=None,
+                client_pack_published_mods=(
+                    ClientPackModSnapshot(name="Duplicate Mod", friendly="First"),
+                    ClientPackModSnapshot(name="duplicate mod", friendly="Second"),
+                ),
+                scope="minecraft",
+            )
 
     def test_client_pack_metadata_validates_and_renders_filename_template(self) -> None:
         metadata = ClientPackMetadataConfig(

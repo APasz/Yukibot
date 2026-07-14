@@ -27,6 +27,7 @@ from modmux.models import ModID, Provider
 from modmux.modmux_errors import ModMuxError
 
 import config
+from _async_utils import run_blocking
 from _discord import (
     App_Bound,
     DC_Bound,
@@ -38,7 +39,14 @@ from _discord import (
 )
 from _file import File_Utils
 from _security import Power_Level, _owner_group
-from apps._app import AM_Receiver, App, AppActivityProvider, AppActivityProviderMetadata, RelayAdvancementTerms
+from apps._app import (
+    AM_Receiver,
+    App,
+    AppActivityProvider,
+    AppActivityProviderMetadata,
+    AppVersionSource,
+    RelayAdvancementTerms,
+)
 from apps._config import (
     App_Config,
     AppVersion,
@@ -396,6 +404,15 @@ def factorio_mod_portal_credentials_from_server_settings(settings_path: Path) ->
 
 
 def detect_factorio_version(*, directory: Path) -> AppVersion | None:
+    info_path: Path = directory / "data" / "base" / _FACTORIO_INFO_JSON_NAME
+    if info_path.exists():
+        try:
+            payload = _load_json_object(info_path.read_text(config.STR_ENCODE), label=f"{info_path} metadata")
+            raw_version = payload.get("version")
+            if isinstance(raw_version, str) and raw_version.strip():
+                return AppVersion(main=raw_version.strip())
+        except (OSError, ValueError) as xcp:
+            log.warning("Failed to inspect Factorio base metadata %s: %s", info_path, xcp)
     log_file: Path = directory / "factorio-current.log"
     if not log_file.exists():
         return None
@@ -1083,24 +1100,24 @@ class Mod_Factorio(Mod):
 
     async def install(self, src: Path, atomic: bool = True):
         await self._handle_drop(src, atomic)
-        await asyncio.to_thread(self._set_mod_list_enabled, True)
+        await run_blocking(self._set_mod_list_enabled, True)
 
     async def uninstall(self, override_coremod: bool = False) -> bool:
         removed = await super().uninstall(override_coremod)
-        await asyncio.to_thread(self._remove_mod_list_entry)
+        await run_blocking(self._remove_mod_list_entry)
         return removed
 
     async def _enable_file(self, override_coremod: bool = False) -> Path:
         if not override_coremod:
             self.is_coremod()
-        await asyncio.to_thread(self._set_mod_list_enabled, True)
+        await run_blocking(self._set_mod_list_enabled, True)
         self.cfg.enabled = True
         return self.path
 
     async def _disable_file(self, override_coremod: bool = False) -> Path:
         if not override_coremod:
             self.is_coremod()
-        await asyncio.to_thread(self._set_mod_list_enabled, False)
+        await run_blocking(self._set_mod_list_enabled, False)
         self.cfg.enabled = False
         return self.path
 
@@ -2069,7 +2086,7 @@ class Factorio(App[App_Config]):
         )
         try:
             process.send_signal(signal.SIGINT)
-            await asyncio.to_thread(process.wait, _FACTORIO_GRACEFUL_STOP_TIMEOUT_SECONDS)
+            await run_blocking(process.wait, _FACTORIO_GRACEFUL_STOP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             log.warning(
                 "%s did not stop after SIGINT within %ss.",
@@ -2186,6 +2203,10 @@ class Factorio(App[App_Config]):
 
     def detect_installed_version(self) -> AppVersion | None:
         return detect_factorio_version(directory=self.directory)
+
+    @property
+    def version_source(self) -> AppVersionSource:
+        return AppVersionSource.INSTALLED_FILES
 
 
 class Factorio_Updater(Update_Manager):
@@ -2379,7 +2400,7 @@ class Factorio_Updater(Update_Manager):
                     detail=f"Extracting {archive_path.name}.",
                     progress_percent=80.0,
                 )
-                await asyncio.to_thread(self._install_release_archive, archive_path)
+                await run_blocking(self._install_release_archive, archive_path)
             finally:
                 File_Utils.remove(archive_path, silent=True, resolve=False)
 
