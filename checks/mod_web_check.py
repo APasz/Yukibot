@@ -199,7 +199,6 @@ from web_dash.types import (
     ModWebAppTabContext,
     ModWebAppTabDefinition,
     ModWebAppTabLoadResult,
-    ModWebAppTabVisibilityRule,
     ModWebBasePageModel,
     ModWebConfigEditorShape,
     ModWebDirectUploadTarget,
@@ -4639,6 +4638,7 @@ class ModWebTests(unittest.TestCase):
                 self.class_value: str | None = None
                 self.style_value: str | None = None
                 self.events: list[str] = []
+                self.props_values: list[str] = []
 
             def classes(self, value: str) -> "FakeContainer":
                 self.class_value = value
@@ -4648,8 +4648,18 @@ class ModWebTests(unittest.TestCase):
                 self.style_value = value
                 return self
 
-            def on(self, event_name: str, handler: object) -> "FakeContainer":
-                del handler
+            def props(self, value: str) -> "FakeContainer":
+                self.props_values.append(value)
+                return self
+
+            def on(
+                self,
+                event_name: str,
+                handler: object,
+                *,
+                js_handler: str | None = None,
+            ) -> "FakeContainer":
+                del handler, js_handler
                 self.events.append(event_name)
                 return self
 
@@ -4806,6 +4816,8 @@ class ModWebTests(unittest.TestCase):
             [element.class_value for element in ui.elements if element.kind == "column"],
         )
         self.assertEqual(len(ui.cards), 2)
+        self.assertTrue(all("role=link tabindex=0" in card.props_values for card in ui.cards))
+        self.assertTrue(all({"click", "keydown.enter", "keydown.space"}.issubset(card.events) for card in ui.cards))
         self.assertEqual(render_app_card_content.call_count, 2)
         self.assertIn("4/6", [label.text for label in ui.labels])
         self.assertIn("5/8", [label.text for label in ui.labels])
@@ -7121,7 +7133,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(ModWebService._chat_event_badges(event), (_ModWebBadgeSpec(text="Joined", tone="purple"),))
 
-    def test_chat_event_badges_include_client_pack_badge_for_join_notice(self) -> None:
+    def test_chat_event_badges_omit_client_pack_badge_for_join_notice(self) -> None:
         event = ChatEvent(
             room_id="minecraft_alpha",
             source=ChatEndpointId.app("minecraft_alpha"),
@@ -7137,10 +7149,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(
             ModWebService._chat_event_badges(event),
-            (
-                _ModWebBadgeSpec(text="Joined", tone="purple"),
-                _ModWebBadgeSpec(text="Pack: 2026-07-04 [Unpublished Changes]", tone="warn"),
-            ),
+            (_ModWebBadgeSpec(text="Joined", tone="purple"),),
         )
 
     def test_chat_event_badges_prefer_typed_notice_over_embed_title(self) -> None:
@@ -10667,7 +10676,15 @@ class ModWebTests(unittest.TestCase):
             )
             self.assertEqual(
                 [item.text for item in ui.menu_items],
-                ["Upload", "Configure <!>", "Find Metadata", "Delete"],
+                ["Client Pack", "Modlist", "Upload", "Configure <!>", "Find Metadata", "Delete"],
+            )
+            mobile_menu_items = [
+                item
+                for item in ui.menu_items
+                if item.text in {"Client Pack", "Modlist"}
+            ]
+            self.assertTrue(
+                all("mod-toolbar-menu-mobile-only" in (item.class_value or "") for item in mobile_menu_items)
             )
             initial_metadata_status = next(
                 button for button in ui.buttons if button.text == "Metadata: Running"
@@ -13564,25 +13581,6 @@ class ModWebTests(unittest.TestCase):
             ),
         )
 
-    def test_replace_save_upload_target_options_only_include_discovered_saves(self) -> None:
-        saves = (
-            NodeSaveEntry(
-                id="save-alpha/A Game World",
-                label="A Game World",
-                relative_path="A Game World",
-                root_id="save-alpha",
-                root_label="Navezgane",
-                kind="directory",
-                size_bytes=0,
-                size_text="Directory",
-                modified_at="2026-05-28 12:00:00",
-            ),
-        )
-
-        options = ModWebService._replace_save_upload_target_options(saves)
-
-        self.assertEqual(options, {"save-alpha": "Navezgane / A Game World"})
-
     def test_filter_save_entries_matches_search_query(self) -> None:
         saves = (
             NodeSaveEntry(
@@ -15732,7 +15730,32 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(unavailable_tab, "configs")
         self.assertEqual(invalid_tab, "configs")
 
-    def test_additional_app_tabs_can_be_conditionally_enabled_for_detail_pages(self) -> None:
+    def test_precomputed_tabs_reject_case_insensitive_duplicate_ids(self) -> None:
+        service = ModWebService()
+        tabs = (
+            ModWebAppTabDefinition.custom(
+                tab_id="Map",
+                label="Map",
+                page_order=100,
+                app_card_order=100,
+                app_card_tone="purple",
+                render_handler_name="_render_map_tab",
+            ),
+            ModWebAppTabDefinition.custom(
+                tab_id=" map ",
+                label="Map Overview",
+                page_order=200,
+                app_card_order=200,
+                app_card_tone="black",
+                render_handler_name="_render_map_overview_tab",
+            ),
+        )
+        model = replace(self._overview_model_with_config_and_chat(), tabs=tabs)
+
+        with self.assertRaisesRegex(ValueError, "Duplicate app tab id: map"):
+            service._page_tabs(model)
+
+    def test_additional_app_tabs_render_custom_handlers_on_detail_pages(self) -> None:
         class HiddenTabService(ModWebService):
             def __init__(self) -> None:
                 super().__init__()
@@ -15756,11 +15779,6 @@ class ModWebTests(unittest.TestCase):
                         render_handler_name="_render_map_tab",
                         badge_handler_name="_map_tab_badges",
                         action_handler_name="_map_tab_actions",
-                        visibility_rule=ModWebAppTabVisibilityRule.all_of(
-                            ModWebAppTabVisibilityRule.min_app_version("1.20.1"),
-                            ModWebAppTabVisibilityRule.has_mod("squaremap"),
-                            ModWebAppTabVisibilityRule.setting_enabled("squaremap_enabled"),
-                        ),
                     ),
                 )
 
@@ -15798,82 +15816,11 @@ class ModWebTests(unittest.TestCase):
 
         service = HiddenTabService()
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
-        settings = NodeSettingList(
-            app_name="minecraft_alpha",
-            app_friendly="Minecraft Alpha",
-            node="yuki",
-            editable_count=1,
-            restricted_count=0,
-            has_pending_changes=False,
-            pending_change_count=0,
-            required_save_level_name=Power_Level.user.name,
-            required_reload_level_name=Power_Level.user.name,
-            settings=(
-                self._setting_entry(
-                    key="squaremap_enabled",
-                    label="Squaremap Enabled",
-                    type_name="bool",
-                    value_text="true",
-                    current_input_value="true",
-                ),
-            ),
-        )
-        model = ModWebPageModel(
-            node_name="yuki",
-            app_name="minecraft_alpha",
-            app_friendly="Minecraft Alpha",
-            app_color_hex="#22C55E",
-            supports_configs=False,
-            config_read_level=Power_Level.user,
-            config_write_level=Power_Level.sudo,
-            supports_save_uploads=False,
-            supports_save_rename=False,
-            save_write_level=Power_Level.user,
-            configs=NodeConfigList(
-                app_name="minecraft_alpha",
-                app_friendly="Minecraft Alpha",
-                node="yuki",
-                configs=(),
-            ),
-            saves=None,
-            app_stats=NodeAppRuntimeSummary(
-                running=True,
-                enabled=True,
-                version="1.20.4",
-                player_count=0,
-                player_capacity=20,
-                relay_support=ChatRelaySupport.BIDIRECTIONAL,
-                storage_percent=None,
-                storage_free_bytes=None,
-                storage_total_bytes=None,
-                transition_state=NodeAppTransitionState.NONE,
-            ),
-            app_start_blocked=False,
-            settings=settings,
-            console_actions=None,
-            mods=NodeModList(
-                app_name="minecraft_alpha",
-                app_friendly="Minecraft Alpha",
-                node="yuki",
-                summary=NodeModSummary(
-                    total_count=1,
-                    enabled_count=1,
-                    disabled_count=0,
-                    coremod_count=0,
-                    downloadable_count=0,
-                    non_downloadable_count=1,
-                ),
-                mods=(self._mod_entry(name="squaremap"),),
-                app_stats=None,
-            ),
-            download_all_url="/mods/download",
-            download_enabled_url="/mods/download?enabled_only=true",
-            mod_download_urls={},
-        )
+        model = self._overview_model_with_config_and_chat()
 
         tabs = service._page_tabs(model)
 
-        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "settings", "map"])
+        self.assertEqual([tab.tab_id for tab in tabs], ["configs", "chat", "map"])
         map_tab = tabs[-1]
         self.assertEqual(
             service._page_section_badges(model=model, user=user, tab=map_tab),
@@ -15985,81 +15932,6 @@ class ModWebTests(unittest.TestCase):
 
         load_tab.assert_awaited_once_with("configs")
         render_empty_state.assert_not_called()
-
-    def test_additional_app_tabs_stay_hidden_when_conditions_are_not_met(self) -> None:
-        class HiddenTabService(ModWebService):
-            def _additional_app_tab_definitions(
-                self,
-                *,
-                context: ModWebAppTabContext,
-                is_detail_page: bool,
-            ) -> tuple[ModWebAppTabDefinition, ...]:
-                if context.app_name != "minecraft_alpha" or not is_detail_page:
-                    return ()
-                return (
-                    ModWebAppTabDefinition.custom(
-                        tab_id="map",
-                        label="Map",
-                        page_order=650,
-                        app_card_order=650,
-                        app_card_tone="purple",
-                        render_handler_name="_render_map_tab",
-                        visibility_rule=ModWebAppTabVisibilityRule.all_of(
-                            ModWebAppTabVisibilityRule.min_app_version("1.20.1"),
-                            ModWebAppTabVisibilityRule.has_mod("squaremap"),
-                            ModWebAppTabVisibilityRule.setting_enabled("squaremap_enabled"),
-                        ),
-                    ),
-                )
-
-            @staticmethod
-            def _render_map_tab(
-                *,
-                ui: ModWebUi,
-                model: ModWebBasePageModel,
-                user: ModWebUser,
-                tab: ModWebAppTabDefinition,
-            ) -> None:
-                del ui, model, user, tab
-                return None
-
-        service = HiddenTabService()
-        model = ModWebOverviewPageModel(
-            node_name="yuki",
-            app_name="minecraft_alpha",
-            app_friendly="Minecraft Alpha",
-            app_color_hex="#22C55E",
-            supports_configs=False,
-            config_read_level=Power_Level.user,
-            config_write_level=Power_Level.sudo,
-            supports_save_uploads=False,
-            supports_save_rename=False,
-            save_write_level=Power_Level.user,
-            configs=NodeConfigList(
-                app_name="minecraft_alpha",
-                app_friendly="Minecraft Alpha",
-                node="yuki",
-                configs=(),
-            ),
-            saves=None,
-            app_stats=NodeAppRuntimeSummary(
-                running=True,
-                enabled=True,
-                version="1.20.0",
-                player_count=0,
-                player_capacity=20,
-                relay_support=ChatRelaySupport.NONE,
-                storage_percent=None,
-                storage_free_bytes=None,
-                storage_total_bytes=None,
-                transition_state=NodeAppTransitionState.NONE,
-            ),
-            app_start_blocked=False,
-            settings=None,
-            console_actions=None,
-        )
-
-        self.assertEqual(service._page_tabs(model), ())
 
     def test_save_card_description_prefers_supported_actions(self) -> None:
         model = ModWebBasePageModel(

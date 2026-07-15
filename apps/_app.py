@@ -394,16 +394,9 @@ class App(Generic[ConfigT], ABC):
         action: PlayerSessionAction,
         source: RelayNoticeSource,
     ) -> PlayerSessionNotice:
-        pack_version: str | None = None
-        has_unpublished_pack_changes: bool = False
-        if action is PlayerSessionAction.JOINED:
-            pack_version = self.published_client_pack_version
-            has_unpublished_pack_changes = self.has_unpublished_client_pack_changes
         return PlayerSessionNotice(
             action=action,
             source=source,
-            pack_version=pack_version,
-            has_unpublished_pack_changes=has_unpublished_pack_changes,
         )
 
     @property
@@ -1038,6 +1031,11 @@ class App(Generic[ConfigT], ABC):
         return path
 
     async def download_save_content(self, file_id: str) -> tuple[str, bytes] | None:
+        del file_id
+        return None
+
+    async def download_save_archive(self, file_id: str) -> tuple[str, Path] | None:
+        """Return a prepared save archive when a save spans multiple filesystem paths."""
         del file_id
         return None
 

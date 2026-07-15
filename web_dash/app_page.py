@@ -7313,6 +7313,8 @@ class ModWebAppPageMixin(
         delete_control: _ModWebEnableableControl | None = None
         result_count_label: Label | None = None
         metadata_status_button: Button | None = None
+        menu_supported: bool = callable(getattr(ui, "menu", None)) and callable(getattr(ui, "menu_item", None))
+        mobile_secondary_class: str = " mod-toolbar-mobile-secondary" if menu_supported else ""
 
         with ui.row().classes("mod-tab-toolbar mod-mods-toolbar w-full"):
             with ui.row().classes("mod-mods-toolbar-filters w-full"):
@@ -7375,25 +7377,27 @@ class ModWebAppPageMixin(
                         )
                     if open_client_pack is not None:
                         ui.button("Client Pack", on_click=open_client_pack).classes(
-                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                            f"mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill{mobile_secondary_class}"
                         )
                     if open_modlist is not None:
                         ui.button("Modlist", on_click=open_modlist).classes(
-                            "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                            f"mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill{mobile_secondary_class}"
                         )
                 if can_add_mod_link:
                     ui.button("Add Link", on_click=add_mod_link).classes(
-                        "mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill"
+                        f"mod-list-button secondary mod-toolbar-button mod-toolbar-button-fill{mobile_secondary_class}"
                     )
                 has_menu_actions = (
                     can_upload_mod
+                    or open_client_pack is not None
+                    or open_modlist is not None
+                    or can_add_mod_link
                     or open_client_pack_config is not None
                     or find_metadata is not None
                     or can_delete_mods
                 )
                 if has_menu_actions:
                     configure_label = "Configure <!>" if model.client_pack_content_dirty else "Configure"
-                    menu_supported = callable(getattr(ui, "menu", None)) and callable(getattr(ui, "menu_item", None))
                     if menu_supported:
                         with (
                             ui.button("")
@@ -7401,6 +7405,21 @@ class ModWebAppPageMixin(
                             .classes("mod-list-button secondary mod-toolbar-button mod-toolbar-menu-button")
                         ):
                             with ui.menu().classes("mod-chat-entry-menu mod-toolbar-menu"):
+                                if open_client_pack is not None:
+                                    ui.menu_item("Client Pack", on_click=open_client_pack).classes(
+                                        "mod-chat-entry-menu-item mod-toolbar-menu-item "
+                                        "mod-toolbar-menu-mobile-only"
+                                    )
+                                if open_modlist is not None:
+                                    ui.menu_item("Modlist", on_click=open_modlist).classes(
+                                        "mod-chat-entry-menu-item mod-toolbar-menu-item "
+                                        "mod-toolbar-menu-mobile-only"
+                                    )
+                                if can_add_mod_link:
+                                    ui.menu_item("Add Link", on_click=add_mod_link).classes(
+                                        "mod-chat-entry-menu-item mod-toolbar-menu-item "
+                                        "mod-toolbar-menu-mobile-only"
+                                    )
                                 if can_upload_mod:
                                     ui.menu_item("Upload", on_click=upload_mod).classes(
                                         "mod-chat-entry-menu-item mod-toolbar-menu-item"

@@ -357,6 +357,23 @@ def _is_executor_shutdown_error(error: BaseException) -> bool:
     return isinstance(error, RuntimeError) and "cannot schedule new futures after shutdown" in str(error)
 
 
+def _normalised_auth_url(raw: str) -> str:
+    text = raw.strip()
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return text.rstrip("/").casefold()
+    return urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            parsed.path.rstrip("/"),
+            "",
+            "",
+        )
+    )
+
+
 def _app_transition_state(
     payload: Mapping[str, object],
     key: str,
@@ -4284,7 +4301,13 @@ class NodeApiService:
         @nicegui_app.post(f"{_NODE_API_PREFIX}/restart")
         async def _restart_node(request: Request, access_token: str | None = None) -> Response:
             traffic_log.info("Node API restart request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
+            self._require_access(
+                request,
+                access_token,
+                app_name=None,
+                scopes=(NodeApiScope.NODE_MANAGE,),
+                token_node_names=self._portal_restart_token_node_names(),
+            )
             if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
                 raise _http_exception(404, "Process restart is only available on the Portal node.")
             if self._process_restart_handler is None:
@@ -9470,6 +9493,29 @@ class NodeApiService:
 
     async def build_save_download_response(self, *, app: App, save_id: str) -> Response:
         try:
+            custom_archive: tuple[str, Path] | None = await app.download_save_archive(save_id)
+        except FileNotFoundError as xcp:
+            raise _http_exception(404, str(xcp)) from xcp
+        except ValueError as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        except RuntimeError as xcp:
+            raise self._runtime_http_exception(app=app, action="Save download", error=xcp) from xcp
+        except Exception as xcp:
+            raise _http_exception(500, f"Save download failed: {xcp}") from xcp
+        if custom_archive is not None:
+            filename, archive_path = custom_archive
+            if not archive_path.is_file():
+                raise _http_exception(404, f"Save archive does not exist: {archive_path.name}")
+            traffic_log.info(
+                "Node API sending custom save archive: node=%s app=%s save=%s archive=%s",
+                self.node_name,
+                app.name,
+                save_id,
+                archive_path,
+            )
+            return FileResponse(path=archive_path, filename=filename)
+
+        try:
             custom_download: tuple[str, bytes] | None = await app.download_save_content(save_id)
         except FileNotFoundError as xcp:
             raise _http_exception(404, str(xcp)) from xcp
@@ -11199,6 +11245,7 @@ class NodeApiService:
         *,
         app_name: str | None,
         scopes: tuple[NodeApiScope, ...],
+        token_node_names: Sequence[str] | None = None,
     ) -> NodeAccessGrant | None:
         secret: str | None = config.MOD_WEB_SERVER.token_secret
         token_error: NodeTokenError | None = None
@@ -11209,6 +11256,7 @@ class NodeApiService:
                     access_token=access_token,
                     app_name=app_name,
                     scopes=scopes,
+                    node_names=token_node_names,
                 )
             except NodeTokenError as xcp:
                 token_error = xcp
@@ -11240,18 +11288,51 @@ class NodeApiService:
         access_token: str | None,
         app_name: str | None,
         scopes: tuple[NodeApiScope, ...],
+        node_names: Sequence[str] | None = None,
     ) -> NodeAccessGrant:
         secret: str | None = config.MOD_WEB_SERVER.token_secret
         if secret is None:
             raise NodeTokenError("Node token secret is not configured.")
         token: str = self._request_token(request, access_token)
-        return verify_node_token(
-            secret=secret,
-            token=token,
-            node=self.node_name,
-            app=app_name,
-            required_scopes=scopes,
-        )
+        resolved_node_names = node_names or (self.node_name,)
+        token_error: NodeTokenError | None = None
+        for node_name in resolved_node_names:
+            try:
+                return verify_node_token(
+                    secret=secret,
+                    token=token,
+                    node=node_name,
+                    app=app_name,
+                    required_scopes=scopes,
+                )
+            except NodeTokenError as xcp:
+                token_error = xcp
+        raise token_error or NodeTokenError("Node token node target is not configured.")
+
+    def _portal_restart_token_node_names(self) -> tuple[str, ...]:
+        names: list[str] = [self.node_name, config.BotProfileName.PORTAL.value]
+        portal_public_base_url = _normalised_auth_url(config.MOD_WEB_SERVER.public_base_url)
+        portal_node_api_base_url = _normalised_auth_url(config.MOD_WEB_SERVER.node_api_base_url)
+
+        for snapshot in config.load_known_bot_snapshots():
+            if snapshot.profile.bot_profile is not config.BotProfileName.PORTAL:
+                continue
+            mod_web = snapshot.features.mod_web
+            if mod_web is None:
+                continue
+            if (
+                _normalised_auth_url(mod_web.public_base_url) != portal_public_base_url
+                and _normalised_auth_url(mod_web.node_api_base_url) != portal_node_api_base_url
+            ):
+                continue
+            names.append(mod_web.node_name)
+
+        unique_names: dict[str, str] = {}
+        for name in names:
+            text = name.strip()
+            if text:
+                unique_names.setdefault(text.casefold(), text)
+        return tuple(unique_names.values())
 
     def _request_actor_user_id(
         self,

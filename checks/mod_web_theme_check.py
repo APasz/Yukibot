@@ -28,10 +28,13 @@ class ModWebThemeTests(unittest.TestCase):
     def test_default_theme_preserves_square_dark_visual_contract(self) -> None:
         css = DEFAULT_MOD_WEB_THEME.css()
 
-        self.assertIn("--mod-bg: #050507", css)
+        self.assertIn("--mod-bg: #000000", css)
         self.assertIn("--mod-purple: #8b5cf6", css)
+        self.assertIn("--mod-accent: #8b5cf6", css)
         self.assertIn("--mod-red: #dc2626", css)
         self.assertIn("--mod-warning: #f59e0b", css)
+        self.assertIn("--mod-warning-text: #fde68a", css)
+        self.assertNotIn("radial-gradient(circle at 14% -8%", css)
         self.assertIn("--mod-motion-medium: 260ms", css)
         self.assertIn("--mod-motion-tab-accent: 320ms", css)
         self.assertIn("--mod-motion-ease: cubic-bezier(0.22, 1, 0.36, 1)", css)
@@ -77,8 +80,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-card-link::before", css)
         self.assertIn(".mod-app-card-disabled::before", css)
         self.assertIn(".mod-app-card:hover", css)
+        self.assertIn(".mod-app-card:focus-visible", css)
         self.assertIn(".mod-node-card:hover", css)
         self.assertIn(".mod-card-link:not(.mod-app-card-link):hover", css)
+        self.assertIn(".mod-card-link:focus-visible", css)
         self.assertIn(".mod-badge-link", css)
         self.assertIn(".mod-badge-avatar", css)
         self.assertRegex(css, r"(?s)\.mod-badge-avatar \{.*?padding: 0 !important;.*?overflow: hidden;")
@@ -265,8 +270,19 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertRegex(
             css,
             r"(?s)@media \(max-width: 720px\).*?\.mod-mods-toolbar-filters \{.*?"
-            r"display: flex !important;.*?\.mod-mods-toolbar-actions \{.*?flex-wrap: nowrap;",
+            r"display: flex !important;.*?\.mod-mods-toolbar-actions \{.*?flex-wrap: wrap;",
         )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-badge\.warn \{.*?background: var\(--mod-warning-dark\).*?"
+            r"border-color: var\(--mod-warning\).*?color: var\(--mod-warning-text\)",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-schedule-field \.q-field__control::after \{.*?"
+            r"border-bottom: 2px solid var\(--mod-accent\)",
+        )
+        self.assertIn(".mod-toolbar-menu-mobile-only", css)
         self.assertRegex(
             css,
             r"(?s)@media \(max-width: 30rem\).*?\.mod-mods-toolbar-filters \{.*?"
@@ -543,7 +559,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-chat-message:first-child::before", css)
         self.assertIn("rgba(113, 113, 122, 0.08) 48%", css)
         self.assertIn(
-            "linear-gradient(90deg, var(--mod-hero-border-glow, rgba(139, 92, 246, 0.18)), transparent 32%) padding-box",
+            "linear-gradient(90deg, var(--mod-hero-border-glow, rgba(244, 244, 245, 0.05)), transparent 32%) padding-box",
             css,
         )
         self.assertIn("var(--mod-hero-border-fade, var(--mod-border)) 100%", css)
@@ -624,8 +640,8 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertEqual(
             ui.colors_payload,
             {
-                "primary": "#7c1d57",
-                "secondary": "#b91c1c",
+                "primary": "#8b5cf6",
+                "secondary": "#52525b",
                 "accent": "#8b5cf6",
                 "positive": "#6b7280",
                 "negative": "#dc2626",

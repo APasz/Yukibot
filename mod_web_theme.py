@@ -36,6 +36,7 @@ class ModWebPalette:
     red_dark: str
     warning: str
     warning_dark: str
+    warning_text: str
     panel: str
     nicegui: NiceGuiPalette
 
@@ -59,10 +60,12 @@ class ModWebTheme:
                     --mod-dim: {palette.dim};
                     --mod-purple: {palette.purple};
                     --mod-purple-dark: {palette.purple_dark};
+                    --mod-accent: {palette.purple};
                     --mod-red: {palette.red};
                     --mod-red-dark: {palette.red_dark};
                     --mod-warning: {palette.warning};
                     --mod-warning-dark: {palette.warning_dark};
+                    --mod-warning-text: {palette.warning_text};
                     --mod-panel: {palette.panel};
                     --mod-scrollbar-thumb: rgba(161, 161, 170, 0.34);
                     --mod-scrollbar-thumb-hover: rgba(161, 161, 170, 0.52);
@@ -85,10 +88,7 @@ class ModWebTheme:
                 .q-page-container,
                 .q-page {{
                     color: var(--mod-text);
-                    background:
-                        radial-gradient(circle at 14% -8%, rgba(139, 92, 246, 0.24), transparent 30rem),
-                        radial-gradient(circle at 88% 6%, rgba(220, 38, 38, 0.18), transparent 34rem),
-                        linear-gradient(180deg, #020204 0%, #07070a 46%, #101012 100%) !important;
+                    background: var(--mod-bg) !important;
                 }}
                 html {{
                     overflow-y: scroll;
@@ -304,7 +304,7 @@ class ModWebTheme:
                 .mod-card-hero {{
                     border: 3px solid transparent !important;
                     background:
-                        linear-gradient(90deg, var(--mod-hero-border-glow, rgba(139, 92, 246, 0.18)), transparent 32%) padding-box,
+                        linear-gradient(90deg, var(--mod-hero-border-glow, rgba(244, 244, 245, 0.05)), transparent 32%) padding-box,
                         linear-gradient(135deg, rgba(9, 9, 13, 0.98), rgba(15, 15, 21, 0.98)) padding-box,
                         linear-gradient(
                             180deg,
@@ -582,13 +582,19 @@ class ModWebTheme:
                     container-type: inline-size;
                 }}
                 .mod-app-card:hover {{
-                    border-color: rgba(139, 92, 246, 0.58) !important;
-                    background: linear-gradient(135deg, #0d0d12, #151018) !important;
+                    border-color: var(--mod-border-hot) !important;
+                    background: #101014 !important;
+                }}
+                .mod-app-card:focus-visible {{
+                    border-color: var(--mod-accent) !important;
+                    background: #101014 !important;
+                    outline: 2px solid var(--mod-accent) !important;
+                    outline-offset: 3px;
                 }}
                 .mod-node-card:hover {{
                     transform: translateY(-1px);
-                    border-color: rgba(139, 92, 246, 0.58) !important;
-                    background: linear-gradient(135deg, #0d0d12, #151018) !important;
+                    border-color: var(--mod-border-hot) !important;
+                    background: #101014 !important;
                 }}
                 .mod-app-card-shell {{
                     display: grid !important;
@@ -894,8 +900,13 @@ class ModWebTheme:
                 }}
                 .mod-card-link:not(.mod-app-card-link):hover {{
                     transform: translateY(-1px);
-                    border-color: rgba(139, 92, 246, 0.58) !important;
-                    background: linear-gradient(135deg, #0d0d12, #151018) !important;
+                    border-color: var(--mod-border-hot) !important;
+                    background: #101014 !important;
+                }}
+                .mod-card-link:focus-visible {{
+                    border-color: var(--mod-accent) !important;
+                    outline: 2px solid var(--mod-accent) !important;
+                    outline-offset: 3px;
                 }}
                 .mod-app-card-link {{
                     cursor: pointer;
@@ -952,7 +963,7 @@ class ModWebTheme:
                     height: 0.85rem;
                     background: rgba(113, 113, 122, 0.72);
                 }}
-                .mod-title {{ color: var(--mod-text) !important; text-shadow: 0 0 26px rgba(139, 92, 246, 0.26); }}
+                .mod-title {{ color: var(--mod-text) !important; text-shadow: none; }}
                 .mod-title-small {{ color: var(--mod-text) !important; }}
                 .mod-subtitle {{ color: var(--mod-muted) !important; }}
                 .mod-error-text {{ color: #f87171 !important; }}
@@ -1192,8 +1203,8 @@ class ModWebTheme:
                     margin-left: 0.35rem;
                 }}
                 .mod-list-button.mod-toolbar-primary {{
-                    background: linear-gradient(135deg, #6d28d9, #8b5cf6) !important;
-                    border-color: rgba(196, 181, 253, 0.82) !important;
+                    background: linear-gradient(135deg, #4c1d75, #6d28d9) !important;
+                    border-color: rgba(196, 181, 253, 0.64) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.12),
                         0 10px 26px rgba(76, 29, 149, 0.36) !important;
@@ -1307,9 +1318,7 @@ class ModWebTheme:
                 .mod-save-upload-panel {{
                     padding: 0.85rem;
                     border: 1px solid rgba(82, 82, 91, 0.68);
-                    background:
-                        linear-gradient(180deg, rgba(196, 181, 253, 0.05), rgba(196, 181, 253, 0)),
-                        rgba(10, 10, 14, 0.72) !important;
+                    background: rgba(8, 8, 10, 0.8) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.03),
                         0 12px 28px rgba(0, 0, 0, 0.18) !important;
@@ -1419,6 +1428,10 @@ class ModWebTheme:
                     border: 1px solid rgba(139, 92, 246, 0.52) !important;
                     box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
+                :is(.mod-list-button, .mod-toolbar-button, .mod-action, .mod-badge-link, .mod-badge-action):focus-visible {{
+                    outline: 2px solid var(--mod-accent) !important;
+                    outline-offset: 3px;
+                }}
                 .mod-list-button.state-enabled,
                 .mod-list-button.state-disabled,
                 .mod-list-button.state-core-on,
@@ -1514,12 +1527,9 @@ class ModWebTheme:
                 .mod-tab-toolbar-surface {{
                     padding: 0.68rem 0.78rem;
                     border: 1px solid rgba(82, 82, 91, 0.48);
-                    background:
-                        linear-gradient(180deg, rgba(196, 181, 253, 0.04), rgba(196, 181, 253, 0)),
-                        rgba(10, 10, 14, 0.78) !important;
+                    background: rgba(8, 8, 10, 0.9) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.03),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.08),
                         0 12px 28px rgba(0, 0, 0, 0.24) !important;
                 }}
                 .mod-config-select {{
@@ -1570,12 +1580,9 @@ class ModWebTheme:
                     padding: 0 0.42rem !important;
                     border: 1px solid rgba(82, 82, 91, 0.9) !important;
                     border-radius: 0 !important;
-                    background:
-                        linear-gradient(180deg, rgba(237, 233, 254, 0.06), rgba(237, 233, 254, 0)),
-                        rgba(17, 17, 24, 0.96) !important;
+                    background: rgba(12, 12, 15, 0.96) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                        inset 0 -1px 0 rgba(124, 58, 237, 0.16),
                         0 10px 24px rgba(0, 0, 0, 0.24) !important;
                     transition:
                         border-color 120ms ease,
@@ -1681,9 +1688,7 @@ class ModWebTheme:
                     gap: 0.55rem;
                     padding: 0.72rem 0.78rem;
                     border: 1px solid rgba(82, 82, 91, 0.62);
-                    background:
-                        linear-gradient(180deg, rgba(196, 181, 253, 0.06), rgba(196, 181, 253, 0)),
-                        rgba(9, 9, 13, 0.88);
+                    background: rgba(8, 8, 10, 0.92);
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.03),
                         0 12px 28px rgba(0, 0, 0, 0.24);
@@ -2074,12 +2079,10 @@ class ModWebTheme:
                     min-width: 15rem;
                 }}
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__control {{
-                    background:
-                        linear-gradient(180deg, rgba(196, 181, 253, 0.08), rgba(196, 181, 253, 0)),
-                        rgba(36, 17, 58, 0.72) !important;
+                    background: rgba(12, 12, 15, 0.96) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.3) !important;
+                        inset 0 -1px 0 rgba(255, 255, 255, 0.04) !important;
                 }}
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field--filled .q-field__control::before {{
                     border-bottom: 1px solid rgba(139, 92, 246, 0.34) !important;
@@ -3394,9 +3397,9 @@ class ModWebTheme:
                     filter: brightness(1.08);
                 }}
                 .mod-badge.black {{ background: #050507 !important; border-color: #52525b; }}
-                .mod-badge.purple {{ background: #24113a !important; border-color: #7c3aed; color: #ddd6fe !important; }}
+                .mod-badge.purple {{ background: var(--mod-purple-dark) !important; border-color: var(--mod-accent); color: #ddd6fe !important; }}
                 .mod-badge.red {{ background: #3a1117 !important; border-color: #dc2626; color: #fecaca !important; }}
-                .mod-badge.warn {{ background: #22161a !important; border-color: #7f1d1d; color: #fca5a5 !important; }}
+                .mod-badge.warn {{ background: var(--mod-warning-dark) !important; border-color: var(--mod-warning); color: var(--mod-warning-text) !important; }}
                 .mod-badge.grey {{ background: #18181f !important; border-color: #3f3f46; color: #d4d4d8 !important; }}
                 .mod-badge .mod-app-activity-alert {{
                     color: #f87171 !important;
@@ -3644,7 +3647,7 @@ class ModWebTheme:
                     border-color: rgba(220, 38, 38, 0.78) !important;
                 }}
                 .mod-home-node-card-warn {{
-                    border-color: rgba(127, 29, 29, 0.82) !important;
+                    border-color: var(--mod-warning) !important;
                 }}
                 .mod-home-node-card-grey {{
                     border-color: #3f3f46 !important;
@@ -3657,7 +3660,8 @@ class ModWebTheme:
                 .mod-home-node-card-actionable:focus-visible {{
                     background: rgba(20, 18, 30, 0.94) !important;
                     border-color: #a78bfa !important;
-                    outline: none !important;
+                    outline: 2px solid var(--mod-accent) !important;
+                    outline-offset: 3px;
                     transform: translateY(-1px);
                 }}
                 .mod-home-node-title {{
@@ -3706,7 +3710,7 @@ class ModWebTheme:
                 }}
                 .mod-home-node-metric-icon.mod-tone-warn,
                 .mod-home-node-running-icon.mod-tone-warn {{
-                    color: #fca5a5 !important;
+                    color: var(--mod-warning-text) !important;
                 }}
                 .mod-home-node-metric-icon.mod-tone-grey,
                 .mod-home-node-running-icon.mod-tone-grey {{
@@ -3929,10 +3933,8 @@ class ModWebTheme:
                 }}
                 .mod-system-schedule-row {{
                     padding: 1rem;
-                    border: 1px solid rgba(127, 29, 29, 0.46);
-                    background:
-                        linear-gradient(135deg, rgba(127, 29, 29, 0.09), transparent 54%),
-                        rgba(10, 10, 14, 0.52);
+                    border: 1px solid var(--mod-border);
+                    background: rgba(8, 8, 10, 0.72);
                 }}
                 .mod-system-schedule-row + .mod-system-schedule-row {{
                     margin-top: 0.25rem;
@@ -4479,12 +4481,9 @@ class ModWebTheme:
                     gap: 0.8rem;
                     padding: 0.95rem 1rem;
                     border: 1px solid rgba(82, 82, 91, 0.62);
-                    background:
-                        linear-gradient(180deg, rgba(196, 181, 253, 0.04), rgba(196, 181, 253, 0)),
-                        rgba(10, 10, 14, 0.78) !important;
+                    background: rgba(8, 8, 10, 0.9) !important;
                     box-shadow:
-                        inset 0 1px 0 rgba(255, 255, 255, 0.03),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.08);
+                        inset 0 1px 0 rgba(255, 255, 255, 0.03);
                 }}
                 .mod-app-details-subsection {{
                     width: 100%;
@@ -4528,12 +4527,9 @@ class ModWebTheme:
                     padding: 0 0.55rem !important;
                     border: 1px solid rgba(82, 82, 91, 0.82) !important;
                     border-radius: 0 !important;
-                    background:
-                        linear-gradient(180deg, rgba(139, 92, 246, 0.06), rgba(139, 92, 246, 0)),
-                        rgba(8, 8, 12, 0.94) !important;
+                    background: rgba(8, 8, 10, 0.96) !important;
                     box-shadow:
-                        inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.12);
+                        inset 0 1px 0 rgba(255, 255, 255, 0.04);
                 }}
                 .mod-app-details-field .q-field--filled .q-field__control::before {{
                     border-bottom: 0 !important;
@@ -5638,9 +5634,9 @@ class ModWebTheme:
                 }}
                 .mod-action {{
                     border-radius: 0 !important;
-                    background: #22113a !important;
+                    background: var(--mod-purple-dark) !important;
                     color: #fff !important;
-                    border: 1px solid rgba(139, 92, 246, 0.58);
+                    border: 1px solid var(--mod-accent);
                     text-decoration: none !important;
                     font-weight: 950;
                     letter-spacing: 0.02em;
@@ -5661,6 +5657,7 @@ class ModWebTheme:
                     box-shadow: none !important;
                 }}
                 .mod-action:hover {{ filter: brightness(1.14); transform: translateY(-1px); }}
+                .mod-toolbar-menu-mobile-only {{ display: none !important; }}
                 .mod-list-button:active,
                 .mod-action:active,
                 .mod-toolbar-button:active,
@@ -5767,7 +5764,7 @@ class ModWebTheme:
                     }}
                     .mod-mods-toolbar-actions {{
                         display: flex !important;
-                        flex-wrap: nowrap;
+                        flex-wrap: wrap;
                         width: 100%;
                         align-self: stretch;
                         margin-left: 0;
@@ -5788,13 +5785,18 @@ class ModWebTheme:
                         min-width: 2.5rem;
                     }}
                     .mod-mods-toolbar-actions .mod-toolbar-status-button {{
-                        flex: 0 0 auto;
-                        width: auto;
-                        min-width: 9.5rem;
+                        flex: 1 0 100%;
+                        width: 100%;
+                        min-width: 0;
+                        order: -1;
                     }}
                     .mod-mods-toolbar-actions .mod-list-button.danger {{
                         margin-left: 0;
                     }}
+                    .mod-mods-toolbar-actions .mod-toolbar-mobile-secondary {{
+                        display: none !important;
+                    }}
+                    .mod-toolbar-menu-mobile-only {{ display: flex !important; }}
                     .mod-config-select,
                     .mod-config-search {{ flex-basis: 100%; min-width: 0; }}
                     .mod-app-details-dialog-card {{ width: calc(100vw - 1rem) !important; }}
@@ -5989,11 +5991,11 @@ class ModWebTheme:
 DEFAULT_MOD_WEB_THEME = ModWebTheme(
     name="void_square",
     palette=ModWebPalette(
-        background="#050507",
-        card="#09090d",
-        card_raised="#101015",
-        border="#2a202d",
-        border_hot="#6d243f",
+        background="#000000",
+        card="#08080a",
+        card_raised="#101014",
+        border="#27272a",
+        border_hot="#3f3f46",
         text="#f4f4f5",
         muted="#a1a1aa",
         dim="#71717a",
@@ -6003,10 +6005,11 @@ DEFAULT_MOD_WEB_THEME = ModWebTheme(
         red_dark="#5f111b",
         warning="#f59e0b",
         warning_dark="#3a230b",
-        panel="rgba(10, 10, 14, 0.94)",
+        warning_text="#fde68a",
+        panel="rgba(0, 0, 0, 0.96)",
         nicegui=NiceGuiPalette(
-            primary="#7c1d57",
-            secondary="#b91c1c",
+            primary="#8b5cf6",
+            secondary="#52525b",
             accent="#8b5cf6",
             positive="#6b7280",
             negative="#dc2626",

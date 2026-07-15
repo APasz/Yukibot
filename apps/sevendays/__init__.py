@@ -11,6 +11,7 @@ import zipfile
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from urllib.parse import quote, unquote, urlsplit
@@ -82,9 +83,11 @@ type SevenDaysRuntimeLogSignature = tuple[int, int, int, int]
 
 @dataclass(frozen=True, slots=True)
 class SevenDaysSaveArchiveInspection:
-    content_prefix: tuple[str, ...]
+    content_prefix: tuple[str, ...] | None
     game_world: str | None
     game_name: str | None
+    generated_world_prefix: tuple[str, ...] | None
+    generated_world: str | None
     file_count: int
 
     @property
@@ -94,6 +97,36 @@ class SevenDaysSaveArchiveInspection:
     @property
     def missing_game_name(self) -> bool:
         return self.game_name is None
+
+    @property
+    def includes_generated_world(self) -> bool:
+        return self.generated_world_prefix is not None
+
+    @property
+    def includes_save(self) -> bool:
+        return self.content_prefix is not None
+
+
+@dataclass(frozen=True, slots=True)
+class SevenDaysWorldSelection:
+    game_world: str | None
+    game_name: str | None
+
+    @property
+    def requires_fresh_save_name(self) -> bool:
+        return self.game_name is None
+
+
+class SevenDaysUploadKind(StrEnum):
+    WORLD = "world"
+    SAVE = "save"
+
+
+@dataclass(frozen=True, slots=True)
+class SevenDaysUploadTarget:
+    kind: SevenDaysUploadKind
+    root: AppSaveRoot
+    save_root: AppSaveRoot | None = None
 
 _SEVENDAYS_NEXUSMODS_GAME_DOMAIN = "7daystodie"
 _SEVENDAYS_VERSION_RE = re.compile(
@@ -105,8 +138,12 @@ _SEVENDAYS_GAME_VERSION_RE = re.compile(
     re.IGNORECASE,
 )
 _SEVENDAYS_NEW_SAVE_ROOT_PREFIX = "new-save:"
+_SEVENDAYS_NEW_WORLD_ROOT_PREFIX = "new-world:"
 _SEVENDAYS_GAME_WORLD_SETTING_KEY = "GameWorld"
 _SEVENDAYS_GAME_NAME_SETTING_KEY = "GameName"
+_SEVENDAYS_NEW_RWG_WORLD_SELECTION = "new-rwg"
+_SEVENDAYS_EXISTING_SAVE_SELECTION_PREFIX = "save:"
+_SEVENDAYS_GENERATED_WORLD_SELECTION_PREFIX = "world:"
 _SEVENDAYS_SAVE_ROOT_FILE_MARKERS: frozenset[str] = frozenset(
     {
         "blocklimits.dat",
@@ -129,6 +166,12 @@ _SEVENDAYS_SAVE_ROOT_DIRECTORY_MARKERS: frozenset[str] = frozenset(
         "dynamicmeshes",
         "player",
         "region",
+    }
+)
+_SEVENDAYS_GENERATED_WORLD_FILE_MARKERS: frozenset[str] = frozenset(
+    {
+        "generationinfo.txt",
+        "map_info.xml",
     }
 )
 _SEVENDAYS_VERSION_BUILD_RE = re.compile(
@@ -563,6 +606,49 @@ def _normalise_sevendays_save_segment(raw_value: str, *, label: str) -> str:
     return value
 
 
+def _is_valid_sevendays_save_segment(raw_value: str) -> bool:
+    try:
+        _normalise_sevendays_save_segment(raw_value, label="Save name")
+    except ValueError:
+        return False
+    return True
+
+
+def _sevendays_existing_save_selection(*, game_world: str, game_name: str) -> str:
+    normalised_world = _normalise_sevendays_save_segment(game_world, label="Game world")
+    normalised_name = _normalise_sevendays_save_segment(game_name, label="Save name")
+    return (
+        f"{_SEVENDAYS_EXISTING_SAVE_SELECTION_PREFIX}"
+        f"{quote(normalised_world, safe='')}/{quote(normalised_name, safe='')}"
+    )
+
+
+def _sevendays_fresh_generated_world_selection(*, game_world: str) -> str:
+    normalised_world = _normalise_sevendays_save_segment(game_world, label="Game world")
+    return f"{_SEVENDAYS_GENERATED_WORLD_SELECTION_PREFIX}{quote(normalised_world, safe='')}"
+
+
+def _sevendays_save_target_from_selection(selection: str) -> SevenDaysWorldSelection:
+    if selection == _SEVENDAYS_NEW_RWG_WORLD_SELECTION:
+        return SevenDaysWorldSelection(game_world=None, game_name=None)
+    encoded_world = selection.removeprefix(_SEVENDAYS_GENERATED_WORLD_SELECTION_PREFIX)
+    if encoded_world != selection:
+        return SevenDaysWorldSelection(
+            game_world=_normalise_sevendays_save_segment(unquote(encoded_world), label="Game world"),
+            game_name=None,
+        )
+    encoded_target = selection.removeprefix(_SEVENDAYS_EXISTING_SAVE_SELECTION_PREFIX)
+    if encoded_target == selection:
+        raise ValueError("7 Days to Die world save selection is invalid.")
+    encoded_world, separator, encoded_name = encoded_target.partition("/")
+    if not separator:
+        raise ValueError("7 Days to Die world save selection is invalid.")
+    return SevenDaysWorldSelection(
+        game_world=_normalise_sevendays_save_segment(unquote(encoded_world), label="Game world"),
+        game_name=_normalise_sevendays_save_segment(unquote(encoded_name), label="Save name"),
+    )
+
+
 def inspect_sevendays_save_archive(archive_path: Path) -> SevenDaysSaveArchiveInspection:
     entries = _sevendays_save_archive_entries(archive_path)
     file_paths = [path for member, path in entries if not member.is_dir()]
@@ -570,50 +656,93 @@ def inspect_sevendays_save_archive(archive_path: Path) -> SevenDaysSaveArchiveIn
         raise ValueError("7 Days to Die save archive does not contain any files.")
 
     marker_prefixes: set[tuple[str, ...]] = set()
+    generated_world_prefixes: set[tuple[str, ...]] = set()
     for path in file_paths:
         marker_prefix = _sevendays_save_marker_prefix(path)
         if marker_prefix is not None:
             marker_prefixes.add(marker_prefix)
-    if not marker_prefixes:
-        raise ValueError("7 Days to Die save archive does not contain recognizable save files.")
+        generated_world_prefix = _sevendays_generated_world_prefix(path)
+        if generated_world_prefix is not None:
+            generated_world_prefixes.add(generated_world_prefix)
+    # Generated worlds also contain region files, which look like save markers.
+    # A marker rooted at the generated-world directory is terrain, not a save.
+    marker_prefixes.difference_update(generated_world_prefixes)
     if len(marker_prefixes) > 1:
         labels = ", ".join(sorted(PurePosixPath(*prefix).as_posix() or "." for prefix in marker_prefixes))
         raise ValueError(f"7 Days to Die save archive contains multiple save roots: {labels}")
+    if len(generated_world_prefixes) > 1:
+        labels = ", ".join(
+            sorted(PurePosixPath(*prefix).as_posix() for prefix in generated_world_prefixes)
+        )
+        raise ValueError(f"7 Days to Die save archive contains multiple generated worlds: {labels}")
+    if not marker_prefixes and not generated_world_prefixes:
+        raise ValueError("7 Days to Die save archive does not contain recognizable save or generated-world files.")
 
-    content_prefix = next(iter(marker_prefixes))
+    content_prefix = next(iter(marker_prefixes), None)
+    generated_world_prefix = next(iter(generated_world_prefixes), None)
+    allowed_prefixes = tuple(
+        prefix for prefix in (content_prefix, generated_world_prefix) if prefix is not None
+    )
     for path in file_paths:
         if _sevendays_archive_path_is_ignorable(path):
             continue
-        if path.parts[: len(content_prefix)] != content_prefix:
+        if not any(path.parts[: len(prefix)] == prefix for prefix in allowed_prefixes):
             raise ValueError(f"7 Days to Die save archive contains files outside the save root: {path.as_posix()}")
 
-    game_world: str | None = None
-    game_name: str | None = None
-    if len(content_prefix) >= 2:
-        game_world = content_prefix[-2]
-        game_name = content_prefix[-1]
-    elif len(content_prefix) == 1:
-        game_name = content_prefix[0]
+    game_world, game_name = _sevendays_archive_save_target(content_prefix) if content_prefix is not None else (None, None)
+    generated_world = generated_world_prefix[-1] if generated_world_prefix is not None else None
+    if game_world is not None and generated_world is not None and game_world != generated_world:
+        raise ValueError(
+            "7 Days to Die save archive has different save and generated-world names: "
+            f"{game_world!r} and {generated_world!r}."
+        )
     return SevenDaysSaveArchiveInspection(
         content_prefix=content_prefix,
-        game_world=game_world,
+        game_world=game_world or generated_world,
         game_name=game_name,
+        generated_world_prefix=generated_world_prefix,
+        generated_world=generated_world,
         file_count=len(file_paths),
     )
 
 
-def extract_sevendays_save_archive(*, archive_path: Path, destination: Path) -> SevenDaysSaveArchiveInspection:
-    inspection = inspect_sevendays_save_archive(archive_path)
+def extract_sevendays_save_archive(
+    *,
+    archive_path: Path,
+    destination: Path | None = None,
+    generated_world_destination: Path | None = None,
+    inspection: SevenDaysSaveArchiveInspection | None = None,
+) -> SevenDaysSaveArchiveInspection:
+    inspection = inspection or inspect_sevendays_save_archive(archive_path)
+    if inspection.content_prefix is not None and destination is None:
+        raise ValueError("7 Days to Die save archive requires a save destination.")
+    if inspection.generated_world_prefix is not None and generated_world_destination is None:
+        raise ValueError("7 Days to Die world archive requires a generated-world destination.")
     entries = _sevendays_save_archive_entries(archive_path)
-    destination.mkdir(parents=True, exist_ok=True)
+    if destination is not None:
+        destination.mkdir(parents=True, exist_ok=True)
+    if generated_world_destination is not None:
+        generated_world_destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive_path, "r") as archive:
         for member, path in entries:
             if _sevendays_archive_path_is_ignorable(path):
                 continue
-            relative_path = _strip_sevendays_archive_content_prefix(path, inspection.content_prefix)
+            extraction_destination = destination
+            content_prefix = inspection.content_prefix
+            if (
+                inspection.generated_world_prefix is not None
+                and path.parts[: len(inspection.generated_world_prefix)] == inspection.generated_world_prefix
+            ):
+                if generated_world_destination is None:
+                    raise RuntimeError("Generated-world destination unexpectedly missing.")
+                extraction_destination = generated_world_destination
+                content_prefix = inspection.generated_world_prefix
+            if extraction_destination is None or content_prefix is None:
+                raise RuntimeError("Save destination unexpectedly missing.")
+            relative_path = _strip_sevendays_archive_content_prefix(path, content_prefix)
             if relative_path is None:
                 continue
-            target = destination.joinpath(*relative_path.parts)
+            target = extraction_destination.joinpath(*relative_path.parts)
             if member.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
@@ -650,6 +779,32 @@ def _sevendays_save_marker_prefix(path: PurePosixPath) -> tuple[str, ...] | None
         if part.casefold() in _SEVENDAYS_SAVE_ROOT_DIRECTORY_MARKERS:
             return parts[:index]
     return None
+
+
+def _sevendays_generated_world_prefix(path: PurePosixPath) -> tuple[str, ...] | None:
+    if path.parts[-1].casefold() not in _SEVENDAYS_GENERATED_WORLD_FILE_MARKERS:
+        return None
+    for index, part in enumerate(path.parts[:-1]):
+        if part.casefold() == "generatedworlds":
+            if index + 1 < len(path.parts) - 1:
+                return path.parts[: index + 2]
+            return None
+        if part.casefold() == "saves":
+            return None
+    if len(path.parts) >= 2:
+        return path.parts[:-1]
+    return None
+
+
+def _sevendays_archive_save_target(content_prefix: tuple[str, ...]) -> tuple[str | None, str | None]:
+    for index, part in enumerate(content_prefix[:-2]):
+        if part.casefold() == "saves":
+            return (content_prefix[index + 1], content_prefix[index + 2])
+    if len(content_prefix) >= 2:
+        return (content_prefix[-2], content_prefix[-1])
+    if len(content_prefix) == 1:
+        return (None, content_prefix[0])
+    return (None, None)
 
 
 def _sevendays_archive_path_is_ignorable(path: PurePosixPath) -> bool:
@@ -1504,13 +1659,13 @@ class SevenDays_Settings(App_Settings):
                 desc="Minutes after logout before offline land-claim durability applies.",
             ),
             Setting[str](
-                StringSettingSpec(allow_blank=True),
-                "Game World",
+                StringSettingSpec(),
+                "Active World Save",
                 "GameWorld",
                 [],
-                default="Navezgane",
+                default=_sevendays_existing_save_selection(game_world="Navezgane", game_name="MyGame"),
                 power_level=Power_Level.sudo,
-                desc="Use `RWG` for a generated world or enter an existing world name.",
+                desc="Choose an existing world/save pair, or choose Generate Fresh Random World below.",
             ),
             Setting[str](
                 StringSettingSpec(allow_blank=True),
@@ -1519,7 +1674,7 @@ class SevenDays_Settings(App_Settings):
                 [],
                 default="MyGame",
                 power_level=Power_Level.sudo,
-                desc="Seed used when `GameWorld` is `RWG`. Existing generated worlds are reused.",
+                desc="Seed used only when generating a fresh random world.",
             ),
             Setting[int](
                 IntSettingSpec(_WORLD_GEN_SIZE_CHOICES),
@@ -1531,12 +1686,13 @@ class SevenDays_Settings(App_Settings):
                 desc="Supported RWG world size preset.",
             ),
             Setting[str](
-                StringSettingSpec(allow_blank=True),
-                "Game Name",
+                StringSettingSpec(raw_validator=_is_valid_sevendays_save_segment),
+                "Fresh Save Name",
                 "GameName",
                 [],
                 default="MyGame",
-                desc="Save name and decoration seed. It does not change the overall RWG layout.",
+                power_level=Power_Level.sudo,
+                desc="Used only with Generate Fresh Random World. Existing world/save selections set this automatically.",
             ),
             *[
                 Setting[str](
@@ -1829,55 +1985,73 @@ class SevenDays_Settings(App_Settings):
         self._refresh_save_setting_choices()
         return super().options
 
-    def _refresh_save_setting_choices(self) -> None:
+    def _refresh_save_setting_choices(self, *, current_target: tuple[str, str] | None = None) -> None:
         world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
-        name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
         save_targets = self._discovered_save_targets()
-        self._set_non_strict_string_choices(
-            world_setting,
-            self._unique_save_setting_choices(
-                *(world for world, _name in save_targets),
-                self._setting_text_value(world_setting),
+        if current_target is None:
+            current_target = self._current_save_target()
+        selection_targets = self._unique_save_targets(*save_targets, current_target)
+        choices = [
+            ChoiceOption(_SEVENDAYS_NEW_RWG_WORLD_SELECTION, "Generate Fresh Random World"),
+            *(
+                ChoiceOption(
+                    _sevendays_fresh_generated_world_selection(game_world=game_world),
+                    f"{game_world} / Fresh Characters",
+                )
+                for game_world in self._discovered_generated_world_names()
             ),
-        )
-        self._set_non_strict_string_choices(
-            name_setting,
-            self._unique_save_setting_choices(
-                *(name for _world, name in save_targets),
-                self._setting_text_value(name_setting),
+            *(
+                ChoiceOption(
+                    _sevendays_existing_save_selection(game_world=game_world, game_name=game_name),
+                    f"{game_world} / {game_name}",
+                )
+                for game_world, game_name in selection_targets
             ),
-        )
+        ]
+        if not isinstance(world_setting.spec, StringSettingSpec):
+            raise TypeError(f"7D2D world save setting {world_setting.key!r} must be a string setting.")
+        world_setting.spec.choice_spec = ChoiceSpec(*choices)
 
     @staticmethod
-    def _setting_text_value(setting: Setting[Any]) -> str | None:
-        if not isinstance(setting.value, str):
-            return None
-        return setting.value.strip() or None
-
-    @staticmethod
-    def _unique_save_setting_choices(*values: str | None) -> tuple[str, ...]:
-        choices: list[str] = []
+    def _unique_save_targets(*values: tuple[str, str] | None) -> tuple[tuple[str, str], ...]:
+        choices: list[tuple[str, str]] = []
         seen: set[str] = set()
         for value in values:
             if value is None:
                 continue
-            choice = value.strip()
-            key = choice.casefold()
-            if not choice or key in seen:
+            game_world, game_name = value
+            try:
+                choice = (
+                    _normalise_sevendays_save_segment(game_world, label="Game world"),
+                    _normalise_sevendays_save_segment(game_name, label="Save name"),
+                )
+            except ValueError:
+                continue
+            key = f"{choice[0].casefold()}\x00{choice[1].casefold()}"
+            if key in seen:
                 continue
             choices.append(choice)
             seen.add(key)
         return tuple(choices)
 
-    @staticmethod
-    def _set_non_strict_string_choices(setting: Setting[Any], choices: tuple[str, ...]) -> None:
-        if not isinstance(setting.spec, StringSettingSpec):
-            raise TypeError(f"7D2D save setting {setting.key!r} must be a string setting.")
-        setting.spec.choice_spec = (
-            ChoiceSpec(*(ChoiceOption(choice) for choice in choices), strict=False)
-            if choices
-            else None
-        )
+    def _current_save_target(self) -> tuple[str, str] | None:
+        world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
+        name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
+        if not isinstance(world_setting.value, str) or not isinstance(name_setting.value, str):
+            return None
+        try:
+            selection = _sevendays_save_target_from_selection(world_setting.value)
+            if selection.game_world is None or selection.game_name is None:
+                return None
+            return (selection.game_world, selection.game_name)
+        except ValueError:
+            try:
+                return (
+                    _normalise_sevendays_save_segment(world_setting.value, label="Game world"),
+                    _normalise_sevendays_save_segment(name_setting.value, label="Save name"),
+                )
+            except ValueError:
+                return None
 
     def _settings_userdata_root_path(self) -> Path | None:
         raw_value = _read_serverconfig_value(self.pointer, "UserDataFolder")
@@ -1907,6 +2081,21 @@ class SevenDays_Settings(App_Settings):
             )
             save_targets.extend((world_directory.name, save_directory.name) for save_directory in save_directories)
         return tuple(save_targets)
+
+    def _discovered_generated_world_names(self) -> tuple[str, ...]:
+        userdata_root = self._settings_userdata_root_path()
+        if userdata_root is None:
+            return ()
+        generated_worlds_root = userdata_root / "GeneratedWorlds"
+        if not generated_worlds_root.is_dir():
+            return ()
+        return tuple(
+            path.name
+            for path in sorted(
+                (path for path in generated_worlds_root.iterdir() if path.is_dir() and not path.name.startswith(".")),
+                key=lambda path: path.name.casefold(),
+            )
+        )
 
     def _rwgmixer_tree(self) -> ET.ElementTree[ET.Element[str]]:
         if not self.rwgmixer_pointer.exists():
@@ -1967,6 +2156,23 @@ class SevenDays_Settings(App_Settings):
         value: object,
         drafts: dict[str, DraftSettingValue],
     ) -> None:
+        if setting.key == _SEVENDAYS_GAME_WORLD_SETTING_KEY:
+            if not isinstance(value, str):
+                raise TypeError("7D2D world save selection must be a string.")
+            selected_target = _sevendays_save_target_from_selection(value)
+            super().apply_draft_update(setting=setting, value=value, drafts=drafts)
+            name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
+            if selected_target.game_name is not None:
+                super().apply_draft_update(setting=name_setting, value=selected_target.game_name, drafts=drafts)
+            return
+        if setting.key == _SEVENDAYS_GAME_NAME_SETTING_KEY:
+            world_selection = self._effective_setting_value(_SEVENDAYS_GAME_WORLD_SETTING_KEY, drafts)
+            if not isinstance(world_selection, str):
+                raise TypeError("7D2D world save selection must be a string.")
+            if not _sevendays_save_target_from_selection(world_selection).requires_fresh_save_name:
+                raise ValueError("Choose a fresh-world option before changing the fresh save name.")
+            super().apply_draft_update(setting=setting, value=value, drafts=drafts)
+            return
         if setting.key not in _TRADER_BIOME_KEYS:
             super().apply_draft_update(setting=setting, value=value, drafts=drafts)
             return
@@ -1997,10 +2203,21 @@ class SevenDays_Settings(App_Settings):
         if not isinstance(data, list):
             raise ValueError(f"config must be list not `{type(data)}`")
 
+        stored_world: str | None = None
+        stored_name: str | None = None
         for element in data:
+            property_name = element.attrib.get("name")
+            raw_value = element.attrib.get("value")
+            if property_name == _SEVENDAYS_GAME_WORLD_SETTING_KEY:
+                stored_world = raw_value
+                continue
+            if property_name == _SEVENDAYS_GAME_NAME_SETTING_KEY:
+                stored_name = raw_value
+                continue
             for opt in self.options:
-                if element.attrib.get("name") == opt.key:
-                    raw_value = element.attrib["value"]
+                if property_name == opt.key:
+                    if raw_value is None:
+                        raise ValueError(f"7D2D setting {opt.key!r} is missing its value.")
                     try:
                         opt.load_value(raw_value)
                     except ValueError:
@@ -2013,6 +2230,24 @@ class SevenDays_Settings(App_Settings):
                             opt.label,
                             opt.serialise_value(),
                         )
+
+        world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
+        name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
+        game_world = _normalise_sevendays_save_segment(stored_world or "Navezgane", label="Game world")
+        game_name = _normalise_sevendays_save_segment(stored_name or "MyGame", label="Save name")
+        name_setting.load_value(game_name)
+        configured_target = (game_world, game_name)
+        saved_targets = self._discovered_save_targets()
+        if configured_target in saved_targets:
+            selection = _sevendays_existing_save_selection(game_world=game_world, game_name=game_name)
+        elif game_world == "RWG":
+            selection = _SEVENDAYS_NEW_RWG_WORLD_SELECTION
+        elif game_world in self._discovered_generated_world_names():
+            selection = _sevendays_fresh_generated_world_selection(game_world=game_world)
+        else:
+            selection = _sevendays_existing_save_selection(game_world=game_world, game_name=game_name)
+        self._refresh_save_setting_choices(current_target=configured_target)
+        world_setting.load_value(selection)
 
         rwg_root = self._rwgmixer_tree().getroot()
         adjustments = self._find_trader_adjustments(rwg_root)
@@ -2030,6 +2265,26 @@ class SevenDays_Settings(App_Settings):
         self._validate_trader_biome_assignments()
         _ensure_serverconfig_userdata_redirect(self.pointer)
 
+        world_setting = self._setting_for_key(_SEVENDAYS_GAME_WORLD_SETTING_KEY)
+        name_setting = self._setting_for_key(_SEVENDAYS_GAME_NAME_SETTING_KEY)
+        if not isinstance(world_setting.value, str) or not isinstance(name_setting.value, str):
+            raise TypeError("7D2D world save settings must be strings.")
+        selected_target = _sevendays_save_target_from_selection(world_setting.value)
+        if selected_target.game_world is None:
+            game_world = "RWG"
+            game_name = _normalise_sevendays_save_segment(name_setting.value, label="New save name")
+        elif selected_target.game_name is None:
+            game_world = selected_target.game_world
+            game_name = _normalise_sevendays_save_segment(name_setting.value, label="Fresh save name")
+        else:
+            game_world = selected_target.game_world
+            game_name = selected_target.game_name
+            name_setting.value = game_name
+        server_world_values = {
+            _SEVENDAYS_GAME_WORLD_SETTING_KEY: game_world,
+            _SEVENDAYS_GAME_NAME_SETTING_KEY: game_name,
+        }
+
         tree = ET.parse(self.pointer)
         root = tree.getroot()
         data = root.findall("property")
@@ -2039,7 +2294,7 @@ class SevenDays_Settings(App_Settings):
         for element in data:
             for opt in self.options:
                 if element.attrib.get("name") == opt.key:
-                    element.attrib["value"] = opt.serialise_value()
+                    element.attrib["value"] = server_world_values.get(opt.key, opt.serialise_value())
 
         tree.write(self.pointer, encoding=config.STR_ENCODE)
 
@@ -2138,6 +2393,15 @@ class SevenDays(App[App_Config]):
             root = self._save_root_for_path(saves_root=saves_root, save_path=configured_save_path)
             roots_by_path[root.path] = root
 
+        generated_worlds_root = self._generated_worlds_container_path()
+        if generated_worlds_root is not None:
+            for generated_world_path in self._discovered_generated_world_directory_paths():
+                root = self._generated_world_root_for_path(
+                    generated_worlds_root=generated_worlds_root,
+                    generated_world_path=generated_world_path,
+                )
+                roots_by_path[root.path] = root
+
         return tuple(sorted(roots_by_path.values(), key=self._save_root_sort_key))
 
     @property
@@ -2151,20 +2415,95 @@ class SevenDays(App[App_Config]):
     def upload_save_file(self, *, root_id: str, upload_name: str, source_path: Path) -> AppSaveEntry:
         if self.check_running():
             raise ValueError("Stop the server before uploading 7 Days to Die saves.")
-        root, is_new_save = self._save_upload_target(root_id)
-        if is_new_save and root.resolved_path.exists():
-            raise FileExistsError(f"7 Days to Die save already exists: {root.label} / {root.path.name}")
+        serverconfig_path = self.directory / "serverconfig.xml"
+        if _read_serverconfig_value(serverconfig_path, "UserDataFolder") is None:
+            _ensure_serverconfig_userdata_redirect(serverconfig_path)
+        target = self._save_upload_target(root_id)
+        root = target.root
         if Path(upload_name).suffix.casefold() != ".zip":
             raise ValueError("7 Days to Die save uploads must be .zip archives.")
-        destination = root.resolved_path
-        temp_parent = destination.parent
+        inspection = inspect_sevendays_save_archive(source_path)
+        if target.kind is SevenDaysUploadKind.WORLD:
+            if not inspection.includes_generated_world:
+                raise ValueError("World uploads must contain generated-world files.")
+            if inspection.includes_save and target.save_root is None:
+                raise ValueError("World-and-save uploads require a save name.")
+        elif inspection.includes_generated_world or not inspection.includes_save:
+            raise ValueError("Save uploads must contain save files only, without a generated world.")
+        if target.kind is SevenDaysUploadKind.SAVE and inspection.game_world not in {None, root.label}:
+            raise ValueError(
+                "Save world name does not match the selected world: "
+                f"{inspection.game_world!r} and {root.label!r}."
+            )
+        save_root = target.save_root or (root if target.kind is SevenDaysUploadKind.SAVE else None)
+        destination = save_root.resolved_path if save_root is not None else None
+        if destination is not None and destination.exists():
+            if save_root is None:
+                raise RuntimeError("Save upload target unexpectedly missing.")
+            raise FileExistsError(f"7 Days to Die save already exists: {save_root.label} / {save_root.path.name}")
+        generated_world_destination: Path | None = None
+        if inspection.generated_world is not None:
+            target_world_name = root.path.name if target.kind is SevenDaysUploadKind.WORLD else root.label
+            if inspection.generated_world != target_world_name:
+                raise ValueError(
+                    "Generated world name does not match the selected save world: "
+                    f"{inspection.generated_world!r} and {target_world_name!r}."
+                )
+            generated_world_destination = self._generated_world_directory_path(target_world_name)
+            if generated_world_destination.exists():
+                raise FileExistsError(f"7 Days to Die generated world already exists: {root.label}")
+        temp_parent = (destination or root.resolved_path).parent
         temp_parent.mkdir(parents=True, exist_ok=True)
+        if generated_world_destination is not None:
+            generated_world_destination.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=temp_parent) as temp_dir:
-            extracted_path = Path(temp_dir) / destination.name
-            extract_sevendays_save_archive(archive_path=source_path, destination=extracted_path)
-            File_Utils.remove(destination, silent=True, resolve=False)
-            File_Utils.move(extracted_path, destination, overwrite=False)
-        return describe_app_save_path(root=root, path=destination, relative_path=destination.name)
+            extracted_path = Path(temp_dir) / destination.name if inspection.includes_save and destination is not None else None
+            extracted_generated_world_path = Path(temp_dir) / "GeneratedWorld"
+            extract_sevendays_save_archive(
+                archive_path=source_path,
+                destination=extracted_path,
+                generated_world_destination=(
+                    extracted_generated_world_path if generated_world_destination is not None else None
+                ),
+                inspection=inspection,
+            )
+            if extracted_path is not None and destination is not None:
+                File_Utils.remove(destination, silent=True, resolve=False)
+                File_Utils.move(extracted_path, destination, overwrite=False)
+            if generated_world_destination is not None:
+                File_Utils.remove(generated_world_destination, silent=True, resolve=False)
+                File_Utils.move(extracted_generated_world_path, generated_world_destination, overwrite=False)
+        if not inspection.includes_save:
+            if generated_world_destination is None:
+                raise RuntimeError("Generated-world upload did not provide a generated world.")
+            return describe_app_save_path(
+                root=root,
+                path=generated_world_destination,
+                relative_path=generated_world_destination.name,
+            )
+        if save_root is None or destination is None:
+            raise RuntimeError("World-and-save upload did not provide a save target.")
+        return describe_app_save_path(root=save_root, path=destination, relative_path=destination.name)
+
+    async def download_save_archive(self, file_id: str) -> tuple[str, Path] | None:
+        save_path = self.resolve_save_file(file_id)
+        root_id, _separator, _relative_path = file_id.partition("/")
+        save_root = get_app_save_root(self.save_file_roots, root_id)
+        if save_root.id.startswith("world-"):
+            return None
+        generated_world_path = self._generated_world_directory_path(save_root.label)
+        if not generated_world_path.is_dir():
+            return None
+        userdata_root = self._userdata_root_path()
+        if userdata_root is None:
+            raise ValueError("7 Days to Die save download requires a configured UserDataFolder.")
+        archive_name = f"{self.name}_{save_root.label}_{save_path.name}.zip"
+        archive_path = await File_Utils.compress(
+            (save_path, generated_world_path),
+            archive_name,
+            arc_base=userdata_root,
+        )
+        return (archive_path.name, archive_path)
 
     @staticmethod
     def new_save_upload_root_id(*, game_world: str, game_name: str) -> str:
@@ -2175,10 +2514,49 @@ class SevenDays(App[App_Config]):
             f"{quote(normalised_world, safe='')}/{quote(normalised_name, safe='')}"
         )
 
-    def _save_upload_target(self, root_id: str) -> tuple[AppSaveRoot, bool]:
+    @staticmethod
+    def new_world_upload_root_id(*, game_world: str, game_name: str | None = None) -> str:
+        normalised_world = _normalise_sevendays_save_segment(game_world, label="Game world")
+        if game_name is None:
+            return f"{_SEVENDAYS_NEW_WORLD_ROOT_PREFIX}{quote(normalised_world, safe='')}"
+        normalised_name = _normalise_sevendays_save_segment(game_name, label="Save name")
+        return (
+            f"{_SEVENDAYS_NEW_WORLD_ROOT_PREFIX}"
+            f"{quote(normalised_world, safe='')}/{quote(normalised_name, safe='')}"
+        )
+
+    def _save_upload_target(self, root_id: str) -> SevenDaysUploadTarget:
         if root_id.startswith(_SEVENDAYS_NEW_SAVE_ROOT_PREFIX):
-            return self._new_save_upload_target(root_id), True
-        return get_app_save_root(self.save_file_roots, root_id), False
+            return SevenDaysUploadTarget(SevenDaysUploadKind.SAVE, self._new_save_upload_target(root_id))
+        if root_id.startswith(_SEVENDAYS_NEW_WORLD_ROOT_PREFIX):
+            return self._new_world_upload_target(root_id)
+        raise ValueError("7 Days to Die uploads must import a new world or save; delete an old one first.")
+
+    def _new_world_upload_target(self, root_id: str) -> SevenDaysUploadTarget:
+        generated_worlds_root = self._generated_worlds_container_path()
+        if generated_worlds_root is None:
+            raise ValueError("7 Days to Die world uploads require a configured UserDataFolder.")
+        encoded_target = root_id.removeprefix(_SEVENDAYS_NEW_WORLD_ROOT_PREFIX)
+        encoded_world, separator, encoded_name = encoded_target.partition("/")
+        game_world = _normalise_sevendays_save_segment(
+            unquote(encoded_world),
+            label="Game world",
+        )
+        world_root = self._generated_world_root_for_path(
+            generated_worlds_root=generated_worlds_root,
+            generated_world_path=generated_worlds_root / game_world,
+        )
+        if not separator:
+            return SevenDaysUploadTarget(SevenDaysUploadKind.WORLD, world_root)
+        game_name = _normalise_sevendays_save_segment(unquote(encoded_name), label="Save name")
+        saves_root = self._save_container_path()
+        if saves_root is None:
+            raise ValueError("7 Days to Die save uploads require a configured UserDataFolder.")
+        return SevenDaysUploadTarget(
+            SevenDaysUploadKind.WORLD,
+            world_root,
+            self._save_root_for_path(saves_root=saves_root, save_path=saves_root / game_world / game_name),
+        )
 
     def _new_save_upload_target(self, root_id: str) -> AppSaveRoot:
         saves_root = self._save_container_path()
@@ -2200,7 +2578,21 @@ class SevenDays(App[App_Config]):
         except StopIteration as xcp:
             raise FileNotFoundError(f"Unknown save file: {file_id}") from xcp
         save_path = self.resolve_save_file(file_id)
+        root_id, _separator, _relative_path = file_id.partition("/")
+        root = get_app_save_root(self.save_file_roots, root_id)
+        if root.id.startswith("world-"):
+            saves_root = self._save_container_path()
+            associated_saves = saves_root / save_path.name if saves_root is not None else None
+            if associated_saves is not None and associated_saves.is_dir() and any(associated_saves.iterdir()):
+                raise ValueError(
+                    f"Delete the saves for generated world {save_path.name!r} before deleting its terrain."
+                )
         File_Utils.remove(save_path, silent=False, resolve=False)
+        if root.id.startswith("save-"):
+            try:
+                save_path.parent.rmdir()
+            except OSError:
+                pass
         return current_save
 
     def _save_directory_path(self) -> Path | None:
@@ -2219,6 +2611,19 @@ class SevenDays(App[App_Config]):
             return None
         return userdata_root / "Saves"
 
+    def _generated_worlds_container_path(self) -> Path | None:
+        userdata_root = self._userdata_root_path()
+        if userdata_root is None:
+            return None
+        return userdata_root / "GeneratedWorlds"
+
+    def _generated_world_directory_path(self, game_world: str) -> Path:
+        world_name = _normalise_sevendays_save_segment(game_world, label="Game world")
+        generated_worlds_root = self._generated_worlds_container_path()
+        if generated_worlds_root is None:
+            raise ValueError("7 Days to Die generated worlds require a configured UserDataFolder.")
+        return generated_worlds_root / world_name
+
     def _discovered_save_directory_paths(self) -> tuple[Path, ...]:
         saves_root = self._save_container_path()
         if saves_root is None or not saves_root.is_dir():
@@ -2236,6 +2641,17 @@ class SevenDays(App[App_Config]):
             discovered.extend(save_directories)
         return tuple(discovered)
 
+    def _discovered_generated_world_directory_paths(self) -> tuple[Path, ...]:
+        generated_worlds_root = self._generated_worlds_container_path()
+        if generated_worlds_root is None or not generated_worlds_root.is_dir():
+            return ()
+        return tuple(
+            sorted(
+                (path for path in generated_worlds_root.iterdir() if path.is_dir() and not path.name.startswith(".")),
+                key=lambda path: path.name.casefold(),
+            )
+        )
+
     def _save_root_for_path(self, *, saves_root: Path, save_path: Path) -> AppSaveRoot:
         relative_path = PurePosixPath(save_path.resolve().relative_to(saves_root.resolve()).as_posix())
         if len(relative_path.parts) < 2:
@@ -2249,10 +2665,35 @@ class SevenDays(App[App_Config]):
             include_directories=True,
         )
 
+    def _generated_world_root_for_path(
+        self,
+        *,
+        generated_worlds_root: Path,
+        generated_world_path: Path,
+    ) -> AppSaveRoot:
+        relative_path = PurePosixPath(
+            generated_world_path.resolve().relative_to(generated_worlds_root.resolve()).as_posix()
+        )
+        if len(relative_path.parts) != 1:
+            raise ValueError(f"7 Days to Die generated world path is invalid: {generated_world_path}")
+        return AppSaveRoot(
+            id=self._generated_world_root_id(relative_path),
+            label=f"World: {relative_path.name}",
+            path=generated_world_path,
+            mode=AppSaveRootMode.SELF,
+            include_files=False,
+            include_directories=True,
+        )
+
     @staticmethod
     def _save_root_id(relative_path: PurePosixPath) -> str:
         digest = hashlib.sha1(relative_path.as_posix().encode(config.STR_ENCODE), usedforsecurity=False).hexdigest()
         return f"save-{digest[:12]}"
+
+    @staticmethod
+    def _generated_world_root_id(relative_path: PurePosixPath) -> str:
+        digest = hashlib.sha1(relative_path.as_posix().encode(config.STR_ENCODE), usedforsecurity=False).hexdigest()
+        return f"world-{digest[:12]}"
 
     @staticmethod
     def _save_root_sort_key(root: AppSaveRoot) -> tuple[str, str, str]:
@@ -2264,9 +2705,7 @@ class SevenDays(App[App_Config]):
 
     def _userdata_root_path(self) -> Path | None:
         raw_value = _read_serverconfig_value(self.directory / "serverconfig.xml", "UserDataFolder")
-        if raw_value is None:
-            return None
-        candidate = Path(raw_value).expanduser()
+        candidate = Path(raw_value or _SEVENDAYS_MANAGED_USERDATA_FOLDER).expanduser()
         if not candidate.is_absolute():
             candidate = (self.directory / candidate).resolve()
         return candidate
@@ -2312,6 +2751,9 @@ class SevenDays(App[App_Config]):
 
     async def start(self) -> bool:
         log.info(f"{__name__}.start")
+        serverconfig_path = self.directory / "serverconfig.xml"
+        if serverconfig_path.is_file():
+            _ensure_serverconfig_userdata_redirect(serverconfig_path)
         self._server_ready.clear()
         self._telnet_startup_error = None
         await self._configure_telnet_client()

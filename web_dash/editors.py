@@ -139,6 +139,7 @@ _UPLOAD_RECEIVE_PROGRESS_PERCENT = 72.0
 _UPLOAD_APPLY_PROGRESS_PERCENT = 92.0
 _TRANSFER_CAPACITY_WAIT_SECONDS = 0.2
 _SEVENDAYS_NEW_SAVE_ROOT_PREFIX = "new-save:"
+_SEVENDAYS_NEW_WORLD_ROOT_PREFIX = "new-world:"
 
 
 class _ModWebSelectOptionsControl(Protocol):
@@ -796,10 +797,8 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         can_write: bool = self._user_has_level(user, model.save_write_level)
         app_scope: object = getattr(model, "app_scope", None)
         is_sevendays_app: bool = app_scope == config.AppScopes.sevendays.value
-        replace_save_target_options: dict[str, str] = self._replace_save_upload_target_options(saves.saves)
-        selected_replace_root_id: str | None = next(iter(replace_save_target_options), None)
-        show_search: bool = len(save_options) > 1
-        show_sort: bool = len(save_options) > 1
+        show_search: bool = not is_sevendays_app and len(save_options) > 1
+        show_sort: bool = not is_sevendays_app and len(save_options) > 1
         show_root_selector: bool = not is_sevendays_app and model.supports_save_uploads and len(saves.roots) > 1
         show_upload_action: bool = model.supports_save_uploads and can_write and (
             selected_root_id is not None or is_sevendays_app
@@ -811,13 +810,12 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
         root_select: Select | None = None
         save_upload_control: Upload | None = None
-        sevendays_replace_upload_control: Upload | None = None
         sevendays_world_input: Input | None = None
         sevendays_name_input: Input | None = None
-        sevendays_replace_target_buttons: dict[str, Button] = {}
         sevendays_new_staged_path: Path | None = None
         sevendays_new_staged_upload_name: str | None = None
         sevendays_new_inspection: SevenDaysSaveArchiveInspection | None = None
+        sevendays_save_upload_world: str | None = None
         direct_save_transfer_id: int | None = None
 
         def ensure_direct_save_transfer() -> int | None:
@@ -867,6 +865,11 @@ class ModWebEditorsMixin(ModWebServiceSupport):
 
         def sevendays_new_save_root_id() -> str:
             game_world, game_name = sevendays_new_save_target_segments()
+            if sevendays_save_upload_world is None:
+                suffix = f"/{quote(game_name, safe='')}" if game_name is not None else ""
+                return f"{_SEVENDAYS_NEW_WORLD_ROOT_PREFIX}{quote(game_world, safe='')}{suffix}"
+            if game_name is None:
+                raise RuntimeError("Save upload is missing its save name.")
             return (
                 f"{_SEVENDAYS_NEW_SAVE_ROOT_PREFIX}"
                 f"{quote(game_world, safe='')}/{quote(game_name, safe='')}"
@@ -903,16 +906,18 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             preferred = inspection.game_name or Path(upload_name).stem or "ImportedSave"
             return sevendays_nonconflicting_game_name(game_world=game_world, preferred_game_name=preferred)
 
-        def sevendays_new_save_target_segments() -> tuple[str, str]:
+        def sevendays_new_save_target_segments() -> tuple[str, str | None]:
             if sevendays_new_inspection is None or sevendays_new_staged_upload_name is None:
                 raise ValueError("Upload and inspect a save archive before importing it.")
-            default_world = sevendays_default_world_name(sevendays_new_inspection)
+            default_world = sevendays_save_upload_world or sevendays_default_world_name(sevendays_new_inspection)
             game_world = (
                 _value_as_text(sevendays_world_input)
                 if sevendays_world_input is not None
                 else default_world
             )
             game_world = self._normalise_sevendays_save_segment(game_world, label="Game world")
+            if sevendays_save_upload_world is None and not sevendays_new_inspection.includes_save:
+                return (game_world, None)
             default_game = sevendays_default_game_name(
                 inspection=sevendays_new_inspection,
                 game_world=game_world,
@@ -927,6 +932,13 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if (game_world, game_name) in sevendays_existing_save_targets():
                 raise FileExistsError(f"Save already exists: {game_world} / {game_name}")
             return game_world, game_name
+
+        def open_sevendays_upload(*, world_name: str | None) -> None:
+            nonlocal sevendays_save_upload_world
+            cleanup_sevendays_new_staging()
+            sevendays_save_upload_world = world_name
+            sevendays_new_import_controls.refresh()
+            upload_dialog.open()
 
         def cleanup_sevendays_new_staging() -> None:
             nonlocal sevendays_new_staged_path, sevendays_new_staged_upload_name, sevendays_new_inspection
@@ -950,29 +962,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             if save_upload_control is None:
                 raise RuntimeError("Save upload control is not available.")
             refresh_direct_save_upload_target(save_upload_control, root_id=selected_save_root_id())
-
-        def refresh_sevendays_replace_upload_target() -> None:
-            if sevendays_replace_upload_control is None:
-                raise RuntimeError("7D2D replace save upload control is not available.")
-            if selected_replace_root_id is None:
-                raise ValueError("Select an existing 7D2D save before uploading a replacement.")
-            refresh_direct_save_upload_target(sevendays_replace_upload_control, root_id=selected_replace_root_id)
-
-        def apply_sevendays_replace_target_button_classes() -> None:
-            for root_id, button in sevendays_replace_target_buttons.items():
-                state_class = "state-enabled" if root_id == selected_replace_root_id else "secondary"
-                button.classes(
-                    replace=f"mod-list-button {state_class} mod-save-upload-target-button"
-                )
-
-        def choose_sevendays_replace_target(root_id: str) -> None:
-            nonlocal selected_replace_root_id
-            if root_id not in replace_save_target_options:
-                raise ValueError(f"Unknown 7D2D replacement save target: {root_id}")
-            selected_replace_root_id = root_id
-            apply_sevendays_replace_target_button_classes()
-            if sevendays_replace_upload_control is not None:
-                refresh_sevendays_replace_upload_target()
 
         def direct_save_upload_started() -> None:
             ui.notify(
@@ -1011,7 +1000,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             nonlocal sevendays_new_staged_path, sevendays_new_staged_upload_name, sevendays_new_inspection
             upload_files = tuple(event.files)
             if len(upload_files) != 1:
-                ui.notify("Choose one 7D2D save archive.", type="warning")
+                ui.notify("Choose one 7D2D world or save archive.", type="warning")
                 return
             upload_file = upload_files[0]
             cleanup_sevendays_new_staging()
@@ -1027,11 +1016,33 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             sevendays_new_staged_path = staged_path
             sevendays_new_staged_upload_name = upload_file.name
             sevendays_new_inspection = inspection
+            if sevendays_save_upload_world is None and not inspection.includes_generated_world:
+                cleanup_sevendays_new_staging()
+                ui.notify("Upload World only accepts a generated-world archive, not a save archive.", type="warning")
+                return
+            if sevendays_save_upload_world is not None and (
+                not inspection.includes_save or inspection.includes_generated_world
+            ):
+                cleanup_sevendays_new_staging()
+                ui.notify("Upload Save only accepts a save archive, not a world archive.", type="warning")
+                return
+            if (
+                sevendays_save_upload_world is not None
+                and inspection.game_world is not None
+                and inspection.game_world != sevendays_save_upload_world
+            ):
+                cleanup_sevendays_new_staging()
+                ui.notify("The save archive belongs to a different world.", type="warning")
+                return
             sevendays_new_import_controls.refresh()
 
         async def apply_staged_sevendays_new_save() -> None:
             if sevendays_new_staged_path is None or sevendays_new_staged_upload_name is None:
-                ui.notify("Upload a 7D2D save archive before importing.", type="warning")
+                ui.notify("Upload a 7D2D world or save archive before importing.", type="warning")
+                return
+            inspection = sevendays_new_inspection
+            if inspection is None:
+                ui.notify("Upload and inspect a 7D2D archive before importing.", type="warning")
                 return
             try:
                 root_id = sevendays_new_save_root_id()
@@ -1047,7 +1058,15 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 return
             cleanup_sevendays_new_staging()
             upload_dialog.close()
-            ui.notify(result.message, type="positive")
+            if inspection.includes_save:
+                ui.notify(result.message, type="positive")
+            else:
+                ui.notify(
+                    "Uploaded the generated world without a save. In Settings, choose "
+                    f"`{inspection.game_world} / Fresh Characters`, set a fresh save name, then save before starting.",
+                    type="positive",
+                    multi_line=True,
+                )
             self._guarded_reload(ui=ui)
 
         @ui.refreshable
@@ -1057,19 +1076,23 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             sevendays_name_input = None
             if sevendays_new_inspection is None or sevendays_new_staged_upload_name is None:
                 ui.upload(
-                    label="Choose Save Archive",
+                    label="Choose Save Archive" if sevendays_save_upload_world is not None else "Choose World Archive",
                     auto_upload=True,
                     multiple=True,
                     max_files=1,
                     on_multi_upload=stage_sevendays_new_save,
                 ).props("accept=.zip").classes("mod-save-upload-zone")
-                ui.label("The archive is inspected before a target world/save is requested.").classes(
+                ui.label(
+                    "Only save data is accepted for this world."
+                    if sevendays_save_upload_world is not None
+                    else "Generated-world data is required; a matching save may be included."
+                ).classes(
                     "mod-subtitle text-sm mod-save-upload-panel-detail"
                 )
                 return
 
             inspection = sevendays_new_inspection
-            default_world = sevendays_default_world_name(inspection)
+            default_world = sevendays_save_upload_world or sevendays_default_world_name(inspection)
             default_game = sevendays_default_game_name(
                 inspection=inspection,
                 game_world=default_world,
@@ -1081,7 +1104,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             ui.label(f"Archive: {sevendays_new_staged_upload_name}").classes("mod-subtitle text-sm break-all")
             if detected_target:
                 ui.label(f"Detected target: {detected_target}").classes("mod-subtitle text-sm break-all")
-            if inspection.game_world is None:
+            if sevendays_save_upload_world is not None:
+                ui.label(f"Game World: {sevendays_save_upload_world}").classes("mod-save-upload-target-static")
+            elif inspection.game_world is None:
                 sevendays_world_input = (
                     ui.input("Game World", value=default_world)
                     .props("filled square dense hide-bottom-space color=accent")
@@ -1090,7 +1115,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             else:
                 ui.label(f"Game World: {inspection.game_world}").classes("mod-save-upload-target-static")
 
-            show_game_input = (
+            show_game_input = inspection.includes_save and (
                 inspection.game_name is None
                 or inspection.game_world is None
                 or (default_world, inspection.game_name) in sevendays_existing_save_targets()
@@ -1103,7 +1128,10 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 )
             else:
                 ui.label(f"Save Name: {inspection.game_name}").classes("mod-save-upload-target-static")
-            ui.button("Import Save", on_click=apply_staged_sevendays_new_save).classes("mod-list-button")
+            ui.button(
+                "Upload Save" if sevendays_save_upload_world is not None else "Upload World",
+                on_click=apply_staged_sevendays_new_save,
+            ).classes("mod-list-button")
 
         def close_upload_dialog() -> None:
             cleanup_sevendays_new_staging()
@@ -1113,55 +1141,17 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
                     with ui.column().classes("gap-0"):
-                        title = "Upload 7D2D Save" if is_sevendays_app else "Upload Save"
+                        title = "Upload 7D2D World" if is_sevendays_app else "Upload Save"
                         description = (
-                            "Replace an existing save or import a new world/save directory."
+                            "Import a generated world, optionally with its matching save. Delete old saves or worlds first."
                             if is_sevendays_app
                             else "Upload a replacement save archive for this app."
                         )
                         ui.label(title).classes("text-xl font-black mod-title-small")
                         ui.label(description).classes("mod-subtitle text-sm")
                     if is_sevendays_app:
-                        if selected_replace_root_id is not None:
-                            with ui.column().classes("mod-save-upload-panel w-full gap-2"):
-                                ui.label("Replace Existing Save").classes(
-                                    "text-sm font-bold mod-title-small mod-save-upload-panel-title"
-                                )
-                                if len(replace_save_target_options) == 1:
-                                    ui.label(replace_save_target_options[selected_replace_root_id]).classes(
-                                        "mod-save-upload-target-static"
-                                    )
-                                else:
-                                    with ui.column().classes("mod-save-upload-target-list w-full gap-2"):
-                                        for root_id, label in replace_save_target_options.items():
-                                            sevendays_replace_target_buttons[root_id] = ui.button(
-                                                label,
-                                                on_click=lambda _event=None, root_id=root_id: choose_sevendays_replace_target(
-                                                    root_id
-                                                ),
-                                            )
-                                    apply_sevendays_replace_target_button_classes()
-                                ui.label(
-                                    "The selected target is replaced after the archive is accepted. "
-                                    "The server must be stopped."
-                                ).classes("mod-subtitle text-sm mod-save-upload-panel-detail")
-                                sevendays_replace_upload_control = ui.upload(
-                                    label="Choose Replacement ZIP",
-                                    auto_upload=True,
-                                ).classes("mod-save-upload-zone")
-                                sevendays_replace_upload_control.props["field-name"] = "upload"
-                                sevendays_replace_upload_control.on("start", direct_save_upload_started, args=[])
-                                sevendays_replace_upload_control.on(
-                                    "uploaded", direct_save_upload_succeeded, args=[]
-                                )
-                                sevendays_replace_upload_control.on("failed", direct_save_upload_failed, args=[])
-                                sevendays_replace_upload_control.on(
-                                    "rejected", direct_save_upload_rejected, args=[]
-                                )
-                                refresh_sevendays_replace_upload_target()
-
                         with ui.column().classes("mod-save-upload-panel w-full gap-2"):
-                            ui.label("Import New Save").classes(
+                            ui.label("Import New World").classes(
                                 "text-sm font-bold mod-title-small mod-save-upload-panel-title"
                             )
                             ui.label(
@@ -1169,14 +1159,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             ).classes("mod-subtitle text-sm mod-save-upload-panel-detail")
                             sevendays_new_import_controls()
 
-                        direct_save_upload_token_timer: Timer = ui.timer(
-                            _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
-                            lambda: refresh_sevendays_replace_upload_target()
-                            if sevendays_replace_upload_control is not None
-                            else None,
-                        )
-                        self._register_timer_cleanup(ui=ui, timer=direct_save_upload_token_timer)
-                        self._register_client_cleanup(ui=ui, cleanup=interrupt_direct_save_transfer)
                         self._register_client_cleanup(ui=ui, cleanup=cleanup_sevendays_new_staging)
                     else:
                         if show_root_selector:
@@ -1224,6 +1206,111 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                 @ui.refreshable
                 def _save_tile_grid(search_query: str) -> None:
                     nonlocal save_page_number
+                    if is_sevendays_app:
+                        saves_by_world: dict[str, list[NodeSaveEntry]] = {}
+                        world_entries: dict[str, NodeSaveEntry] = {}
+                        for save in saves.saves:
+                            if save.root_id.startswith("world-"):
+                                world_name = save.label
+                                world_entries[world_name] = save
+                            else:
+                                world_name = save.root_label
+                                saves_by_world.setdefault(world_name, []).append(save)
+                        world_names = tuple(sorted(set(saves_by_world) | set(world_entries), key=str.casefold))
+                        if not world_names:
+                            ui.label("No worlds are currently available. Upload a generated world to begin.").classes(
+                                "mod-subtitle text-sm"
+                            )
+                            return
+
+                        def render_world_actions(world_entry: NodeSaveEntry) -> None:
+                            delete_dialog: Dialog | None = None
+
+                            async def delete_world() -> None:
+                                try:
+                                    result = await self._delete_save(
+                                        model=model,
+                                        save_id=world_entry.id,
+                                        user=user,
+                                    )
+                                except Exception as xcp:
+                                    ui.notify(f"World delete failed: {xcp}", type="negative")
+                                    return
+                                if delete_dialog is not None:
+                                    delete_dialog.close()
+                                ui.notify(result.message, type="positive")
+                                self._guarded_reload(ui=ui)
+
+                            def open_delete_dialog() -> None:
+                                nonlocal delete_dialog
+                                if delete_dialog is None:
+                                    with ui.dialog() as created_dialog:
+                                        delete_dialog = created_dialog
+                                        with ui.card().classes("mod-card mod-dialog-card"):
+                                            with ui.column().classes("w-full gap-4 p-5"):
+                                                ui.label("Delete World Terrain").classes(
+                                                    "text-xl font-black mod-title-small"
+                                                )
+                                                ui.label(
+                                                    f"Delete terrain for {world_entry.label}? Delete its saves first."
+                                                ).classes("mod-subtitle text-sm")
+                                                with ui.row().classes("w-full justify-end gap-2"):
+                                                    ui.button("Cancel", on_click=created_dialog.close).classes(
+                                                        "mod-list-button secondary"
+                                                    )
+                                                    ui.button("Delete", on_click=delete_world).classes(
+                                                        "mod-list-button danger"
+                                                    )
+                                delete_dialog.open()
+
+                            async def download_world(_: object | None = None) -> None:
+                                await self._download_save(
+                                    ui=ui,
+                                    model=model,
+                                    save=world_entry,
+                                    user=user,
+                                )
+
+                            self._badge(ui=ui, text=f"Modified {world_entry.modified_at}", tone="purple")
+                            ui.button("Download", on_click=download_world).classes("mod-list-button secondary")
+                            if world_entry.can_delete:
+                                delete_button = ui.button("Delete", on_click=open_delete_dialog).classes(
+                                    "mod-list-button danger"
+                                )
+                                if not can_write:
+                                    delete_button.disable()
+
+                        def open_world_save_upload(world_name: str) -> Callable[[], None]:
+                            return lambda: open_sevendays_upload(world_name=world_name)
+
+                        for world_name in world_names:
+                            with ui.card().classes("mod-setting-card w-full gap-3"):
+                                with ui.row().classes("w-full items-center justify-between gap-3"):
+                                    with ui.column().classes("gap-0"):
+                                        ui.label(world_name).classes("mod-setting-name")
+                                        ui.label("World terrain and its associated saves.").classes(
+                                            "mod-subtitle text-sm"
+                                        )
+                                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                                        world_entry = world_entries.get(world_name)
+                                        if world_entry is not None:
+                                            render_world_actions(world_entry)
+                                        if can_write:
+                                            ui.button(
+                                                "Upload Save",
+                                                on_click=open_world_save_upload(world_name),
+                                            ).classes("mod-list-button")
+                                with ui.element("div").classes("mod-save-grid w-full"):
+                                    for save in sorted(saves_by_world.get(world_name, ()), key=lambda item: item.label.casefold()):
+                                        self._render_save_tile(
+                                            ui=ui,
+                                            model=model,
+                                            user=user,
+                                            save=save,
+                                            root_count=1,
+                                            can_write=can_write,
+                                        )
+                        return
                     filtered_saves: tuple[NodeSaveEntry, ...] = self._filter_save_entries(
                         saves=saves.saves,
                         options=save_options,
@@ -1300,9 +1387,16 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                             )
                         with ui.row().classes("mod-tab-toolbar-actions"):
                             if show_upload_action:
-                                ui.button("Upload Save", on_click=upload_dialog.open).classes("mod-list-button")
+                                ui.button(
+                                    "Upload World" if is_sevendays_app else "Upload Save",
+                                    on_click=(
+                                        lambda: open_sevendays_upload(world_name=None)
+                                        if is_sevendays_app
+                                        else upload_dialog.open
+                                    ),
+                                ).classes("mod-list-button")
 
-                if not saves.saves:
+                if not saves.saves and not is_sevendays_app:
                     ui.label("No saves are currently available for this app.").classes(
                         "mod-subtitle text-sm mod-tab-empty-detail"
                     )
@@ -3399,10 +3493,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     @staticmethod
     def _save_option_label(entry: NodeSaveEntry) -> str:
         return f"{entry.root_label} / {entry.relative_path}"
-
-    @classmethod
-    def _replace_save_upload_target_options(cls, saves: tuple[NodeSaveEntry, ...]) -> dict[str, str]:
-        return {save.root_id: cls._save_option_label(save) for save in saves}
 
     @staticmethod
     def _normalise_sevendays_save_segment(raw_value: str, *, label: str) -> str:

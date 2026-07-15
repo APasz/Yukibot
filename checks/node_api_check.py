@@ -184,7 +184,7 @@ from node_api import (
     required_app_mutation_scope,
     required_mod_mutation_level,
 )
-from node_auth import NodeApiScope, verify_node_token
+from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token, verify_node_token
 from restart_targets import RestartTarget
 from restart_state import RestartKind, RestartRecord
 
@@ -1438,6 +1438,103 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
         self.assertIn("Authorization", response.headers["access-control-allow-headers"])
 
+    def test_portal_restart_accepts_matching_portal_registry_node_alias(self) -> None:
+        portal_config = replace(
+            config.MOD_WEB_SERVER,
+            node_name="portal",
+            public_base_url="https://wakusei.apasz.com",
+            node_api_base_url="https://wakusei.apasz.com/api/node",
+            token_secret="shared-secret",
+        )
+        portal_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="999",
+                label="Portal",
+                bot_profile=config.BotProfileName.PORTAL,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="wakusei",
+                    public_base_url="https://wakusei.apasz.com",
+                    node_api_base_url="https://wakusei.apasz.com/api/node",
+                )
+            ),
+        )
+        token = issue_node_token(
+            secret="shared-secret",
+            grant=NodeAccessGrant(
+                subject="web:1234",
+                node="wakusei",
+                app=None,
+                scopes=frozenset({NodeApiScope.NODE_MANAGE}),
+                expires_at=9_999_999_999,
+            ),
+        )
+
+        with (
+            patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.PORTAL]),
+            patch.object(config, "MOD_WEB_SERVER", portal_config),
+            patch.object(config, "load_known_bot_snapshots", return_value=(portal_snapshot,)),
+            patch("node_api.mark_pending_process_restart") as mark_restart,
+        ):
+            app = FastAPI()
+            service = NodeApiService()
+            service.set_process_restart_handler(Mock())
+            service.register_routes(app)
+
+            response = TestClient(app).post(
+                "/api/node/restart",
+                json={"restart_kind": RestartKind.MANUAL_BOT.value},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        mark_restart.assert_called_once_with(RestartKind.MANUAL_BOT)
+
+    def test_portal_restart_token_node_names_include_matching_aliases_once(self) -> None:
+        portal_config = replace(
+            config.MOD_WEB_SERVER,
+            node_name="portal",
+            public_base_url="https://wakusei.apasz.com/",
+            node_api_base_url="https://wakusei.apasz.com/api/node",
+        )
+        matching_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="999",
+                label="Portal",
+                bot_profile=config.BotProfileName.PORTAL,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="wakusei",
+                    public_base_url="https://wakusei.apasz.com",
+                    node_api_base_url="https://wakusei.apasz.com/api/node/",
+                )
+            ),
+        )
+        stale_snapshot = config.BotMetadataSnapshot(
+            profile=config.BotMetadataProfile(
+                id="998",
+                label="Old Portal",
+                bot_profile=config.BotProfileName.PORTAL,
+            ),
+            features=config.BotMetadataFeatures(
+                mod_web=config.BotMetadataModWeb(
+                    node_name="old-portal",
+                    public_base_url="https://old.example",
+                    node_api_base_url="https://old.example/api/node",
+                )
+            ),
+        )
+
+        with (
+            patch.object(config, "MOD_WEB_SERVER", portal_config),
+            patch.object(config, "load_known_bot_snapshots", return_value=(matching_snapshot, stale_snapshot)),
+        ):
+            node_names = NodeApiService()._portal_restart_token_node_names()
+
+        self.assertEqual(node_names, ("portal", "wakusei"))
+
     def test_mod_mutation_result_round_trips_mapping(self) -> None:
         result = NodeModMutationResult(
             app_name="minecraft_alpha",
@@ -2074,6 +2171,7 @@ class NodeApiTests(unittest.TestCase):
         app = SimpleNamespace(
             name="satisfactory_alpha",
             friendly="Satisfactory",
+            download_save_archive=AsyncMock(return_value=None),
             download_save_content=AsyncMock(side_effect=RuntimeError("Satisfactory is not running.")),
         )
 

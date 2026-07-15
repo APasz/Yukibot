@@ -856,7 +856,7 @@ class SettingTests(unittest.TestCase):
             self.assertIn('name="UserDataFolder" value="userdata"', saved)
             self.assertNotIn('name="UserDataFolder" value="/var/lib/7d2d"', saved)
 
-    def test_sevendays_game_world_and_name_choices_use_discovered_saves(self) -> None:
+    def test_sevendays_world_save_selection_uses_discovered_pairs_and_fresh_generation(self) -> None:
         property_values = {
             "UserDataFolder": "userdata",
             "ServerName": "Choice Test",
@@ -869,6 +869,7 @@ class SettingTests(unittest.TestCase):
             pointer, _ = _write_sevendays_xml_files(root, server_properties=property_values)
             (root / "userdata" / "Saves" / "Navezgane" / "CurrentSave").mkdir(parents=True)
             (root / "userdata" / "Saves" / "Wizefoco Mountains" / "ImportedSave").mkdir(parents=True)
+            (root / "userdata" / "GeneratedWorlds" / "Wizefoco Mountains").mkdir(parents=True)
             (root / "userdata" / "Saves" / ".HiddenWorld" / "HiddenSave").mkdir(parents=True)
             (root / "userdata" / "Saves" / "Navezgane" / ".HiddenSave").mkdir(parents=True)
 
@@ -877,26 +878,50 @@ class SettingTests(unittest.TestCase):
             game_world = listed_settings["GameWorld"]
             game_name = listed_settings["GameName"]
 
-            self.assertFalse(game_world.strict_choice)
+            self.assertTrue(game_world.strict_choice)
             self.assertFalse(game_name.strict_choice)
             self.assertEqual(
                 game_world.choice_items(),
                 (
-                    ("Navezgane", "Navezgane"),
-                    ("Wizefoco Mountains", "Wizefoco Mountains"),
+                    ("Generate Fresh Random World", "new-rwg"),
+                    ("Wizefoco Mountains / Fresh Characters", "world:Wizefoco%20Mountains"),
+                    ("Navezgane / CurrentSave", "save:Navezgane/CurrentSave"),
+                    ("Wizefoco Mountains / ImportedSave", "save:Wizefoco%20Mountains/ImportedSave"),
                 ),
             )
-            self.assertEqual(
-                game_name.choice_items(),
-                (
-                    ("CurrentSave", "CurrentSave"),
-                    ("ImportedSave", "ImportedSave"),
+            self.assertEqual(game_world.value, "save:Navezgane/CurrentSave")
+            self.assertEqual(game_name.value, "CurrentSave")
+
+            manager = Settings_Manager(
+                App_Config(
+                    name="sevendays_alpha",
+                    instance_key="alpha",
+                    directory=root,
+                    apps_dir=root,
+                    scope="sevendays",
                 ),
+                settings,
             )
-            game_world.update("Brand New World")
-            game_name.update("Brand New Save")
-            self.assertEqual(game_world.value, "Brand New World")
-            self.assertEqual(game_name.value, "Brand New Save")
+            manager.update_setting(actor_user_id=42, setting=game_world, value="Wizefoco Mountains / ImportedSave")
+            self.assertEqual(manager.current_input_value(game_name, 42), "ImportedSave")
+            manager.save(42)
+            switched = pointer.read_text(encoding="utf-8")
+            self.assertIn('name="GameWorld" value="Wizefoco Mountains"', switched)
+            self.assertIn('name="GameName" value="ImportedSave"', switched)
+
+            manager.update_setting(actor_user_id=42, setting=game_world, value="Generate Fresh Random World")
+            manager.update_setting(actor_user_id=42, setting=game_name, value="FreshSave")
+            manager.save(42)
+            generated = pointer.read_text(encoding="utf-8")
+            self.assertIn('name="GameWorld" value="RWG"', generated)
+            self.assertIn('name="GameName" value="FreshSave"', generated)
+
+            manager.update_setting(actor_user_id=42, setting=game_world, value="Wizefoco Mountains / Fresh Characters")
+            manager.update_setting(actor_user_id=42, setting=game_name, value="FreshCharacters")
+            manager.save(42)
+            fresh_characters = pointer.read_text(encoding="utf-8")
+            self.assertIn('name="GameWorld" value="Wizefoco Mountains"', fresh_characters)
+            self.assertIn('name="GameName" value="FreshCharacters"', fresh_characters)
 
     def test_sevendays_settings_clamp_loaded_transfer_speed_without_startup_error(self) -> None:
         property_values = {

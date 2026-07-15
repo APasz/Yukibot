@@ -484,7 +484,7 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
 
         self.assertEqual(cfg.save_file_write_level_override, Power_Level.admin)
 
-    def test_save_file_roots_require_userdata_folder_redirect(self) -> None:
+    def test_save_file_roots_default_to_managed_userdata_folder_without_a_redirect(self) -> None:
         with TemporaryDirectory() as temp_dir:
             app_dir = Path(temp_dir)
             (app_dir / "serverconfig.xml").write_text(
@@ -501,8 +501,9 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
 
             roots = app.save_file_roots
 
-            self.assertEqual(roots, ())
-            self.assertFalse(app.supports_save_uploads)
+            self.assertEqual(len(roots), 1)
+            self.assertEqual(roots[0].path, app_dir / "userdata" / "Saves" / "Navezgane" / "AlphaWorld")
+            self.assertTrue(app.supports_save_uploads)
 
     def test_save_file_roots_use_redirected_userdata_folder(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -588,6 +589,42 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             self.assertEqual(deleted.label, "AlphaWorld")
             self.assertFalse(save_dir.exists())
 
+    def test_delete_generated_world_requires_its_saves_to_be_deleted_first(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            save_dir = userdata_dir / "Saves" / "Wizefoco Mountains" / "AlphaWorld"
+            generated_world_dir = userdata_dir / "GeneratedWorlds" / "Wizefoco Mountains"
+            app_dir.mkdir()
+            save_dir.mkdir(parents=True)
+            generated_world_dir.mkdir(parents=True)
+            (save_dir / "main.ttw").write_text("save-data", encoding="utf-8")
+            (generated_world_dir / "GenerationInfo.txt").write_text("world-data", encoding="utf-8")
+            (app_dir / "serverconfig.xml").write_text(
+                f'''<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+</ServerSettings>
+''',
+                encoding="utf-8",
+            )
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.check_running = lambda: False
+
+            saves = app.list_save_files()
+            save_id = next(save.id for save in saves if save.label == "AlphaWorld")
+            world_id = next(save.id for save in saves if save.label == "Wizefoco Mountains")
+
+            with self.assertRaisesRegex(ValueError, "Delete the saves"):
+                app.delete_save_file(file_id=world_id)
+            app.delete_save_file(file_id=save_id)
+            deleted_world = app.delete_save_file(file_id=world_id)
+
+            self.assertEqual(deleted_world.label, "Wizefoco Mountains")
+            self.assertFalse(generated_world_dir.exists())
+
     def test_sevendays_save_archive_inspection_accepts_direct_save_contents(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -639,6 +676,70 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             self.assertEqual((destination / "main.ttw").read_text(encoding="utf-8"), "main")
             self.assertFalse((destination / "Wizefoco Mountains" / "woabewbies" / "main.ttw").exists())
 
+    def test_sevendays_save_archive_inspection_accepts_portable_generated_world_bundle(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "portable-world.zip"
+            save_destination = root / "save"
+            generated_world_destination = root / "generated-world"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("Saves/Wizefoco Mountains/woabewbies/main.ttw", "main")
+                archive.writestr("Saves/Wizefoco Mountains/woabewbies/Player/player.ttp", "player")
+                archive.writestr("GeneratedWorlds/Wizefoco Mountains/GenerationInfo.txt", "world")
+                archive.writestr("GeneratedWorlds/Wizefoco Mountains/prefabs.xml", "<prefabs />")
+
+            inspection = inspect_sevendays_save_archive(archive_path)
+            extracted = extract_sevendays_save_archive(
+                archive_path=archive_path,
+                destination=save_destination,
+                generated_world_destination=generated_world_destination,
+                inspection=inspection,
+            )
+
+            self.assertEqual(extracted.game_world, "Wizefoco Mountains")
+            self.assertEqual(extracted.game_name, "woabewbies")
+            self.assertEqual(extracted.generated_world, "Wizefoco Mountains")
+            self.assertTrue(extracted.includes_generated_world)
+            self.assertEqual((save_destination / "main.ttw").read_text(encoding="utf-8"), "main")
+            self.assertEqual(
+                (generated_world_destination / "GenerationInfo.txt").read_text(encoding="utf-8"), "world"
+            )
+
+    def test_sevendays_save_archive_inspection_accepts_generated_world_without_save(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "fresh-world.zip"
+            generated_world_destination = root / "generated-world"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("Wizefoco Mountains/GenerationInfo.txt", "world")
+                archive.writestr("Wizefoco Mountains/prefabs.xml", "<prefabs />")
+
+            inspection = extract_sevendays_save_archive(
+                archive_path=archive_path,
+                generated_world_destination=generated_world_destination,
+            )
+
+            self.assertFalse(inspection.includes_save)
+            self.assertEqual(inspection.game_world, "Wizefoco Mountains")
+            self.assertIsNone(inspection.game_name)
+            self.assertEqual(
+                (generated_world_destination / "GenerationInfo.txt").read_text(encoding="utf-8"), "world"
+            )
+
+    def test_sevendays_save_archive_does_not_mistake_generated_world_regions_for_a_save(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "fresh-world.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("GeneratedWorlds/Wizefoco Mountains/GenerationInfo.txt", "world")
+                archive.writestr("GeneratedWorlds/Wizefoco Mountains/region/r.0.0.7rg", "region")
+
+            inspection = inspect_sevendays_save_archive(archive_path)
+
+            self.assertFalse(inspection.includes_save)
+            self.assertTrue(inspection.includes_generated_world)
+            self.assertEqual(inspection.game_world, "Wizefoco Mountains")
+
     def test_sevendays_save_archive_inspection_rejects_multiple_save_roots(self) -> None:
         with TemporaryDirectory() as temp_dir:
             archive_path = Path(temp_dir) / "bad.zip"
@@ -676,7 +777,7 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Stop the server"):
                 app.upload_save_file(root_id=save_root_id, upload_name="upload.zip", source_path=archive_path)
 
-    def test_upload_save_file_replaces_existing_save_with_archive_content_root(self) -> None:
+    def test_upload_save_file_rejects_replacing_an_existing_save(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             app_dir = root / "server"
@@ -701,17 +802,14 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             app.directory = app_dir
             app.check_running = lambda: False
 
-            uploaded = app.upload_save_file(
-                root_id=app.save_file_roots[0].id,
-                upload_name="upload.zip",
-                source_path=archive_path,
-            )
+            with self.assertRaisesRegex(ValueError, "must import a new"):
+                app.upload_save_file(
+                    root_id=app.save_file_roots[0].id,
+                    upload_name="upload.zip",
+                    source_path=archive_path,
+                )
 
-            self.assertEqual(uploaded.label, "AlphaWorld")
-            self.assertEqual((save_dir / "main.ttw").read_text(encoding="utf-8"), "main")
-            self.assertEqual((save_dir / "Region" / "r.0.0.7rg").read_text(encoding="utf-8"), "region")
-            self.assertFalse((save_dir / "Wizefoco Mountains" / "woabewbies" / "main.ttw").exists())
-            self.assertFalse((save_dir / "old.txt").exists())
+            self.assertEqual((save_dir / "old.txt").read_text(encoding="utf-8"), "old")
 
     def test_upload_new_save_file_creates_requested_world_and_save_directory(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -743,6 +841,117 @@ class SevenDaysGameStatParsingTests(unittest.TestCase):
             self.assertEqual(uploaded.root_label, "RWG")
             self.assertEqual(uploaded.label, "ImportedSave")
             self.assertEqual((userdata_dir / "Saves" / "RWG" / "ImportedSave" / "main.ttw").read_text(), "save-data")
+
+    def test_upload_portable_world_archive_creates_new_save_and_generated_world(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            save_dir = userdata_dir / "Saves" / "Wizefoco Mountains" / "woabewbies"
+            generated_world_dir = userdata_dir / "GeneratedWorlds" / "Wizefoco Mountains"
+            archive_path = root / "portable-world.zip"
+            app_dir.mkdir()
+            (app_dir / "serverconfig.xml").write_text(
+                f'''<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+</ServerSettings>
+''',
+                encoding="utf-8",
+            )
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("Saves/Wizefoco Mountains/woabewbies/main.ttw", "save-data")
+                archive.writestr("GeneratedWorlds/Wizefoco Mountains/GenerationInfo.txt", "world-data")
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.check_running = lambda: False
+
+            uploaded = app.upload_save_file(
+                root_id=SevenDays.new_world_upload_root_id(
+                    game_world="Wizefoco Mountains",
+                    game_name="woabewbies",
+                ),
+                upload_name=archive_path.name,
+                source_path=archive_path,
+            )
+
+            self.assertEqual(uploaded.label, "woabewbies")
+            self.assertEqual((save_dir / "main.ttw").read_text(encoding="utf-8"), "save-data")
+            self.assertEqual(
+                (generated_world_dir / "GenerationInfo.txt").read_text(encoding="utf-8"), "world-data"
+            )
+
+    def test_download_generated_world_save_creates_portable_archive(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = root / "userdata"
+            save_dir = userdata_dir / "Saves" / "Wizefoco Mountains" / "woabewbies"
+            generated_world_dir = userdata_dir / "GeneratedWorlds" / "Wizefoco Mountains"
+            archive_path = root / "portable-world.zip"
+            app_dir.mkdir()
+            save_dir.mkdir(parents=True)
+            generated_world_dir.mkdir(parents=True)
+            (save_dir / "main.ttw").write_text("save-data", encoding="utf-8")
+            (generated_world_dir / "GenerationInfo.txt").write_text("world-data", encoding="utf-8")
+            (app_dir / "serverconfig.xml").write_text(
+                f'''<?xml version="1.0"?>
+<ServerSettings>
+    <property name="UserDataFolder" value="{userdata_dir.as_posix()}" />
+</ServerSettings>
+''',
+                encoding="utf-8",
+            )
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.name = "sevendays_test"
+            save_id = app.save_file_roots[0].id + "/woabewbies"
+
+            with patch("apps.sevendays.File_Utils.compress", new=AsyncMock(return_value=archive_path)) as compress:
+                filename, downloaded_archive_path = asyncio.run(app.download_save_archive(save_id))
+
+            self.assertEqual(filename, archive_path.name)
+            self.assertEqual(downloaded_archive_path, archive_path)
+            compress.assert_awaited_once_with(
+                (save_dir, generated_world_dir),
+                "sevendays_test_Wizefoco Mountains_woabewbies.zip",
+                arc_base=userdata_dir,
+            )
+
+    def test_upload_generated_world_without_save_leaves_fresh_save_path_empty(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app_dir = root / "server"
+            userdata_dir = app_dir / "userdata"
+            archive_path = root / "fresh-world.zip"
+            app_dir.mkdir()
+            (app_dir / "serverconfig.xml").write_text(
+                '''<?xml version="1.0"?>
+<ServerSettings>
+</ServerSettings>
+''',
+                encoding="utf-8",
+            )
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("GeneratedWorlds/Wizefoco Mountains/GenerationInfo.txt", "world-data")
+            app = cast(Any, object.__new__(SevenDays))
+            app.directory = app_dir
+            app.check_running = lambda: False
+
+            uploaded = app.upload_save_file(
+                root_id=SevenDays.new_world_upload_root_id(game_world="Wizefoco Mountains"),
+                upload_name=archive_path.name,
+                source_path=archive_path,
+            )
+
+            generated_world_dir = userdata_dir / "GeneratedWorlds" / "Wizefoco Mountains"
+            self.assertEqual(uploaded.label, "Wizefoco Mountains")
+            self.assertEqual((generated_world_dir / "GenerationInfo.txt").read_text(encoding="utf-8"), "world-data")
+            self.assertFalse((userdata_dir / "Saves" / "Wizefoco Mountains" / "FreshSave").exists())
+            self.assertIn(
+                'name="UserDataFolder" value="userdata"',
+                (app_dir / "serverconfig.xml").read_text(encoding="utf-8"),
+            )
 
     def test_upload_new_save_file_rejects_existing_save_directory(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1169,6 +1378,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("apps.sevendays.Tailer", return_value=tailer) as tailer_cls,
             patch("apps.sevendays._discover_sevendays_runtime_log", new=AsyncMock(return_value=None)),
+            patch("apps.sevendays._ensure_serverconfig_userdata_redirect") as ensure_userdata_redirect,
         ):
             result = await SevenDays.start(app)
 
@@ -1176,6 +1386,7 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(app._running)
         self.assertEqual(call_order, ["ready", "players", "activities"])
         app._std_launch.assert_awaited_once()
+        ensure_userdata_redirect.assert_not_called()
         app._relay.setup.assert_awaited_once()
         tailer.start.assert_awaited_once_with(app._tail_matchers)
         tailer_cls.assert_called_once()
@@ -1185,6 +1396,8 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_prefers_launch_created_runtime_log_file_over_existing_timestamped_logs(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
+            serverconfig_path = root / "serverconfig.xml"
+            serverconfig_path.write_text("<ServerSettings />", encoding="utf-8")
             log_dir = root / "7DaysToDieServer_Data"
             log_dir.mkdir(parents=True)
             older_runtime_log = log_dir / "output_log__2026-06-17__02-27-35.txt"
@@ -1219,11 +1432,13 @@ class SevenDaysRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
                 patch("apps.sevendays.File_Utils.link") as link_mock,
             ):
                 result = await SevenDays.start(app)
+            redirected_config = serverconfig_path.read_text(encoding="utf-8")
 
         self.assertTrue(result)
         tailer_cls.assert_called_once()
         self.assertEqual(tailer_cls.call_args.args[1:], (runtime_log, app.file_stdout))
         link_mock.assert_called_once_with(runtime_log, app.file_stdout.with_name(runtime_log.name))
+        self.assertIn('name="UserDataFolder" value="userdata"', redirected_config)
 
     async def test_start_rejects_telnet_bind_failure_and_terminates_process(self) -> None:
         with TemporaryDirectory() as tmp:

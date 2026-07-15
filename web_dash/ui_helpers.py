@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from font_assets import font_assets
 
@@ -86,6 +86,26 @@ def copy_text_to_clipboard(
 
 
 class ModWebUiHelpersMixin(ModWebServiceSupport):
+    @staticmethod
+    def _make_activatable(
+        *,
+        target: "Element",
+        role: Literal["button", "link"],
+        on_activate: Callable[[object | None], object],
+    ) -> None:
+        target.props(f"role={role} tabindex=0")
+        target.on("click", on_activate)
+        target.on(
+            "keydown.enter",
+            on_activate,
+            js_handler="(event) => { event.preventDefault(); emit(); }",
+        )
+        target.on(
+            "keydown.space",
+            on_activate,
+            js_handler="(event) => { event.preventDefault(); emit(); }",
+        )
+
     @staticmethod
     def _portal_recovery_head_html() -> str:
         health_path: str = json.dumps(_PORTAL_HEALTH_PATH)
@@ -392,9 +412,17 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         extra_classes: str = "",
         tooltip_text: str | None = None,
     ) -> Label:
-        badge = ui.label(text).classes(ModWebUiHelpersMixin._badge_class_name(tone=tone, extra_classes=extra_classes)).props(
-            "role=button tabindex=0"
-        ).on("click", on_click)
+        badge = ui.label(text).classes(
+            ModWebUiHelpersMixin._badge_class_name(
+                tone=tone,
+                extra_classes=f"mod-badge-action {extra_classes}".strip(),
+            )
+        )
+        ModWebUiHelpersMixin._make_activatable(
+            target=cast("Element", badge),
+            role="button",
+            on_activate=on_click,
+        )
         ModWebUiHelpersMixin._attach_badge_tooltip(
             ui=ui,
             target=cast("Element", badge),

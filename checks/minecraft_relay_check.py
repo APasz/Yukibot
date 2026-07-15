@@ -437,7 +437,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.player_id, 42)
         app.name_cache.resolve_name.assert_called_once_with("Alice", "minecraft")
 
-    async def test_note_join_omits_client_pack_details_from_message_when_published(self) -> None:
+    async def test_note_join_omits_client_pack_details_when_published(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
         app.name = "minecraft_demo"
         app.friendly = "Minecraft Demo"
@@ -461,8 +461,8 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.content, "Alice joined Minecraft Demo")
         self.assertIsInstance(relayed_message.notice, PlayerSessionNotice)
         assert isinstance(relayed_message.notice, PlayerSessionNotice)
-        self.assertEqual(relayed_message.notice.pack_version, "2026-07-04")
-        self.assertTrue(relayed_message.notice.has_unpublished_pack_changes)
+        self.assertIsNone(relayed_message.notice.pack_version)
+        self.assertFalse(relayed_message.notice.has_unpublished_pack_changes)
 
     async def test_note_leave_resolves_player_to_discord_mention_when_available(self) -> None:
         app = cast(Any, object.__new__(Minecraft))
@@ -1719,7 +1719,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.description, "Joined Alice")
         self.assertEqual(embed.color, 0x22C55E)
 
-    async def test_send_dc_synthesises_join_embed_with_client_pack_details(self) -> None:
+    async def test_send_dc_synthesises_join_embed_without_client_pack_details(self) -> None:
         relay = object.__new__(DC_Relay)
         relay.bot = cast(Any, object())
         setattr(relay, "names", _NamesStub())
@@ -1766,7 +1766,7 @@ class MinecraftRelayTests(unittest.IsolatedAsyncioTestCase):
         if await_args is None:
             raise AssertionError("Expected relay send to be awaited.")
         embed = await_args.kwargs["embeds"][0]
-        self.assertEqual(embed.description, "Joined Alice\nPack: 2026-07-04 [Unpublished Changes]")
+        self.assertEqual(embed.description, "Joined Alice")
 
     async def test_send_dc_queues_relay_tts_when_target_matches_channel(self) -> None:
         relay = object.__new__(DC_Relay)

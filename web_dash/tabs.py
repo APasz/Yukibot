@@ -1,24 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from .runtime_imports import NodeSettingEntry, replace
+from .runtime_imports import BadgeTone, replace
 from .service_base import ModWebServiceSupport
 from .types import (
     ModWebAppLink,
     ModWebAppSectionKind,
     ModWebAppTabContext,
     ModWebAppTabDefinition,
-    ModWebAppTabSettingSnapshot,
-    ModWebAppTabVisibilityKind,
-    ModWebAppTabVisibilityRule,
     ModWebBasePageModel,
     ModWebPageModel,
 )
 
 _VERSION_TOKEN_RE: re.Pattern[str] = re.compile(r"\d+|[A-Za-z]+")
-_ENABLED_SETTING_TEXTS: frozenset[str] = frozenset({"1", "true", "yes", "on", "enabled"})
 _MINECRAFT_APP_SCOPE = "minecraft"
 _SEVENDAYS_APP_SCOPE = "sevendays"
 _SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION_TEXT = "3.0.259"
@@ -28,6 +25,24 @@ _KUBEJS_RECIPE_ADDON_LABELS: dict[str, str] = {
     "kubejs-create": "KubeJS Create",
     "kubejs-immersive-engineering": "KubeJS Immersive Engineering",
     "kubejs-immersiveengineering": "KubeJS Immersive Engineering",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _BuiltinTabPresentation:
+    page_order: int
+    app_card_order: int
+    app_card_tone: BadgeTone
+
+
+_BUILTIN_TAB_PRESENTATIONS: dict[ModWebAppSectionKind, _BuiltinTabPresentation] = {
+    ModWebAppSectionKind.UPDATE: _BuiltinTabPresentation(page_order=150, app_card_order=350, app_card_tone="black"),
+    ModWebAppSectionKind.MODS: _BuiltinTabPresentation(page_order=100, app_card_order=500, app_card_tone="purple"),
+    ModWebAppSectionKind.CONFIGS: _BuiltinTabPresentation(page_order=200, app_card_order=200, app_card_tone="black"),
+    ModWebAppSectionKind.SETTINGS: _BuiltinTabPresentation(page_order=300, app_card_order=300, app_card_tone="black"),
+    ModWebAppSectionKind.SAVES: _BuiltinTabPresentation(page_order=400, app_card_order=100, app_card_tone="black"),
+    ModWebAppSectionKind.CONSOLE: _BuiltinTabPresentation(page_order=500, app_card_order=400, app_card_tone="black"),
+    ModWebAppSectionKind.CHAT: _BuiltinTabPresentation(page_order=600, app_card_order=600, app_card_tone="purple"),
 }
 
 
@@ -53,7 +68,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
         definitions: tuple[ModWebAppTabDefinition, ...] = (
             self._built_in_page_tab_definitions(model) + self._additional_app_tab_definitions(context=context, is_detail_page=True)
         )
-        return self._resolve_visible_app_tabs(definitions=definitions, context=context, sort_for="page")
+        return self._sorted_page_tabs(definitions)
 
     def _resolved_app_link_tabs(self, app: ModWebAppLink) -> tuple[ModWebAppTabDefinition, ...]:
         context: ModWebAppTabContext = self._app_link_tab_context(app)
@@ -61,7 +76,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
             self._built_in_app_link_tab_definitions(app)
             + self._additional_app_tab_definitions(context=context, is_detail_page=False)
         )
-        return self._resolve_visible_app_tabs(definitions=definitions, context=context, sort_for="app_card")
+        return self._sorted_app_card_tabs(definitions)
 
     def _additional_app_tab_definitions(
         self,
@@ -127,24 +142,12 @@ class ModWebTabsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _page_tab_context(model: ModWebBasePageModel) -> ModWebAppTabContext:
-        mod_names: tuple[str, ...]
         if isinstance(model, ModWebPageModel):
-            mod_names = tuple(mod.name for mod in model.mods.mods)
             enabled_mod_names = tuple(mod.name for mod in model.mods.mods if mod.enabled)
         else:
-            mod_names = ()
             enabled_mod_names = ()
-        settings: tuple[ModWebAppTabSettingSnapshot, ...]
-        if model.settings is None:
-            settings = ()
-        else:
-            settings = tuple(
-                ModWebAppTabSettingSnapshot(key=setting.key, value_text=ModWebTabsMixin._setting_snapshot_text(setting))
-                for setting in model.settings.settings
-            )
         return ModWebAppTabContext(
             app_name=model.app_name,
-            app_friendly=model.app_friendly,
             app_version=(
                 model.app_stats.version
                 if model.app_stats is not None and model.app_stats.version is not None
@@ -155,9 +158,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
                 )
             ),
             app_scope=model.app_scope,
-            mod_names=mod_names,
             enabled_mod_names=enabled_mod_names,
-            settings=settings,
             supports_map=model.map_api_url is not None,
             supports_blueprints=model.blueprints is not None,
             supports_sevendays_sandbox_options=model.sevendays_sandbox_options is not None,
@@ -167,7 +168,6 @@ class ModWebTabsMixin(ModWebServiceSupport):
     def _app_link_tab_context(app: ModWebAppLink) -> ModWebAppTabContext:
         return ModWebAppTabContext(
             app_name=app.name,
-            app_friendly=app.friendly,
             app_scope=app.app_scope,
             supports_map=app.map_url is not None,
             supports_blueprints=app.supports_blueprints,
@@ -236,10 +236,6 @@ class ModWebTabsMixin(ModWebServiceSupport):
                 return label
         return None
 
-    @staticmethod
-    def _setting_snapshot_text(setting: NodeSettingEntry) -> str:
-        return setting.value_text
-
     def _built_in_page_tab_definitions(self, model: ModWebBasePageModel) -> tuple[ModWebAppTabDefinition, ...]:
         definitions: list[ModWebAppTabDefinition] = []
         if model.supports_updates:
@@ -278,71 +274,13 @@ class ModWebTabsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _builtin_tab_definition(section_kind: ModWebAppSectionKind) -> ModWebAppTabDefinition:
-        if section_kind is ModWebAppSectionKind.UPDATE:
-            return ModWebAppTabDefinition.builtin(
-                builtin_kind=section_kind,
-                page_order=150,
-                app_card_order=350,
-                app_card_tone="black",
-            )
-        if section_kind is ModWebAppSectionKind.MODS:
-            return ModWebAppTabDefinition.builtin(
-                builtin_kind=section_kind,
-                page_order=100,
-                app_card_order=500,
-                app_card_tone="purple",
-            )
-        if section_kind is ModWebAppSectionKind.CONFIGS:
-            return ModWebAppTabDefinition.builtin(
-                builtin_kind=section_kind,
-                page_order=200,
-                app_card_order=200,
-                app_card_tone="black",
-            )
-        if section_kind is ModWebAppSectionKind.SETTINGS:
-            return ModWebAppTabDefinition.builtin(
-                builtin_kind=section_kind,
-                page_order=300,
-                app_card_order=300,
-                app_card_tone="black",
-            )
-        if section_kind is ModWebAppSectionKind.SAVES:
-            return ModWebAppTabDefinition.builtin(
-                builtin_kind=section_kind,
-                page_order=400,
-                app_card_order=100,
-                app_card_tone="black",
-            )
-        if section_kind is ModWebAppSectionKind.CONSOLE:
-            return ModWebAppTabDefinition.builtin(
-                builtin_kind=section_kind,
-                page_order=500,
-                app_card_order=400,
-                app_card_tone="black",
-            )
+        presentation: _BuiltinTabPresentation = _BUILTIN_TAB_PRESENTATIONS[section_kind]
         return ModWebAppTabDefinition.builtin(
             builtin_kind=section_kind,
-            page_order=600,
-            app_card_order=600,
-            app_card_tone="purple",
+            page_order=presentation.page_order,
+            app_card_order=presentation.app_card_order,
+            app_card_tone=presentation.app_card_tone,
         )
-
-    def _resolve_visible_app_tabs(
-        self,
-        *,
-        definitions: tuple[ModWebAppTabDefinition, ...],
-        context: ModWebAppTabContext,
-        sort_for: str,
-    ) -> tuple[ModWebAppTabDefinition, ...]:
-        self._validate_unique_tab_ids(definitions)
-        visible_tabs: tuple[ModWebAppTabDefinition, ...] = tuple(
-            definition for definition in definitions if self._app_tab_visibility_matches(definition.visibility_rule, context)
-        )
-        if sort_for == "page":
-            return self._sorted_page_tabs(visible_tabs)
-        if sort_for == "app_card":
-            return self._sorted_app_card_tabs(visible_tabs)
-        raise ValueError(f"Unsupported app tab sort target: {sort_for}")
 
     @staticmethod
     def _validate_unique_tab_ids(definitions: tuple[ModWebAppTabDefinition, ...]) -> None:
@@ -355,6 +293,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _sorted_page_tabs(definitions: tuple[ModWebAppTabDefinition, ...]) -> tuple[ModWebAppTabDefinition, ...]:
+        ModWebTabsMixin._validate_unique_tab_ids(definitions)
         return tuple(
             sorted(
                 definitions,
@@ -368,6 +307,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
 
     @staticmethod
     def _sorted_app_card_tabs(definitions: tuple[ModWebAppTabDefinition, ...]) -> tuple[ModWebAppTabDefinition, ...]:
+        ModWebTabsMixin._validate_unique_tab_ids(definitions)
         return tuple(
             sorted(
                 definitions,
@@ -378,47 +318,6 @@ class ModWebTabsMixin(ModWebServiceSupport):
                 ),
             )
         )
-
-    def _app_tab_visibility_matches(
-        self,
-        rule: ModWebAppTabVisibilityRule,
-        context: ModWebAppTabContext,
-    ) -> bool:
-        if rule.kind is ModWebAppTabVisibilityKind.ALWAYS:
-            return True
-        if rule.kind is ModWebAppTabVisibilityKind.MIN_APP_VERSION:
-            if context.app_version is None:
-                return False
-            if rule.app_version is None:
-                raise ValueError("Minimum-version app tab rule unexpectedly missing its version.")
-            return self._app_version_is_at_least(context.app_version, rule.app_version)
-        if rule.kind is ModWebAppTabVisibilityKind.HAS_MOD:
-            if rule.mod_name is None:
-                raise ValueError("Mod-gated app tab rule unexpectedly missing its mod name.")
-            return context.has_mod(rule.mod_name)
-        if rule.kind is ModWebAppTabVisibilityKind.SETTING_ENABLED:
-            if rule.setting_key is None:
-                raise ValueError("Setting-enabled app tab rule unexpectedly missing its setting key.")
-            setting_value: str | None = context.setting_value(rule.setting_key)
-            if setting_value is None:
-                return False
-            return self._setting_text_is_enabled(setting_value)
-        if rule.kind is ModWebAppTabVisibilityKind.SETTING_EQUALS:
-            if rule.setting_key is None:
-                raise ValueError("Setting-equals app tab rule unexpectedly missing its setting key.")
-            if rule.setting_value is None:
-                raise ValueError("Setting-equals app tab rule unexpectedly missing its expected value.")
-            setting_value = context.setting_value(rule.setting_key)
-            if setting_value is None:
-                return False
-            return setting_value.strip().casefold() == rule.setting_value.strip().casefold()
-        if rule.kind is ModWebAppTabVisibilityKind.ALL:
-            return all(self._app_tab_visibility_matches(child_rule, context) for child_rule in rule.children)
-        return any(self._app_tab_visibility_matches(child_rule, context) for child_rule in rule.children)
-
-    @staticmethod
-    def _setting_text_is_enabled(setting_value: str) -> bool:
-        return setting_value.strip().casefold() in _ENABLED_SETTING_TEXTS
 
     @classmethod
     def _app_version_is_at_least(cls, current_version: str, minimum_version: str) -> bool:

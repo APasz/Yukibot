@@ -851,114 +851,14 @@ class ModWebAppSectionKind(Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class ModWebAppTabSettingSnapshot:
-    key: str
-    value_text: str
-
-
-@dataclass(frozen=True, slots=True)
 class ModWebAppTabContext:
     app_name: str
-    app_friendly: str
     app_version: str | None = None
     app_scope: str | None = None
-    mod_names: tuple[str, ...] = ()
     enabled_mod_names: tuple[str, ...] = ()
-    settings: tuple[ModWebAppTabSettingSnapshot, ...] = ()
     supports_map: bool = False
     supports_blueprints: bool = False
     supports_sevendays_sandbox_options: bool = False
-
-    def has_mod(self, mod_name: str) -> bool:
-        target_name: str = mod_name.strip().casefold()
-        return any(candidate.casefold() == target_name for candidate in self.mod_names)
-
-    def has_enabled_mod(self, mod_name: str) -> bool:
-        target_name: str = mod_name.strip().casefold()
-        return any(candidate.casefold() == target_name for candidate in self.enabled_mod_names)
-
-    def setting_value(self, setting_key: str) -> str | None:
-        target_key: str = setting_key.strip().casefold()
-        for setting in self.settings:
-            if setting.key.casefold() == target_key:
-                return setting.value_text
-        return None
-
-
-class ModWebAppTabVisibilityKind(Enum):
-    ALWAYS = "always"
-    MIN_APP_VERSION = "min_app_version"
-    HAS_MOD = "has_mod"
-    SETTING_ENABLED = "setting_enabled"
-    SETTING_EQUALS = "setting_equals"
-    ALL = "all"
-    ANY = "any"
-
-
-@dataclass(frozen=True, slots=True)
-class ModWebAppTabVisibilityRule:
-    kind: ModWebAppTabVisibilityKind
-    app_version: str | None = None
-    mod_name: str | None = None
-    setting_key: str | None = None
-    setting_value: str | None = None
-    children: tuple["ModWebAppTabVisibilityRule", ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.kind is ModWebAppTabVisibilityKind.ALWAYS:
-            return
-        if self.kind is ModWebAppTabVisibilityKind.MIN_APP_VERSION:
-            if self.app_version is None or not self.app_version.strip():
-                raise ValueError("App tab minimum-version rule requires a version.")
-            return
-        if self.kind is ModWebAppTabVisibilityKind.HAS_MOD:
-            if self.mod_name is None or not self.mod_name.strip():
-                raise ValueError("App tab mod rule requires a mod name.")
-            return
-        if self.kind is ModWebAppTabVisibilityKind.SETTING_ENABLED:
-            if self.setting_key is None or not self.setting_key.strip():
-                raise ValueError("App tab setting-enabled rule requires a setting key.")
-            return
-        if self.kind is ModWebAppTabVisibilityKind.SETTING_EQUALS:
-            if self.setting_key is None or not self.setting_key.strip():
-                raise ValueError("App tab setting-equals rule requires a setting key.")
-            if self.setting_value is None:
-                raise ValueError("App tab setting-equals rule requires an expected value.")
-            return
-        if not self.children:
-            raise ValueError("Composite app tab visibility rules require at least one child rule.")
-
-    @classmethod
-    def always(cls) -> "ModWebAppTabVisibilityRule":
-        return cls(ModWebAppTabVisibilityKind.ALWAYS)
-
-    @classmethod
-    def min_app_version(cls, app_version: str) -> "ModWebAppTabVisibilityRule":
-        return cls(ModWebAppTabVisibilityKind.MIN_APP_VERSION, app_version=app_version)
-
-    @classmethod
-    def has_mod(cls, mod_name: str) -> "ModWebAppTabVisibilityRule":
-        return cls(ModWebAppTabVisibilityKind.HAS_MOD, mod_name=mod_name)
-
-    @classmethod
-    def setting_enabled(cls, setting_key: str) -> "ModWebAppTabVisibilityRule":
-        return cls(ModWebAppTabVisibilityKind.SETTING_ENABLED, setting_key=setting_key)
-
-    @classmethod
-    def setting_equals(cls, setting_key: str, setting_value: str) -> "ModWebAppTabVisibilityRule":
-        return cls(
-            ModWebAppTabVisibilityKind.SETTING_EQUALS,
-            setting_key=setting_key,
-            setting_value=setting_value,
-        )
-
-    @classmethod
-    def all_of(cls, *children: "ModWebAppTabVisibilityRule") -> "ModWebAppTabVisibilityRule":
-        return cls(ModWebAppTabVisibilityKind.ALL, children=children)
-
-    @classmethod
-    def any_of(cls, *children: "ModWebAppTabVisibilityRule") -> "ModWebAppTabVisibilityRule":
-        return cls(ModWebAppTabVisibilityKind.ANY, children=children)
 
 
 @dataclass(frozen=True, slots=True)
@@ -968,7 +868,6 @@ class ModWebAppTabDefinition:
     page_order: int
     app_card_order: int
     app_card_tone: BadgeTone
-    visibility_rule: ModWebAppTabVisibilityRule = field(default_factory=ModWebAppTabVisibilityRule.always)
     show_on_app_card: bool = True
     builtin_kind: ModWebAppSectionKind | None = None
     render_handler_name: str | None = None
@@ -977,7 +876,7 @@ class ModWebAppTabDefinition:
     action_handler_name: str | None = None
 
     def __post_init__(self) -> None:
-        tab_id: str = self.tab_id.strip()
+        tab_id: str = self.tab_id.strip().casefold()
         label: str = self.label.strip()
         if not tab_id:
             raise ValueError("App tab definitions require a tab id.")
@@ -1014,7 +913,6 @@ class ModWebAppTabDefinition:
         page_order: int,
         app_card_order: int,
         app_card_tone: BadgeTone,
-        visibility_rule: ModWebAppTabVisibilityRule | None = None,
         show_on_app_card: bool = True,
     ) -> "ModWebAppTabDefinition":
         return cls(
@@ -1023,7 +921,6 @@ class ModWebAppTabDefinition:
             page_order=page_order,
             app_card_order=app_card_order,
             app_card_tone=app_card_tone,
-            visibility_rule=visibility_rule or ModWebAppTabVisibilityRule.always(),
             show_on_app_card=show_on_app_card,
             builtin_kind=builtin_kind,
         )
@@ -1038,7 +935,6 @@ class ModWebAppTabDefinition:
         app_card_order: int,
         app_card_tone: BadgeTone,
         render_handler_name: str,
-        visibility_rule: ModWebAppTabVisibilityRule | None = None,
         show_on_app_card: bool = True,
         badge_handler_name: str | None = None,
         app_card_badge_handler_name: str | None = None,
@@ -1050,7 +946,6 @@ class ModWebAppTabDefinition:
             page_order=page_order,
             app_card_order=app_card_order,
             app_card_tone=app_card_tone,
-            visibility_rule=visibility_rule or ModWebAppTabVisibilityRule.always(),
             show_on_app_card=show_on_app_card,
             render_handler_name=render_handler_name,
             badge_handler_name=badge_handler_name,
@@ -1113,9 +1008,6 @@ __all__: tuple[str, ...] = (
     "ModWebAppTabContext",
     "ModWebAppTabDefinition",
     "ModWebAppTabLoadResult",
-    "ModWebAppTabSettingSnapshot",
-    "ModWebAppTabVisibilityKind",
-    "ModWebAppTabVisibilityRule",
     "ModWebBasePageModel",
     "ModWebConfigEditorLayout",
     "ModWebConfigEditorShape",

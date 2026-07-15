@@ -903,17 +903,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     card: Card = ui.card().classes(_card_classes(stat.card_tone))
                     if system_page_enabled:
                         target_url: str = mod_web_node_system_path(stat.node_name)
-                        card.props("role=link tabindex=0")
-                        card.on("click", lambda _=None, url=target_url: ui.navigate.to(url))
-                        card.on(
-                            "keydown.enter",
-                            lambda _=None, url=target_url: ui.navigate.to(url),
-                            js_handler="(event) => { event.preventDefault(); emit(); }",
-                        )
-                        card.on(
-                            "keydown.space",
-                            lambda _=None, url=target_url: ui.navigate.to(url),
-                            js_handler="(event) => { event.preventDefault(); emit(); }",
+                        ModWebUiHelpersMixin._make_activatable(
+                            target=cast("Element", card),
+                            role="link",
+                            on_activate=lambda _=None, url=target_url: ui.navigate.to(url),
                         )
                     metric_bindings: list[_ModWebHomeMetricBinding] = []
                     with card:
@@ -1137,7 +1130,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 ui.card().classes(self._app_card_link_classes(app)).style(self._app_card_link_style(app))
                             )
                             if card_target is not None:
-                                card.on("click", lambda _=None, target_url=card_target: ui.navigate.to(target_url))
+                                ModWebUiHelpersMixin._make_activatable(
+                                    target=cast("Element", card),
+                                    role="link",
+                                    on_activate=lambda _=None, target_url=card_target: ui.navigate.to(target_url),
+                                )
                             with card:
                                 self._render_app_card_content(
                                     ui=ui,

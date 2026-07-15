@@ -599,13 +599,6 @@ def render_pack_text(*, pack_version: str | None, has_unpublished_changes: bool)
     return pack_text
 
 
-def render_player_session_pack_text(notice: PlayerSessionNotice) -> str | None:
-    return render_pack_text(
-        pack_version=notice.pack_version,
-        has_unpublished_changes=notice.has_unpublished_pack_changes,
-    )
-
-
 def render_notice_body(notice: RelayNotice, *, app_name: str) -> str:
     if isinstance(notice, PlayerSessionNotice):
         if notice.action is PlayerSessionAction.JOINED:
@@ -715,13 +708,8 @@ def notice_badge_spec(notice: RelayNotice) -> RelayNoticeBadgeSpec | None:
 
 
 def notice_additional_badge_specs(notice: RelayNotice) -> tuple[RelayNoticeBadgeSpec, ...]:
-    if not isinstance(notice, PlayerSessionNotice):
-        return ()
-    pack_text = render_player_session_pack_text(notice)
-    if pack_text is None:
-        return ()
-    tone: RelayNoticeBadgeTone = "warn" if notice.has_unpublished_pack_changes else "black"
-    return (RelayNoticeBadgeSpec(text=pack_text, tone=tone),)
+    del notice
+    return ()
 
 
 def relay_notice_badge_spec_from_label(label: str) -> RelayNoticeBadgeSpec | None:
@@ -749,11 +737,7 @@ def relay_notice_badge_spec_from_label(label: str) -> RelayNoticeBadgeSpec | Non
 def notice_embed_spec(notice: RelayNotice, *, app_name: str, author_name: str) -> RelayNoticeEmbedSpec | None:
     if isinstance(notice, PlayerSessionNotice):
         if notice.action is PlayerSessionAction.JOINED:
-            description_lines = [f"Joined {author_name}"]
-            pack_text = render_player_session_pack_text(notice)
-            if pack_text is not None:
-                description_lines.append(pack_text)
-            return RelayNoticeEmbedSpec(title=app_name, description="\n".join(description_lines))
+            return RelayNoticeEmbedSpec(title=app_name, description=f"Joined {author_name}")
         return RelayNoticeEmbedSpec(title=app_name, description=f"Left {author_name}")
     if isinstance(notice, GameDeathNotice):
         return RelayNoticeEmbedSpec(title=app_name, description=_render_game_death_embed_description(notice))
