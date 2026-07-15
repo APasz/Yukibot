@@ -175,6 +175,7 @@ from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import (
     _APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
     _PORTAL_HEALTH_PATH,
+    _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
 )
 from web_dash.home import (
     _format_restart_hours_input,
@@ -216,6 +217,7 @@ from web_dash.types import (
     ModWebOverviewPageModel,
     ModWebPageLoadWarning,
     ModWebPageModel,
+    RemoteNodeCircuitOpenError,
     ModWebSearchOption,
     ModWebSettingControlKind,
     ModWebSevenDaysSandboxOptionEntry,
@@ -1966,7 +1968,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(style, "border-color: #dc6b0f !important;")
         self.assertNotIn("background:", style)
 
-    def test_probe_node_status_treats_http_response_as_alive(self) -> None:
+    def test_probe_node_status_requires_ping_success_status(self) -> None:
         node: ModWebNodeLink = ModWebNodeLink(
             node_name="erin",
             label="Erin",
@@ -1987,7 +1989,7 @@ class ModWebTests(unittest.TestCase):
         with patch.object(ModWebService, "_remote_http_client", new=AsyncMock(return_value=session)):
             status = asyncio.run(ModWebService()._probe_node_status_async(node))
 
-        self.assertEqual(status, ModWebNodeStatus(node=node, alive=True, detail="HTTP 401"))
+        self.assertEqual(status, ModWebNodeStatus(node=node, alive=False, detail="Unexpected HTTP 401"))
 
     def test_probe_node_status_uses_presence_timeout(self) -> None:
         node: ModWebNodeLink = ModWebNodeLink(
@@ -2789,6 +2791,11 @@ class ModWebTests(unittest.TestCase):
             with (
                 patch.object(service, "_authorised_page_user", new=authorised_user),
                 patch.object(service, "_remote_node_link", return_value=node),
+                patch.object(
+                    service,
+                    "_probe_node_status_async",
+                    new=AsyncMock(return_value=ModWebNodeStatus(node=node, alive=True, detail="HTTP 204")),
+                ),
                 patch.object(service, "_remote_node_system_summary_async", new=AsyncMock(return_value=summary)),
                 patch.object(service, "_remote_node_system_history_async", new=AsyncMock(return_value=history)),
                 patch.object(service, "_remote_apps_async", new=AsyncMock(return_value=())),
@@ -2933,7 +2940,7 @@ class ModWebTests(unittest.TestCase):
                 exception=connection_error,
                 retry_url="/mod-web/nodes/erin/system",
             )
-            probe.assert_awaited_once_with(node, log_failures=False)
+            self.assertEqual(probe.await_args_list, [call(node), call(node, log_failures=False)])
             navigate_to.assert_called_once_with("/mod-web/nodes/erin/system")
             register_timer_cleanup.assert_called_once_with(ui=ui, timer=timer)
 
@@ -3952,7 +3959,7 @@ class ModWebTests(unittest.TestCase):
             color_hex="#DC2626",
         )
 
-        with patch.object(ModWebService, "_remote_apps_async", AsyncMock(return_value=(entry,))):
+        with patch.object(ModWebService, "_remote_apps_async", AsyncMock(return_value=(entry,))) as remote_apps:
             links: tuple[ModWebAppLink, ...] = asyncio.run(service._remote_app_links(node, user))
 
         self.assertEqual(len(links), 1)
@@ -3962,6 +3969,11 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(links[0].supports_chat)
         self.assertEqual(links[0].chat_url, "/mod-web/nodes/erin/chat/minecraft_alpha")
         self.assertIsNone(links[0].player_count)
+        remote_apps.assert_awaited_once_with(
+            node,
+            user,
+            timeout=_REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
+        )
 
     def test_remote_apps_uses_standard_request_timeout(self) -> None:
         service: ModWebService = ModWebService()
@@ -3988,6 +4000,7 @@ class ModWebTests(unittest.TestCase):
             path="/apps",
             scopes=(NodeApiScope.APPS_READ,),
             user=user,
+            timeout=15.0,
         )
 
     def test_remote_app_entry_uses_app_specific_endpoint(self) -> None:
@@ -4089,6 +4102,55 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(payload, {"apps": []})
         self.assertEqual(session.get.call_count, 2)
         retry_sleep.assert_awaited_once()
+
+    def test_remote_json_async_opens_circuit_after_exhausted_get_timeout(self) -> None:
+        class TimeoutContext:
+            async def __aenter__(self) -> object:
+                raise aiohttp.SocketTimeoutError("slow response")
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        service = ModWebService()
+        node = ModWebNodeLink(
+            node_name="erin",
+            label="Erin",
+            url="/mod-web/nodes/erin",
+            api_base_url="https://erin.example/api/node",
+            api_url="/api/node-proxy/erin/apps",
+            is_current=False,
+        )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        session = Mock()
+        session.get.side_effect = (TimeoutContext(), TimeoutContext())
+
+        with (
+            patch.object(service, "_remote_token", return_value="test-token"),
+            patch.object(service, "_remote_http_client", new=AsyncMock(return_value=session)),
+            patch("web_dash.models.asyncio.sleep", new=AsyncMock()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Remote node request failed"):
+                asyncio.run(
+                    service._remote_json_async(
+                        node=node,
+                        app_name=None,
+                        path="/apps",
+                        scopes=(NodeApiScope.APPS_READ,),
+                        user=user,
+                    )
+                )
+            with self.assertRaises(RemoteNodeCircuitOpenError):
+                asyncio.run(
+                    service._remote_json_async(
+                        node=node,
+                        app_name=None,
+                        path="/apps",
+                        scopes=(NodeApiScope.APPS_READ,),
+                        user=user,
+                    )
+                )
+
+        self.assertEqual(session.get.call_count, 2)
 
     def test_remote_node_system_summary_or_none_async_returns_none_on_failure(self) -> None:
         async def exercise() -> None:
@@ -4567,7 +4629,11 @@ class ModWebTests(unittest.TestCase):
                 is_simulated_down=True,
             ),
         )
-        remote_app_links.assert_awaited_once_with(local_node, user)
+        remote_app_links.assert_awaited_once_with(
+            local_node,
+            user,
+            timeout=_REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
+        )
 
     def test_home_app_sections_short_circuit_simulated_current_node(self) -> None:
         service: ModWebService = ModWebService()

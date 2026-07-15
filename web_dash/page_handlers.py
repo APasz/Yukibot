@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .constants import (
+    _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
     _REMOTE_NODE_PRESENCE_REQUEST_TIMEOUT,
     log,
 )
@@ -204,8 +205,14 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         current_node = self._current_node_link()
         return await self._remote_app_links(current_node, user)
 
-    async def _remote_app_links(self, node: ModWebNodeLink, user: ModWebUser) -> tuple[ModWebAppLink, ...]:
-        entries = await self._remote_apps_async(node, user)
+    async def _remote_app_links(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        *,
+        timeout: float = _REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
+    ) -> tuple[ModWebAppLink, ...]:
+        entries = await self._remote_apps_async(node, user, timeout=timeout)
         return tuple(self._app_link_from_entry(entry=entry, user=user, node_name=node.node_name) for entry in entries)
 
     async def _home_app_sections(
@@ -227,7 +234,14 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             if node.node_name.casefold() in simulated_down_keys:
                 return index, self._simulated_remote_node_section(node)
             try:
-                return index, ModWebNodeAppSection(node=node, app_links=await self._remote_app_links(node, user))
+                return index, ModWebNodeAppSection(
+                    node=node,
+                    app_links=await self._remote_app_links(
+                        node,
+                        user,
+                        timeout=_REMOTE_NODE_OVERVIEW_REQUEST_TIMEOUT_SECONDS,
+                    ),
+                )
             except Exception as xcp:
                 if not (self._shutting_down or config.IS_SHUTTINGDOWN):
                     log.warning("Remote mod web home node unavailable: node=%s error=%s", node.node_name, xcp)
@@ -274,7 +288,10 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             if log_failures and not (self._shutting_down or config.IS_SHUTTINGDOWN):
                 log.warning("Remote mod web login status probe failed: node=%s error=%s", node.node_name, xcp)
             return ModWebNodeStatus(node=node, alive=False, detail=str(xcp))
-        return ModWebNodeStatus(node=node, alive=True, detail=f"HTTP {status_code}")
+        if status_code == 204:
+            self._record_remote_node_success(node)
+            return ModWebNodeStatus(node=node, alive=True, detail="HTTP 204")
+        return ModWebNodeStatus(node=node, alive=False, detail=f"Unexpected HTTP {status_code}")
 
     @staticmethod
     def _simulated_remote_node_error_text() -> str:
@@ -527,6 +544,9 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         node: ModWebNodeLink | None = None
         try:
             node = self._remote_node_link(node_name)
+            status = await self._probe_node_status_async(node)
+            if not status.alive:
+                raise ConnectionError(status.detail or "Remote node health check failed.")
             (
                 system_summary,
                 system_history,

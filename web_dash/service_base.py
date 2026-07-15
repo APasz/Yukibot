@@ -95,6 +95,7 @@ from .types import (
     ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
     RemoteChatBrokerEvent,
+    RemoteNodeCircuitState,
     _ModWebBadgeSpec,
     _ModWebChatSurfaceConfig,
     _ModWebKillControlState,
@@ -119,6 +120,10 @@ class ModWebServiceSupport:
     _remote_sync_http_local: threading.local = cast(threading.local, cast(object, None))
     _remote_sync_http_sessions: list[requests.Session] = cast(list[requests.Session], cast(object, None))
     _remote_sync_http_sessions_lock: threading.Lock = cast(threading.Lock, cast(object, None))
+    _remote_node_circuit_lock: threading.Lock = cast(threading.Lock, cast(object, None))
+    _remote_node_circuits: dict[str, RemoteNodeCircuitState] = cast(
+        dict[str, RemoteNodeCircuitState], cast(object, None)
+    )
     _remote_node_state_broker: SharedAsyncStreamBroker[
         RemoteNodeStreamKey, NodeStateStreamEvent
     ] = cast(SharedAsyncStreamBroker[RemoteNodeStreamKey, NodeStateStreamEvent], cast(object, None))
@@ -564,6 +569,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_remote_apps_async"]) -> Callable[..., Awaitable[tuple[NodeAppEntry, ...]]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_record_remote_node_success"]) -> Callable[[ModWebNodeLink], None]: ...
 
     @overload
     def __getattr__(

@@ -46,6 +46,18 @@ from .runtime_imports import (
 ChatMediaPreviewKind: TypeAlias = Literal["image", "video", "audio"]
 
 
+class RemoteNodeCircuitOpenError(RuntimeError):
+    def __init__(self, *, node_name: str, retry_after_seconds: float) -> None:
+        self.node_name = node_name
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(f"Remote node {node_name!r} is temporarily unavailable; retry shortly.")
+
+
+@dataclass(slots=True)
+class RemoteNodeCircuitState:
+    retry_after_seconds: float = 0.0
+
+
 @dataclass(frozen=True, slots=True)
 class _SettingSecretConfig:
     style: str
@@ -1021,6 +1033,8 @@ __all__: tuple[str, ...] = (
     "ModWebOverviewPageModel",
     "ModWebPageModel",
     "ModWebSearchOption",
+    "RemoteNodeCircuitOpenError",
+    "RemoteNodeCircuitState",
     "ModWebSevenDaysSandboxOptionEntry",
     "ModWebSevenDaysSandboxOptionsSummary",
     "ModWebSettingControlKind",

@@ -79,6 +79,7 @@ from .types import (
     ModWebNodeStatus,
     ModWebNotificationTrayItemKind,
     ModWebNotificationTrayItemState,
+    RemoteNodeCircuitOpenError,
     _ModWebChatEventGroup,
     _ModWebFakeChatMessageMode,
     _ModWebFakeChatPreviewState,
@@ -425,6 +426,8 @@ class ModWebStatusMixin(ModWebServiceSupport):
     @classmethod
     def _friendly_remote_node_error_text(cls, exception: BaseException) -> str:
         for cause in cls._exception_chain(exception):
+            if isinstance(cause, RemoteNodeCircuitOpenError):
+                return "This node is recovering from a recent connection failure. Retrying shortly."
             if isinstance(cause, (requests.Timeout, asyncio.TimeoutError)):
                 return "This node is taking too long to respond. It may be offline or still waking up."
             if isinstance(cause, (requests.ConnectionError, aiohttp.ClientConnectionError, ConnectionError)):
@@ -443,6 +446,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
             isinstance(
                 cause,
                 (
+                    RemoteNodeCircuitOpenError,
                     requests.Timeout,
                     requests.ConnectionError,
                     aiohttp.ClientConnectionError,

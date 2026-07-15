@@ -20,6 +20,7 @@ from apps.sevendays import SevenDays, SevenDaysSandboxOptionsSnapshot
 
 from .constants import (
     _KNOWN_BOT_SNAPSHOT_CACHE_TTL_SECONDS,
+    _REMOTE_NODE_CIRCUIT_BREAK_SECONDS,
     _REMOTE_NODE_GET_MAX_ATTEMPTS,
     _REMOTE_NODE_GET_RETRY_DELAY_SECONDS,
     _REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
@@ -129,6 +130,8 @@ from .types import (
     ModWebOverviewPageModel,
     ModWebPageLoadWarning,
     ModWebPageModel,
+    RemoteNodeCircuitOpenError,
+    RemoteNodeCircuitState,
     ModWebSevenDaysSandboxOptionEntry,
     ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
@@ -1206,13 +1209,20 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 return node
         raise _http_exception(404, f"Unknown node: {node_name}")
 
-    async def _remote_apps_async(self, node: ModWebNodeLink, user: ModWebUser) -> tuple[NodeAppEntry, ...]:
+    async def _remote_apps_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        *,
+        timeout: float = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
+    ) -> tuple[NodeAppEntry, ...]:
         payload: dict[str, object] = await self._remote_json_async(
             node=node,
             app_name=None,
             path="/apps",
             scopes=(NodeApiScope.APPS_READ,),
             user=user,
+            timeout=timeout,
         )
         return self._remote_apps_from_payload(payload)
 
@@ -2095,6 +2105,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
         json_payload: Mapping[str, object] | None = None,
         timeout: float | tuple[float, float] = _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     ) -> dict[str, object]:
+        if method == "GET":
+            self._raise_if_remote_node_circuit_open(node)
         token: str = self._remote_token(node=node, app_name=app_name, scopes=scopes, user=user)
         node_api_base_url = self._absolute_node_api_base_url(node.api_base_url)
         url: str = f"{node_api_base_url.rstrip('/')}/{path.lstrip('/')}"
@@ -2128,9 +2140,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
                         payload: object = cast(object, await response.json())
                     except (aiohttp.ContentTypeError, ValueError, json.JSONDecodeError) as xcp:
                         raise RuntimeError("Remote node returned invalid JSON.") from xcp
+                if method == "GET":
+                    self._record_remote_node_success(node)
                 return _json_object(payload, context="Remote node response")
             except (aiohttp.ClientError, asyncio.TimeoutError) as xcp:
                 if attempt >= max_attempts:
+                    if method == "GET":
+                        self._record_remote_node_failure(node)
                     raise RuntimeError(
                         f"Remote node request failed: url={url} error={type(xcp).__name__}: {xcp}"
                     ) from xcp
@@ -2143,7 +2159,35 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     xcp,
                 )
                 await asyncio.sleep(_REMOTE_NODE_GET_RETRY_DELAY_SECONDS)
+            except _RemoteNodeHttpError as xcp:
+                if method == "GET" and xcp.status_code in {500, 502, 503, 504}:
+                    self._record_remote_node_failure(node)
+                raise
         raise RuntimeError("Remote node request attempts were unexpectedly exhausted.")
+
+    def _raise_if_remote_node_circuit_open(self, node: ModWebNodeLink) -> None:
+        now = time.monotonic()
+        key = node.node_name.casefold()
+        with self._remote_node_circuit_lock:
+            state = self._remote_node_circuits.get(key)
+            if state is None or state.retry_after_seconds <= now:
+                return
+            raise RemoteNodeCircuitOpenError(
+                node_name=node.node_name,
+                retry_after_seconds=state.retry_after_seconds - now,
+            )
+
+    def _record_remote_node_success(self, node: ModWebNodeLink) -> None:
+        key = node.node_name.casefold()
+        with self._remote_node_circuit_lock:
+            self._remote_node_circuits.pop(key, None)
+
+    def _record_remote_node_failure(self, node: ModWebNodeLink) -> None:
+        key = node.node_name.casefold()
+        with self._remote_node_circuit_lock:
+            self._remote_node_circuits[key] = RemoteNodeCircuitState(
+                retry_after_seconds=time.monotonic() + _REMOTE_NODE_CIRCUIT_BREAK_SECONDS,
+            )
 
     async def _remote_bytes_async(
         self,

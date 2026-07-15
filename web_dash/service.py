@@ -57,7 +57,7 @@ from .stream_broker import (
 )
 from .streams import ModWebStreamsMixin
 from .tabs import ModWebTabsMixin
-from .types import RemoteChatBrokerEvent
+from .types import RemoteChatBrokerEvent, RemoteNodeCircuitState
 from .ui_helpers import ModWebUiHelpersMixin
 
 
@@ -89,6 +89,8 @@ class ModWebService(
         self._remote_sync_http_local = threading.local()
         self._remote_sync_http_sessions: list[requests.Session] = []
         self._remote_sync_http_sessions_lock = threading.Lock()
+        self._remote_node_circuit_lock = threading.Lock()
+        self._remote_node_circuits: dict[str, RemoteNodeCircuitState] = {}
         self._remote_node_state_broker: SharedAsyncStreamBroker[RemoteNodeStreamKey, NodeStateStreamEvent] = (
             SharedAsyncStreamBroker()
         )
