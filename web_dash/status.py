@@ -92,7 +92,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from nicegui.element import Element
+    from nicegui.element import Element  # noqa: F401
 
 _STATUS_SVG_DIRECTORY: Path = Path(__file__).resolve().parent.parent / "resources" / "svg" / "web_dash"
 _USER_HEADER_SURFACE_MIN_HEIGHT_REM = 4.9
@@ -1115,7 +1115,10 @@ class ModWebStatusMixin(ModWebServiceSupport):
             drafts_by_user: dict[int, _AliasDialogDraft] = {}
             form_controls: dict[str, ModWebValueContainer] = {}
             app_alias_controls: dict[str, ModWebValueContainer] = {}
-            refresh_alias_body: Callable[[], None] = lambda: None
+            def _refresh_alias_body() -> None:
+                return None
+
+            refresh_alias_body: Callable[[], None] = _refresh_alias_body
 
             def _target_user_id() -> int:
                 target_user_id = state.get("target_user_id", user.discord_id)

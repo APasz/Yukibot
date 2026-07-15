@@ -99,6 +99,7 @@ from .types import (
     ChatMediaPreviewKind,
     ModWebBasePageModel,
     ModWebNodeLink,
+    RemoteChatBrokerEvent,
     _ChatMediaPreview,
     _ModWebBadgeSpec,
     _ModWebChatComposeRequest,
@@ -106,7 +107,6 @@ from .types import (
     _ModWebChatPanelConfig,
     _ModWebChatPanelSignal,
     _ModWebChatSurfaceConfig,
-    RemoteChatBrokerEvent,
 )
 from .ui_helpers import ModWebUiHelpersMixin, copy_text_to_clipboard
 
@@ -144,6 +144,10 @@ class ModWebChatMixin(ModWebServiceSupport):
                     )
                 ),
             )
+            def _noop_unsubscribe() -> None:
+                return None
+
+            unsubscribe_runtime: Callable[[], None] = _noop_unsubscribe
             if include_runtime_updates:
                 unsubscribe_runtime = self._node_api.subscribe_local_app_runtime(
                     room_id,
@@ -153,9 +157,6 @@ class ModWebChatMixin(ModWebServiceSupport):
                         else None
                     ),
                 )
-            else:
-                unsubscribe_runtime = lambda: None
-
             def _unsubscribe() -> None:
                 ChatHub().unsubscribe(room_id, room_subscription_id)
                 unsubscribe_runtime()
@@ -2721,8 +2722,6 @@ class ModWebChatMixin(ModWebServiceSupport):
             return ""
         return reference.content.strip()
 
-        ui.notify("Copied message text.", type="positive")
-
     @staticmethod
     def _chat_event_hides_body_content(event: ChatEvent) -> bool:
         notice = event.resolved_notice()
@@ -2794,7 +2793,7 @@ class ModWebChatMixin(ModWebServiceSupport):
         if app_stats.transition_state is NodeAppTransitionState.STOPPING:
             return "Stopping", "warn"
         if app_stats.running:
-            return "Running", "purple"
+            return "Running", "grey"
         if not app_stats.enabled:
             return "Disabled", "red"
         if app_stats.runtime_fault is not None:

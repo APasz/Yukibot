@@ -59,7 +59,8 @@ from nicegui.elements.timer import Timer
 from nicegui.elements.tooltip import Tooltip
 from nicegui.elements.upload import Upload
 from requests.models import Response
-from starlette.responses import Response as StarletteResponse, StreamingResponse
+from starlette.responses import Response as StarletteResponse
+from starlette.responses import StreamingResponse
 
 import config
 from _authority import AuthorityResource, read_json_object
@@ -93,8 +94,8 @@ from apps._config import (
     SteamUpdatePreset,
     steam_update_preset_for_scope,
 )
-from apps._updater import AppUpdateInfo, AppUpdateOperationKind, AppUpdateState, AppUpdateStatus
 from apps._node_api import NodeModUploadSource
+from apps._updater import AppUpdateInfo, AppUpdateOperationKind, AppUpdateState, AppUpdateStatus
 from apps.factorio.node_api import (
     NodeFactorioModSettings,
     NodeModDependencyEntry,
@@ -191,6 +192,7 @@ from node_api import (
     NodeSystemAction,
     NodeSystemActionHandler,
     NodeSystemActionResult,
+    NodeSystemCapabilities,
     NodeSystemDiskSummary,
     NodeSystemHistory,
     NodeSystemSample,
@@ -354,6 +356,7 @@ __all__: tuple[str, ...] = (
     "NodeSystemHistory",
     "NodeSystemAction",
     "NodeSystemActionHandler",
+    "NodeSystemCapabilities",
     "NodeSystemActionResult",
     "NodeRestartRecord",
     "NodeRestartScheduleEntry",

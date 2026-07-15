@@ -26,6 +26,7 @@ from .runtime_imports import (
     NodeSaveList,
     NodeSettingList,
     NodeStateStreamEvent,
+    NodeSystemCapabilities,
     NodeSystemHistory,
     NodeSystemSummary,
     Power_Level,
@@ -277,6 +278,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
         log_failures: bool = True,
     ) -> ModWebNodeStatus:
         url = node.latency_probe_url or f"{self._absolute_node_api_base_url(node.api_base_url).rstrip('/')}/ping"
+        started_at = asyncio.get_running_loop().time()
         try:
             session = await self._remote_http_client()
             async with session.get(
@@ -290,7 +292,8 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             return ModWebNodeStatus(node=node, alive=False, detail=str(xcp))
         if status_code == 204:
             self._record_remote_node_success(node)
-            return ModWebNodeStatus(node=node, alive=True, detail="HTTP 204")
+            latency_ms = round((asyncio.get_running_loop().time() - started_at) * 1000)
+            return ModWebNodeStatus(node=node, alive=True, detail="HTTP 204", latency_ms=latency_ms)
         return ModWebNodeStatus(node=node, alive=False, detail=f"Unexpected HTTP {status_code}")
 
     @staticmethod
@@ -501,17 +504,12 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 log_method("Remote restart state unavailable: node=%s error=%s", node.node_name, xcp)
                 return None
 
-        async def _load_portal_restart_state(node: ModWebNodeLink) -> NodeRestartState | None:
-            if not self._node_is_yuki(node):
-                return None
-            portal_node = self._portal_node_link()
-            if portal_node is None:
-                return None
+        async def _load_system_capabilities(node: ModWebNodeLink) -> NodeSystemCapabilities | None:
             try:
-                return await self._remote_restart_state_async(portal_node, user)
+                return await self._remote_node_system_capabilities_async(node, user)
             except Exception as xcp:
                 log_method = log.info if self._remote_node_error_is_transient(xcp) else log.warning
-                log_method("Remote Portal restart state unavailable: node=%s error=%s", portal_node.node_name, xcp)
+                log_method("Remote node system capabilities unavailable: node=%s error=%s", node.node_name, xcp)
                 return None
 
         async def _load_node_capacity(node: ModWebNodeLink) -> config.NodeCapacityProfile | None:
@@ -553,7 +551,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 app_entries,
                 restart_schedules,
                 restart_state,
-                portal_restart_state,
+                system_capabilities,
                 node_capacity,
                 node_font_sources,
                 node_disk_settings,
@@ -563,7 +561,7 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
                 self._remote_apps_async(node, user),
                 _load_restart_schedules(node),
                 _load_restart_state(node),
-                _load_portal_restart_state(node),
+                _load_system_capabilities(node),
                 _load_node_capacity(node),
                 _load_node_font_sources(node),
                 _load_node_disk_settings(node),
@@ -623,10 +621,11 @@ class ModWebPageHandlersMixin(ModWebServiceSupport):
             user=user,
             initial_system_summary=system_summary,
             initial_system_history=system_history,
+            initial_node_status=status,
             initial_app_entries=app_entries,
             initial_restart_schedules=restart_schedules,
             initial_restart_state=restart_state,
-            initial_portal_restart_state=portal_restart_state,
+            initial_system_capabilities=system_capabilities,
             initial_node_capacity=node_capacity,
             initial_node_font_sources=node_font_sources,
             initial_node_disk_settings=node_disk_settings,

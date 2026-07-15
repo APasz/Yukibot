@@ -12,8 +12,8 @@ from _manager import App_Manager, ac_app_logs
 from _security import Access_Control
 from cmd_music import MusicService
 from cmd_voice import VoiceTTSService
-from restart_targets import RestartTarget
 from restart_state import RestartKind, record_voice_restart
+from restart_targets import RestartTarget
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +24,6 @@ RESTART_TARGET_PERMISSIONS: dict[RestartTarget, Access_Control.LvL] = {
     RestartTarget.VOICE: Access_Control.LvL.admin,
     RestartTarget.BOT: Access_Control.LvL.sudo,
     RestartTarget.SYSTEM: Access_Control.LvL.sudo,
-    RestartTarget.PORTAL: Access_Control.LvL.sudo,
 }
 
 
@@ -34,8 +33,13 @@ def available_restart_targets(
     return tuple(
         target
         for target in RestartTarget
-        if (target is not RestartTarget.VOICE or profile.has_service(config.BotService.VOICE_TTS))
-        and (target is not RestartTarget.PORTAL or profile.name is config.BotProfileName.YUKI)
+        if (
+            target is RestartTarget.BOT
+            or (
+                profile.name is not config.BotProfileName.PORTAL
+                and (target is not RestartTarget.VOICE or profile.has_service(config.BotService.VOICE_TTS))
+            )
+        )
     )
 
 
@@ -112,24 +116,6 @@ async def reset_voice_runtime_services(
     await voice_tts.reset_runtime(extra_guild_ids=music_guild_ids)
 
 
-async def restart_portal(
-    ctx: lightbulb.Context,
-    acl: Access_Control,
-    silent: bool,
-) -> None:
-    if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.YUKI:
-        raise ValueError("Portal restart is only available from the Yuki profile")
-    await acl.perm_check(ctx.user.id, restart_required_level(RestartTarget.PORTAL))
-    await ctx.defer()
-    log.critical(
-        "Ops.Restart; target=%s silent=%s: %s",
-        RestartTarget.PORTAL.value,
-        silent,
-        ctx.user.display_name,
-    )
-    await _sys.restart_portal(ctx, silent=silent)
-
-
 async def reset_voice_runtime(ctx: lightbulb.Context) -> None:
     async with ctx.client.di.enter_context(lightbulb.di.Contexts.DEFAULT) as di:
         voice_tts = await di.get(VoiceTTSService)
@@ -197,9 +183,6 @@ class CMD_OpsRestart(
                 ctx.user.display_name,
             )
             await reset_voice_runtime(ctx)
-            return
-        if restart_type is RestartTarget.PORTAL:
-            await restart_portal(ctx, acl, self.silent)
             return
         await restart_host_or_bot(
             ctx,

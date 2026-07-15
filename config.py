@@ -3200,6 +3200,12 @@ class Name_Cache(metaclass=Singleton):
         user = self.by_id.get(user_id)
         return user.avatar_hash if user is not None else None
 
+    def primary_guild_nickname(self, user_id: int) -> str | None:
+        user = self.by_id.get(user_id)
+        if user is None:
+            return None
+        return user.guild_names.get(int(DISCORD_GUILD))
+
     def web_mention_name(
         self,
         user_id: int,

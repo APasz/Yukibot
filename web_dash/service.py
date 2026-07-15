@@ -32,13 +32,14 @@ from .runtime_imports import (
     Access_Control,
     App,
     App_Manager,
-    Callable,
+    MaintenanceService,
     ModWebUser,
     NodeAppStateStreamEvent,
     NodeConsoleStdoutSnapshot,
     NodeStateStreamEvent,
     NodeSystemActionHandler,
     RelayTTSQueue,
+    RestartTarget,
     aiohttp,
     asyncio,
     cast,
@@ -118,11 +119,15 @@ class ModWebService(
     def set_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self._backend.set_chat_relay_service(chat_relay)
 
-    def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
-        self._backend.set_process_restart_handler(handler)
-
     def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
         self._backend.set_system_action_handler(handler)
+
+    def set_maintenance_service(
+        self,
+        maintenance_service: MaintenanceService,
+        available_targets: tuple[RestartTarget, ...],
+    ) -> None:
+        self._backend.set_maintenance_service(maintenance_service, available_targets)
 
     @staticmethod
     def _web_display_name(user: ModWebUser) -> str:

@@ -5,10 +5,10 @@ import enum
 import logging
 import re
 import wave
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Iterable
-from typing import Any, Callable, cast
+from typing import Any, cast
 
 import hikari
 import hikariwave

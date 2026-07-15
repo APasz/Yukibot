@@ -999,6 +999,17 @@ class Mod_Manager:
             raise
         return mod
 
+    async def update_notes(self, mod_name: str | Mod, *, notes: str | None) -> Mod:
+        mod = self.get(mod_name)
+        previous_notes = mod.cfg.notes
+        try:
+            mod.cfg.notes = notes
+            await self.save_mods()
+        except Exception:
+            mod.cfg.notes = previous_notes
+            raise
+        return mod
+
     async def apply_discovered_launcher_metadata(
         self,
         mod_name: str | Mod,

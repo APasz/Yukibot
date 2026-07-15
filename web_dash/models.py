@@ -50,8 +50,8 @@ from .runtime_imports import (
     BotMetadataSnapshot,
     Callable,
     Card,
-    ClientPackKubeJsScript,
     ClientPackFilePreview,
+    ClientPackKubeJsScript,
     ClientPackMetadataConfig,
     ClientPackRelease,
     Iterable,
@@ -76,8 +76,8 @@ from .runtime_imports import (
     NodeConsoleStdoutSnapshot,
     NodeFactorioModSettings,
     NodeMinecraftRecipeWorkspaceState,
-    NodeModList,
     NodeModDependencyResolutionResult,
+    NodeModList,
     NodeModPortalVersionList,
     NodeModUploadBatchResult,
     NodeSaveList,
@@ -130,12 +130,12 @@ from .types import (
     ModWebOverviewPageModel,
     ModWebPageLoadWarning,
     ModWebPageModel,
-    RemoteNodeCircuitOpenError,
-    RemoteNodeCircuitState,
     ModWebSevenDaysSandboxOptionEntry,
     ModWebSevenDaysSandboxOptionsSummary,
     ModWebTitleStat,
     ModWebTitleStatLine,
+    RemoteNodeCircuitOpenError,
+    RemoteNodeCircuitState,
 )
 from .utils import _format_uptime_seconds, _http_exception, _is_executor_shutdown_error
 
@@ -197,7 +197,7 @@ class _KnownBotSnapshotCache:
 
 class ModWebModelsMixin(ModWebServiceSupport):
     _ALLOWED_DASHBOARD_NODE_PROFILES: frozenset[config.BotProfileName] = frozenset(
-        {config.BotProfileName.YUKI, config.BotProfileName.ERIN}
+        {config.BotProfileName.YUKI, config.BotProfileName.ERIN, config.BotProfileName.PORTAL}
     )
     _known_bot_snapshot_cache: _KnownBotSnapshotCache | None = None
 
@@ -285,12 +285,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 node_api_public_base_url = str(item["node_api_public_base_url"]).strip()
                 if not node_name or not label or not node_api_public_base_url:
                     raise ValueError("fields must not be blank")
-                if node_name.casefold() not in {
-                    config.BotProfileName.YUKI.value.casefold(),
-                    config.BotProfileName.ERIN.value.casefold(),
-                }:
-                    log.warning("Mod web ignored DEV_CLUSTER_NODE_LINKS_JSON node outside dashboard split: %s", node_name)
-                    continue
                 resolved_public_base_url = config.resolve_node_api_public_base_url(
                     node_api_public_base_url,
                     mod_web_public_base_url=config.MOD_WEB_SERVER.public_base_url,
@@ -1113,9 +1107,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
     def _node_links(self) -> tuple[ModWebNodeLink, ...]:
         links: dict[str, ModWebNodeLink] = {}
-        if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
-            current = self._current_node_link()
-            links[current.node_name.casefold()] = current
+        current = self._current_node_link()
+        links[current.node_name.casefold()] = current
 
         for node in self._dev_cluster_node_links():
             key = node.node_name.casefold()
@@ -1149,6 +1142,10 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 latency_probe_url=self._node_api.ping_url(base_url=mod_web.node_api_base_url),
                 presence_stream_url=self._node_api.presence_stream_url(base_url=mod_web.node_api_base_url),
             )
+
+        portal_node = self._portal_node_link()
+        if portal_node is not None:
+            links.setdefault(portal_node.node_name.casefold(), portal_node)
         return tuple(links.values())
 
     def _current_node_label(self) -> str:
@@ -1183,6 +1180,21 @@ class ModWebModelsMixin(ModWebServiceSupport):
         snapshot = self._known_bot_snapshot_for_node(node_name=node.node_name)
         return snapshot is not None and snapshot.profile.bot_profile is config.BotProfileName.YUKI
 
+    def _node_is_portal(self, node: ModWebNodeLink) -> bool:
+        if node.is_current and config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
+            return True
+        snapshot = self._known_bot_snapshot_for_node(node_name=node.node_name)
+        return snapshot is not None and snapshot.profile.bot_profile is config.BotProfileName.PORTAL
+
+    def _node_has_discord_bot(self, node: ModWebNodeLink) -> bool:
+        if node.is_current:
+            return config.ACTIVE_BOT_PROFILE.name in {config.BotProfileName.YUKI, config.BotProfileName.ERIN}
+        snapshot = self._known_bot_snapshot_for_node(node_name=node.node_name)
+        return snapshot is not None and snapshot.profile.bot_profile in {
+            config.BotProfileName.YUKI,
+            config.BotProfileName.ERIN,
+        }
+
     def _portal_node_link(self) -> ModWebNodeLink | None:
         for snapshot in self._known_bot_snapshots():
             if snapshot.profile.bot_profile is not config.BotProfileName.PORTAL:
@@ -1200,6 +1212,8 @@ class ModWebModelsMixin(ModWebServiceSupport):
                 latency_probe_url=self._node_api.ping_url(base_url=mod_web.node_api_base_url),
                 presence_stream_url=self._node_api.presence_stream_url(base_url=mod_web.node_api_base_url),
             )
+        if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
+            return self._current_node_link()
         return None
 
     def _remote_node_link(self, node_name: str) -> ModWebNodeLink:

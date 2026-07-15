@@ -7,10 +7,10 @@ import logging
 import re
 import shutil
 import sys
-from collections.abc import Awaitable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from string import Formatter
-from typing import TYPE_CHECKING, Callable, ClassVar, TypeVar
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 from urllib.parse import unquote, urlparse
 
 import hikari

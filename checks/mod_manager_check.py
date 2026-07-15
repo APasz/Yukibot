@@ -13,8 +13,8 @@ from _mod_ops import (
     ClientPackValidationError,
     ModArchiveEntry,
     NonDownloadableModError,
-    build_client_pack_entries,
     build_admin_pack_entries,
+    build_client_pack_entries,
     build_server_pack_entries,
     download_entries,
     download_paths,
@@ -27,8 +27,8 @@ from apps._config import (
     ClientPackPolicy,
     CurseForgeModMetadata,
     KnownModPageProvider,
-    ModClassificationOverride,
     Mod_Config,
+    ModClassificationOverride,
     ModDownloadBlockReason,
     ModMetadataOverrides,
     ModPageLink,
@@ -576,6 +576,20 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated.storage_path, self.mods_dir / "example.zip")
         self.assertTrue(updated.storage_path.exists())
         self.assertFalse((self.mods_dir / "example.zip.client").exists())
+
+    async def test_update_notes_persists_and_can_be_cleared(self) -> None:
+        manager = self._build_manager()
+        await manager.add(self._write_source_file())
+
+        updated = await manager.update_notes("example.zip", notes="Install after the API mod.")
+
+        self.assertEqual(updated.cfg.notes, "Install after the API mod.")
+        await manager.reload_mods()
+        self.assertEqual(manager.get("example.zip").cfg.notes, "Install after the API mod.")
+
+        cleared = await manager.update_notes("example.zip", notes=None)
+
+        self.assertIsNone(cleared.cfg.notes)
 
     async def test_update_properties_rejects_conflicting_client_representation(self) -> None:
         manager = self._build_manager()

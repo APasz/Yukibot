@@ -2159,11 +2159,17 @@ class Mod_Config(BaseModel):
     download_block_reason: ModDownloadBlockReason | None = None
     classification_override: ModClassificationOverride | None = None
     mod_pages: tuple[ModPageLink, ...] = ()
+    notes: str | None = None
     metadata_overrides: ModMetadataOverrides = Field(default_factory=ModMetadataOverrides)
     client_pack: ClientPackConfig = Field(default_factory=ClientPackConfig)
     platforms: ModPlatformMetadata = Field(default_factory=ModPlatformMetadata)
 
     model_config = ConfigDict(arbitrary_types_allowed=True, str_strip_whitespace=True)
+
+    @field_validator("notes")
+    @classmethod
+    def normalise_notes(cls, raw: str | None) -> str | None:
+        return normalise_optional_text(raw)
 
     @model_validator(mode="before")
     @classmethod

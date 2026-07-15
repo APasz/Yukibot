@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 # pyright: reportUninitializedInstanceVariable=false
-
 import contextlib
 import json
 import logging
 import re
 import shutil
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from urllib.parse import quote, unquote, urlparse
 
 import hikari

@@ -3671,7 +3671,13 @@ class ModWebAppPageMixin(
                 with ui.element("div").classes("mod-section-tabs-shell"):
                     with ui.tabs(value=initial_tab_id, on_change=sync_section).classes("mod-section-tabs") as section_tabs:
                         for tab in tabs:
-                            tab_by_id[tab.tab_id] = ui.tab(tab.tab_id, label=tab.label)
+                            tab_element = ui.tab(tab.tab_id, label=tab.label, icon=tab.icon)
+                            tab_by_id[tab.tab_id] = tab_element
+                            self._attach_badge_tooltip(
+                                ui=ui,
+                                target=tab_element,
+                                text=f"Open {tab.label} section",
+                            )
                 with ui.row().classes("mod-section-chrome items-start justify-end gap-3 flex-wrap"):
                     for tab in tabs:
                         chrome_classes = "mod-section-chrome-panel items-start justify-end gap-3 flex-wrap"

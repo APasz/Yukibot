@@ -673,6 +673,7 @@ class ModWebNodeStatus:
     alive: bool
     detail: str | None = None
     is_simulated_down: bool = False
+    latency_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,13 +689,16 @@ class _ModWebNodePresenceBadgeSpec:
     pending_class_name: str
     healthy_class_name: str
     unhealthy_class_name: str
+    tooltip_element_id: int | None = None
     show_latency: bool = False
+    tooltip_mode: Literal["basic", "discord", "portal"] = "basic"
 
     def to_mapping(self) -> dict[str, object]:
         return {
             "node_name": self.node_name,
             "badge_element_id": self.badge_element_id,
             "text_element_id": self.text_element_id,
+            "tooltip_element_id": self.tooltip_element_id,
             "node_label": self.node_label,
             "pending_text": self.pending_text,
             "alive_text": self.alive_text,
@@ -704,6 +708,7 @@ class _ModWebNodePresenceBadgeSpec:
             "healthy_class_name": self.healthy_class_name,
             "unhealthy_class_name": self.unhealthy_class_name,
             "show_latency": self.show_latency,
+            "tooltip_mode": self.tooltip_mode,
         }
 
 
@@ -880,6 +885,7 @@ class ModWebAppTabDefinition:
     page_order: int
     app_card_order: int
     app_card_tone: BadgeTone
+    icon: str = "extension"
     show_on_app_card: bool = True
     builtin_kind: ModWebAppSectionKind | None = None
     render_handler_name: str | None = None
@@ -890,10 +896,13 @@ class ModWebAppTabDefinition:
     def __post_init__(self) -> None:
         tab_id: str = self.tab_id.strip().casefold()
         label: str = self.label.strip()
+        icon: str = self.icon.strip()
         if not tab_id:
             raise ValueError("App tab definitions require a tab id.")
         if not label:
             raise ValueError("App tab definitions require a label.")
+        if not icon:
+            raise ValueError("App tab definitions require an icon.")
         if self.page_order < 0 or self.app_card_order < 0:
             raise ValueError("App tab definition orders must be non-negative.")
         if (self.builtin_kind is None) == (self.render_handler_name is None):
@@ -908,6 +917,7 @@ class ModWebAppTabDefinition:
             raise ValueError("App tab action handler names must be non-empty when provided.")
         object.__setattr__(self, "tab_id", tab_id)
         object.__setattr__(self, "label", label)
+        object.__setattr__(self, "icon", icon)
         if self.render_handler_name is not None:
             object.__setattr__(self, "render_handler_name", self.render_handler_name.strip())
         if self.badge_handler_name is not None:
@@ -925,6 +935,7 @@ class ModWebAppTabDefinition:
         page_order: int,
         app_card_order: int,
         app_card_tone: BadgeTone,
+        icon: str = "extension",
         show_on_app_card: bool = True,
     ) -> "ModWebAppTabDefinition":
         return cls(
@@ -933,6 +944,7 @@ class ModWebAppTabDefinition:
             page_order=page_order,
             app_card_order=app_card_order,
             app_card_tone=app_card_tone,
+            icon=icon,
             show_on_app_card=show_on_app_card,
             builtin_kind=builtin_kind,
         )
@@ -947,6 +959,7 @@ class ModWebAppTabDefinition:
         app_card_order: int,
         app_card_tone: BadgeTone,
         render_handler_name: str,
+        icon: str = "extension",
         show_on_app_card: bool = True,
         badge_handler_name: str | None = None,
         app_card_badge_handler_name: str | None = None,
@@ -958,6 +971,7 @@ class ModWebAppTabDefinition:
             page_order=page_order,
             app_card_order=app_card_order,
             app_card_tone=app_card_tone,
+            icon=icon,
             show_on_app_card=show_on_app_card,
             render_handler_name=render_handler_name,
             badge_handler_name=badge_handler_name,

@@ -66,17 +66,19 @@ from .runtime_imports import (
     NodeModMutationResult,
     NodeModPortalVersionEntry,
     NodeModPortalVersionList,
-    NodeModUpdateDependencyAction,
     NodeModUpdateCheckResult,
+    NodeModUpdateDependencyAction,
     NodeModUpdateStatus,
     NodeModUploadBatchResult,
     NodeRestartScheduleState,
     NodeRestartState,
     NodeSystemAction,
     NodeSystemActionResult,
+    NodeSystemCapabilities,
     Power_Level,
     RestartTarget,
     Select,
+    Textarea,
     assert_never,
     asyncio,
     config,
@@ -441,6 +443,20 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return NodeSystemActionResult.from_mapping(payload)
 
+    async def _remote_node_system_capabilities_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> NodeSystemCapabilities:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/system/capabilities",
+            scopes=(NodeApiScope.NODE_OPERATE,),
+            user=user,
+        )
+        return NodeSystemCapabilities.from_mapping(payload)
+
     async def _remote_restart_schedules_async(
         self,
         node: ModWebNodeLink,
@@ -716,6 +732,27 @@ class ModWebActionsMixin(ModWebServiceSupport):
         )
         return NodeModMutationResult.from_mapping(payload)
 
+    async def _update_mod_notes(
+        self,
+        *,
+        model: ModWebPageModel,
+        entry: NodeModEntry,
+        notes: str | None,
+        user: ModWebUser,
+    ) -> NodeModMutationResult:
+        if not self._user_has_level(user, Power_Level.admin):
+            raise PermissionError("Admin access is required to edit mod notes.")
+        payload = await self._remote_json_async(
+            node=self._remote_node_link(model.node_name),
+            app_name=model.app_name,
+            path=f"/apps/{quote(model.app_name, safe='')}/mods/{quote(entry.name, safe='')}/notes",
+            scopes=(NodeApiScope.MODS_WRITE,),
+            user=user,
+            method="PUT",
+            json_payload={"notes": notes},
+        )
+        return NodeModMutationResult.from_mapping(payload)
+
     async def _fetch_mod_launcher_metadata(
         self,
         *,
@@ -905,6 +942,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
                 return "Unblock" if not entry.downloadable else "Block"
             case NodeModMutationAction.UPDATE_PROPERTIES:
                 return "Save Properties"
+            case NodeModMutationAction.UPDATE_NOTES:
+                return "Save Notes"
             case NodeModMutationAction.DELETE:
                 return "Delete"
             case _:
@@ -922,6 +961,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
             case NodeModMutationAction.TOGGLE_DOWNLOAD_BLOCK:
                 return "mod-list-button state-blocked" if not entry.downloadable else "mod-list-button state-open"
             case NodeModMutationAction.UPDATE_PROPERTIES:
+                return "mod-list-button"
+            case NodeModMutationAction.UPDATE_NOTES:
                 return "mod-list-button"
             case NodeModMutationAction.DELETE:
                 return "mod-list-button danger"
@@ -1284,6 +1325,7 @@ class ModWebActionsMixin(ModWebServiceSupport):
             user,
             required_mod_mutation_level(NodeModMutationAction.UPDATE_PROPERTIES),
         )
+        can_edit_notes: bool = self._user_has_level(user, Power_Level.admin)
         supports_client_pack: bool = mod_capabilities_for_scope(model.app_scope).supports_client_pack
         launcher_metadata_providers = mod_capabilities_for_scope(model.app_scope).launcher_metadata_providers
         launcher_url_inputs: dict[Provider, Input] = {}
@@ -1297,6 +1339,8 @@ class ModWebActionsMixin(ModWebServiceSupport):
         detect_metadata_button: Button | None = None
         metadata_detection_save_button: Button | None = None
         save_properties_button: Button | None = None
+        save_notes_button: Button | None = None
+        notes_input: Textarea | None = None
         check_update_button: Button | None = None
         check_update_version_input: Input | None = None
         check_update_version_select: Select | None = None
@@ -1334,6 +1378,26 @@ class ModWebActionsMixin(ModWebServiceSupport):
         available_update_result: NodeModUpdateCheckResult | None = None
         check_update_versions: NodeModPortalVersionList | None = None
         active_metadata_panel: Literal["overrides", "launcher"] | None = None
+
+        async def save_notes() -> None:
+            if save_notes_button is None or notes_input is None:
+                raise RuntimeError("Save Notes button was not rendered.")
+            try:
+                notes = str(notes_input.value or "").strip() or None
+                result = await self._update_mod_notes(model=model, entry=entry, notes=notes, user=user)
+            except Exception as xcp:
+                log.warning(
+                    "Mod notes update failed: node=%s app=%s mod=%s error=%s",
+                    model.node_name,
+                    model.app_name,
+                    entry.name,
+                    xcp,
+                )
+                ui.notify(f"Mod notes update failed: {xcp}", type="negative")
+                return
+            dialog.close()
+            ui.notify(result.message, type="positive")
+            self._guarded_reload(ui=ui)
 
         def toggle_metadata_panel(panel: Literal["overrides", "launcher"]) -> None:
             nonlocal active_metadata_panel
@@ -2522,6 +2586,25 @@ class ModWebActionsMixin(ModWebServiceSupport):
                         with ui.column().classes("mod-detail-item gap-1 mod-mod-details-description"):
                             ui.label("Description").classes("mod-stat-label")
                             ui.label(entry.description).classes("mod-stat-value break-words")
+                    notes = entry.notes
+                    if can_edit_notes or notes is not None:
+                        with ui.column().classes("mod-detail-item gap-1 mod-mod-details-notes"):
+                            ui.label("Notes").classes("mod-stat-label")
+                            if can_edit_notes:
+                                notes_input = (
+                                    ui.textarea(
+                                        value=notes or "",
+                                        placeholder="Add notes for this mod",
+                                    )
+                                    .props("filled square dense clearable hide-bottom-space color=accent")
+                                    .classes("w-full mod-app-details-field")
+                                )
+                                with ui.row().classes("w-full justify-end"):
+                                    save_notes_button = ui.button("Save Notes", on_click=save_notes).classes(
+                                        "mod-list-button"
+                                    )
+                            else:
+                                ui.label(notes or "").classes("mod-stat-value break-words whitespace-pre-wrap")
                     if can_check_update:
                         with ui.column().classes("mod-detail-item gap-2 mod-mod-details-update-check"):
                             ui.label("Updates").classes("mod-stat-label")

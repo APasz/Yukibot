@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import mimetypes
 import struct
 import tempfile
@@ -275,7 +276,6 @@ from mod_web_auth import ModWebAuthService, ModWebUser
 from node_auth import NodeAccessGrant, NodeApiScope, NodeTokenError, issue_node_token, verify_node_token
 from restart_state import (
     RestartKind,
-    mark_pending_process_restart,
     read_process_restart_record,
     read_voice_restart_record,
 )
@@ -289,6 +289,7 @@ _NODE_TOKEN_TTL_SECONDS = 15 * 60
 _NODE_RESTART_DELAY_SECONDS = 0.25
 _RELAY_TTS_FORWARD_TTL_SECONDS = 60
 _APP_PLAYER_COUNT_TIMEOUT_SECONDS = 1.5
+_PORTAL_NODE_LATENCY_TIMEOUT_SECONDS = 4.0
 _APP_FOOTPRINT_CACHE_TTL_SECONDS = 60.0
 _APP_TRANSITION_TTL_SECONDS = 15.0
 _NODE_APP_ENTRY_CACHE_TTL_SECONDS = 5.0
@@ -993,6 +994,7 @@ class NodeModEntry:
     archive_name: str
     source_path: str
     description: str | None = None
+    notes: str | None = None
     client_path: str | None = None
     mod_pages: tuple[ModPageLink, ...] = ()
     metadata_overrides: ModMetadataOverrides = field(default_factory=ModMetadataOverrides)
@@ -1092,6 +1094,7 @@ class NodeModEntry:
             archive_name=_optional_string(payload, "archive_name") or name,
             source_path=_optional_string(payload, "source_path") or client_path or name,
             description=_optional_string(payload, "description"),
+            notes=_optional_string(payload, "notes"),
             mod_pages=tuple(
                 ModPageLink.model_validate(page)
                 for page in cast(list[object] | tuple[object, ...], raw_mod_pages)
@@ -1131,6 +1134,7 @@ class NodeModEntry:
             "archive_name": self.archive_name,
             "source_path": self.source_path,
             "description": self.description,
+            "notes": self.notes,
             "mod_pages": [page.model_dump(mode="json") for page in self.mod_pages],
             "metadata_overrides": self.metadata_overrides.model_dump(mode="json"),
             "client_pack": self.client_pack.model_dump(mode="json"),
@@ -1144,6 +1148,7 @@ class NodeModMutationAction(StrEnum):
     TOGGLE_COREMOD = "toggle_coremod"
     TOGGLE_DOWNLOAD_BLOCK = "toggle_download_block"
     UPDATE_PROPERTIES = "update_properties"
+    UPDATE_NOTES = "update_notes"
     DELETE = "delete"
 
 
@@ -1168,6 +1173,8 @@ def required_mod_mutation_level(
         NodeModMutationAction.DELETE,
     }:
         return Power_Level.sudo
+    if action is NodeModMutationAction.UPDATE_NOTES:
+        return Power_Level.admin
     raise ValueError(f"Unsupported mod mutation action: {action}")
 
 
@@ -1182,6 +1189,12 @@ class NodeModPropertiesUpdateRequest(BaseModel):
     mod_pages: tuple[ModPageLink, ...] | None = None
     client_pack: ClientPackConfig | None = None
     launcher_urls: LauncherProviderUrls = Field(default_factory=LauncherProviderUrls)
+
+
+class NodeModNotesUpdateRequest(BaseModel):
+    notes: str | None = None
+
+    model_config = ConfigDict(str_strip_whitespace=True)
 
 
 class NodeLauncherProviderSelectionRequest(BaseModel):
@@ -2432,7 +2445,54 @@ class NodeSystemHistory:
 class NodeSystemAction(StrEnum):
     RESTART_PROCESS = "restart_process"
     REBOOT_HOST = "reboot_host"
-    RESTART_PORTAL = "restart_portal"
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSystemCapabilities:
+    actions: tuple[NodeSystemAction, ...]
+    supports_app_auto_restart: bool = False
+    supports_silent_restart: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.actions:
+            raise ValueError("Node system capabilities require at least one action.")
+        if len(set(self.actions)) != len(self.actions):
+            raise ValueError("Node system capabilities must not contain duplicate actions.")
+
+    def supports(self, action: NodeSystemAction) -> bool:
+        return action in self.actions
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemCapabilities:
+        raw_actions = payload.get("actions")
+        if not isinstance(raw_actions, Sequence) or isinstance(raw_actions, (str, bytes)):
+            raise ValueError("Node system capabilities actions are invalid.")
+        actions: list[NodeSystemAction] = []
+        for raw_action in raw_actions:
+            if not isinstance(raw_action, str):
+                raise ValueError("Node system capability action is invalid.")
+            try:
+                actions.append(NodeSystemAction(raw_action))
+            except ValueError as xcp:
+                raise ValueError("Node system capability action is invalid.") from xcp
+        raw_supports_app_auto_restart = payload.get("supports_app_auto_restart", False)
+        raw_supports_silent_restart = payload.get("supports_silent_restart", False)
+        if not isinstance(raw_supports_app_auto_restart, bool):
+            raise ValueError("Node system app auto-restart capability is invalid.")
+        if not isinstance(raw_supports_silent_restart, bool):
+            raise ValueError("Node system silent restart capability is invalid.")
+        return cls(
+            actions=tuple(actions),
+            supports_app_auto_restart=raw_supports_app_auto_restart,
+            supports_silent_restart=raw_supports_silent_restart,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "actions": [action.value for action in self.actions],
+            "supports_app_auto_restart": self.supports_app_auto_restart,
+            "supports_silent_restart": self.supports_silent_restart,
+        }
 
 
 type NodeSystemActionHandler = Callable[[NodeSystemAction, bool, bool], None]
@@ -2441,7 +2501,6 @@ type NodeSystemActionHandler = Callable[[NodeSystemAction, bool, bool], None]
 _NODE_SYSTEM_ACTION_LABELS: dict[NodeSystemAction, str] = {
     NodeSystemAction.RESTART_PROCESS: "process restart",
     NodeSystemAction.REBOOT_HOST: "host reboot",
-    NodeSystemAction.RESTART_PORTAL: "Portal restart",
 }
 
 
@@ -4033,7 +4092,6 @@ class NodeApiService:
         self._relay_tts_service: RelayTTSQueue | None = None
         self._acl: Access_Control | None = None
         self._web_auth: ModWebAuthService | None = None
-        self._process_restart_handler: Callable[[], None] | None = None
         self._system_action_handler: NodeSystemActionHandler | None = None
         self._maintenance_service: MaintenanceService | None = None
         self._maintenance_restart_targets: tuple[RestartTarget, ...] = ()
@@ -4203,9 +4261,6 @@ class NodeApiService:
     def set_web_auth(self, web_auth: ModWebAuthService) -> None:
         self._web_auth = web_auth
 
-    def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
-        self._process_restart_handler = handler
-
     def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
         self._system_action_handler = handler
 
@@ -4298,28 +4353,6 @@ class NodeApiService:
         async def _ping() -> Response:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/restart")
-        async def _restart_node(request: Request, access_token: str | None = None) -> Response:
-            traffic_log.info("Node API restart request: node=%s", self.node_name)
-            self._require_access(
-                request,
-                access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
-                token_node_names=self._portal_restart_token_node_names(),
-            )
-            if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
-                raise _http_exception(404, "Process restart is only available on the Portal node.")
-            if self._process_restart_handler is None:
-                raise _http_exception(503, "Portal process restart handler is unavailable.")
-            restart_kind = await self._portal_process_restart_kind(request)
-            mark_pending_process_restart(restart_kind)
-            asyncio.get_running_loop().call_later(
-                _NODE_RESTART_DELAY_SECONDS,
-                self._process_restart_handler,
-            )
-            return Response(status_code=status.HTTP_202_ACCEPTED)
-
         @nicegui_app.websocket(f"{_NODE_API_PREFIX}/presence/stream")
         async def _presence_stream(websocket: WebSocket) -> None:
             traffic_log.info("Node API presence stream request: node=%s", self.node_name)
@@ -4336,6 +4369,12 @@ class NodeApiService:
             traffic_log.info("Node API system history request: node=%s", self.node_name)
             self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
             return self.build_system_history().to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/capabilities")
+        async def _system_capabilities(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API system capabilities request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+            return self.system_capabilities().to_mapping()
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/system/restart-state")
         async def _restart_state(request: Request, access_token: str | None = None) -> dict[str, object]:
@@ -5309,6 +5348,31 @@ class NodeApiService:
             )
             return result.to_mapping()
 
+        @nicegui_app.put(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/notes")
+        async def _update_mod_notes(
+            app_name: str,
+            mod_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.MODS_WRITE,))
+            update_request = NodeModNotesUpdateRequest.model_validate(payload)
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.MODS_WRITE,),
+                verified_grant=grant,
+            )
+            result = await self.update_mod_notes(
+                app=self._resolve_app(app_name),
+                mod_name=mod_name,
+                notes=update_request.notes,
+                actor_user_id=actor_user_id,
+            )
+            return result.to_mapping()
+
         @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/mods/{{mod_name}}/launcher-metadata")
         async def _fetch_mod_launcher_metadata(
             app_name: str,
@@ -6273,7 +6337,11 @@ class NodeApiService:
             return entries
 
     async def _build_app_entries(self) -> tuple[NodeAppEntry, ...]:
-        manager: App_Manager = self._require_manager()
+        manager = self._manager
+        if manager is None:
+            if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL:
+                return ()
+            raise _http_exception(503, "App manager is not available yet.")
         apps = tuple(sorted(manager.apps.values(), key=lambda item: item.friendly.casefold()))
         return tuple(await asyncio.gather(*(self._build_live_app_entry(app) for app in apps)))
 
@@ -7892,21 +7960,80 @@ class NodeApiService:
                 if message.get("type") == "websocket.disconnect":
                     return
                 sample_id: str | None = None
+                payload: Mapping[str, object] | None = None
                 payload_text = message.get("text")
                 if isinstance(payload_text, str) and payload_text:
                     try:
-                        payload = json.loads(payload_text)
+                        raw_payload = json.loads(payload_text)
                     except ValueError:
-                        payload = None
-                    if isinstance(payload, Mapping):
+                        raw_payload = None
+                    if isinstance(raw_payload, Mapping):
+                        payload = cast(Mapping[str, object], raw_payload)
                         raw_sample_id = payload.get("sample_id")
                         if raw_sample_id is not None:
                             sample_id = str(raw_sample_id)
-                await websocket.send_json({"type": "pong", "node": self.node_name, "sample_id": sample_id})
+                if payload is not None and payload.get("type") == "node_latencies":
+                    await websocket.send_json(
+                        {
+                            "type": "node_latencies",
+                            "node": self.node_name,
+                            "sample_id": sample_id,
+                            "latencies": await self._portal_node_latencies_async(),
+                        }
+                    )
+                    continue
+                response: dict[str, object] = {"type": "pong", "node": self.node_name, "sample_id": sample_id}
+                discord_latency_ms = self._discord_heartbeat_latency_ms()
+                if discord_latency_ms is not None:
+                    response["discord_latency_ms"] = discord_latency_ms
+                await websocket.send_json(response)
         except WebSocketDisconnect:
             return
         finally:
             await self._close_websocket_quietly(websocket)
+
+    def _discord_heartbeat_latency_ms(self) -> int | None:
+        if config.ACTIVE_BOT_PROFILE.name not in {config.BotProfileName.YUKI, config.BotProfileName.ERIN}:
+            return None
+        manager = self._manager
+        if manager is None or manager.bot is None:
+            return None
+        latency_seconds = manager.bot.heartbeat_latency
+        if not math.isfinite(latency_seconds):
+            return None
+        return round(latency_seconds * 1000)
+
+    async def _portal_node_latencies_async(self) -> dict[str, int | None]:
+        if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
+            return {}
+        targets = self._portal_node_latency_targets()
+        measurements = await asyncio.gather(
+            *(run_blocking(self._measure_node_latency_ms, ping_url) for _, ping_url in targets)
+        )
+        return {node_name: latency_ms for (node_name, _), latency_ms in zip(targets, measurements, strict=True)}
+
+    @staticmethod
+    def _portal_node_latency_targets() -> tuple[tuple[str, str], ...]:
+        targets: dict[str, tuple[str, str]] = {}
+        for snapshot in config.load_known_bot_snapshots():
+            if snapshot.profile.bot_profile not in {config.BotProfileName.YUKI, config.BotProfileName.ERIN}:
+                continue
+            mod_web = snapshot.features.mod_web
+            if mod_web is None:
+                continue
+            node_name = mod_web.node_name
+            targets.setdefault(node_name.casefold(), (node_name, f"{mod_web.node_api_base_url.rstrip('/')}/ping"))
+        return tuple(targets.values())
+
+    @staticmethod
+    def _measure_node_latency_ms(ping_url: str) -> int | None:
+        started_at = time.perf_counter()
+        try:
+            response = requests.get(ping_url, timeout=_PORTAL_NODE_LATENCY_TIMEOUT_SECONDS)
+            response.raise_for_status()
+        except requests.RequestException:
+            return None
+        return max(1, round((time.perf_counter() - started_at) * 1000))
 
     async def _serve_node_state_stream(self, *, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -8457,24 +8584,6 @@ class NodeApiService:
         manager = self._require_manager()
         return manager.discord_settings()
 
-    async def _portal_process_restart_kind(self, request: Request) -> RestartKind:
-        try:
-            payload: object = await request.json()
-        except Exception:
-            payload = {}
-        if not isinstance(payload, Mapping):
-            raise _http_exception(400, "Portal restart payload is invalid.")
-        raw_kind = payload.get("restart_kind", RestartKind.MANUAL_BOT.value)
-        if not isinstance(raw_kind, str):
-            raise _http_exception(400, "Portal restart kind is invalid.")
-        try:
-            restart_kind = RestartKind(raw_kind)
-        except ValueError as xcp:
-            raise _http_exception(400, "Portal restart kind is invalid.") from xcp
-        if restart_kind not in {RestartKind.SCHEDULED_BOT, RestartKind.MANUAL_BOT}:
-            raise _http_exception(400, "Portal restart kind must be scheduled_bot or manual_bot.")
-        return restart_kind
-
     async def schedule_system_action(
         self,
         *,
@@ -8484,11 +8593,8 @@ class NodeApiService:
         actor_user_id: int,
     ) -> NodeSystemActionResult:
         await self._require_acl().perm_check(actor_user_id, Power_Level.sudo)
-        if (
-            action is NodeSystemAction.RESTART_PORTAL
-            and config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.YUKI
-        ):
-            raise _http_exception(400, "Portal restart is only available on the Yuki node.")
+        if not self.system_capabilities().supports(action):
+            raise _http_exception(400, f"Node action {action.value!r} is unavailable on this node.")
         handler = self._system_action_handler
         if handler is None:
             raise _http_exception(503, "Node system actions are unavailable on this node.")
@@ -8515,16 +8621,29 @@ class NodeApiService:
                     self._pending_system_action = None
                 log.exception("Node system action dispatch failed: node=%s action=%s", self.node_name, action.value)
                 return
-            if action is NodeSystemAction.RESTART_PORTAL:
-                with self._system_action_lock:
-                    self._pending_system_action = None
-
         asyncio.get_running_loop().call_later(_NODE_RESTART_DELAY_SECONDS, _dispatch)
         action_label = _NODE_SYSTEM_ACTION_LABELS[action]
         return NodeSystemActionResult(
             node=self.node_name,
             action=action,
             message=f"Scheduled {action_label} for {self.node_name}.",
+        )
+
+    def system_capabilities(self) -> NodeSystemCapabilities:
+        manager = self._manager
+        is_portal = config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL
+        supports_app_auto_restart = not is_portal and manager is not None
+        supports_silent_restart = not is_portal and manager is not None and manager.bot is not None
+        if is_portal:
+            return NodeSystemCapabilities(
+                actions=(NodeSystemAction.RESTART_PROCESS,),
+                supports_app_auto_restart=supports_app_auto_restart,
+                supports_silent_restart=supports_silent_restart,
+            )
+        return NodeSystemCapabilities(
+            actions=(NodeSystemAction.RESTART_PROCESS, NodeSystemAction.REBOOT_HOST),
+            supports_app_auto_restart=supports_app_auto_restart,
+            supports_silent_restart=supports_silent_restart,
         )
 
     def read_restart_state(self) -> NodeRestartState:
@@ -8545,7 +8664,11 @@ class NodeApiService:
         maintenance = self._maintenance_service
         if maintenance is None:
             raise _http_exception(503, "Restart scheduling is unavailable on this node.")
-        maintenance.reload()
+        if not maintenance.reload():
+            raise _http_exception(503, "Restart scheduling configuration is temporarily unavailable.")
+        return self._restart_schedule_state(maintenance)
+
+    def _restart_schedule_state(self, maintenance: MaintenanceService) -> NodeRestartScheduleState:
         return NodeRestartScheduleState(
             node=self.node_name,
             schedules=tuple(
@@ -8599,7 +8722,7 @@ class NodeApiService:
             anchor_timestamp=anchor_timestamp,
             automatically_skipped_through_timestamp=updated_schedule.skipped_through_timestamp,
         )
-        return self.read_restart_schedules()
+        return self._restart_schedule_state(maintenance)
 
     async def skip_restart_schedule(
         self,
@@ -8624,7 +8747,7 @@ class NodeApiService:
             target=target.value,
             skipped_through_timestamp=schedule.skipped_through_timestamp,
         )
-        return self.read_restart_schedules()
+        return self._restart_schedule_state(maintenance)
 
     async def mutate_node_capacity(
         self,
@@ -10842,6 +10965,33 @@ class NodeApiService:
             mod=self._mod_entry(updated_mod),
         )
 
+    async def update_mod_notes(
+        self,
+        *,
+        app: App,
+        mod_name: str,
+        notes: str | None,
+        actor_user_id: int,
+    ) -> NodeModMutationResult:
+        manager: Mod_Manager = app.has_mod_manager
+        await manager.reload_mods()
+        mod: Mod = _get_mod_or_404(manager, mod_name)
+        await self._require_acl().perm_check(actor_user_id, Power_Level.admin)
+        try:
+            updated_mod = await manager.update_notes(mod, notes=notes)
+        except ValueError as xcp:
+            raise _http_exception(409, str(xcp)) from xcp
+        self._invalidate_mod_inventory(app.name)
+        return NodeModMutationResult(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=self.node_name,
+            mod_name=mod.name,
+            action=NodeModMutationAction.UPDATE_NOTES,
+            message=f"Updated notes for {updated_mod.friendly}.",
+            mod=self._mod_entry(updated_mod),
+        )
+
     async def update_client_pack_config(
         self,
         *,
@@ -11309,31 +11459,6 @@ class NodeApiService:
                 token_error = xcp
         raise token_error or NodeTokenError("Node token node target is not configured.")
 
-    def _portal_restart_token_node_names(self) -> tuple[str, ...]:
-        names: list[str] = [self.node_name, config.BotProfileName.PORTAL.value]
-        portal_public_base_url = _normalised_auth_url(config.MOD_WEB_SERVER.public_base_url)
-        portal_node_api_base_url = _normalised_auth_url(config.MOD_WEB_SERVER.node_api_base_url)
-
-        for snapshot in config.load_known_bot_snapshots():
-            if snapshot.profile.bot_profile is not config.BotProfileName.PORTAL:
-                continue
-            mod_web = snapshot.features.mod_web
-            if mod_web is None:
-                continue
-            if (
-                _normalised_auth_url(mod_web.public_base_url) != portal_public_base_url
-                and _normalised_auth_url(mod_web.node_api_base_url) != portal_node_api_base_url
-            ):
-                continue
-            names.append(mod_web.node_name)
-
-        unique_names: dict[str, str] = {}
-        for name in names:
-            text = name.strip()
-            if text:
-                unique_names.setdefault(text.casefold(), text)
-        return tuple(unique_names.values())
-
     def _request_actor_user_id(
         self,
         *,
@@ -11747,6 +11872,7 @@ class NodeApiService:
             archive_name=mod.logical_archive_name,
             source_path=str(mod.storage_path),
             description=mod.description,
+            notes=mod.cfg.notes,
             mod_type=mod.mod_type,
             coremod=mod.is_coremod_type,
             downloadable=mod.downloadable,

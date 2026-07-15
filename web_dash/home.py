@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import avatars as mod_web_avatars
@@ -40,6 +40,7 @@ from .runtime_imports import (
     NodeRestartState,
     NodeStateStreamEvent,
     NodeSystemAction,
+    NodeSystemCapabilities,
     NodeSystemHistory,
     NodeSystemSample,
     NodeSystemSummary,
@@ -62,20 +63,25 @@ from .utils import _format_player_capacity, _format_uptime_seconds
 
 _KEEP_PAGE_MODEL_VALUE = object()
 _CLIENT_TIMEZONE_VALUE = "client"
+_RESTART_TIMEZONES: tuple[tuple[str, str], ...] = (
+    ("UTC", "UTC"),
+    ("Europe/London", "London"),
+    ("Australia/Melbourne", "Melbourne"),
+    ("Europe/Helsinki", "Helsinki"),
+)
 _RESTART_TIMEZONE_OPTIONS: dict[str, str] = {
     _CLIENT_TIMEZONE_VALUE: "Client local time",
-    "UTC": "UTC",
-    "Europe/London": "London",
-    "Australia/Melbourne": "Melbourne",
-    "Europe/Helsinki": "Helsinki",
+    **dict(_RESTART_TIMEZONES),
 }
-_RESTART_DISPLAY_TIMEZONES: tuple[tuple[str, str], ...] = (
-    ("UTC", "UTC"),
-    ("London", "Europe/London"),
-    ("Melbourne", "Australia/Melbourne"),
-    ("Helsinki", "Europe/Helsinki"),
+_RESTART_DISPLAY_TIMEZONES: tuple[tuple[str, str], ...] = tuple(
+    (label, timezone_name) for timezone_name, label in _RESTART_TIMEZONES
 )
+_RESTART_STATE_TIMEZONE = _RESTART_TIMEZONES[2][0]
+_RESTART_STATE_TIMEZONE_LABEL = dict(_RESTART_TIMEZONES)[_RESTART_STATE_TIMEZONE]
 _RESTART_SCHEDULE_FIELD_PROPS = "filled square dense hide-bottom-space color=accent"
+_SYSTEM_TREND_WINDOW_SECONDS = 10 * 60
+_SYSTEM_WARNING_PERCENT = 75
+_SYSTEM_CRITICAL_PERCENT = 90
 
 
 class _RestartWeekday(Enum):
@@ -196,6 +202,22 @@ if TYPE_CHECKING:
     from nicegui.elements.dialog import Dialog
 
 
+@dataclass(slots=True)
+class _RestartScheduleControls:
+    target: RestartTarget
+    days_input: Input
+    hours_input: Input
+    weekday_select: Select
+    anchor_time_input: Input
+    timezone_select: Select
+    status_label: Label
+    timezone_labels: dict[str, Label]
+    client_time_label: Label
+    save_button: Button
+    skip_button: Button
+    disable_button: Button
+
+
 @dataclass(frozen=True, slots=True)
 class _ModWebHomeMetricSpec:
     label: str
@@ -260,7 +282,6 @@ class _ModWebSystemActionSpec:
     action: NodeSystemAction
     title: str
     button_label: str
-    required_target: RestartTarget | None = None
 
 
 class _ModWebNodeSettingsFieldKey(Enum):
@@ -300,12 +321,6 @@ _SYSTEM_ACTION_SPECS: tuple[_ModWebSystemActionSpec, ...] = (
         action=NodeSystemAction.REBOOT_HOST,
         title="Restart System",
         button_label="Restart System",
-    ),
-    _ModWebSystemActionSpec(
-        action=NodeSystemAction.RESTART_PORTAL,
-        title="Restart Portal",
-        button_label="Restart Portal",
-        required_target=RestartTarget.PORTAL,
     ),
 )
 
@@ -401,14 +416,26 @@ class ModWebHomeMixin(ModWebServiceSupport):
             summary.node.node_name: summary for summary in home_node_summaries
         }
         can_view_node_system: bool = self._user_has_level(user, Power_Level.sudo)
+        portal_node = self._portal_node_link()
+        portal_system_url = (
+            mod_web_node_system_path(portal_node.node_name)
+            if can_view_node_system and portal_node is not None
+            else None
+        )
 
-        def _current_sections() -> tuple[ModWebNodeAppSection, ...]:
-            return tuple[ModWebNodeAppSection, ...](sections_by_node[node_name] for node_name in node_order)
+        def _current_sections(*, include_portal: bool) -> tuple[ModWebNodeAppSection, ...]:
+            sections_in_order = tuple[ModWebNodeAppSection](sections_by_node[node_name] for node_name in node_order)
+            if include_portal:
+                return sections_in_order
+            return tuple(section for section in sections_in_order if not self._node_is_portal(section.node))
 
-        def _current_summaries() -> tuple[ModWebHomeNodeSummary, ...]:
-            return tuple[ModWebHomeNodeSummary, ...](
+        def _current_summaries(*, include_portal: bool) -> tuple[ModWebHomeNodeSummary, ...]:
+            summaries_in_order = tuple[ModWebHomeNodeSummary](
                 summaries_by_node[node_name] for node_name in node_order if node_name in summaries_by_node
             )
+            if include_portal:
+                return summaries_in_order
+            return tuple(summary for summary in summaries_in_order if not self._node_is_portal(summary.node))
 
         def _app_links_for_sections(
             current_sections: tuple[ModWebNodeAppSection, ...],
@@ -422,7 +449,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
         with ui.column().classes("w-full gap-6 px-4 py-8 md:px-8"):
             with ui.column().classes("mod-page w-full gap-6"):
                 self._render_user_header(ui=ui, user=user)
-                with ui.card().classes(f"{self._hero_card_classes()} mod-home-hero"):
+                hero_card: Card
+                with (hero_card := ui.card()).classes(f"{self._hero_card_classes()} mod-home-hero"):
                     with ui.element("div").classes("mod-app-node-badge-wrap mod-home-edge-badge-wrap"):
 
                         @ui.refreshable
@@ -438,7 +466,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 )
                                 with ui.row().classes("mod-home-node-badge-list"):
                                     for section in current_sections:
-                                        badge, badge_text = self._render_home_node_status_badge(
+                                        badge, badge_text, tooltip = self._render_home_node_status_badge(
                                             ui=ui,
                                             section=section,
                                             on_click=None,
@@ -447,6 +475,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                         badge_spec = self._home_node_latency_badge_spec(
                                             badge_element=badge,
                                             text_element=badge_text,
+                                            tooltip_element=tooltip,
                                             section=section,
                                             extra_classes="mod-node-status-badge mod-app-corner-badge",
                                         )
@@ -457,21 +486,13 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 badge_specs=tuple(home_node_latency_badges),
                             )
 
-                        _render_home_edge_badges(_current_sections())
+                        _render_home_edge_badges(_current_sections(include_portal=True))
                     with ui.column().classes(f"{self._hero_shell_classes()} mod-home-hero-shell"):
                         with ui.row().classes(f"{self._hero_header_classes()} mod-home-hero-header"):
                             with ui.column().classes("mod-hero-header-main gap-1"):
                                 ui.label("Yukibot Dashboard").classes(
                                     f"{self._hero_title_classes()} mod-home-hero-title"
                                 )
-                        apply_home_node_stats: Callable[[tuple[ModWebHomeNodeSummary, ...]], None] = (
-                            self._render_live_home_node_stats(
-                                ui=ui,
-                                initial_summaries=home_node_summaries,
-                                system_page_enabled=can_view_node_system,
-                            )
-                        )
-
                         @ui.refreshable
                         def _render_home_capability_badges(
                             current_sections: tuple[ModWebNodeAppSection, ...],
@@ -490,7 +511,22 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                         badge=capability_badge,
                                     )
 
-                        _render_home_capability_badges(_current_sections())
+                        _render_home_capability_badges(_current_sections(include_portal=False))
+                        apply_home_node_stats: Callable[[tuple[ModWebHomeNodeSummary, ...]], None] = (
+                            self._render_live_home_node_stats(
+                                ui=ui,
+                                initial_summaries=_current_summaries(include_portal=False),
+                                system_page_enabled=can_view_node_system,
+                            )
+                        )
+
+                if portal_system_url is not None:
+                    hero_card.classes(add="mod-home-hero-actionable")
+                    ModWebUiHelpersMixin._make_activatable(
+                        target=cast("Element", hero_card),
+                        role="link",
+                        on_activate=lambda _=None, url=portal_system_url: ui.navigate.to(url),
+                    )
 
             @ui.refreshable
             def _render_home_sections(
@@ -505,7 +541,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     show_api_actions=show_api_actions,
                 )
 
-            _render_home_sections(_current_sections(), _current_summaries())
+            _render_home_sections(
+                _current_sections(include_portal=False),
+                _current_summaries(include_portal=False),
+            )
 
             page_closed = False
             loop: AbstractEventLoop = asyncio.get_running_loop()
@@ -514,7 +553,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             def _apply_node_update(node: ModWebNodeLink, event: NodeStateStreamEvent) -> None:
                 if page_closed:
                     return
-                previous_sections: tuple[ModWebNodeAppSection, ...] = _current_sections()
+                previous_sections: tuple[ModWebNodeAppSection, ...] = _current_sections(include_portal=True)
                 current_section = sections_by_node.get(
                     node.node_name,
                     ModWebNodeAppSection(node=node, app_links=(), error="Unavailable"),
@@ -547,13 +586,14 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         else existing_summary.system_summary
                     ),
                 )
-                current_sections = _current_sections()
-                current_summaries = _current_summaries()
-                if not self._sections_equal_for_card_render(previous_sections, current_sections):
-                    _render_home_edge_badges.refresh(current_sections)
-                    _render_home_capability_badges.refresh(current_sections)
-                    _render_home_sections.refresh(current_sections, current_summaries)
-                apply_home_node_stats(current_summaries)
+                badge_sections = _current_sections(include_portal=True)
+                app_sections = _current_sections(include_portal=False)
+                app_summaries = _current_summaries(include_portal=False)
+                if not self._sections_equal_for_card_render(previous_sections, badge_sections):
+                    _render_home_edge_badges.refresh(badge_sections)
+                    _render_home_capability_badges.refresh(app_sections)
+                    _render_home_sections.refresh(app_sections, app_summaries)
+                apply_home_node_stats(app_summaries)
 
             def _node_state_callback(node: ModWebNodeLink) -> Callable[[NodeStateStreamEvent], None]:
                 def _handle_event(event: NodeStateStreamEvent) -> None:
@@ -561,7 +601,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
                 return _handle_event
 
-            for section in _current_sections():
+            for section in _current_sections(include_portal=True):
                 if section.is_simulated_down:
                     continue
                 unsubscribe = self._create_remote_node_state_subscription(
@@ -612,6 +652,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         node_stats: list[_ModWebHomeNodeStatSpec] = []
         for node_summary in node_summaries:
             system_summary: NodeSystemSummary | None = node_summary.system_summary
+            node_label = self._home_node_display_label(node_summary.node)
             cpu_value, cpu_tone = self._system_cpu_entry(system_summary)
             ram_value, ram_tone = self._system_ram_percent_entry(system_summary)
             storage_value, storage_tone = self._system_storage_percent_entry(system_summary)
@@ -635,10 +676,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
             node_stats.append(
                 _ModWebHomeNodeStatSpec(
                     node_name=node_summary.node.node_name,
-                    node_label=node_summary.node.label,
-                    node_subtitle=self._node_display_subtitle(
-                        label=node_summary.node.label,
-                        node_name=node_summary.node.node_name,
+                    node_label=node_label,
+                    node_subtitle=self._home_node_display_subtitle(
+                        node=node_summary.node,
+                        display_label=node_label,
                     ),
                     status_text=status_text,
                     status_tone=status_tone,
@@ -839,6 +880,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
     def _node_system_operational_badges(
         cls,
         system_summary: NodeSystemSummary,
+        *,
+        include_resource_points: bool = True,
     ) -> tuple[_ModWebBadgeSpec, ...]:
         system_uptime = _ModWebBadgeSpec(
             text=(
@@ -860,6 +903,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
             icon="smart_toy",
             tooltip_text="Yukibot uptime",
         )
+        if not include_resource_points:
+            return (system_uptime, bot_uptime)
         cpu_points = cls._node_resource_point_badge(
             available_points=system_summary.cpu_points_available,
             capacity_points=system_summary.cpu_points_capacity,
@@ -873,6 +918,98 @@ class ModWebHomeMixin(ModWebServiceSupport):
             tooltip_text="RAM",
         ) or _ModWebBadgeSpec(text="Unavailable", tone="grey", icon="memory", tooltip_text="RAM")
         return (system_uptime, bot_uptime, cpu_points, ram_points)
+
+    @staticmethod
+    def _node_system_load_trend_badges(history: NodeSystemHistory) -> tuple[_ModWebBadgeSpec, ...]:
+        if len(history.samples) < 2:
+            return (_ModWebBadgeSpec(text="Collecting load trend", tone="grey"),)
+        latest = history.samples[-1]
+        cutoff = latest.captured_at_epoch_seconds - _SYSTEM_TREND_WINDOW_SECONDS
+        baseline = next(
+            (sample for sample in history.samples if sample.captured_at_epoch_seconds >= cutoff),
+            history.samples[0],
+        )
+        elapsed_minutes = max(1, round((latest.captured_at_epoch_seconds - baseline.captured_at_epoch_seconds) / 60))
+        badges: list[_ModWebBadgeSpec] = []
+        for label, baseline_value, latest_value in (
+            ("CPU", baseline.cpu_percent, latest.cpu_percent),
+            ("RAM", baseline.ram_percent, latest.ram_percent),
+        ):
+            if baseline_value is None or latest_value is None:
+                continue
+            delta = latest_value - baseline_value
+            direction = f"+{delta}" if delta > 0 else str(delta)
+            tone: BadgeTone = (
+                "red"
+                if latest_value >= _SYSTEM_CRITICAL_PERCENT or delta >= 20
+                else "warn"
+                if latest_value >= _SYSTEM_WARNING_PERCENT or delta >= 10
+                else "black"
+            )
+            badges.append(
+                _ModWebBadgeSpec(
+                    text=f"{label} {direction}pp",
+                    tone=tone,
+                    tooltip_text=f"{label} change over {elapsed_minutes}m; current usage {latest_value}%.",
+                )
+            )
+        return tuple(badges) or (_ModWebBadgeSpec(text="Load trend unavailable", tone="grey"),)
+
+    @staticmethod
+    def _node_system_warning_badges(system_summary: NodeSystemSummary) -> tuple[_ModWebBadgeSpec, ...]:
+        warnings: list[_ModWebBadgeSpec] = []
+        for label, percent in (
+            ("CPU", system_summary.cpu_percent),
+            ("RAM", system_summary.ram_percent),
+            ("Storage", system_summary.storage_percent),
+        ):
+            if percent is None or percent < _SYSTEM_WARNING_PERCENT:
+                continue
+            warnings.append(
+                _ModWebBadgeSpec(
+                    text=f"{label} {percent}%",
+                    tone="red" if percent >= _SYSTEM_CRITICAL_PERCENT else "warn",
+                    tooltip_text=f"{label} usage is above the {_SYSTEM_WARNING_PERCENT}% warning threshold.",
+                )
+            )
+        for label, available, capacity in (
+            ("CPU capacity", system_summary.cpu_points_available, system_summary.cpu_points_capacity),
+            ("RAM capacity", system_summary.ram_points_available, system_summary.ram_points_capacity),
+        ):
+            if available is None or capacity is None or capacity <= 0 or available * 4 > capacity:
+                continue
+            warnings.append(
+                _ModWebBadgeSpec(
+                    text=f"{label} {available}/{capacity}",
+                    tone="red" if available == 0 else "warn",
+                    tooltip_text=f"{label} has 25% or less headroom.",
+                )
+            )
+        if system_summary.start_blocked_app_ids:
+            warnings.append(
+                _ModWebBadgeSpec(
+                    text=f"{len(system_summary.start_blocked_app_ids)} app start blocked",
+                    tone="warn",
+                    tooltip_text="One or more stopped apps cannot currently be started.",
+                )
+            )
+        return tuple(warnings) or (_ModWebBadgeSpec(text="No active warnings", tone="black"),)
+
+    @staticmethod
+    def _node_network_health_badge(status: ModWebNodeStatus) -> _ModWebBadgeSpec:
+        if not status.alive:
+            return _ModWebBadgeSpec(
+                text="Node API unavailable",
+                tone="red",
+                tooltip_text=status.detail or "The initial node health probe failed.",
+            )
+        latency_text = "reachable" if status.latency_ms is None else f"{status.latency_ms} ms"
+        tone: BadgeTone = "warn" if status.latency_ms is not None and status.latency_ms >= 500 else "black"
+        return _ModWebBadgeSpec(
+            text=f"Node API {latency_text}",
+            tone=tone,
+            tooltip_text=f"Initial remote health probe: {status.detail or 'healthy'}.",
+        )
 
     def _render_live_home_node_stats_renderer(
         self,
@@ -908,6 +1045,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             role="link",
                             on_activate=lambda _=None, url=target_url: ui.navigate.to(url),
                         )
+                        card.on("click", js_handler="(event) => event.stopPropagation()")
+                        card.on("keydown.enter", js_handler="(event) => event.stopPropagation()")
+                        card.on("keydown.space", js_handler="(event) => event.stopPropagation()")
                     metric_bindings: list[_ModWebHomeMetricBinding] = []
                     with card:
                         with ui.column().classes("w-full gap-3 p-3"):
@@ -1088,20 +1228,21 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     ):
                         with ui.column().classes("mod-home-section-identity gap-1 min-w-0"):
                             with ui.row().classes("items-center gap-2 min-w-0"):
+                                section_label = self._home_node_display_label(section.node)
                                 ui.html(
                                     self._home_section_avatar_markup(
                                         node_name=section.node.node_name,
-                                        display_name=section.node.label,
+                                        display_name=section_label,
                                     )
                                 )
-                                section_title: Label = ui.label(section.node.label).classes(
+                                section_title: Label = ui.label(section_label).classes(
                                     "text-xl font-bold mod-title-small"
                                 )
                                 if node_text_style is not None:
                                     section_title.style(node_text_style)
-                            node_subtitle: str | None = self._node_display_subtitle(
-                                label=section.node.label,
-                                node_name=section.node.node_name,
+                            node_subtitle: str | None = self._home_node_display_subtitle(
+                                node=section.node,
+                                display_label=section_label,
                             )
                             if node_subtitle is not None:
                                 subtitle: Label = ui.label(node_subtitle).classes("text-sm mod-subtitle")
@@ -1150,10 +1291,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
         user: ModWebUser,
         initial_system_summary: NodeSystemSummary,
         initial_system_history: NodeSystemHistory,
+        initial_node_status: ModWebNodeStatus,
         initial_app_entries: tuple[NodeAppEntry, ...],
         initial_restart_schedules: NodeRestartScheduleState | None,
         initial_restart_state: NodeRestartState | None,
-        initial_portal_restart_state: NodeRestartState | None,
+        initial_system_capabilities: NodeSystemCapabilities | None,
         initial_node_capacity: config.NodeCapacityProfile | None,
         initial_node_font_sources: config.NodeFontSourceSettings | None,
         initial_node_disk_settings: NodeDiskManagementState | None,
@@ -1170,7 +1312,11 @@ class ModWebHomeMixin(ModWebServiceSupport):
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_user_header(ui=ui, user=user)
             with ui.card().classes(self._hero_card_classes()):
-                operational_badge_specs = self._node_system_operational_badges(initial_system_summary)
+                include_resource_points = not self._node_is_portal(node)
+                operational_badge_specs = self._node_system_operational_badges(
+                    initial_system_summary,
+                    include_resource_points=include_resource_points,
+                )
                 operational_badge_bindings: list[tuple[Element, Label]] = []
                 with ui.element("div").classes("mod-app-node-badge-wrap mod-system-edge-badge-wrap"):
                     with ui.row().classes("mod-app-node-badge-row mod-system-edge-badge-row"):
@@ -1204,7 +1350,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 node_title: Label = ui.label(node.label).classes(self._hero_title_classes())
                                 if node_text_style is not None:
                                     node_title.style(node_text_style)
-                                ui.label(f"{node.node_name} system monitoring").classes(self._hero_support_classes())
+                                ui.label("system monitoring").classes(self._hero_support_classes())
                         with ui.column().classes("mod-system-scope-slot"):
 
                             @ui.refreshable
@@ -1241,6 +1387,30 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     chart: Html = ui.html(self._node_system_history_svg(current_history, animate=True))
                     chart.classes("mod-system-chart-shell w-full")
 
+            @ui.refreshable
+            def _render_system_signals(
+                system_summary: NodeSystemSummary,
+                history: NodeSystemHistory,
+            ) -> None:
+                with ui.card().classes("mod-card w-full"):
+                    with ui.column().classes("w-full gap-3 p-4"):
+                        ui.label("Operational signals").classes("text-lg font-black mod-title-small")
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                            self._badge_spec(
+                                ui=ui,
+                                badge=self._node_network_health_badge(initial_node_status),
+                            )
+                        ui.label("10-minute load trend").classes("mod-subtitle text-xs")
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                            for badge in self._node_system_load_trend_badges(history):
+                                self._badge_spec(ui=ui, badge=badge)
+                        ui.label("Warnings").classes("mod-subtitle text-xs")
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                            for badge in self._node_system_warning_badges(system_summary):
+                                self._badge_spec(ui=ui, badge=badge)
+
+            _render_system_signals(current_system_summary, current_history)
+
             can_manage_node_configuration = self._user_has_level(user, Power_Level.root)
             self._render_node_system_properties(
                 ui=ui,
@@ -1259,7 +1429,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 user=user,
                 initial_restart_schedules=initial_restart_schedules,
                 initial_restart_state=initial_restart_state,
-                initial_portal_restart_state=initial_portal_restart_state,
+                initial_system_capabilities=initial_system_capabilities,
             )
 
             page_closed = False
@@ -1279,7 +1449,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if event.system_summary is None:
                     return
                 current_system_summary = event.system_summary
-                next_operational_badges = self._node_system_operational_badges(current_system_summary)
+                next_operational_badges = self._node_system_operational_badges(
+                    current_system_summary,
+                    include_resource_points=include_resource_points,
+                )
                 for index, (previous_badge, next_badge) in enumerate(
                     zip(operational_badge_specs, next_operational_badges, strict=True)
                 ):
@@ -1301,6 +1474,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if next_history != current_history:
                     current_history = next_history
                     chart.set_content(self._node_system_history_svg(current_history))
+                _render_system_signals.refresh(current_system_summary, current_history)
 
             def _handle_update(event: NodeStateStreamEvent) -> None:
                 loop.call_soon_threadsafe(lambda: _apply_update(event))
@@ -1706,7 +1880,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         user: ModWebUser,
         initial_restart_schedules: NodeRestartScheduleState | None,
         initial_restart_state: NodeRestartState | None,
-        initial_portal_restart_state: NodeRestartState | None,
+        initial_system_capabilities: NodeSystemCapabilities | None,
     ) -> None:
         action_buttons: list[Button] = []
         from nicegui.context import context as nicegui_context
@@ -1742,8 +1916,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
             *,
             spec: _ModWebSystemActionSpec,
             dialog: Dialog,
-            auto_restart_running_apps_checkbox: Checkbox,
-            silent_checkbox: Checkbox,
+            auto_restart_running_apps_checkbox: Checkbox | None,
+            silent_checkbox: Checkbox | None,
         ) -> Callable[[], Awaitable[None]]:
             async def _confirm() -> None:
                 for action_button in action_buttons:
@@ -1752,8 +1926,12 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     result = await self._remote_node_system_action_async(
                         node,
                         spec.action,
-                        _value_as_bool(auto_restart_running_apps_checkbox),
-                        _value_as_bool(silent_checkbox),
+                        (
+                            _value_as_bool(auto_restart_running_apps_checkbox)
+                            if auto_restart_running_apps_checkbox is not None
+                            else False
+                        ),
+                        _value_as_bool(silent_checkbox) if silent_checkbox is not None else False,
                         user,
                     )
                 except Exception as xcp:
@@ -1770,100 +1948,116 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
             return _confirm
 
-        with ui.card().classes("mod-card mod-system-danger-card w-full"):
+        with ui.card().classes("mod-card w-full"):
             with ui.column().classes("w-full gap-4 p-4"):
-                ui.label("Root actions").classes("text-lg font-black mod-title-small")
-                with ui.row().classes("w-full items-center gap-3 flex-wrap"):
-                    auto_restart_running_apps_checkbox = ui.checkbox(
-                        "Auto-restart running apps",
-                        value=True,
-                    ).props("dense color=accent").classes(
-                        "mod-app-details-toggle mod-system-auto-restart-toggle"
-                    )
-                    silent_checkbox = ui.checkbox(
-                        "Silent",
-                        value=False,
-                    ).props("dense color=accent").classes(
-                        "mod-app-details-toggle mod-system-silent-toggle"
-                    )
-                    for spec in _SYSTEM_ACTION_SPECS:
-                        if spec.required_target is not None and (
-                            initial_restart_schedules is None
-                            or all(
-                                entry.target is not spec.required_target
-                                for entry in initial_restart_schedules.schedules
-                            )
-                        ):
-                            continue
-                        dialog = ui.dialog()
-                        with dialog:
-                            with ui.card().classes("mod-card mod-dialog-card"):
-                                with ui.column().classes("w-full gap-4 p-5"):
-                                    ui.label(f"{spec.title}?").classes("text-xl font-black mod-title-small")
-                                    ui.label(node.label).classes("mod-subtitle text-sm")
-                                    with ui.row().classes("w-full justify-end gap-2"):
-                                        ui.button("Cancel", on_click=dialog.close).classes("mod-list-button secondary")
-                                        confirm_button = ui.button(spec.button_label).classes("mod-list-button danger")
-                                        action_buttons.append(confirm_button)
-                                        confirm_button.on(
-                                            "click",
-                                            _create_confirm_handler(
-                                                spec=spec,
-                                                dialog=dialog,
-                                                auto_restart_running_apps_checkbox=(
-                                                    auto_restart_running_apps_checkbox
+                with ui.column().classes("mod-system-danger-zone w-full gap-4 p-4"):
+                    ui.label("Root actions").classes("text-lg font-black mod-title-small")
+                    ui.label("These actions affect the whole node.").classes("mod-subtitle text-xs")
+                    with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                        for spec in _SYSTEM_ACTION_SPECS:
+                            if initial_system_capabilities is None or not initial_system_capabilities.supports(
+                                spec.action
+                            ):
+                                continue
+                            dialog = ui.dialog()
+                            with dialog:
+                                with ui.card().classes("mod-card mod-dialog-card"):
+                                    with ui.column().classes("w-full gap-4 p-5"):
+                                        ui.label(f"{spec.title}?").classes("text-xl font-black mod-title-small")
+                                        ui.label(node.label).classes("mod-subtitle text-sm")
+                                        auto_restart_running_apps_checkbox: Checkbox | None = None
+                                        if initial_system_capabilities.supports_app_auto_restart:
+                                            with ui.column().classes("gap-1"):
+                                                auto_restart_running_apps_checkbox = (
+                                                    ui.checkbox(
+                                                        "Auto-restart running apps",
+                                                        value=True,
+                                                    )
+                                                    .props("dense color=accent")
+                                                    .classes("mod-app-details-toggle mod-system-auto-restart-toggle")
+                                                )
+                                                ui.label("Start apps that were running before this action.").classes(
+                                                    "mod-subtitle text-xs"
+                                                )
+                                        silent_checkbox: Checkbox | None = None
+                                        if initial_system_capabilities.supports_silent_restart:
+                                            with ui.column().classes("gap-1"):
+                                                silent_checkbox = (
+                                                    ui.checkbox("Silent", value=False)
+                                                    .props("dense color=accent")
+                                                    .classes("mod-app-details-toggle mod-system-silent-toggle")
+                                                )
+                                                ui.label("Suppress the normal restart notice.").classes(
+                                                    "mod-subtitle text-xs"
+                                                )
+                                        with ui.row().classes("w-full justify-end gap-2"):
+                                            ui.button("Cancel", on_click=dialog.close).classes(
+                                                "mod-list-button secondary"
+                                            )
+                                            confirm_button = ui.button(spec.button_label).classes(
+                                                "mod-list-button danger"
+                                            )
+                                            action_buttons.append(confirm_button)
+                                            confirm_button.on(
+                                                "click",
+                                                _create_confirm_handler(
+                                                    spec=spec,
+                                                    dialog=dialog,
+                                                    auto_restart_running_apps_checkbox=(
+                                                        auto_restart_running_apps_checkbox
+                                                    ),
+                                                    silent_checkbox=silent_checkbox,
                                                 ),
-                                                silent_checkbox=silent_checkbox,
-                                            ),
-                                        )
-                        open_button = ui.button(spec.button_label, on_click=dialog.open).classes(
-                            "mod-list-button danger"
-                        )
-                        action_buttons.append(open_button)
+                                            )
+                            open_button = ui.button(spec.button_label, on_click=dialog.open).classes(
+                                "mod-list-button danger"
+                            )
+                            action_buttons.append(open_button)
 
-                ui.label("Restart schedules").classes("text-base font-black mod-title-small")
+                ui.label("Restart schedules").classes(
+                    "mod-system-schedule-section-title text-base font-black mod-title-small"
+                )
                 if initial_restart_schedules is None:
                     ui.label("Unavailable").classes("mod-subtitle text-sm")
                     return
+                restart_state_labels: list[tuple[Label, str, int, str]] = []
                 if initial_restart_state is not None:
+                    bot_kind = initial_restart_state.process.kind.value
+                    bot_timestamp = initial_restart_state.process.timestamp
+                    bot_client_label = ui.label(f"Bot: loading… [{bot_kind}]").classes(_RESTART_STATE_LINE_CLASSES)
                     ui.label(
-                        _format_restart_state_line(
-                            "Bot",
-                            initial_restart_state.process.timestamp,
-                            initial_restart_state.process.kind.value,
-                            "Australia/Melbourne",
-                        )
+                        f"{_RESTART_STATE_TIMEZONE_LABEL} · "
+                        f"{_format_restart_timestamp(bot_timestamp, _RESTART_STATE_TIMEZONE)}"
                     ).classes(_RESTART_STATE_LINE_CLASSES)
+                    restart_state_labels.append((bot_client_label, "Bot", bot_timestamp, bot_kind))
                     if initial_restart_state.voice is not None:
-                        ui.label(
-                            _format_restart_state_line(
-                                "Voice",
-                                initial_restart_state.voice.timestamp,
-                                initial_restart_state.voice.kind.value,
-                                "Australia/Melbourne",
-                            )
-                        ).classes(_RESTART_STATE_LINE_CLASSES)
-                if initial_portal_restart_state is not None:
-                    ui.label(
-                        _format_restart_state_line(
-                            "Portal",
-                            initial_portal_restart_state.process.timestamp,
-                            initial_portal_restart_state.process.kind.value,
-                            "Australia/Melbourne",
+                        voice_kind = initial_restart_state.voice.kind.value
+                        voice_timestamp = initial_restart_state.voice.timestamp
+                        voice_client_label = ui.label(f"Voice: loading… [{voice_kind}]").classes(
+                            _RESTART_STATE_LINE_CLASSES
                         )
-                    ).classes(_RESTART_STATE_LINE_CLASSES)
-
+                        ui.label(
+                            f"{_RESTART_STATE_TIMEZONE_LABEL} · "
+                            f"{_format_restart_timestamp(voice_timestamp, _RESTART_STATE_TIMEZONE)}"
+                        ).classes(_RESTART_STATE_LINE_CLASSES)
+                        restart_state_labels.append((voice_client_label, "Voice", voice_timestamp, voice_kind))
                 def _schedule_status(entry: NodeRestartScheduleEntry) -> str:
                     if not entry.enabled:
                         return "Off"
                     interval = MaintenanceService.format_interval_minutes(entry.interval_minutes)
                     return f"Every {interval}"
 
-                async def _set_client_restart_time(label: Label, timestamp: int | None) -> None:
+                async def _set_client_restart_time(
+                    label: Label,
+                    timestamp: int | None,
+                    *,
+                    prefix: str = "",
+                    suffix: str = "",
+                ) -> None:
                     if actions_closed:
                         return
                     if timestamp is None:
-                        label.set_text("—")
+                        label.set_text(f"{prefix}—{suffix}")
                         return
                     script = (
                         f"const date = new Date({timestamp * 1000});"
@@ -1880,11 +2074,25 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     except Exception:
                         if actions_closed:
                             return
-                        label.set_text("unavailable")
+                        label.set_text(f"{prefix}unavailable{suffix}")
                         return
                     if actions_closed:
                         return
-                    label.set_text(str(formatted))
+                    label.set_text(f"{prefix}{formatted}{suffix}")
+
+                for label, restart_label, timestamp, restart_kind in restart_state_labels:
+                    ui.timer(
+                        0.01,
+                        lambda label=label, restart_label=restart_label, timestamp=timestamp, restart_kind=restart_kind: (
+                            _set_client_restart_time(
+                                label,
+                                timestamp,
+                                prefix=f"{restart_label}: ",
+                                suffix=f" [{restart_kind}]",
+                            )
+                        ),
+                        once=True,
+                    )
 
                 def _set_schedule_display(
                     entry: NodeRestartScheduleEntry,
@@ -1913,23 +2121,58 @@ class ModWebHomeMixin(ModWebServiceSupport):
 
                 def _set_schedule_buttons_busy(
                     *,
-                    schedule_target: RestartTarget,
-                    save: Button,
-                    skip: Button,
-                    disable: Button,
+                    controls: _RestartScheduleControls,
                     busy: bool,
                 ) -> None:
                     if busy:
-                        save.disable()
-                        skip.disable()
-                        disable.disable()
+                        controls.save_button.disable()
+                        controls.skip_button.disable()
+                        controls.disable_button.disable()
                         return
-                    save.enable()
-                    disable.enable()
-                    if schedules_by_target[schedule_target].enabled:
-                        skip.enable()
+                    controls.save_button.enable()
+                    controls.disable_button.enable()
+                    if schedules_by_target[controls.target].enabled:
+                        controls.skip_button.enable()
                     else:
-                        skip.disable()
+                        controls.skip_button.disable()
+
+                async def _run_schedule_mutation(
+                    *,
+                    controls: _RestartScheduleControls,
+                    action: Callable[[], Awaitable[NodeRestartScheduleState]],
+                    error_prefix: str,
+                    success_message: Callable[[NodeRestartScheduleEntry], str],
+                    update_interval_inputs: bool = False,
+                ) -> None:
+                    _set_schedule_buttons_busy(controls=controls, busy=True)
+                    try:
+                        state = await action()
+                    except Exception as xcp:
+                        if actions_closed:
+                            return
+                        _set_schedule_buttons_busy(controls=controls, busy=False)
+                        _notify_error(f"{error_prefix}: {xcp}", multi_line=True)
+                        return
+                    if actions_closed:
+                        return
+                    entry = next((item for item in state.schedules if item.target is controls.target), None)
+                    if entry is None:
+                        _set_schedule_buttons_busy(controls=controls, busy=False)
+                        _notify_error("The node returned no schedule for this target.", multi_line=True)
+                        return
+                    schedules_by_target[controls.target] = entry
+                    if update_interval_inputs:
+                        days, hours, minutes = _restart_interval_parts(entry.interval_minutes)
+                        controls.days_input.set_value(str(days))
+                        controls.hours_input.set_value(_format_restart_hours_input(hours, minutes))
+                    _set_schedule_display(
+                        entry,
+                        status_label=controls.status_label,
+                        timezone_labels=controls.timezone_labels,
+                        client_label=controls.client_time_label,
+                    )
+                    _set_schedule_buttons_busy(controls=controls, busy=False)
+                    _notify_success(success_message(entry))
 
                 for target, initial_entry in schedules_by_target.items():
                     initial_days, initial_hours, initial_minutes = _restart_interval_parts(
@@ -1950,7 +2193,9 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             with ui.row().classes("gap-2"):
                                 save_button = ui.button("Save").classes("mod-list-button")
                                 skip_button = ui.button("Skip").classes("mod-list-button secondary")
-                                disable_button = ui.button("Disable").classes("mod-list-button secondary")
+                                disable_button = ui.button("Disable").classes(
+                                    "mod-list-button secondary mod-system-schedule-disable"
+                                )
                                 if not initial_entry.enabled:
                                     skip_button.disable()
 
@@ -2004,6 +2249,20 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                     f"{timezone_label} · {value}"
                                 ).classes("mod-subtitle text-xs")
 
+                        controls = _RestartScheduleControls(
+                            target=target,
+                            days_input=days_input,
+                            hours_input=hours_input,
+                            weekday_select=weekday_select,
+                            anchor_time_input=anchor_time_input,
+                            timezone_select=timezone_select,
+                            status_label=status_label,
+                            timezone_labels=timezone_labels,
+                            client_time_label=client_time_label,
+                            save_button=save_button,
+                            skip_button=skip_button,
+                            disable_button=disable_button,
+                        )
                         _set_schedule_display(
                             initial_entry,
                             status_label=status_label,
@@ -2012,264 +2271,84 @@ class ModWebHomeMixin(ModWebServiceSupport):
                         )
 
                         async def _save_schedule(
-                            *,
-                            schedule_target: RestartTarget = target,
-                            schedule_days_input: Input = days_input,
-                            schedule_hours_input: Input = hours_input,
-                            schedule_weekday_select: Select = weekday_select,
-                            schedule_anchor_time_input: Input = anchor_time_input,
-                            schedule_timezone_select: Select = timezone_select,
-                            schedule_status_label: Label = status_label,
-                            schedule_timezone_labels: dict[str, Label] = timezone_labels,
-                            schedule_client_label: Label = client_time_label,
-                            schedule_save_button: Button = save_button,
-                            schedule_skip_button: Button = skip_button,
-                            schedule_disable_button: Button = disable_button,
+                            schedule_controls: _RestartScheduleControls = controls,
                         ) -> None:
                             try:
-                                interval_days = int(_value_as_text(schedule_days_input))
+                                days = int(_value_as_text(schedule_controls.days_input))
                             except ValueError:
                                 _notify_error("Use a whole number of days.")
                                 return
                             try:
-                                interval_hours, interval_remainder_minutes = _parse_restart_hours_input(
-                                    _value_as_text(schedule_hours_input)
+                                hours, minutes = _parse_restart_hours_input(
+                                    _value_as_text(schedule_controls.hours_input)
                                 )
-                            except ValueError as xcp:
-                                _notify_error(str(xcp))
-                                return
-                            try:
                                 interval_minutes = _restart_interval_from_parts(
-                                    days=interval_days,
-                                    hours=interval_hours,
-                                    minutes=interval_remainder_minutes,
+                                    days=days,
+                                    hours=hours,
+                                    minutes=minutes,
                                 )
                             except ValueError as xcp:
                                 _notify_error(str(xcp))
                                 return
-                            _set_schedule_buttons_busy(
-                                schedule_target=schedule_target,
-                                save=schedule_save_button,
-                                skip=schedule_skip_button,
-                                disable=schedule_disable_button,
-                                busy=True,
-                            )
 
-                            timezone_name = _value_as_text(schedule_timezone_select)
-                            if timezone_name == _CLIENT_TIMEZONE_VALUE:
-                                try:
+                            async def _save() -> NodeRestartScheduleState:
+                                timezone_name = _value_as_text(schedule_controls.timezone_select)
+                                if timezone_name == _CLIENT_TIMEZONE_VALUE:
                                     raw_timezone = await cast(
                                         Awaitable[object],
                                         ui.run_javascript("return Intl.DateTimeFormat().resolvedOptions().timeZone;"),
                                     )
-                                except Exception as xcp:
-                                    _set_schedule_buttons_busy(
-                                        schedule_target=schedule_target,
-                                        save=schedule_save_button,
-                                        skip=schedule_skip_button,
-                                        disable=schedule_disable_button,
-                                        busy=False,
-                                    )
-                                    _notify_error(f"Unable to detect the client timezone: {xcp}")
-                                    return
-                                if actions_closed:
-                                    return
-                                if not isinstance(raw_timezone, str) or not raw_timezone:
-                                    _set_schedule_buttons_busy(
-                                        schedule_target=schedule_target,
-                                        save=schedule_save_button,
-                                        skip=schedule_skip_button,
-                                        disable=schedule_disable_button,
-                                        busy=False,
-                                    )
-                                    _notify_error("The browser did not provide a timezone.")
-                                    return
-                                timezone_name = raw_timezone
-                            try:
-                                anchor_weekday = _RestartWeekday(_value_as_text(schedule_weekday_select))
-                            except ValueError:
-                                _set_schedule_buttons_busy(
-                                    schedule_target=schedule_target,
-                                    save=schedule_save_button,
-                                    skip=schedule_skip_button,
-                                    disable=schedule_disable_button,
-                                    busy=False,
-                                )
-                                _notify_error("Choose an anchor day.")
-                                return
-                            try:
+                                    if not isinstance(raw_timezone, str) or not raw_timezone:
+                                        raise ValueError("The browser did not provide a timezone.")
+                                    timezone_name = raw_timezone
                                 anchor_timestamp = _restart_anchor_timestamp(
-                                    anchor_weekday,
-                                    _value_as_text(schedule_anchor_time_input),
+                                    _RestartWeekday(_value_as_text(schedule_controls.weekday_select)),
+                                    _value_as_text(schedule_controls.anchor_time_input),
                                     timezone_name,
                                 )
-                            except ValueError as xcp:
-                                _set_schedule_buttons_busy(
-                                    schedule_target=schedule_target,
-                                    save=schedule_save_button,
-                                    skip=schedule_skip_button,
-                                    disable=schedule_disable_button,
-                                    busy=False,
-                                )
-                                _notify_error(str(xcp))
-                                return
-                            try:
-                                state = await self._remote_update_restart_schedule_async(
+                                return await self._remote_update_restart_schedule_async(
                                     node,
-                                    schedule_target,
+                                    schedule_controls.target,
                                     interval_minutes,
                                     anchor_timestamp,
                                     user,
                                 )
-                            except Exception as xcp:
-                                if actions_closed:
-                                    return
-                                _set_schedule_buttons_busy(
-                                    schedule_target=schedule_target,
-                                    save=schedule_save_button,
-                                    skip=schedule_skip_button,
-                                    disable=schedule_disable_button,
-                                    busy=False,
-                                )
-                                _notify_error(f"Unable to save schedule: {xcp}", multi_line=True)
-                                return
-                            if actions_closed:
-                                return
-                            entry = next(item for item in state.schedules if item.target is schedule_target)
-                            schedules_by_target[schedule_target] = entry
-                            next_days, next_hours, next_minutes = _restart_interval_parts(entry.interval_minutes)
-                            schedule_days_input.set_value(str(next_days))
-                            schedule_hours_input.set_value(
-                                _format_restart_hours_input(next_hours, next_minutes)
-                            )
-                            _set_schedule_buttons_busy(
-                                schedule_target=schedule_target,
-                                save=schedule_save_button,
-                                skip=schedule_skip_button,
-                                disable=schedule_disable_button,
-                                busy=False,
-                            )
-                            _set_schedule_display(
-                                entry,
-                                status_label=schedule_status_label,
-                                timezone_labels=schedule_timezone_labels,
-                                client_label=schedule_client_label,
-                            )
-                            _notify_success(
-                                "Schedule saved; near-term restart skipped."
-                                if entry.skipped_through_timestamp is not None
-                                else "Schedule saved."
+
+                            await _run_schedule_mutation(
+                                controls=schedule_controls,
+                                action=_save,
+                                error_prefix="Unable to save schedule",
+                                success_message=lambda entry: (
+                                    "Schedule saved; near-term restart skipped."
+                                    if entry.skipped_through_timestamp is not None
+                                    else "Schedule saved."
+                                ),
+                                update_interval_inputs=True,
                             )
 
                         async def _disable_schedule(
-                            *,
-                            schedule_target: RestartTarget = target,
-                            schedule_status_label: Label = status_label,
-                            schedule_timezone_labels: dict[str, Label] = timezone_labels,
-                            schedule_client_label: Label = client_time_label,
-                            schedule_save_button: Button = save_button,
-                            schedule_skip_button: Button = skip_button,
-                            schedule_disable_button: Button = disable_button,
+                            schedule_controls: _RestartScheduleControls = controls,
                         ) -> None:
-                            _set_schedule_buttons_busy(
-                                schedule_target=schedule_target,
-                                save=schedule_save_button,
-                                skip=schedule_skip_button,
-                                disable=schedule_disable_button,
-                                busy=True,
+                            await _run_schedule_mutation(
+                                controls=schedule_controls,
+                                action=lambda: self._remote_update_restart_schedule_async(
+                                    node, schedule_controls.target, None, None, user
+                                ),
+                                error_prefix="Unable to disable schedule",
+                                success_message=lambda _: "Schedule disabled.",
                             )
-                            try:
-                                state = await self._remote_update_restart_schedule_async(
-                                    node,
-                                    schedule_target,
-                                    None,
-                                    None,
-                                    user,
-                                )
-                            except Exception as xcp:
-                                if actions_closed:
-                                    return
-                                _set_schedule_buttons_busy(
-                                    schedule_target=schedule_target,
-                                    save=schedule_save_button,
-                                    skip=schedule_skip_button,
-                                    disable=schedule_disable_button,
-                                    busy=False,
-                                )
-                                _notify_error(f"Unable to disable schedule: {xcp}", multi_line=True)
-                                return
-                            if actions_closed:
-                                return
-                            entry = next(item for item in state.schedules if item.target is schedule_target)
-                            schedules_by_target[schedule_target] = entry
-                            _set_schedule_buttons_busy(
-                                schedule_target=schedule_target,
-                                save=schedule_save_button,
-                                skip=schedule_skip_button,
-                                disable=schedule_disable_button,
-                                busy=False,
-                            )
-                            _set_schedule_display(
-                                entry,
-                                status_label=schedule_status_label,
-                                timezone_labels=schedule_timezone_labels,
-                                client_label=schedule_client_label,
-                            )
-                            _notify_success("Schedule disabled.")
 
                         async def _skip_schedule(
-                            *,
-                            schedule_target: RestartTarget = target,
-                            schedule_status_label: Label = status_label,
-                            schedule_timezone_labels: dict[str, Label] = timezone_labels,
-                            schedule_client_label: Label = client_time_label,
-                            schedule_save_button: Button = save_button,
-                            schedule_skip_button: Button = skip_button,
-                            schedule_disable_button: Button = disable_button,
+                            schedule_controls: _RestartScheduleControls = controls,
                         ) -> None:
-                            _set_schedule_buttons_busy(
-                                schedule_target=schedule_target,
-                                save=schedule_save_button,
-                                skip=schedule_skip_button,
-                                disable=schedule_disable_button,
-                                busy=True,
+                            await _run_schedule_mutation(
+                                controls=schedule_controls,
+                                action=lambda: self._remote_skip_restart_schedule_async(
+                                    node, schedule_controls.target, user
+                                ),
+                                error_prefix="Unable to skip restart",
+                                success_message=lambda _: "Next restart skipped.",
                             )
-                            try:
-                                state = await self._remote_skip_restart_schedule_async(
-                                    node,
-                                    schedule_target,
-                                    user,
-                                )
-                            except Exception as xcp:
-                                if actions_closed:
-                                    return
-                                _set_schedule_buttons_busy(
-                                    schedule_target=schedule_target,
-                                    save=schedule_save_button,
-                                    skip=schedule_skip_button,
-                                    disable=schedule_disable_button,
-                                    busy=False,
-                                )
-                                _notify_error(f"Unable to skip restart: {xcp}", multi_line=True)
-                                return
-                            if actions_closed:
-                                return
-                            entry = next(item for item in state.schedules if item.target is schedule_target)
-                            schedules_by_target[schedule_target] = entry
-                            _set_schedule_display(
-                                entry,
-                                status_label=schedule_status_label,
-                                timezone_labels=schedule_timezone_labels,
-                                client_label=schedule_client_label,
-                            )
-                            _set_schedule_buttons_busy(
-                                schedule_target=schedule_target,
-                                save=schedule_save_button,
-                                skip=schedule_skip_button,
-                                disable=schedule_disable_button,
-                                busy=False,
-                            )
-                            _notify_success("Next restart skipped.")
 
                         save_button.on("click", _save_schedule)
                         skip_button.on("click", _skip_schedule)
@@ -2280,6 +2359,27 @@ class ModWebHomeMixin(ModWebServiceSupport):
         if label.strip().casefold() == node_name.strip().casefold():
             return None
         return node_name
+
+    def _home_node_display_label(self, node: ModWebNodeLink) -> str:
+        bot = self._mod_web_bot()
+        if bot is not None:
+            user_id = self._node_bot_user_id(node_name=node.node_name, bot=bot)
+            if user_id is not None:
+                cached_member = bot.cache.get_member(config.DISCORD_GUILD, user_id)
+                nickname = getattr(cached_member, "nickname", None)
+                if isinstance(nickname, str) and nickname.strip():
+                    return nickname.strip()
+        snapshot = self._known_bot_snapshot_for_node(node_name=node.node_name)
+        if snapshot is None:
+            return node.label
+        user_id = int(snapshot.profile.id)
+        nickname = config.Name_Cache().primary_guild_nickname(user_id)
+        return nickname or node.label
+
+    def _home_node_display_subtitle(self, *, node: ModWebNodeLink, display_label: str) -> str | None:
+        if display_label.strip().casefold() != node.label.strip().casefold():
+            return node.label
+        return self._node_display_subtitle(label=node.label, node_name=node.node_name)
 
     @staticmethod
     def _bot_avatar_uri_fallback() -> str:
@@ -2438,22 +2538,23 @@ class ModWebHomeMixin(ModWebServiceSupport):
             return ModWebHomeMixin._node_status_badge_text(section)
         return f"{section.node.label}: ..."
 
-    @classmethod
     def _home_node_latency_badge_spec(
-        cls,
+        self,
         *,
         badge_element: Element,
         text_element: Element,
+        tooltip_element: Tooltip,
         section: ModWebNodeAppSection,
         extra_classes: str,
     ) -> _ModWebNodePresenceBadgeSpec | None:
         badge_element_id = getattr(badge_element, "id", None)
         text_element_id = getattr(text_element, "id", None)
+        tooltip_element_id = getattr(tooltip_element, "id", None)
         if section.error is None and (not isinstance(badge_element_id, int) or not isinstance(text_element_id, int)):
             raise RuntimeError(f"Healthy node badge text element is missing its id: {section.node.node_name}")
         if not isinstance(badge_element_id, int) or not isinstance(text_element_id, int):
             return None
-        pending_text = cls._home_node_badge_initial_text(section)
+        pending_text = self._home_node_badge_initial_text(section)
         return _ModWebNodePresenceBadgeSpec(
             node_name=section.node.node_name,
             badge_element_id=badge_element_id,
@@ -2464,13 +2565,22 @@ class ModWebHomeMixin(ModWebServiceSupport):
             down_text=f"{section.node.label}: Down",
             presence_stream_url=section.node.presence_stream_url if section.error is None else None,
             pending_class_name=ModWebUiHelpersMixin._badge_class_name(
-                tone=cls._node_status_badge_tone(section),
+                tone=self._node_status_badge_tone(section),
                 extra_classes=extra_classes,
             ),
             healthy_class_name=ModWebUiHelpersMixin._badge_class_name(tone="black", extra_classes=extra_classes),
             unhealthy_class_name=ModWebUiHelpersMixin._badge_class_name(tone="red", extra_classes=extra_classes),
+            tooltip_element_id=tooltip_element_id if isinstance(tooltip_element_id, int) else None,
             show_latency=section.error is None,
+            tooltip_mode=self._home_node_badge_tooltip_mode(section),
         )
+
+    def _home_node_badge_tooltip_mode(self, section: ModWebNodeAppSection) -> Literal["basic", "discord", "portal"]:
+        if self._node_is_portal(section.node):
+            return "portal"
+        if self._node_has_discord_bot(section.node):
+            return "discord"
+        return "basic"
 
     @classmethod
     def _run_home_node_latency_badges_javascript(
@@ -2510,15 +2620,15 @@ class ModWebHomeMixin(ModWebServiceSupport):
         section: ModWebNodeAppSection,
         on_click: Callable[[object | None], object] | None,
         extra_classes: str,
-    ) -> tuple[Element, Label]:
+    ) -> tuple[Element, Label, Tooltip]:
         badge_text = self._home_node_badge_initial_text(section)
         badge = ui.element("span").classes(self._badge_class_name(tone=self._node_status_badge_tone(section), extra_classes=extra_classes))
         if on_click is not None:
             badge.on("click", on_click)
-        self._attach_badge_tooltip(ui=ui, target=badge, text=badge_text)
         with badge:
+            tooltip = ui.tooltip(badge_text).classes("whitespace-pre-line")
             text_label = ui.label(badge_text).classes("mod-home-node-status-badge-text")
-        return badge, text_label
+        return badge, text_label, tooltip
 
     @staticmethod
     def _login_node_status_badge_text(status: ModWebNodeStatus) -> str:
@@ -2593,12 +2703,20 @@ class ModWebHomeMixin(ModWebServiceSupport):
                                 url=badge_target,
                                 shift_url=shift_target,
                                 stop_propagation=True,
+                                extra_classes="mod-app-card-tab-link",
+                                tooltip_text=(
+                                    f"Open {badge.text} section"
+                                    if shift_target is None
+                                    else f"Open {badge.text} section. Shift-click opens the chat popout."
+                                ),
                             )
                 api_actions: tuple[_ModWebLinkSpec, ...] | tuple[()] = (
                     self._app_card_api_actions(app) if show_api_actions else ()
                 )
                 if api_actions:
                     self._render_app_card_api_pill(ui=ui, actions=api_actions)
+                open_corner = ui.element("span").classes("mod-app-card-open-corner")
+                self._attach_text_tooltip(ui=ui, target=open_corner, text=f"Open {app.friendly}")
 
     def _app_card_badges(self, app: ModWebAppLink) -> tuple[_ModWebAppCardBadgeSpec, ...]:
         badges: list[_ModWebAppCardBadgeSpec] = []
@@ -2705,7 +2823,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
                     raise RuntimeError("Player count unexpectedly missing for runtime badge.")
                 return _ModWebBadgeSpec(
                     text=player_snapshot_text,
-                    tone="purple" if app.player_count > 0 else "black",
+                    tone="black",
                 )
             return _ModWebBadgeSpec(text="Running", tone="black")
         if not app.enabled:
@@ -2772,6 +2890,8 @@ class ModWebHomeMixin(ModWebServiceSupport):
             classes = f"{classes} mod-app-card-live"
         if not app.enabled:
             return f"{classes} mod-app-card-disabled"
+        if app.runtime_fault is not None:
+            return f"{classes} mod-app-card-crashed"
         return classes
 
     @staticmethod

@@ -4,25 +4,6 @@ from typing import TYPE_CHECKING, Literal
 
 from font_assets import font_assets
 
-from .runtime_imports import (
-    BadgeTone,
-    Callable,
-    Html,
-    Label,
-    MOD_WEB_ACTION_BASE_CLASSES,
-    Request,
-    Tooltip,
-    apply_mod_web_theme,
-    config,
-    escape,
-    json,
-    mod_web_badge_class,
-    parse_qsl,
-    cast,
-    urlencode,
-    urlsplit,
-    urlunsplit,
-)
 from .constants import (
     _APP_LIST_API_QUERY_PARAM,
     _DEV_SIMULATED_DOWN_NODE_QUERY_PARAM,
@@ -35,7 +16,25 @@ from .constants import (
     _PORTAL_RECOVERY_POLL_INTERVAL_SECONDS,
 )
 from .nicegui_protocols import ModWebUi
-
+from .runtime_imports import (
+    MOD_WEB_ACTION_BASE_CLASSES,
+    BadgeTone,
+    Callable,
+    Html,
+    Label,
+    Request,
+    Tooltip,
+    apply_mod_web_theme,
+    cast,
+    config,
+    escape,
+    json,
+    mod_web_badge_class,
+    parse_qsl,
+    urlencode,
+    urlsplit,
+    urlunsplit,
+)
 from .service_base import ModWebServiceSupport
 from .types import _ModWebBadgeSpec, _ModWebNodePresenceBadgeSpec
 
@@ -694,12 +693,45 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         textElement.textContent = text;
                     }}
                 }};
+                const setBadgeTooltip = (spec, text) => {{
+                    const tooltipState = spec.tooltip_element_id === null
+                        ? null
+                        : mounted_app?.elements?.[spec.tooltip_element_id];
+                    if (tooltipState) {{
+                        tooltipState.text = text;
+                        return;
+                    }}
+                    const badgeElement = getElementMaybe(spec.badge_element_id);
+                    if (badgeElement) {{
+                        badgeElement.setAttribute('title', text);
+                    }}
+                }};
                 const latencyText = (spec, latencyTextValue) => `${{spec.node_label}}: ${{latencyTextValue}}`;
                 const formatLatency = (latencyMs) => {{
                     if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs)) {{
                         return null;
                     }}
                     return `${{latencyMs}} ms`;
+                }};
+                const formatTooltipLatency = (latencyMs) => formatLatency(latencyMs) || 'unavailable';
+                const tooltipText = (spec, connection) => {{
+                    if (spec.tooltip_mode === 'discord') {{
+                        return `${{spec.node_label}} response: ${{formatTooltipLatency(connection.lastLatencyMs)}}\\nDiscord: ${{formatTooltipLatency(connection.discordLatencyMs)}}`;
+                    }}
+                    if (spec.tooltip_mode === 'portal') {{
+                        return specs
+                            .filter((target) => target.tooltip_mode === 'discord')
+                            .map((target) => `Portal → ${{target.node_label}}: ${{formatTooltipLatency(connection.portalNodeLatencies?.[target.node_name])}}`)
+                            .join('\\n') || spec.pending_text;
+                    }}
+                    return connection.lastText || spec.pending_text;
+                }};
+                const refreshTooltip = (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    const spec = getSpec(nodeName);
+                    if (connection && spec) {{
+                        setBadgeTooltip(spec, tooltipText(spec, connection));
+                    }}
                 }};
                 const sleep = async (delayMs) => new Promise((resolve) => window.setTimeout(resolve, delayMs));
                 const summariseLatencyMeasurements = (measurements) => {{
@@ -785,16 +817,27 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         connection.socket.send(JSON.stringify({{type: 'ping', sample_id: sampleId}}));
                     }});
                 }};
-                const renderAliveState = async (nodeName, latencyTextValue) => {{
+                const renderAliveState = async (nodeName, latencyMs) => {{
                     const connection = controllerState.connectionsByNode[nodeName];
                     const spec = getSpec(nodeName);
                     if (!connection || !spec) {{
                         return;
                     }}
-                    const nextText = latencyTextValue === null ? spec.alive_text : latencyText(spec, latencyTextValue);
+                    connection.lastLatencyMs = latencyMs;
+                    const formattedLatency = formatLatency(latencyMs);
+                    const nextText = formattedLatency === null ? spec.alive_text : latencyText(spec, formattedLatency);
                     connection.lastText = nextText;
                     connection.lastClassName = spec.healthy_class_name;
                     renderBadge(spec, nextText, spec.healthy_class_name);
+                    refreshTooltip(nodeName);
+                }};
+                const requestPortalNodeLatencies = (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    const spec = getSpec(nodeName);
+                    if (!connection || !spec || spec.tooltip_mode !== 'portal' || !connection.socket || connection.socket.readyState !== WebSocket.OPEN) {{
+                        return;
+                    }}
+                    connection.socket.send(JSON.stringify({{type: 'node_latencies'}}));
                 }};
                 const runLatencyBootstrap = async (nodeName) => {{
                     const spec = getSpec(nodeName);
@@ -812,7 +855,8 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         }}
                     }}
                     const summary = summariseLatencyMeasurements(measurements);
-                    await renderAliveState(nodeName, formatLatency(summary));
+                    await renderAliveState(nodeName, summary);
+                    requestPortalNodeLatencies(nodeName);
                 }};
                 const runLatencySample = async (nodeName) => {{
                     const spec = getSpec(nodeName);
@@ -820,7 +864,8 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         return;
                     }}
                     const latency = await sampleLatencyMeasurement(nodeName);
-                    await renderAliveState(nodeName, formatLatency(latency));
+                    await renderAliveState(nodeName, latency);
+                    requestPortalNodeLatencies(nodeName);
                 }};
                 const scheduleReconnect = (nodeName) => {{
                     const connection = controllerState.connectionsByNode[nodeName];
@@ -861,6 +906,9 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         closedByScript: false,
                         lastText: spec.pending_text,
                         lastClassName: spec.pending_class_name,
+                        lastLatencyMs: null,
+                        discordLatencyMs: null,
+                        portalNodeLatencies: {{}},
                     }};
                     controllerState.connectionsByNode[nodeName] = connection;
                     renderBadge(spec, spec.pending_text, spec.pending_class_name);
@@ -875,6 +923,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         connection.lastText = latestSpec.pending_text;
                         connection.lastClassName = latestSpec.pending_class_name;
                         renderBadge(latestSpec, connection.lastText, connection.lastClassName);
+                        refreshTooltip(nodeName);
                         rejectPendingSamples(connection);
                         if (connection.latencyIntervalId) {{
                             window.clearInterval(connection.latencyIntervalId);
@@ -905,6 +954,16 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         if (payload.node !== nodeName) {{
                             socket.close();
                             return;
+                        }}
+                        if (payload.type === 'node_latencies') {{
+                            if (payload.latencies && typeof payload.latencies === 'object') {{
+                                connection.portalNodeLatencies = payload.latencies;
+                                refreshTooltip(nodeName);
+                            }}
+                            return;
+                        }}
+                        if (typeof payload.discord_latency_ms === 'number' && Number.isFinite(payload.discord_latency_ms)) {{
+                            connection.discordLatencyMs = payload.discord_latency_ms;
                         }}
                         const sampleId = payload.sample_id;
                         if (sampleId == null) {{

@@ -4,38 +4,24 @@ import logging
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Final, Literal
+from typing import Literal
 
 import hikari
 import lightbulb
 import psutil
-import requests
 
 import config
-from _async_utils import run_blocking
 from _manager import App_Manager
 from config import Singleton
-from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
-from restart_state import RestartKind, mark_pending_process_restart, process_restart_kind
+from restart_state import mark_pending_process_restart, process_restart_kind
 
 log = logging.getLogger(__name__)
 _IGNORED_SYSTEM_MOUNTPOINTS = frozenset({"/boot", "/boot/efi", "/efi"})
 _DISK_DISCOVERY_REFRESH_INTERVAL = timedelta(minutes=1)
-_PORTAL_RESTART_REQUEST_TIMEOUT_SECONDS: Final[int] = 10
-_PORTAL_RESTART_TOKEN_TTL_SECONDS: Final[int] = 60
-
-
-@dataclass(frozen=True, slots=True)
-class PortalRestartTarget:
-    node_name: str
-    restart_url: str
-
-
 class Stats_CPU:
     def __init__(self):
         self.last_updated: datetime | None = None
@@ -750,106 +736,6 @@ class Stats_System(metaclass=Singleton):
     def update(self):
         with self._lock:
             self._update_unlocked()
-
-
-async def restart_portal(
-    ctx: lightbulb.Context,
-    *,
-    silent: bool = False,
-) -> None:
-    try:
-        await request_portal_process_restart(subject=f"web:{ctx.user.id}", restart_kind=RestartKind.MANUAL_BOT)
-    except (RuntimeError, requests.RequestException) as xcp:
-        log.error("Portal restart failed: %s", xcp)
-        await ctx.respond("Unable to restart Portal.", flags=hikari.MessageFlag.EPHEMERAL)
-        return
-
-    flags: hikari.MessageFlag | hikari.UndefinedType = (
-        hikari.MessageFlag.EPHEMERAL if silent else hikari.UNDEFINED
-    )
-    await ctx.respond("Portal restarting.", flags=flags)
-
-
-async def request_portal_process_restart(
-    *,
-    subject: str,
-    restart_kind: RestartKind = RestartKind.MANUAL_BOT,
-) -> None:
-    if restart_kind not in {RestartKind.SCHEDULED_BOT, RestartKind.MANUAL_BOT}:
-        raise ValueError("Portal process restart kind must be scheduled_bot or manual_bot.")
-    token_secret = config.MOD_WEB_SERVER.token_secret
-    if token_secret is None:
-        raise RuntimeError("Portal restart requires a configured node API token secret.")
-
-    portal_target = _portal_restart_target()
-    token = issue_node_token(
-        secret=token_secret,
-        grant=NodeAccessGrant(
-            subject=subject,
-            node=portal_target.node_name,
-            app=None,
-            scopes=frozenset({NodeApiScope.NODE_MANAGE}),
-            expires_at=int(time.time()) + _PORTAL_RESTART_TOKEN_TTL_SECONDS,
-        ),
-    )
-    await run_blocking(
-        _request_portal_restart,
-        portal_target.restart_url,
-        token,
-        restart_kind,
-    )
-
-
-def _portal_restart_target() -> PortalRestartTarget:
-    portal_node_api_url = config.resolve_node_api_base_url(config.MOD_WEB_SERVER.public_base_url)
-    portal_node_name = _configured_portal_node_name()
-    return PortalRestartTarget(
-        node_name=portal_node_name,
-        restart_url=f"{portal_node_api_url.rstrip('/')}/restart",
-    )
-
-
-def _configured_portal_node_name() -> str:
-    for snapshot in config.load_known_bot_snapshots():
-        if snapshot.profile.bot_profile is not config.BotProfileName.PORTAL:
-            continue
-        mod_web = snapshot.features.mod_web
-        if mod_web is not None:
-            return mod_web.node_name
-    return config.BotProfileName.PORTAL.value
-
-
-def _request_portal_restart(url: str, token: str, restart_kind: RestartKind) -> None:
-    response = requests.post(
-        url,
-        json={"restart_kind": restart_kind.value},
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=_PORTAL_RESTART_REQUEST_TIMEOUT_SECONDS,
-    )
-    if response.ok:
-        return
-    detail = _portal_restart_error_detail(response)
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as xcp:
-        if detail is None:
-            raise
-        raise requests.HTTPError(f"{xcp} ({detail})", response=response) from xcp
-
-
-def _portal_restart_error_detail(response: requests.Response) -> str | None:
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if isinstance(payload, Mapping):
-        detail = payload.get("detail")
-        if isinstance(detail, str):
-            text = detail.strip()
-            if text:
-                return text
-    text = response.text.strip()
-    return text or None
 
 
 async def restart(

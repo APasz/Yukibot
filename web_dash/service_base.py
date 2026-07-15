@@ -40,10 +40,10 @@ from .runtime_imports import (
     NodeFactorioModSettings,
     NodeFontSourceSettingsMutationResult,
     NodeMinecraftRecipeMutationResult,
+    NodeModDependencyResolutionResult,
     NodeModEntry,
     NodeModList,
     NodeModMutationResult,
-    NodeModDependencyResolutionResult,
     NodeModPortalVersionList,
     NodeModUploadBatchResult,
     NodeRestartScheduleState,
@@ -56,6 +56,7 @@ from .runtime_imports import (
     NodeStateStreamEvent,
     NodeSystemAction,
     NodeSystemActionResult,
+    NodeSystemCapabilities,
     NodeSystemHistory,
     NodeSystemSummary,
     Path,
@@ -680,6 +681,12 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_node_is_yuki"]) -> Callable[[ModWebNodeLink], bool]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_node_is_portal"]) -> Callable[[ModWebNodeLink], bool]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_node_has_discord_bot"]) -> Callable[[ModWebNodeLink], bool]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_portal_node_link"]) -> Callable[[], ModWebNodeLink | None]: ...
 
     @overload
@@ -696,6 +703,11 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_remote_node_system_action_async"]
     ) -> Callable[[ModWebNodeLink, NodeSystemAction, bool, bool, ModWebUser], Awaitable[NodeSystemActionResult]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_node_system_capabilities_async"]
+    ) -> Callable[[ModWebNodeLink, ModWebUser], Awaitable[NodeSystemCapabilities]]: ...
 
     @overload
     def __getattr__(

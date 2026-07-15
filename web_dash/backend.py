@@ -14,12 +14,14 @@ from .nicegui_protocols import ModWebFastApiApp, WebChatRelayPublisher
 from .runtime_imports import (
     Access_Control,
     App_Manager,
+    MaintenanceService,
     ManagedApp,
     ModWebAuthService,
     NodeApiService,
     NodeSystemActionHandler,
     Power_Level,
     RelayTTSQueue,
+    RestartTarget,
 )
 from .types import (
     ModWebNotificationTrayItemKind,
@@ -124,11 +126,15 @@ class ModWebDashboardBackend:
         self._chat_relay = chat_relay
         self._node_api.set_chat_relay_service(chat_relay)
 
-    def set_process_restart_handler(self, handler: Callable[[], None]) -> None:
-        self._node_api.set_process_restart_handler(handler)
-
     def set_system_action_handler(self, handler: NodeSystemActionHandler) -> None:
         self._node_api.set_system_action_handler(handler)
+
+    def set_maintenance_service(
+        self,
+        maintenance_service: MaintenanceService,
+        available_targets: tuple[RestartTarget, ...],
+    ) -> None:
+        self._node_api.set_maintenance_service(maintenance_service, available_targets)
 
     def replace_chat_relay_service(self, chat_relay: WebChatRelayPublisher | None) -> None:
         self.set_chat_relay_service(chat_relay)

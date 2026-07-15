@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
 
 from .runtime_imports import BadgeTone, replace
 from .service_base import ModWebServiceSupport
@@ -33,16 +33,17 @@ class _BuiltinTabPresentation:
     page_order: int
     app_card_order: int
     app_card_tone: BadgeTone
+    icon: str
 
 
 _BUILTIN_TAB_PRESENTATIONS: dict[ModWebAppSectionKind, _BuiltinTabPresentation] = {
-    ModWebAppSectionKind.UPDATE: _BuiltinTabPresentation(page_order=150, app_card_order=350, app_card_tone="black"),
-    ModWebAppSectionKind.MODS: _BuiltinTabPresentation(page_order=100, app_card_order=500, app_card_tone="purple"),
-    ModWebAppSectionKind.CONFIGS: _BuiltinTabPresentation(page_order=200, app_card_order=200, app_card_tone="black"),
-    ModWebAppSectionKind.SETTINGS: _BuiltinTabPresentation(page_order=300, app_card_order=300, app_card_tone="black"),
-    ModWebAppSectionKind.SAVES: _BuiltinTabPresentation(page_order=400, app_card_order=100, app_card_tone="black"),
-    ModWebAppSectionKind.CONSOLE: _BuiltinTabPresentation(page_order=500, app_card_order=400, app_card_tone="black"),
-    ModWebAppSectionKind.CHAT: _BuiltinTabPresentation(page_order=600, app_card_order=600, app_card_tone="purple"),
+    ModWebAppSectionKind.UPDATE: _BuiltinTabPresentation(150, 350, "grey", "system_update_alt"),
+    ModWebAppSectionKind.MODS: _BuiltinTabPresentation(100, 500, "purple", "extension"),
+    ModWebAppSectionKind.CONFIGS: _BuiltinTabPresentation(200, 200, "grey", "description"),
+    ModWebAppSectionKind.SETTINGS: _BuiltinTabPresentation(300, 300, "grey", "tune"),
+    ModWebAppSectionKind.SAVES: _BuiltinTabPresentation(400, 100, "grey", "save"),
+    ModWebAppSectionKind.CONSOLE: _BuiltinTabPresentation(500, 400, "grey", "terminal"),
+    ModWebAppSectionKind.CHAT: _BuiltinTabPresentation(600, 600, "purple", "forum"),
 }
 
 
@@ -93,6 +94,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
                     page_order=350,
                     app_card_order=150,
                     app_card_tone="purple",
+                    icon="map",
                     render_handler_name="_render_map_section",
                     badge_handler_name="_map_tab_badges",
                     action_handler_name="_map_tab_actions",
@@ -105,7 +107,8 @@ class ModWebTabsMixin(ModWebServiceSupport):
                     label="Blueprints",
                     page_order=450,
                     app_card_order=650,
-                    app_card_tone="black",
+                    app_card_tone="grey",
+                    icon="account_tree",
                     show_on_app_card=False,
                     render_handler_name="_render_blueprints_section",
                     badge_handler_name="_blueprint_tab_badges",
@@ -119,7 +122,8 @@ class ModWebTabsMixin(ModWebServiceSupport):
                     label="Recipes",
                     page_order=425,
                     app_card_order=675,
-                    app_card_tone="black",
+                    app_card_tone="grey",
+                    icon="menu_book",
                     show_on_app_card=False,
                     render_handler_name="_render_minecraft_recipes_section",
                     badge_handler_name="_minecraft_recipes_tab_badges",
@@ -132,7 +136,8 @@ class ModWebTabsMixin(ModWebServiceSupport):
                     label="Sandbox",
                     page_order=475,
                     app_card_order=675,
-                    app_card_tone="black",
+                    app_card_tone="grey",
+                    icon="sports_esports",
                     show_on_app_card=False,
                     render_handler_name="_render_sevendays_sandbox_options_section",
                     badge_handler_name="_sevendays_sandbox_options_tab_badges",
@@ -280,6 +285,7 @@ class ModWebTabsMixin(ModWebServiceSupport):
             page_order=presentation.page_order,
             app_card_order=presentation.app_card_order,
             app_card_tone=presentation.app_card_tone,
+            icon=presentation.icon,
         )
 
     @staticmethod

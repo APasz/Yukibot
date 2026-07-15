@@ -79,8 +79,25 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-hero-running::after", css)
         self.assertIn(".mod-app-card-link::before", css)
         self.assertIn(".mod-app-card-disabled::before", css)
+        self.assertIn(".mod-app-card-crashed::before", css)
+        self.assertIn(".mod-app-card-open-corner", css)
+        self.assertIn("clip-path: polygon(100% 0, 100% 100%, 0 0);", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-app-card-tab-link \{.*?position: relative;.*?border-color: var\(--mod-accent\) !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-app-card-tab-link::after \{.*?background: #050507;.*?"
+            r"clip-path: polygon\(100% 0, 100% 100%, 0 0\);",
+        )
         self.assertIn(".mod-app-card:hover", css)
         self.assertIn(".mod-app-card:focus-visible", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-app-card \{.*?transition: border-color 150ms ease;.*?\}"
+            r".*?\.mod-app-card:hover \{.*?border-color: var\(--mod-border-hot\) !important;\s*\}",
+        )
         self.assertIn(".mod-node-card:hover", css)
         self.assertIn(".mod-card-link:not(.mod-app-card-link):hover", css)
         self.assertIn(".mod-card-link:focus-visible", css)
@@ -132,6 +149,10 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertRegex(
             css,
+            r"(?s)@media \(max-width: 36rem\) \{.*?\.mod-system-schedule-controls \{.*?grid-template-columns: 1fr;",
+        )
+        self.assertRegex(
+            css,
             r"(?s)\.mod-system-schedule-field \.q-field__control \{.*?height: 2\.75rem !important;",
         )
         self.assertRegex(
@@ -158,6 +179,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-app-card-running::before", css)
         self.assertIn(".mod-app-card-stopping::before", css)
         self.assertIn(".mod-app-card-stopping::after", css)
+        self.assertIn(".mod-section-tabs .q-tab__icon", css)
         self.assertIn("@keyframes mod-page-enter", css)
         self.assertIn("@keyframes mod-live-value-pulse-a", css)
         self.assertIn("@keyframes mod-live-value-pulse-b", css)
@@ -195,6 +217,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("background-position: 100% 0;", css)
         self.assertIn("--mod-app-rail-width: 0.72rem;", css)
         self.assertIn("width: var(--mod-app-rail-width);", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-app-card-crashed::before \{.*?var\(--mod-app-strip-color, var\(--mod-border-hot\)\);",
+        )
         self.assertIn("var(--mod-card) 40% 56%", css)
         self.assertIn("transform: translateY(1.25rem);", css)
         self.assertIn(") left top / 1rem 1.25rem repeat-y", css)

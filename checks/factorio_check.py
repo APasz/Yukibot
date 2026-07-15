@@ -1397,9 +1397,9 @@ class FactorioUpdaterTests(unittest.TestCase):
         )
         actual_paths = Counter(str(call.args[0]) for call in chown_mock.call_args_list)
         self.assertEqual(actual_paths, expected_paths)
-        for call in chown_mock.call_args_list:
-            self.assertEqual(call.kwargs["user"], "yuki")
-            self.assertEqual(call.kwargs["group"], "games")
+        for chown_call in chown_mock.call_args_list:
+            self.assertEqual(chown_call.kwargs["user"], "yuki")
+            self.assertEqual(chown_call.kwargs["group"], "games")
 
     def test_factorio_binary_permission_repair_restores_execute_bits(self) -> None:
         with TemporaryDirectory() as temp_dir:

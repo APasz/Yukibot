@@ -154,9 +154,9 @@ from node_api import (
     NodeModPortalVersionEntry,
     NodeModPortalVersionList,
     NodeModPropertiesUpdateRequest,
+    NodeModUpdateCheckResult,
     NodeModUpdateDependency,
     NodeModUpdateDependencyAction,
-    NodeModUpdateCheckResult,
     NodeModUpdateRequest,
     NodeModUpdateStatus,
     NodeModUploadBatchResult,
@@ -174,6 +174,7 @@ from node_api import (
     NodeStateStreamEvent,
     NodeStateTopic,
     NodeSystemAction,
+    NodeSystemCapabilities,
     NodeSystemDiskSummary,
     NodeSystemHistory,
     NodeSystemSample,
@@ -184,9 +185,9 @@ from node_api import (
     required_app_mutation_scope,
     required_mod_mutation_level,
 )
-from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token, verify_node_token
-from restart_targets import RestartTarget
+from node_auth import NodeApiScope, verify_node_token
 from restart_state import RestartKind, RestartRecord
+from restart_targets import RestartTarget
 
 
 class _DummyApp(App[Any]):
@@ -1417,7 +1418,6 @@ class NodeApiTests(unittest.TestCase):
         hints = get_type_hints(route)
         self.assertIs(hints["request"], Request)
         self.assertIn("/api/node/ping", handlers)
-        self.assertIn("/api/node/restart", handlers)
         self.assertIn("/api/node/presence/stream", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
 
@@ -1437,103 +1437,6 @@ class NodeApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["access-control-allow-origin"], "*")
         self.assertIn("Authorization", response.headers["access-control-allow-headers"])
-
-    def test_portal_restart_accepts_matching_portal_registry_node_alias(self) -> None:
-        portal_config = replace(
-            config.MOD_WEB_SERVER,
-            node_name="portal",
-            public_base_url="https://wakusei.apasz.com",
-            node_api_base_url="https://wakusei.apasz.com/api/node",
-            token_secret="shared-secret",
-        )
-        portal_snapshot = config.BotMetadataSnapshot(
-            profile=config.BotMetadataProfile(
-                id="999",
-                label="Portal",
-                bot_profile=config.BotProfileName.PORTAL,
-            ),
-            features=config.BotMetadataFeatures(
-                mod_web=config.BotMetadataModWeb(
-                    node_name="wakusei",
-                    public_base_url="https://wakusei.apasz.com",
-                    node_api_base_url="https://wakusei.apasz.com/api/node",
-                )
-            ),
-        )
-        token = issue_node_token(
-            secret="shared-secret",
-            grant=NodeAccessGrant(
-                subject="web:1234",
-                node="wakusei",
-                app=None,
-                scopes=frozenset({NodeApiScope.NODE_MANAGE}),
-                expires_at=9_999_999_999,
-            ),
-        )
-
-        with (
-            patch.object(config, "ACTIVE_BOT_PROFILE", config.BOT_PROFILES[config.BotProfileName.PORTAL]),
-            patch.object(config, "MOD_WEB_SERVER", portal_config),
-            patch.object(config, "load_known_bot_snapshots", return_value=(portal_snapshot,)),
-            patch("node_api.mark_pending_process_restart") as mark_restart,
-        ):
-            app = FastAPI()
-            service = NodeApiService()
-            service.set_process_restart_handler(Mock())
-            service.register_routes(app)
-
-            response = TestClient(app).post(
-                "/api/node/restart",
-                json={"restart_kind": RestartKind.MANUAL_BOT.value},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-
-        self.assertEqual(response.status_code, 202)
-        mark_restart.assert_called_once_with(RestartKind.MANUAL_BOT)
-
-    def test_portal_restart_token_node_names_include_matching_aliases_once(self) -> None:
-        portal_config = replace(
-            config.MOD_WEB_SERVER,
-            node_name="portal",
-            public_base_url="https://wakusei.apasz.com/",
-            node_api_base_url="https://wakusei.apasz.com/api/node",
-        )
-        matching_snapshot = config.BotMetadataSnapshot(
-            profile=config.BotMetadataProfile(
-                id="999",
-                label="Portal",
-                bot_profile=config.BotProfileName.PORTAL,
-            ),
-            features=config.BotMetadataFeatures(
-                mod_web=config.BotMetadataModWeb(
-                    node_name="wakusei",
-                    public_base_url="https://wakusei.apasz.com",
-                    node_api_base_url="https://wakusei.apasz.com/api/node/",
-                )
-            ),
-        )
-        stale_snapshot = config.BotMetadataSnapshot(
-            profile=config.BotMetadataProfile(
-                id="998",
-                label="Old Portal",
-                bot_profile=config.BotProfileName.PORTAL,
-            ),
-            features=config.BotMetadataFeatures(
-                mod_web=config.BotMetadataModWeb(
-                    node_name="old-portal",
-                    public_base_url="https://old.example",
-                    node_api_base_url="https://old.example/api/node",
-                )
-            ),
-        )
-
-        with (
-            patch.object(config, "MOD_WEB_SERVER", portal_config),
-            patch.object(config, "load_known_bot_snapshots", return_value=(matching_snapshot, stale_snapshot)),
-        ):
-            node_names = NodeApiService()._portal_restart_token_node_names()
-
-        self.assertEqual(node_names, ("portal", "wakusei"))
 
     def test_mod_mutation_result_round_trips_mapping(self) -> None:
         result = NodeModMutationResult(
@@ -4506,6 +4409,58 @@ class NodeApiTests(unittest.TestCase):
             [{"type": "pong", "node": service.node_name, "sample_id": "sample-1"}],
         )
 
+    def test_discord_heartbeat_latency_is_reported_for_bot_nodes(self) -> None:
+        service = NodeApiService()
+        service._manager = cast(Any, SimpleNamespace(bot=SimpleNamespace(heartbeat_latency=0.042)))
+        yuki_profile = config.BOT_PROFILES[config.BotProfileName.YUKI]
+
+        with patch.object(config, "ACTIVE_BOT_PROFILE", yuki_profile):
+            self.assertEqual(service._discord_heartbeat_latency_ms(), 42)
+
+    def test_portal_node_latencies_are_returned_by_presence_stream(self) -> None:
+        sent_payloads: list[object] = []
+
+        class _PresenceWebSocket:
+            def __init__(self) -> None:
+                self._messages = iter(
+                    (
+                        {"type": "websocket.receive", "text": json.dumps({"type": "node_latencies"})},
+                        {"type": "websocket.disconnect"},
+                    )
+                )
+
+            async def accept(self) -> None:
+                return None
+
+            async def receive(self) -> dict[str, str]:
+                return next(self._messages)
+
+            async def send_json(self, payload: object) -> None:
+                sent_payloads.append(payload)
+
+            async def close(self) -> None:
+                return None
+
+        service = NodeApiService()
+        portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+        with (
+            patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile),
+            patch.object(service, "_portal_node_latencies_async", new=AsyncMock(return_value={"yuki": 12, "erin": 34})),
+        ):
+            asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
+
+        self.assertEqual(
+            sent_payloads,
+            [
+                {
+                    "type": "node_latencies",
+                    "node": service.node_name,
+                    "sample_id": None,
+                    "latencies": {"yuki": 12, "erin": 34},
+                }
+            ],
+        )
+
     def test_serve_presence_stream_ignores_disconnect_while_closing_websocket(self) -> None:
         class _DisconnectingWebSocket:
             async def accept(self) -> None:
@@ -7270,6 +7225,14 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(NodeSystemHistory.from_mapping(history.to_mapping()), history)
 
+    def test_portal_node_has_an_empty_app_inventory_without_an_app_manager(self) -> None:
+        async def exercise() -> None:
+            portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+            with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
+                self.assertEqual(await NodeApiService().list_apps(), ())
+
+        asyncio.run(exercise())
+
     def test_schedule_system_action_requires_sudo_and_dispatches_once(self) -> None:
         async def exercise() -> None:
             service = NodeApiService()
@@ -7303,26 +7266,29 @@ class NodeApiTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_schedule_portal_action_is_available_on_yuki(self) -> None:
+    def test_portal_system_capabilities_only_allow_process_restart(self) -> None:
         async def exercise() -> None:
             service = NodeApiService()
             acl = AsyncMock()
             handler = Mock()
             service.set_acl(cast(Access_Control, acl))
             service.set_system_action_handler(handler)
-            loop = asyncio.get_running_loop()
-            with patch.object(loop, "call_later") as call_later:
-                result = await service.schedule_system_action(
-                    action=NodeSystemAction.RESTART_PORTAL,
-                    auto_restart_running_apps=True,
-                    silent=False,
-                    actor_user_id=42,
-                )
+            portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
+            with patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile):
+                capabilities = service.system_capabilities()
+                self.assertEqual(capabilities, NodeSystemCapabilities(actions=(NodeSystemAction.RESTART_PROCESS,)))
+                self.assertFalse(capabilities.supports_app_auto_restart)
+                self.assertFalse(capabilities.supports_silent_restart)
+                with self.assertRaises(HTTPException) as raised:
+                    await service.schedule_system_action(
+                        action=NodeSystemAction.REBOOT_HOST,
+                        auto_restart_running_apps=True,
+                        silent=False,
+                        actor_user_id=42,
+                    )
 
-            self.assertEqual(result.message, f"Scheduled Portal restart for {service.node_name}.")
-            call_later.call_args.args[1]()
-            handler.assert_called_once_with(NodeSystemAction.RESTART_PORTAL, True, False)
-            self.assertIsNone(service._pending_system_action)  # type: ignore[attr-defined]
+            self.assertEqual(raised.exception.status_code, 400)
+            handler.assert_not_called()
 
         asyncio.run(exercise())
 
@@ -7367,6 +7333,18 @@ class NodeApiTests(unittest.TestCase):
                     self.assertEqual(system_schedule.interval_minutes, 7 * 24 * 60)
 
         asyncio.run(exercise())
+
+    def test_restart_schedule_read_rejects_stale_configuration(self) -> None:
+        service = NodeApiService()
+        maintenance = Mock(spec=MaintenanceService)
+        maintenance.reload.return_value = False
+        service.set_maintenance_service(cast(MaintenanceService, maintenance), (RestartTarget.BOT,))
+
+        with self.assertRaises(HTTPException) as raised:
+            service.read_restart_schedules()
+
+        self.assertEqual(raised.exception.status_code, 503)
+        maintenance.reload.assert_called_once_with()
 
     def test_restart_state_uses_process_sentinel_and_optional_voice_record(self) -> None:
         service = NodeApiService()

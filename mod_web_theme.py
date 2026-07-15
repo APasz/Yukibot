@@ -577,17 +577,15 @@ class ModWebTheme:
                 .mod-app-card {{
                     --mod-app-rail-width: 0.72rem;
                     --mod-app-chevron-width: 2rem;
-                    transition: border-color 150ms ease, background 150ms ease;
+                    transition: border-color 150ms ease;
                     container-name: mod-app-card;
                     container-type: inline-size;
                 }}
                 .mod-app-card:hover {{
                     border-color: var(--mod-border-hot) !important;
-                    background: #101014 !important;
                 }}
                 .mod-app-card:focus-visible {{
                     border-color: var(--mod-accent) !important;
-                    background: #101014 !important;
                     outline: 2px solid var(--mod-accent) !important;
                     outline-offset: 3px;
                 }}
@@ -672,6 +670,32 @@ class ModWebTheme:
                 }}
                 .mod-app-card .mod-app-card-api-separator {{
                     height: 0.72rem;
+                }}
+                .mod-app-card-open-corner {{
+                    position: absolute;
+                    top: -1px;
+                    right: -1px;
+                    z-index: 2;
+                    width: 1.2rem;
+                    height: 1.2rem;
+                    pointer-events: none;
+                    background: var(--mod-bg);
+                    clip-path: polygon(100% 0, 100% 100%, 0 0);
+                }}
+                .mod-app-card-tab-link {{
+                    position: relative;
+                    border-color: var(--mod-accent) !important;
+                }}
+                .mod-app-card-tab-link::after {{
+                    content: "";
+                    position: absolute;
+                    top: 1px;
+                    right: 1px;
+                    width: 0.52rem;
+                    height: 0.52rem;
+                    pointer-events: none;
+                    background: #050507;
+                    clip-path: polygon(100% 0, 100% 100%, 0 0);
                 }}
                 @container mod-app-card (max-width: 38rem) {{
                     .mod-app-card-shell {{
@@ -933,6 +957,12 @@ class ModWebTheme:
                             transparent 0.7rem 1.08rem
                         );
                 }}
+                .mod-app-card-crashed::before {{
+                    background:
+                        repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.76) 0 0.16rem, transparent 0.16rem 0.34rem),
+                        repeating-linear-gradient(-45deg, rgba(0, 0, 0, 0.76) 0 0.16rem, transparent 0.16rem 0.34rem),
+                        var(--mod-app-strip-color, var(--mod-border-hot));
+                }}
                 .mod-app-card-title-disabled {{
                     color: rgba(244, 244, 245, 0.74) !important;
                     text-shadow: none !important;
@@ -1009,6 +1039,13 @@ class ModWebTheme:
                     letter-spacing: 0.1em;
                     text-transform: uppercase;
                     overflow: hidden;
+                }}
+                .mod-section-tabs .q-tab__content {{
+                    flex-direction: row;
+                    gap: 0.4rem;
+                }}
+                .mod-section-tabs .q-tab__icon {{
+                    font-size: 1.05rem;
                 }}
                 .mod-section-tabs .q-tab::after {{
                     content: "";
@@ -3499,6 +3536,14 @@ class ModWebTheme:
                     padding: 0 !important;
                     gap: 0 !important;
                 }}
+                .mod-home-hero-actionable {{
+                    cursor: pointer !important;
+                    transition: border-color 140ms ease, box-shadow 140ms ease;
+                }}
+                .mod-home-hero-actionable:hover {{
+                    border-color: rgba(124, 58, 237, 0.78) !important;
+                    box-shadow: 0 0 0 1px rgba(124, 58, 237, 0.2), 0 14px 34px rgba(0, 0, 0, 0.24) !important;
+                }}
                 .mod-home-edge-badge-wrap {{
                     position: relative !important;
                     inset: auto !important;
@@ -3897,8 +3942,21 @@ class ModWebTheme:
                     font-weight: 750;
                     text-align: center;
                 }}
-                .mod-system-danger-card {{
-                    border-color: rgba(220, 38, 38, 0.64) !important;
+                .mod-system-danger-zone {{
+                    border: 1px solid rgba(220, 38, 38, 0.64);
+                    background: linear-gradient(135deg, rgba(30, 18, 42, 0.88), rgba(11, 10, 15, 0.94));
+                }}
+                .mod-system-schedule-section-title {{
+                    width: 100%;
+                    margin-top: 0.25rem;
+                    padding-top: 1rem;
+                    border-top: 1px solid var(--mod-border);
+                }}
+                .mod-system-schedule-disable {{
+                    color: #fecaca !important;
+                    background: #1b1520 !important;
+                    border-color: rgba(220, 38, 38, 0.7) !important;
+                    box-shadow: inset 0 0 0 1px rgba(127, 29, 29, 0.22) !important;
                 }}
                 .mod-system-disk-select {{
                     flex: 1 1 18rem;
@@ -3995,6 +4053,11 @@ class ModWebTheme:
                 @media (max-width: 56rem) {{
                     .mod-system-schedule-controls {{
                         grid-template-columns: repeat(3, minmax(0, 1fr));
+                    }}
+                }}
+                @media (max-width: 36rem) {{
+                    .mod-system-schedule-controls {{
+                        grid-template-columns: 1fr;
                     }}
                 }}
                 .mod-system-action-row {{
@@ -4701,6 +4764,7 @@ class ModWebTheme:
                     background: rgba(10, 10, 14, 0.72) !important;
                 }}
                 .mod-mod-details-description,
+                .mod-mod-details-notes,
                 .mod-mod-details-update-check,
                 .mod-mod-details-classification-section {{
                     width: calc(100% - 2.5rem) !important;
@@ -4822,6 +4886,7 @@ class ModWebTheme:
                     }}
                     .mod-mod-details-links,
                     .mod-mod-details-description,
+                    .mod-mod-details-notes,
                     .mod-mod-details-update-check,
                     .mod-mod-details-classification-section,
                     .mod-mod-details-editor,
@@ -5914,6 +5979,14 @@ class ModWebTheme:
                     .mod-chat-send {{ width: 100%; }}
                 }}
                 @media (max-width: 30rem) {{
+                    .mod-section-tabs .q-tab {{
+                        flex: 0 1 3rem;
+                        min-width: 3rem;
+                        padding-inline: 0.65rem;
+                    }}
+                    .mod-section-tabs .q-tab__label {{ display: none; }}
+                    .mod-section-tabs .q-tab__content {{ gap: 0; }}
+                    .mod-section-tabs .q-tab__icon {{ font-size: 1.2rem; }}
                     .mod-inline-toolbar {{
                         flex-wrap: wrap;
                     }}

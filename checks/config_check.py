@@ -36,7 +36,6 @@ class ConfigEnvFlagTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INDEV must be a boolean flag"):
             config._parse_env_flag("development", var_name="INDEV")
 
-
 class AppModCapabilitiesTests(unittest.TestCase):
     def test_minecraft_supports_launcher_client_packs(self) -> None:
         capabilities = mod_capabilities_for_scope("minecraft")

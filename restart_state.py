@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from _thread import RLock
 from collections.abc import Mapping
@@ -10,6 +11,7 @@ from datetime import datetime
 from enum import StrEnum
 from logging import Logger
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 log: Logger = logging.getLogger(__name__)
 
@@ -175,3 +177,21 @@ def _read_json_object(path: Path) -> dict[str, object] | None:
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     path.write_text(f"{json.dumps(dict[str, object](payload), sort_keys=True)}\n", encoding="utf-8")
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary_file:
+        temporary_file.write(f"{json.dumps(dict[str, object](payload), sort_keys=True)}\n")
+        temporary_path = Path(temporary_file.name)
+    try:
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)

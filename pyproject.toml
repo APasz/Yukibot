@@ -54,6 +54,10 @@ hikari-ui = { path = "../hikari_editor" }
 python_files = ["*_check.py"]
 testpaths = ["checks"]
 
+[tool.ruff.lint]
+# Keep Ruff focused on deterministic source hygiene; BasedPyright owns type analysis.
+select = ["E731", "F401", "F402", "F811"]
+
 [tool.basedpyright]
 include = [
     "*.py",

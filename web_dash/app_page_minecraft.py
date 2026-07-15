@@ -21,13 +21,13 @@ from apps.minecraft import (
     minecraft_recipe_mutation_with_id,
 )
 
+from .constants import _SEARCH_INPUT_DEBOUNCE_MILLISECONDS
 from .nicegui_protocols import (
     ModWebEventArgumentsContainer,
     ModWebUi,
     _event_args_as_text,
     _value_as_object,
 )
-from .constants import _SEARCH_INPUT_DEBOUNCE_MILLISECONDS
 from .runtime_imports import (
     Callable,
     ModWebUser,
@@ -306,8 +306,10 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
         with ui.element("div").classes("mod-recipe-subtabs w-full"):
             with ui.element("div").classes("mod-section-tabs-shell"):
                 with ui.tabs().classes("mod-section-tabs") as recipe_subtabs:
-                    add_tab = ui.tab("Add")
-                    manage_tab = ui.tab("Manage")
+                    add_tab = ui.tab("Add", icon="add_circle")
+                    manage_tab = ui.tab("Manage", icon="format_list_bulleted")
+                    self._attach_badge_tooltip(ui=ui, target=add_tab, text="Create a recipe")
+                    self._attach_badge_tooltip(ui=ui, target=manage_tab, text="Manage saved recipes")
             with ui.tab_panels(
                 recipe_subtabs,
                 value=add_tab,

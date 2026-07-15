@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 # pyright: reportUninitializedInstanceVariable=false
-
 import asyncio
 import contextlib
 import io
@@ -9,11 +8,11 @@ import logging
 import re
 import wave
 from collections import deque
-from collections.abc import Awaitable, Iterable, Mapping, Sized
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sized
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 from urllib.parse import unquote, urlparse
 
 import emoji

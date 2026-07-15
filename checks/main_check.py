@@ -377,24 +377,25 @@ class MainHelpersTests(unittest.IsolatedAsyncioTestCase):
 
         run_blocking_mock.assert_not_awaited()
 
-    async def test_portal_restart_request_exits_main_process_with_failure(self) -> None:
-        restart_handler: Callable[[], None] = Mock()
+    async def test_portal_process_action_exits_main_process_with_failure(self) -> None:
+        restart_handler: Callable[[main.NodeSystemAction, bool, bool], None] = Mock()
         mod_web = Mock()
 
-        def _set_restart_handler(handler: Callable[[], None]) -> None:
+        def _set_restart_handler(handler: Callable[[main.NodeSystemAction, bool, bool], None]) -> None:
             nonlocal restart_handler
             restart_handler = handler
 
         async def _start(*, acl: object) -> None:
             del acl
-            restart_handler()
+            restart_handler(main.NodeSystemAction.RESTART_PROCESS, True, False)
 
-        mod_web.set_process_restart_handler.side_effect = _set_restart_handler
+        mod_web.set_system_action_handler.side_effect = _set_restart_handler
         mod_web.start = AsyncMock(side_effect=_start)
 
         with (
             patch("main.Access_Control", return_value=Mock()),
             patch("main.ModWebService", return_value=mod_web),
+            patch("main.mark_pending_process_restart_if_missing"),
             patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.LOCAL),
             patch.object(config, "IS_RESTARTING", False),
         ):

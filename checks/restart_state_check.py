@@ -31,6 +31,5 @@ class RestartStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not a process restart kind"):
             restart_state.mark_pending_process_restart(RestartKind.MANUAL_VOICE)
 
-
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import traceback
+from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
 from contextlib import suppress
 from dataclasses import dataclass
@@ -19,12 +20,11 @@ install_startup_exception_logger()
 import hikari
 import hikariwave
 import lightbulb
-import requests
 
 import _sys
 import config
-from _async_utils import run_blocking
 from _activity import Activity_Manager, Provider_CPU, Provider_DISK, Provider_RAM
+from _async_utils import run_blocking
 from _authority_server import AuthorityServer
 from _discord import DC_Relay, Distils, Resolutator, cached_member_role_color, color_int_to_hex
 from _file import File_Utils
@@ -55,14 +55,13 @@ from relay_notices import (
     RelayNoticeSource,
     render_system_notice_text,
 )
-from restart_targets import RestartTarget
 from restart_state import (
     RestartKind,
-    mark_pending_process_restart,
     mark_pending_process_restart_if_missing,
     record_process_start,
     record_voice_restart,
 )
+from restart_targets import RestartTarget
 from web_dash.service import ModWebService
 
 log: Logger = logging.getLogger("system")
@@ -85,6 +84,7 @@ activities: list[type[Activity_Provider]] = [
 start_time: datetime = datetime.now()
 _RESTART_AUTO_LAUNCH_DELAY_SECONDS: float = 0.0
 _PORTAL_AUTHORITY_REFRESH_INTERVAL_SECONDS: float = 60.0
+_PORTAL_MAINTENANCE_REFRESH_INTERVAL_SECONDS: float = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +337,7 @@ async def _run_portal() -> None:
     )
     acl = Access_Control()
     mod_web = ModWebService()
+    maintenance = MaintenanceService()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     restart_requested = False
@@ -348,11 +349,11 @@ async def _run_portal() -> None:
         mod_web.begin_shutdown()
         stop_event.set()
 
-    def _request_restart() -> None:
+    def _request_restart(restart_kind: RestartKind = RestartKind.MANUAL_BOT) -> None:
         nonlocal restart_requested
         if stop_event.is_set():
             return
-        mark_pending_process_restart_if_missing(RestartKind.MANUAL_BOT)
+        mark_pending_process_restart_if_missing(restart_kind)
         restart_requested = True
         config.IS_RESTARTING = True
         log.critical("Restarting portal profile")
@@ -364,26 +365,24 @@ async def _run_portal() -> None:
 
     def _schedule_system_action(action: NodeSystemAction, auto_restart_running_apps: bool, silent: bool) -> None:
         del auto_restart_running_apps, silent
-        if action is NodeSystemAction.RESTART_PROCESS:
-            _schedule_restart()
-            return
+        if action is not NodeSystemAction.RESTART_PROCESS:
+            raise ValueError(f"Portal does not support {action.value}.")
+        _schedule_restart()
 
-        async def _reboot_portal_host() -> None:
-            log.critical("Rebooting portal host from web dashboard")
-            mark_pending_process_restart(RestartKind.MANUAL_SYS)
-            mod_web.begin_shutdown()
-            await run_blocking(_sys.reboot_host)
-
-        asyncio.run_coroutine_threadsafe(_reboot_portal_host(), loop)
-
-    mod_web.set_process_restart_handler(_schedule_restart)
     mod_web.set_system_action_handler(_schedule_system_action)
+    mod_web.set_maintenance_service(maintenance, (RestartTarget.BOT,))
     await mod_web.start(acl=acl)
 
     refresh_task: asyncio.Task[None] | None = None
     if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
         refresh_task = asyncio.create_task(_portal_authority_refresh_loop(acl=acl, stop_event=stop_event))
-
+    maintenance_task = asyncio.create_task(
+        _portal_maintenance_restart_loop(
+            maintenance=maintenance,
+            stop_event=stop_event,
+            on_restart=_request_restart,
+        )
+    )
     for signum in (signal.SIGINT, signal.SIGTERM):
         with suppress(NotImplementedError):
             loop.add_signal_handler(signum, _request_stop)
@@ -391,10 +390,12 @@ async def _run_portal() -> None:
     try:
         await stop_event.wait()
     finally:
-        if refresh_task is not None:
-            refresh_task.cancel()
+        for task in (refresh_task, maintenance_task):
+            if task is None:
+                continue
+            task.cancel()
             with suppress(asyncio.CancelledError):
-                await refresh_task
+                await task
     if restart_requested:
         raise SystemExit(1)
 
@@ -417,6 +418,32 @@ async def _portal_authority_refresh_loop(
 ) -> None:
     while not stop_event.is_set():
         await _refresh_portal_remote_state(acl)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            continue
+
+
+async def _portal_maintenance_restart_loop(
+    *,
+    maintenance: MaintenanceService,
+    stop_event: asyncio.Event,
+    on_restart: Callable[[RestartKind], None],
+    interval_seconds: float = _PORTAL_MAINTENANCE_REFRESH_INTERVAL_SECONDS,
+) -> None:
+    available_targets = (RestartTarget.BOT,)
+    while not stop_event.is_set():
+        maintenance.reload()
+        now = datetime.now().astimezone()
+        due_targets = maintenance.due_restart_targets(now=now, available_targets=available_targets)
+        if due_targets:
+            maintenance.mark_triggered(due_targets, triggered_at=now)
+            log.critical(
+                "Portal maintenance restart: due=%s",
+                ",".join(target.value for target in due_targets),
+            )
+            on_restart(RestartKind.SCHEDULED_BOT)
+            continue
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
         except asyncio.TimeoutError:
@@ -488,13 +515,6 @@ def main():
             raise RuntimeError("Bot runtime loop is not available for node system actions.")
 
         async def _execute_node_system_action() -> None:
-            if action is NodeSystemAction.RESTART_PORTAL:
-                log.critical("Executing web dashboard Portal restart")
-                await _sys.request_portal_process_restart(
-                    subject="web:yuki-system-action",
-                    restart_kind=RestartKind.MANUAL_BOT,
-                )
-                return
             auto_start_apps = _sys.configure_restart_auto_start_apps(
                 app_manager,
                 enabled=auto_restart_running_apps,
@@ -833,37 +853,14 @@ def main():
         if not due_targets:
             return
 
-        if RestartTarget.PORTAL in due_targets:
-            portal_scheduled_for = maintenance.next_restart_at(RestartTarget.PORTAL, now=now)
-            try:
-                await _sys.request_portal_process_restart(
-                    subject="maintenance:yuki",
-                    restart_kind=RestartKind.SCHEDULED_BOT,
-                )
-            except (RuntimeError, requests.RequestException):
-                log.exception(
-                    "Scheduled Portal restart request failed; it will be retried at the next maintenance check"
-                )
-            else:
-                maintenance.mark_triggered((RestartTarget.PORTAL,), triggered_at=now)
-                log.critical(
-                    "Maintenance.Restart; effective=portal due=portal interval=%sm slot=%s",
-                    maintenance.schedule_for(RestartTarget.PORTAL).interval_minutes,
-                    (portal_scheduled_for or now.replace(second=0, microsecond=0)).isoformat(),
-                )
-
-        local_due_targets = tuple(target for target in due_targets if target is not RestartTarget.PORTAL)
-        if not local_due_targets:
-            return
-
-        effective_target = maintenance.due_restart_target(now=now, available_targets=local_due_targets)
+        effective_target = maintenance.due_restart_target(now=now, available_targets=due_targets)
         if effective_target is None:
             return
 
         scheduled_for = maintenance.next_restart_at(effective_target, now=now) or now.replace(second=0, microsecond=0)
-        maintenance.mark_triggered(local_due_targets, triggered_at=now)
+        maintenance.mark_triggered(due_targets, triggered_at=now)
         schedule = maintenance.schedule_for(effective_target)
-        due_names = ", ".join(target.value for target in local_due_targets)
+        due_names = ", ".join(target.value for target in due_targets)
         log.critical(
             "Maintenance.Restart; effective=%s due=%s interval=%sm slot=%s",
             effective_target.value,
@@ -880,7 +877,7 @@ def main():
             record_voice_restart(RestartKind.SCHEDULED_VOICE, restarted_at=now)
             completion_notice = maintenance.build_restart_completed_notice(
                 effective_target=effective_target,
-                matched_targets=local_due_targets,
+                matched_targets=due_targets,
                 scheduled_for=scheduled_for,
             )
             await _post_started_channel_notice(bot, completion_notice, error_context="MAINTENANCE COMPLETE MESSAGE")
@@ -888,7 +885,7 @@ def main():
 
         restart_notice = maintenance.build_restart_executing_notice(
             effective_target=effective_target,
-            matched_targets=local_due_targets,
+            matched_targets=due_targets,
             scheduled_for=scheduled_for,
         )
         await _sys.scheduled_restart(

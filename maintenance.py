@@ -76,8 +76,7 @@ class MaintenanceService:
                 )
                 return False
 
-            self._restart_schedules = {target: bot_config.maintenance.schedule_for(target) for target in RestartTarget}
-            self._restart_warning = bot_config.maintenance.restart_warning
+            self._cache_configuration(bot_config)
             return True
 
     def update_restart_intervals(
@@ -129,7 +128,7 @@ class MaintenanceService:
                 next_schedules[target] = next_schedule
             bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
             config.save_bot_configuration(self._bot_configuration_path, bot_config)
-            self.reload()
+            self._cache_configuration(bot_config)
             return dict(self._restart_schedules)
 
     def update_restart_warning_minutes(self, lead_minutes: int) -> int:
@@ -138,7 +137,7 @@ class MaintenanceService:
             bot_config = self._load_bot_configuration()
             bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_warning": warning})
             config.save_bot_configuration(self._bot_configuration_path, bot_config)
-            self.reload()
+            self._cache_configuration(bot_config)
             return self.restart_warning_lead_minutes
 
     def due_restart_targets(
@@ -182,7 +181,7 @@ class MaintenanceService:
                 )
             bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
             config.save_bot_configuration(self._bot_configuration_path, bot_config)
-            self.reload()
+            self._cache_configuration(bot_config)
 
     def skip_next_restart(self, target: RestartTarget) -> config.PersistedRestartSchedule:
         with self._lock:
@@ -198,7 +197,7 @@ class MaintenanceService:
             )
             bot_config.maintenance = bot_config.maintenance.model_copy(update={"restart_schedules": next_schedules})
             config.save_bot_configuration(self._bot_configuration_path, bot_config)
-            self.reload()
+            self._cache_configuration(bot_config)
             return self.schedule_for(target)
 
     def due_restart_warnings(
@@ -393,6 +392,12 @@ class MaintenanceService:
         if not self._bot_configuration_path.exists():
             return config.BotConfiguration()
         return config.load_bot_configuration(self._bot_configuration_path)
+
+    def _cache_configuration(self, bot_config: config.BotConfiguration) -> None:
+        self._restart_schedules = {
+            target: bot_config.maintenance.schedule_for(target) for target in RestartTarget
+        }
+        self._restart_warning = bot_config.maintenance.restart_warning
 
     def _scheduled_targets_for_slot(
         self,
