@@ -760,7 +760,15 @@ def main():
         except Exception as xcp:
             prefix = "Initial bot OAuth support refresh" if initial else "Bot OAuth support refresh"
             log.warning(f"{prefix} failed; using current local configuration: {xcp}")
-            bot_config = config.load_bot_configuration(Path("configuration.json"))
+            try:
+                bot_config = config.load_bot_configuration(Path("configuration.json"))
+            except (OSError, ValueError) as configuration_xcp:
+                log.warning(
+                    "%s could not read the local configuration; metadata sync will retry: %s",
+                    prefix,
+                    configuration_xcp,
+                )
+                return
 
         me = bot.get_me()
         if me is None:

@@ -390,7 +390,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
     def _current_node_link(self) -> ModWebNodeLink:
         node_name = config.MOD_WEB_SERVER.node_name
-        api_base_url = self._absolute_node_api_base_url(config.MOD_WEB_SERVER.node_api_base_url)
+        api_base_url = (
+            config.LOCAL_NODE_API_BASE_URL
+            if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL
+            else self._absolute_node_api_base_url(config.MOD_WEB_SERVER.node_api_base_url)
+        )
         return ModWebNodeLink(
             node_name=node_name,
             label=self._current_node_label(),

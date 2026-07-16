@@ -1045,12 +1045,36 @@ def load_bot_configuration(path: Path) -> BotConfiguration:
         return BotConfiguration()
 
     raw = json.loads(path.read_text(STR_ENCODE))
-    loaded = BotConfiguration.model_validate(raw)
-    if isinstance(raw, Mapping) and (
-        "node_capacity" not in raw or "discord_settings" not in raw or "node_font_sources" not in raw
+    migrated_raw, migrated_legacy_portal_restart = _migrate_legacy_portal_restart_schedule(raw)
+    loaded = BotConfiguration.model_validate(migrated_raw)
+    if migrated_legacy_portal_restart or (
+        isinstance(raw, Mapping)
+        and ("node_capacity" not in raw or "discord_settings" not in raw or "node_font_sources" not in raw)
     ):
         save_bot_configuration(path, loaded)
     return loaded
+
+
+def _migrate_legacy_portal_restart_schedule(raw: object) -> tuple[object, bool]:
+    """Retire the portal restart target, retaining it as bot only when bot is absent."""
+    if not isinstance(raw, Mapping):
+        return raw, False
+
+    maintenance = raw.get("maintenance")
+    if not isinstance(maintenance, Mapping):
+        return raw, False
+    restart_schedules = maintenance.get("restart_schedules")
+    if not isinstance(restart_schedules, Mapping) or "portal" not in restart_schedules:
+        return raw, False
+
+    migrated_schedules = dict(restart_schedules)
+    portal_schedule = migrated_schedules.pop("portal")
+    migrated_schedules.setdefault("bot", portal_schedule)
+    migrated_maintenance = dict(maintenance)
+    migrated_maintenance["restart_schedules"] = migrated_schedules
+    migrated_raw = dict(raw)
+    migrated_raw["maintenance"] = migrated_maintenance
+    return migrated_raw, True
 
 
 def load_known_bot_snapshots() -> tuple[BotMetadataSnapshot, ...]:
@@ -1894,6 +1918,12 @@ def resolve_node_api_base_url(public_base_url: str, *, source_name: str = "MOD_W
     return urlunsplit((parsed.scheme, parsed.netloc, "/api/node", "", ""))
 
 
+def resolve_local_node_api_base_url(*, node_api_port: int | None, mod_web_port: int) -> str:
+    """Return the loopback URL for this process's node API."""
+    port = mod_web_port if node_api_port is None else node_api_port
+    return f"http://127.0.0.1:{port}/api/node"
+
+
 def resolve_mod_web_auth_redirect_url(raw: str | None, *, mod_web_public_base_url: str) -> str:
     if raw is not None:
         parsed = _parse_http_reference(
@@ -2025,6 +2055,10 @@ PUBLISHED_NODE_API_BASE_URL = (
     resolve_node_api_base_url(NODE_API_PUBLIC_BASE_URL, source_name="NODE_API_PUBLIC_BASE_URL")
     if NODE_API_PORT is not None
     else resolve_node_api_base_url(MOD_WEB_PUBLIC_BASE_URL)
+)
+LOCAL_NODE_API_BASE_URL = resolve_local_node_api_base_url(
+    node_api_port=NODE_API_PORT,
+    mod_web_port=MOD_WEB_PORT,
 )
 MOD_WEB_SERVER = ModWebServerConfig(
     node_name=NODE_NAME,

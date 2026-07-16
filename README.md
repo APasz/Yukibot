@@ -78,6 +78,7 @@ The `portal` profile also acts as a remote client.
 - `PUBLIC_BASE_URL` / `MOD_WEB_PUBLIC_BASE_URL` should point at the portal host, not Yuki.
 - The portal home page lists remote nodes from the shared bot registry; app and chat pages should be reached through `/mod-web/nodes/{node_name}/...`.
 - `NODE_API_PORT` is usually not needed for `portal`.
+- Portal accesses its own node API through loopback automatically. This works when Portal and Yuki share a public URL or host: no DNS or reverse-proxy change is needed for Portal's own maintenance page.
 
 - `DATA_AUTHORITY_HOST` is the client-facing base host for the authority API. Prefer a full URL when you know the scheme, for example `https://wakusei.apasz.com`.
 - If `DATA_AUTHORITY_HOST` is a bare host and `PUBLIC_BASE_URL` is explicitly set, the authority client inherits that scheme. Otherwise bare hosts default to `https`.

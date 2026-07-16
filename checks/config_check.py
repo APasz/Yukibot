@@ -315,6 +315,18 @@ class ConfigPublicUrlTests(unittest.TestCase):
             "http://mods.apasz.com:8088/api/node",
         )
 
+    def test_resolve_local_node_api_base_url_prefers_dedicated_port(self) -> None:
+        self.assertEqual(
+            config.resolve_local_node_api_base_url(node_api_port=8088, mod_web_port=3180),
+            "http://127.0.0.1:8088/api/node",
+        )
+
+    def test_resolve_local_node_api_base_url_uses_mod_web_port_without_dedicated_server(self) -> None:
+        self.assertEqual(
+            config.resolve_local_node_api_base_url(node_api_port=None, mod_web_port=3180),
+            "http://127.0.0.1:3180/api/node",
+        )
+
     def test_resolve_node_api_public_base_url_defaults_to_mod_web_public_base_url(self) -> None:
         self.assertEqual(
             config.resolve_node_api_public_base_url(
@@ -699,6 +711,38 @@ class BotConfigurationTests(unittest.TestCase):
         assert schedule.anchor_timestamp is not None
         anchor_at = datetime.fromtimestamp(schedule.anchor_timestamp).astimezone()
         self.assertEqual((anchor_at.hour, anchor_at.minute), (4, 30))
+
+    def test_load_bot_configuration_migrates_legacy_portal_restart_schedule(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            path.write_text(
+                '{"maintenance":{"restart_schedules":{"portal":{"enabled":true,"hour":4,"minute":30}}}}',
+                encoding="utf-8",
+            )
+
+            loaded = config.load_bot_configuration(path)
+            saved_payload = path.read_text(encoding="utf-8")
+
+        self.assertTrue(loaded.maintenance.schedule_for(RestartTarget.BOT).enabled)
+        self.assertNotIn('"portal"', saved_payload)
+        self.assertIn('"bot"', saved_payload)
+
+    def test_load_bot_configuration_keeps_current_bot_restart_schedule_over_legacy_portal_schedule(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "configuration.json"
+            path.write_text(
+                (
+                    '{"maintenance":{"restart_schedules":{'
+                    '"bot":{"enabled":false},'
+                    '"portal":{"enabled":true,"hour":4,"minute":30}'
+                    '}}}'
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = config.load_bot_configuration(path)
+
+        self.assertFalse(loaded.maintenance.schedule_for(RestartTarget.BOT).enabled)
 
     def test_restart_schedule_migrates_aware_datetimes_to_unix_seconds(self) -> None:
         schedule = config.PersistedRestartSchedule.model_validate(

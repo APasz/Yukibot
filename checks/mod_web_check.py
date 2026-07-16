@@ -3944,8 +3944,9 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual([link.node_name for link in links], ["portal"])
         self.assertEqual(links[0].label, "Portal")
-        self.assertEqual(links[0].latency_probe_url, f"{server.node_api_base_url}/ping")
-        self.assertEqual(links[0].presence_stream_url, f"{server.node_api_base_url}/presence/stream")
+        self.assertEqual(links[0].api_base_url, config.LOCAL_NODE_API_BASE_URL)
+        self.assertEqual(links[0].latency_probe_url, f"{config.LOCAL_NODE_API_BASE_URL}/ping")
+        self.assertEqual(links[0].presence_stream_url, f"{config.LOCAL_NODE_API_BASE_URL}/presence/stream")
 
     def test_portal_node_links_prefer_dev_cluster_env_over_stale_snapshots(self) -> None:
         stale_yuki_snapshot = config.BotMetadataSnapshot(
