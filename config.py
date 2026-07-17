@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from functools import cache
 from logging import Logger
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any, Callable, Literal, Protocol, overload
 from urllib.parse import SplitResult, parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
@@ -33,6 +35,7 @@ from _authority import (
     response_data,
     write_json_object,
 )
+from logging_support import HumanLogFormatter, MachineJsonFormatter, SessionRotatingFileHandler
 from restart_targets import RestartTarget
 
 NAME: str = "Yukibot"
@@ -50,10 +53,12 @@ _IGNORED_PYTHON_WARNING_MESSAGE_SNIPPETS: tuple[str, ...] = (
     "websockets.server.WebSocketServerProtocol is deprecated",
     "remove second argument of ws_handler",
 )
+_PROJECT_SOURCE_DIRECTORY: Path = Path(__file__).resolve().parent
 LOGGER_TRAFFIC: str = "traffic"
 LOGGER_TTS: str = "tts"
 LOGGER_AUDIT: str = "audit"
 LOGGER_TENOR: str = "tenor"
+REPEATED_EXTERNAL_LOG_WINDOW_SECONDS: float = 60.0
 DEFAULT_DATA_AUTHORITY_BIND_HOST: str = "127.0.0.1"
 DEFAULT_DATA_AUTHORITY_BIND_PORT: int = 8081
 
@@ -147,6 +152,111 @@ class SuppressKnownWarningsFilter(logging.Filter):
         message = record.getMessage()
         return not any(snippet in message for snippet in _IGNORED_PYTHON_WARNING_MESSAGE_SNIPPETS)
 
+
+class SuppressExpectedGatewayTracebackFilter(logging.Filter):
+    """Remove tracebacks for routine Hikari gateway socket closures."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc_info = record.exc_info
+        if record.name != "asyncio" or not isinstance(exc_info, tuple):
+            return True
+
+        exception = exc_info[1]
+        if not isinstance(exception, hikari.GatewayConnectionError) or "Socket has closed" not in str(exception):
+            return True
+
+        setattr(record, "_yukibot_suppress_traceback", True)
+        return True
+
+
+def _is_project_log_record(record: logging.LogRecord) -> bool:
+    if record.pathname.startswith("<"):
+        return False
+    return Path(record.pathname).resolve().is_relative_to(_PROJECT_SOURCE_DIRECTORY)
+
+
+class ProjectLogFilter(logging.Filter):
+    """Allow log records emitted by this project's source files."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return _is_project_log_record(record)
+
+
+class ExternalModuleLogFilter(logging.Filter):
+    """Allow log records emitted by Python or installed dependencies."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _is_project_log_record(record)
+
+
+@dataclass(slots=True)
+class _RepeatedExternalLogState:
+    last_emitted_at: float
+    suppressed_count: int = 0
+
+
+class SuppressRepeatedExternalLogsFilter(logging.Filter):
+    """Rate-limit repeated warning and error records from external modules."""
+
+    _RECORD_DECISION_ATTRIBUTE: str = "_yukibot_repeat_log_allowed"
+
+    def __init__(self, *, window_seconds: float = REPEATED_EXTERNAL_LOG_WINDOW_SECONDS) -> None:
+        super().__init__()
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be greater than zero.")
+        self._window_seconds = window_seconds
+        self._lock = Lock()
+        self._states: dict[tuple[str, int, str, str | None, str | None], _RepeatedExternalLogState] = {}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        previous_decision = getattr(record, self._RECORD_DECISION_ATTRIBUTE, None)
+        if isinstance(previous_decision, bool):
+            return previous_decision
+
+        if record.levelno < logging.WARNING or _is_project_log_record(record):
+            return self._set_record_decision(record, allowed=True)
+
+        fingerprint = self._fingerprint(record)
+        now = monotonic()
+        with self._lock:
+            state = self._states.get(fingerprint)
+            if state is not None and now - state.last_emitted_at < self._window_seconds:
+                state.suppressed_count += 1
+                return self._set_record_decision(record, allowed=False)
+
+            suppressed_count = 0 if state is None else state.suppressed_count
+            self._states[fingerprint] = _RepeatedExternalLogState(last_emitted_at=now)
+            if suppressed_count:
+                message = record.getMessage()
+                record.msg = (
+                    f"{message} (suppressed {suppressed_count} matching external log records "
+                    f"over the previous {self._window_seconds:g} seconds)"
+                )
+                record.args = ()
+            self._discard_stale_states(now)
+        return self._set_record_decision(record, allowed=True)
+
+    @staticmethod
+    def _fingerprint(record: logging.LogRecord) -> tuple[str, int, str, str | None, str | None]:
+        exc_info = record.exc_info
+        exception = exc_info[1] if isinstance(exc_info, tuple) else None
+        exception_type = None if exception is None else type(exception).__qualname__
+        exception_message = None if exception is None else str(exception)
+        return (record.name, record.levelno, record.getMessage(), exception_type, exception_message)
+
+    def _discard_stale_states(self, now: float) -> None:
+        if len(self._states) <= 1_000:
+            return
+        cutoff = now - self._window_seconds
+        self._states = {
+            fingerprint: state for fingerprint, state in self._states.items() if state.last_emitted_at >= cutoff
+        }
+
+    def _set_record_decision(self, record: logging.LogRecord, *, allowed: bool) -> bool:
+        setattr(record, self._RECORD_DECISION_ATTRIBUTE, allowed)
+        return allowed
+
+
 class AppScopes(enum.StrEnum):
     minecraft = "minecraft"
     sevendays = "sevendays"
@@ -202,6 +312,7 @@ PUBLIC_IP_SOURCE_URL: str = "https://api.ipify.org"
 EXCHANGE_RATE_ADDR: str = "https://api.exchangerate.host/convert"
 FILE_USERS: Path = Path("users.json")
 DISCORD_NAMES: Path = Path("discord_names.json")
+USER_SETTINGS: Path = Path("user_settings.json")
 CHAT_IGNORE: str = "!"
 
 
@@ -1651,6 +1762,8 @@ def authority_cache_path(resource: AuthorityResource) -> Path:
         filename = "discord_names.json"
     elif resource is AuthorityResource.USERS:
         filename = "users.json"
+    elif resource is AuthorityResource.USER_SETTINGS:
+        filename = "user_settings.json"
     else:
         filename = "bot_registry.json"
     return DATA_AUTHORITY_CACHE_DIR / filename
@@ -1722,6 +1835,25 @@ def save_authority_json(
     response = client.post_json(f"/authority/{resource.value}/replace", {"data": serializable_payload})
     data = response_data(response)
     write_json_object(authority_cache_path(resource), data)
+    return data
+
+
+def mutate_remote_user_settings(*, user_id: int, settings: Mapping[str, object]) -> dict[str, object]:
+    """Atomically update one user's mod-web settings through the remote authority."""
+    if DATA_AUTHORITY_MODE is not DataAuthorityMode.REMOTE:
+        raise RuntimeError("Remote user settings mutation requires remote authority mode")
+    if isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError("user_id must be a positive integer")
+
+    client = authority_client()
+    if client is None:
+        raise RuntimeError("Remote authority client is not configured")
+    response = client.post_json(
+        "/authority/user-settings/mutate",
+        {"user_id": user_id, "settings": dict(settings)},
+    )
+    data = response_data(response)
+    write_json_object(authority_cache_path(AuthorityResource.USER_SETTINGS), data)
     return data
 
 
@@ -2084,7 +2216,7 @@ if (
     and _binding_hosts_overlap(NODE_API_SERVER.host, MOD_WEB_BIND_HOST)
 ):
     raise ValueError("NODE_API_PORT must differ from MOD_WEB_PORT when using a dedicated node API server.")
-MOD_WEB_AUTH = ModWebAuthConfig(
+MOD_WEB_AUTH: ModWebAuthConfig = ModWebAuthConfig(
     discord_client_id=_env_settings.mod_web_discord_client_id,
     discord_client_secret=_env_settings.mod_web_discord_client_secret,
     redirect_url=resolve_mod_web_auth_redirect_url(
@@ -2094,8 +2226,8 @@ MOD_WEB_AUTH = ModWebAuthConfig(
     bypass_enabled=BYPASS_WEB_AUTH,
     session_cache_directory=Path(_env_settings.mod_web_session_cache_dir or ".cache/mod_web_sessions"),
 )
-MOD_WEB_BUILD_SHA = parse_mod_web_build_sha(_env_settings.mod_web_build_sha)
-DATA_AUTHORITY_ENDPOINT = resolve_data_authority_endpoint(
+MOD_WEB_BUILD_SHA: str | None = parse_mod_web_build_sha(_env_settings.mod_web_build_sha)
+DATA_AUTHORITY_ENDPOINT: AuthorityEndpoint | None = resolve_data_authority_endpoint(
     DATA_AUTHORITY_HOST,
     DATA_AUTHORITY_PORT,
     mode=DATA_AUTHORITY_MODE,
@@ -2103,35 +2235,51 @@ DATA_AUTHORITY_ENDPOINT = resolve_data_authority_endpoint(
     raw_public_base_url=RAW_PUBLIC_BASE_URL,
     allow_insecure_remote=INDEV,
 )
-DATA_AUTHORITY_SERVER_BINDING = resolve_data_authority_server_binding(
+DATA_AUTHORITY_SERVER_BINDING: AuthorityServerBinding | None = resolve_data_authority_server_binding(
     DATA_AUTHORITY_BIND_HOST,
     DATA_AUTHORITY_BIND_PORT,
     endpoint=DATA_AUTHORITY_ENDPOINT,
 )
-DATA_AUTHORITY_SERVER_ENABLED = DATA_AUTHORITY_MODE is DataAuthorityMode.LOCAL and DATA_AUTHORITY_TOKEN is not None
-DIR_LOG = Path("logs")
-DIR_TMP = Path(_require_loaded_setting(_env_settings.dir_tmp, var_name="DIR_TMP"))
+DATA_AUTHORITY_SERVER_ENABLED: bool = (
+    DATA_AUTHORITY_MODE is DataAuthorityMode.LOCAL and DATA_AUTHORITY_TOKEN is not None
+)
+DIR_LOG: Path = Path("logs")
+DIR_LOG_USER: Path = DIR_LOG / "_user"
+DIR_LOG_MACHINE: Path = DIR_LOG / "_machine"
+DIR_TMP: Path = Path(_require_loaded_setting(_env_settings.dir_tmp, var_name="DIR_TMP"))
 "/tmp/yukibot"
-DIR_OPT = Path(_require_loaded_setting(_env_settings.dir_opt, var_name="DIR_OPT"))  # nginx setup only opt/bot
+DIR_OPT: Path = Path(_require_loaded_setting(_env_settings.dir_opt, var_name="DIR_OPT"))  # nginx setup only opt/bot
 "/opt/yukibot"
-DIR_UPLOAD = DIR_OPT / "uploads"
+DIR_UPLOAD: Path = DIR_OPT / "uploads"
 "{opt}/uploads"
-DIR_DOWNLOADS = DIR_OPT / "downloads"
+DIR_DOWNLOADS: Path = DIR_OPT / "downloads"
 "{opt}/downloads"
-DIR_ZIPS = DIR_OPT / "zips"
+DIR_ZIPS: Path = DIR_OPT / "zips"
 "{opt}/zips"
-DIR_CWD = Path().parent
+DIR_CWD: Path = Path().parent
 
 
 DIR_LOG.mkdir(parents=True, exist_ok=True)
+DIR_LOG_USER.mkdir(parents=True, exist_ok=True)
+DIR_LOG_MACHINE.mkdir(parents=True, exist_ok=True)
 DIR_TMP.mkdir(parents=True, exist_ok=True)
 DIR_UPLOAD.mkdir(parents=True, exist_ok=True)
 DIR_ZIPS.mkdir(parents=True, exist_ok=True)
 
 STR_ENCODE = "utf-8"
 
-is_debug = "-debug" in sys.argv
-is_dc_debug = "-dc-debug" in sys.argv
+
+def _log_file_name(filename: str) -> str:
+    """Return a node-specific log filename for concurrent development profiles."""
+    if not INDEV:
+        return filename
+    if Path(NODE_NAME).name != NODE_NAME or NODE_NAME in {"", ".", ".."}:
+        raise ValueError("NODE_NAME must be a single path component when INDEV is enabled.")
+    return f"{NODE_NAME}-{filename}"
+
+
+is_debug: bool = "-debug" in sys.argv
+is_dc_debug: bool = "-dc-debug" in sys.argv
 
 root_lvl = logging.DEBUG if is_debug else logging.INFO
 dc_lvl = logging.DEBUG if is_debug and is_dc_debug else logging.INFO
@@ -2143,112 +2291,245 @@ logging.config.dictConfig(
         "disable_existing_loggers": False,
         "formatters": {
             "standard": {
+                "()": HumanLogFormatter,
                 "format": "%(asctime)s | %(levelname).1s %(name)-25s - %(message)s",
             },
-            "json_line": {
-                "format": "%(message)s",
+            "machine_json": {
+                "()": MachineJsonFormatter,
+                "node_name": NODE_NAME,
+                "bot_profile": ACTIVE_BOT_PROFILE.name.value,
             },
         },
         "filters": {
             "suppress_known_warnings": {
                 "()": SuppressKnownWarningsFilter,
             },
+            "suppress_expected_gateway_tracebacks": {
+                "()": SuppressExpectedGatewayTracebackFilter,
+            },
+            "project_logs": {
+                "()": ProjectLogFilter,
+            },
+            "external_module_logs": {
+                "()": ExternalModuleLogFilter,
+            },
+            "suppress_repeated_external_logs": {
+                "()": SuppressRepeatedExternalLogsFilter,
+            },
         },
         "handlers": {
             "file": {
-                "class": "logging.FileHandler",
-                "filename": str(DIR_LOG / "System.log"),
-                "mode": "w",  # 'a' if you want to append instead
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_USER / _log_file_name("System.log")),
+                "legacy_path": str(DIR_LOG / _log_file_name("System.log")),
+                "current_link_path": str(DIR_LOG / _log_file_name("System.log")),
                 "formatter": "standard",
                 "encoding": STR_ENCODE,
-                "filters": ["suppress_known_warnings"],
+                "filters": [
+                    "project_logs",
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
+            },
+            "system_json_file": {
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_MACHINE / _log_file_name("System.jsonl")),
+                "legacy_path": str(DIR_LOG / _log_file_name("System.jsonl")),
+                "formatter": "machine_json",
+                "encoding": STR_ENCODE,
+                "filters": [
+                    "project_logs",
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
+            },
+            "modules_file": {
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_USER / _log_file_name("Modules.log")),
+                "legacy_path": str(DIR_LOG / _log_file_name("Modules.log")),
+                "current_link_path": str(DIR_LOG / _log_file_name("Modules.log")),
+                "formatter": "standard",
+                "encoding": STR_ENCODE,
+                "filters": [
+                    "external_module_logs",
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
+            },
+            "modules_json_file": {
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_MACHINE / _log_file_name("Modules.jsonl")),
+                "legacy_path": str(DIR_LOG / _log_file_name("Modules.jsonl")),
+                "formatter": "machine_json",
+                "encoding": STR_ENCODE,
+                "filters": [
+                    "external_module_logs",
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
             },
             "traffic_file": {
-                "class": "logging.FileHandler",
-                "filename": str(DIR_LOG / "Traffic.log"),
-                "mode": "w",
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_USER / _log_file_name("Traffic.log")),
+                "legacy_path": str(DIR_LOG / _log_file_name("Traffic.log")),
+                "current_link_path": str(DIR_LOG / _log_file_name("Traffic.log")),
                 "formatter": "standard",
                 "encoding": STR_ENCODE,
-                "filters": ["suppress_known_warnings"],
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
+            },
+            "traffic_json_file": {
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_MACHINE / _log_file_name("Traffic.jsonl")),
+                "legacy_path": str(DIR_LOG / _log_file_name("Traffic.jsonl")),
+                "formatter": "machine_json",
+                "encoding": STR_ENCODE,
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
             },
             "tts_file": {
-                "class": "logging.FileHandler",
-                "filename": str(DIR_LOG / "TTS.log"),
-                "mode": "w",
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_USER / _log_file_name("TTS.log")),
+                "legacy_path": str(DIR_LOG / _log_file_name("TTS.log")),
+                "current_link_path": str(DIR_LOG / _log_file_name("TTS.log")),
                 "formatter": "standard",
                 "encoding": STR_ENCODE,
-                "filters": ["suppress_known_warnings"],
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
+            },
+            "tts_json_file": {
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_MACHINE / _log_file_name("TTS.jsonl")),
+                "legacy_path": str(DIR_LOG / _log_file_name("TTS.jsonl")),
+                "formatter": "machine_json",
+                "encoding": STR_ENCODE,
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
             },
             "audit_file": {
-                "class": "logging.FileHandler",
-                "filename": str(DIR_LOG / "Audit.log"),
-                "mode": "w",
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_USER / _log_file_name("Audit.log")),
+                "legacy_path": str(DIR_LOG / _log_file_name("Audit.log")),
+                "current_link_path": str(DIR_LOG / _log_file_name("Audit.log")),
                 "formatter": "standard",
                 "encoding": STR_ENCODE,
-                "filters": ["suppress_known_warnings"],
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
+            },
+            "audit_json_file": {
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_MACHINE / _log_file_name("Audit.jsonl")),
+                "legacy_path": str(DIR_LOG / _log_file_name("Audit.jsonl")),
+                "formatter": "machine_json",
+                "encoding": STR_ENCODE,
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
             },
             "tenor_file": {
-                "class": "logging.FileHandler",
-                "filename": str(DIR_LOG / "Tenor.jsonl"),
-                "mode": "w",
-                "formatter": "json_line",
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_USER / _log_file_name("Tenor.log")),
+                "legacy_path": str(DIR_LOG / _log_file_name("Tenor.log")),
+                "current_link_path": str(DIR_LOG / _log_file_name("Tenor.log")),
+                "formatter": "standard",
                 "encoding": STR_ENCODE,
-                "filters": ["suppress_known_warnings"],
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
+            },
+            "tenor_json_file": {
+                "class": SessionRotatingFileHandler,
+                "filename": str(DIR_LOG_MACHINE / _log_file_name("Tenor.jsonl")),
+                "legacy_path": str(DIR_LOG / _log_file_name("Tenor.jsonl")),
+                "formatter": "machine_json",
+                "encoding": STR_ENCODE,
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
             },
             "console": {
                 "class": "logging.StreamHandler",
                 "formatter": "standard",
-                "filters": ["suppress_known_warnings"],
+                "filters": [
+                    "suppress_known_warnings",
+                    "suppress_expected_gateway_tracebacks",
+                    "suppress_repeated_external_logs",
+                ],
             },
         },
         "root": {
             "level": root_lvl,
-            "handlers": ["file", "console"],
+            "handlers": ["file", "system_json_file", "modules_file", "modules_json_file", "console"],
         },
         "loggers": {
             "system": {
                 "level": root_lvl,
-                "handlers": ["file"],
+                "handlers": ["file", "system_json_file"],
                 "propagate": False,
             },
             "hikari": {
                 "level": dc_lvl,
-                "handlers": ["file"],
+                "handlers": ["modules_file", "modules_json_file"],
                 "propagate": False,
             },
             "lightbulb": {
                 "level": dc_lvl,
-                "handlers": ["file"],
+                "handlers": ["modules_file", "modules_json_file"],
                 "propagate": False,
             },
             "linkd": {
                 "level": dc_lvl,
-                "handlers": ["file"],
+                "handlers": ["modules_file", "modules_json_file"],
                 "propagate": False,
             },
             LOGGER_TRAFFIC: {
                 "level": root_lvl,
-                "handlers": ["traffic_file"],
+                "handlers": ["traffic_file", "traffic_json_file"],
                 "propagate": False,
             },
             "aiohttp.access": {
                 "level": root_lvl,
-                "handlers": ["traffic_file"],
+                "handlers": ["traffic_file", "traffic_json_file"],
                 "propagate": False,
             },
             LOGGER_TTS: {
                 "level": root_lvl,
-                "handlers": ["tts_file"],
+                "handlers": ["tts_file", "tts_json_file"],
                 "propagate": False,
             },
             LOGGER_AUDIT: {
                 "level": root_lvl,
-                "handlers": ["audit_file"],
+                "handlers": ["audit_file", "audit_json_file"],
                 "propagate": False,
             },
             LOGGER_TENOR: {
                 "level": root_lvl,
-                "handlers": ["tenor_file"],
+                "handlers": ["tenor_file", "tenor_json_file"],
                 "propagate": False,
             },
         },

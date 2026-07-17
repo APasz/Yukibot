@@ -2863,7 +2863,7 @@ class Minecraft(App[Minecraft_Config]):
         self.proc_name = "java"
         self.proc_cmd = [self.proc_name, "nogui"]
         file_settings: Path = cfg.directory.absolute() / "server.properties"
-        self.cmd_start = cfg.cmd_start or ["bash", "run.sh"]
+        self.cmd_start = ["bash", "run.sh"]
         self.process = None
         super().__init__(bot, am, cfg, Minecraft_Settings(file_settings, version_getter=lambda: cfg.version), Mod_MC)
 

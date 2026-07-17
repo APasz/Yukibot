@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import tempfile
 from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -23,25 +24,39 @@ from _utils import Utilities
 from apps._app import App
 from apps._config import KnownModPageProvider, ModPlacement, known_mod_page_provider_for_url
 from apps._mod import Mod, Mod_Manager
-from apps._node_api import NodeModUploadSource, optional_int, optional_string, required_bool, required_string
+from apps._node_api import JsonValue, NodeModUploadSource, optional_int, optional_string, required_bool, required_string
 from apps.factorio import (
+    Factorio,
     FactorioModPortalCandidate,
     FactorioModPortalCredentials,
     FactorioModPortalDownload,
     FactorioVanillaMod,
     download_factorio_mods_from_portal,
     factorio_mod_portal_credentials_from_server_settings,
+    factorio_config_path,
     factorio_mod_settings_path,
     factorio_server_settings_path,
     factorio_vanilla_mods,
     list_factorio_mod_portal_release_options,
     parse_factorio_mod_portal_url,
+    normalise_factorio_map_exchange_string,
     resolve_factorio_mod_portal_candidates,
 )
 
 log: Logger = logging.getLogger(__name__)
 _FACTORIO_SCOPE: Final[str] = "factorio"
 _UploadBatchResult = TypeVar("_UploadBatchResult", covariant=True)
+
+
+def _json_mapping(value: object, *, label: str) -> dict[str, JsonValue]:
+    try:
+        encoded = json.dumps(value, allow_nan=False)
+        decoded: object = json.loads(encoded)
+    except (TypeError, ValueError) as xcp:
+        raise ValueError(f"{label} must contain only JSON values.") from xcp
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{label} must be a JSON object.")
+    return dict[str, JsonValue](decoded)
 
 
 class FactorioModUploader(Protocol[_UploadBatchResult]):
@@ -111,6 +126,36 @@ class NodeModUpdateRequest(BaseModel):
     @classmethod
     def validate_version(cls, raw: str | None) -> str | None:
         return normalise_factorio_mod_portal_version(raw)
+
+
+class NodeFactorioGenerationUpdateRequest(BaseModel):
+    map_gen_settings: dict[str, object]
+    map_settings: dict[str, object]
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("map_gen_settings")
+    @classmethod
+    def validate_map_gen_settings(cls, raw: dict[str, object]) -> dict[str, object]:
+        _json_mapping(raw, label="Factorio map generation settings")
+        return raw
+
+    @field_validator("map_settings")
+    @classmethod
+    def validate_map_settings(cls, raw: dict[str, object]) -> dict[str, object]:
+        _json_mapping(raw, label="Factorio map settings")
+        return raw
+
+
+class NodeFactorioMapExchangeImportRequest(BaseModel):
+    map_exchange_string: str
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    @field_validator("map_exchange_string")
+    @classmethod
+    def validate_map_exchange_string(cls, raw: str) -> str:
+        return normalise_factorio_map_exchange_string(raw)
 
 
 class NodeModUpdateStatus(StrEnum):
@@ -486,6 +531,171 @@ def build_factorio_mod_settings_download_response(*, app: App) -> FileResponse:
         path=pointer,
         filename=pointer.name,
         media_type="application/octet-stream",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class NodeFactorioGenerationState:
+    app_name: str
+    app_friendly: str
+    node: str
+    map_gen_settings: dict[str, JsonValue] | None
+    map_settings: dict[str, JsonValue] | None
+    space_age_enabled: bool
+    map_exchange_available: bool
+    load_error: str | None = None
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeFactorioGenerationState":
+        raw_settings: object | None = payload.get("map_gen_settings")
+        raw_map_settings: object | None = payload.get("map_settings")
+        if raw_settings is not None and not isinstance(raw_settings, Mapping):
+            raise ValueError("Factorio map generation settings are invalid.")
+        if raw_map_settings is not None and not isinstance(raw_map_settings, Mapping):
+            raise ValueError("Factorio map settings are invalid.")
+        return cls(
+            app_name=required_string(payload, "app_name"),
+            app_friendly=required_string(payload, "app_friendly"),
+            node=required_string(payload, "node"),
+            map_gen_settings=(
+                None
+                if raw_settings is None
+                else _json_mapping(raw_settings, label="Factorio map generation settings")
+            ),
+            map_settings=(
+                None
+                if raw_map_settings is None
+                else _json_mapping(raw_map_settings, label="Factorio map settings")
+            ),
+            space_age_enabled=required_bool(payload, "space_age_enabled"),
+            map_exchange_available=required_bool(payload, "map_exchange_available"),
+            load_error=optional_string(payload, "load_error"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "app_name": self.app_name,
+            "app_friendly": self.app_friendly,
+            "node": self.node,
+            "map_gen_settings": self.map_gen_settings,
+            "map_settings": self.map_settings,
+            "space_age_enabled": self.space_age_enabled,
+            "map_exchange_available": self.map_exchange_available,
+            "load_error": self.load_error,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeFactorioMapExchangeString:
+    map_exchange_string: str
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeFactorioMapExchangeString":
+        raw_value: object | None = payload.get("map_exchange_string")
+        if not isinstance(raw_value, str):
+            raise ValueError("Factorio map exchange string is invalid.")
+        return cls(map_exchange_string=normalise_factorio_map_exchange_string(raw_value))
+
+    def to_mapping(self) -> dict[str, object]:
+        return {"map_exchange_string": self.map_exchange_string}
+
+
+def factorio_space_age_enabled(app: Factorio) -> bool:
+    if not (app.directory / "data" / "space-age").is_dir():
+        return False
+    mod_list_path = app.directory / "mods" / "mod-list.json"
+    if not mod_list_path.is_file():
+        return True
+    try:
+        raw_payload: object = json.loads(mod_list_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    if not isinstance(raw_payload, Mapping):
+        return True
+    raw_mods: object | None = raw_payload.get("mods")
+    if not isinstance(raw_mods, Sequence):
+        return True
+    for raw_mod in raw_mods:
+        if not isinstance(raw_mod, Mapping):
+            continue
+        raw_name: object | None = raw_mod.get("name")
+        if not isinstance(raw_name, str) or raw_name.casefold() != "space-age":
+            continue
+        return raw_mod.get("enabled") is True
+    return True
+
+
+def build_factorio_generation_state(*, app: Factorio, node_name: str) -> NodeFactorioGenerationState:
+    space_age_enabled = factorio_space_age_enabled(app)
+    try:
+        map_gen_settings = _read_factorio_json_settings(
+            app=app,
+            filename="map-gen-settings.json",
+            label="Factorio map-gen-settings.json",
+        )
+        map_settings = _read_factorio_json_settings(
+            app=app,
+            filename="map-settings.json",
+            label="Factorio map-settings.json",
+        )
+    except (OSError, ValueError) as xcp:
+        return NodeFactorioGenerationState(
+            app_name=app.name,
+            app_friendly=app.friendly,
+            node=node_name,
+            map_gen_settings=None,
+            map_settings=None,
+            space_age_enabled=space_age_enabled,
+            map_exchange_available=app.check_running(),
+            load_error=str(xcp) or type(xcp).__name__,
+        )
+    return NodeFactorioGenerationState(
+        app_name=app.name,
+        app_friendly=app.friendly,
+        node=node_name,
+        map_gen_settings=map_gen_settings,
+        map_settings=map_settings,
+        space_age_enabled=space_age_enabled,
+        map_exchange_available=app.check_running(),
+    )
+
+
+def _read_factorio_json_settings(
+    *,
+    app: Factorio,
+    filename: str,
+    label: str,
+) -> dict[str, JsonValue]:
+    raw_payload: object = json.loads(factorio_config_path(app.directory, filename).read_text(encoding="utf-8"))
+    return _json_mapping(raw_payload, label=label)
+
+
+def write_factorio_generation_settings(
+    *,
+    app: Factorio,
+    map_gen_settings: Mapping[str, object],
+    map_settings: Mapping[str, object],
+) -> None:
+    generation_settings = _json_mapping(map_gen_settings, label="Factorio map generation settings")
+    world_settings = _json_mapping(map_settings, label="Factorio map settings")
+    generation_content = json.dumps(generation_settings, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+    world_content = json.dumps(world_settings, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+    app.write_config_file("map-settings/map-settings.json", world_content)
+    app.write_config_file("map-gen-settings/map-gen-settings.json", generation_content)
+
+
+async def import_factorio_map_exchange_string(
+    *,
+    app: Factorio,
+    map_exchange_string: str,
+) -> None:
+    imported = await app.import_map_exchange_string(map_exchange_string)
+    map_settings = _json_mapping(imported.map_settings, label="Factorio imported map settings")
+    map_gen_settings = _json_mapping(imported.map_gen_settings, label="Factorio imported map generation settings")
+    write_factorio_generation_settings(
+        app=app,
+        map_gen_settings=map_gen_settings,
+        map_settings=map_settings,
     )
 
 

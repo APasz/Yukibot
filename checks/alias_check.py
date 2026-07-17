@@ -33,6 +33,18 @@ def _component_custom_ids(components: list[hikari.api.MessageActionRowBuilder]) 
     return tuple(custom_ids)
 
 
+def _select_options(
+    components: list[hikari.api.MessageActionRowBuilder],
+    *,
+    placeholder: str,
+) -> tuple[hikari.api.SelectOptionBuilder, ...]:
+    for row in components:
+        for component in row.components:
+            if getattr(component, "placeholder", None) == placeholder:
+                return tuple(cast(hikari.api.TextSelectMenuBuilder[object], component).options)
+    raise AssertionError(f"Missing select with placeholder {placeholder!r}")
+
+
 class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_discord_username_autocomplete_returns_only_accounts(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -97,6 +109,24 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(cache.is_manual_user(user_id))
             self.assertEqual(cache.cached_display_name(user_id), "Web Alice")
 
+    async def test_raw_numeric_target_rejects_invalid_discord_snowflake(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = object.__new__(config.Name_Cache)
+            cache.pointer = Path(tmp) / "discord_names.json"
+            cache.by_id = {}
+            cache.by_alias = {}
+            cache.by_platform_id = {}
+
+            with self.assertRaisesRegex(ValueError, "valid positive snowflake"):
+                await cmd_alias._resolve_alias_target_user_id(
+                    actor_user_id=1,
+                    requested_user=str(int(hikari.Snowflake.max()) + 1),
+                    acl=_FakeAcl(),  # type: ignore[arg-type]
+                    names_cache=cache,
+                )
+
+            self.assertEqual(cache.by_id, {})
+
     async def test_manual_name_is_rejected_for_resolved_target(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = object.__new__(config.Name_Cache)
@@ -150,6 +180,9 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertIsNotNone(response)
+            assert response is not None
+            self.assertEqual(response.response_type, hikari.ResponseType.MESSAGE_CREATE)
+            self.assertEqual(response.flags, hikari.MessageFlag.EPHEMERAL)
             self.assertEqual(cache.get_display_override(42), "Portal Alice")
 
     async def test_steam_modal_sets_platform_id(self) -> None:
@@ -178,6 +211,8 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertIsNotNone(response)
+            assert response is not None
+            self.assertEqual(response.response_type, hikari.ResponseType.MESSAGE_CREATE)
             self.assertEqual(cache.get_platform_id(42, "steam"), "76561198000000001")
 
     async def test_steam_input_accepts_profiles_url(self) -> None:
@@ -363,82 +398,57 @@ class AliasTargetResolutionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertLessEqual(len(modal_id), 100)
 
-    def test_app_scope_editor_component_custom_ids_are_unique(self) -> None:
+    def test_external_lookup_modal_submits_are_deferred_ephemerally(self) -> None:
+        service = cmd_alias.AliasEditorService()
+        for action_kind in (cmd_alias.AliasActionKind.SET_STEAM, cmd_alias.AliasActionKind.SET_MINECRAFT_PROFILE):
+            deferral = service._defer_external_lookup_modal_submit(
+                SimpleNamespace(action=service._action_codec.build(action_kind, page=0)),
+                {},
+            )
+
+            self.assertIsNotNone(deferral)
+            assert deferral is not None
+            self.assertEqual(deferral.response_type, hikari.ResponseType.DEFERRED_MESSAGE_CREATE)
+            self.assertEqual(deferral.flags, hikari.MessageFlag.EPHEMERAL)
+
+    async def test_long_general_alias_remains_renderable_and_removable(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = object.__new__(config.Name_Cache)
             cache.pointer = Path(tmp) / "discord_names.json"
-            cache.by_id = {42: config.UserNames()}
+            alias = "x" * 1025
+            cache.by_id = {42: config.UserNames(nicknames={alias})}
             cache.by_alias = {}
             cache.by_platform_id = {}
-            manager = SimpleNamespace(
-                apps={
-                    "valheim_alpha": SimpleNamespace(scope="valheim"),
-                    "minecraft_alpha": SimpleNamespace(scope="minecraft"),
-                }
-            )
+            cache._rebuild_aliases()
             service = cmd_alias.AliasEditorService()
 
-            _embed, components = service._render_editor(
+            embed, components = service._render_editor(
                 target_user_id=42,
                 actor_user_id=42,
                 locale=hikari.Locale.EN_US,
                 names_cache=cache,
-                manager=manager,  # type: ignore[arg-type]
-                state=cmd_alias.AliasEditorState(section=cmd_alias.AliasEditorSection.APP_SCOPES, page=0),
+                state=cmd_alias.AliasEditorState(section=cmd_alias.AliasEditorSection.ALIASES, page=0),
             )
 
-        custom_ids = _component_custom_ids(components)
-        self.assertEqual(len(custom_ids), len(set(custom_ids)))
-
-    async def test_app_scope_selector_includes_all_known_manager_scopes(self) -> None:
-        with TemporaryDirectory() as tmp:
-            cache = object.__new__(config.Name_Cache)
-            cache.pointer = Path(tmp) / "discord_names.json"
-            cache.by_id = {42: config.UserNames()}
-            cache.by_alias = {}
-            cache.by_platform_id = {}
-            manager = create_autospec(App_Manager, instance=True)
-            manager.apps = {"valheim_alpha": SimpleNamespace(scope="valheim")}
-            manager.list_create_scopes.return_value = ("factorio", "minecraft", "valheim")
-            service = cmd_alias.AliasEditorService()
-
-            view = service._build_view(
-                target_user_id=42,
-                names_cache=cache,
-                manager=manager,
-                state=cmd_alias.AliasEditorState(section=cmd_alias.AliasEditorSection.APP_SCOPES, page=0),
-            )
-
-        self.assertEqual(view.app_scopes.visible, ("factorio", "minecraft", "valheim"))
-
-    async def test_editor_action_accepts_scope_from_manager_registry_when_not_loaded(self) -> None:
-        with TemporaryDirectory() as tmp:
-            cache = object.__new__(config.Name_Cache)
-            cache.pointer = Path(tmp) / "discord_names.json"
-            cache.by_id = {42: config.UserNames()}
-            cache.by_alias = {}
-            cache.by_platform_id = {}
-            manager = create_autospec(App_Manager, instance=True)
-            manager.apps = {"valheim_alpha": SimpleNamespace(scope="valheim")}
-            manager.list_create_scopes.return_value = ("factorio", "valheim")
-            service = cmd_alias.AliasEditorService()
-            interaction = SimpleNamespace(create_modal_response=AsyncMock())
+            field = next(field for field in embed.fields if field.name.startswith("General Aliases"))
+            self.assertLessEqual(len(field.value), 1024)
+            options = _select_options(components, placeholder="Remove general alias")
+            self.assertLessEqual(len(options[0].value), 100)
 
             response = await service._on_editor_action(
                 SimpleNamespace(
-                    action=service._action_codec.build(cmd_alias.AliasActionKind.SET_APP, page=0),
+                    action=service._action_codec.build(cmd_alias.AliasActionKind.REMOVE_GENERAL, page=0),
                     user_id=42,
                     scope_id=42,
-                    values=("factorio",),
+                    values=(options[0].value,),
                     locale=hikari.Locale.EN_US,
-                    interaction=interaction,
+                    interaction=SimpleNamespace(),
                 ),
-                {"names_cache": cache, "manager": manager},
+                {"names_cache": cache},
             )
 
-        self.assertIsNone(response)
-        interaction.create_modal_response.assert_awaited_once()
-
+            self.assertIsNotNone(response)
+            self.assertEqual(cache.by_id[42].nicknames, set())
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import sys
 import unittest
@@ -41,8 +42,17 @@ class StartupLoggingTests(unittest.TestCase):
                 sys.excepthook(type(error), error, error.__traceback__)
 
                 log_text = (Path(temp_dir) / startup_logging.STARTUP_LOG_FILE).read_text(encoding="utf-8")
+                machine_events = [
+                    json.loads(line)
+                    for line in (Path(temp_dir) / startup_logging.STARTUP_MACHINE_LOG_FILE)
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                ]
                 self.assertIn("Unhandled exception during process startup/runtime", log_text)
                 self.assertIn("ModuleNotFoundError: No module named 'apps._node_api'", log_text)
+                self.assertTrue((Path(temp_dir) / startup_logging.STARTUP_LOG_LINK).is_symlink())
+                self.assertEqual("CRITICAL", machine_events[-1]["level"])
+                self.assertTrue(machine_events[-1]["timestamp"].endswith("Z"))
                 self.assertEqual(["No module named 'apps._node_api'"], captured_errors)
         finally:
             os.chdir(original_cwd)

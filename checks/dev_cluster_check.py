@@ -15,6 +15,7 @@ from dev_cluster import (
     _install_signal_handlers,
     build_process_environment,
     load_dotenv_values,
+    parse_args,
     settings_from_environment,
 )
 
@@ -213,6 +214,24 @@ class DevClusterManagerTests(unittest.TestCase):
         assert next_record is not None
         self.assertEqual(next_record.pid, 2222)
         self.assertIn("Found stale portal process from an earlier run (pid 1111); stopping it.", printer.lines)
+
+    def test_debug_mode_adds_project_debug_argument_to_member_commands(self) -> None:
+        manager = DevClusterManager(
+            base_env=self.base_env,
+            settings=self.settings,
+            command=("python", "main.py"),
+            debug=True,
+        )
+
+        self.assertEqual(manager._command, ("python", "main.py", "-debug"))
+
+
+class DevClusterArgumentTests(unittest.TestCase):
+    def test_debug_argument_is_available(self) -> None:
+        args = parse_args(["--debug", "--no-start"])
+
+        self.assertTrue(args.debug)
+        self.assertTrue(args.no_start)
 
 
 class DevClusterSignalHandlerTests(unittest.TestCase):

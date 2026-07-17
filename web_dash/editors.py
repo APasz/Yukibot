@@ -77,8 +77,8 @@ from .runtime_imports import (
     Select,
     Textarea,
     Timer,
-    TypeVar,
     Upload,
+    TypeVar,
     asyncio,
     cached_member_role_color,
     cast,
@@ -817,6 +817,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         sevendays_new_inspection: SevenDaysSaveArchiveInspection | None = None
         sevendays_save_upload_world: str | None = None
         direct_save_transfer_id: int | None = None
+        use_indirect_save_upload = False
 
         def ensure_direct_save_transfer() -> int | None:
             nonlocal direct_save_transfer_id
@@ -948,22 +949,60 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             sevendays_new_staged_upload_name = None
             sevendays_new_inspection = None
 
-        def refresh_direct_save_upload_target(upload_control: Upload, *, root_id: str) -> None:
-            target: ModWebDirectUploadTarget = self._direct_save_upload_target(model=model, user=user)
-            upload_control.props["url"] = target.url
-            upload_control.props["headers"] = [
-                {"name": "Authorization", "value": target.authorization_header},
-            ]
-            upload_control.props["form-fields"] = [
-                {"name": "root_id", "value": root_id},
-            ]
+        async def upload_generic_save(event: "MultiUploadEventArguments") -> None:
+            upload_files = tuple(event.files)
+            if len(upload_files) != 1:
+                ui.notify("Choose exactly one save archive.", type="warning")
+                return
+            log.info(
+                "Relaying fallback save upload through mod web: app=%s node=%s filename=%s",
+                model.app_name,
+                model.node_name,
+                upload_files[0].name,
+            )
+            try:
+                result = await self._upload_save(
+                    model=model,
+                    root_id=selected_save_root_id(),
+                    upload_file=upload_files[0],
+                    user=user,
+                )
+            except Exception as xcp:
+                ui.notify(f"Save upload failed: {xcp}", type="negative", multi_line=True)
+                return
+            upload_dialog.close()
+            ui.notify(result.message, type="positive")
+            self._guarded_reload(ui=ui)
 
-        def refresh_generic_save_upload_target() -> None:
+        def refresh_direct_save_upload_target() -> None:
             if save_upload_control is None:
                 raise RuntimeError("Save upload control is not available.")
-            refresh_direct_save_upload_target(save_upload_control, root_id=selected_save_root_id())
+            if use_indirect_save_upload:
+                return
+            target: ModWebDirectUploadTarget = self._direct_save_upload_target(model=model, user=user)
+            save_upload_control.props["url"] = target.url
+            save_upload_control.props["headers"] = [
+                {"name": "Authorization", "value": target.authorization_header},
+            ]
+            save_upload_control.props["form-fields"] = [
+                {"name": "root_id", "value": selected_save_root_id()},
+                {"name": "upload_transport", "value": "direct"},
+            ]
+            save_upload_control.props["field-name"] = "upload"
+
+        def configure_indirect_save_upload() -> None:
+            if save_upload_control is None:
+                raise RuntimeError("Save upload control is not available.")
+            save_upload_control.props["url"] = indirect_save_upload_url
+            save_upload_control.props["headers"] = []
+            save_upload_control.props["form-fields"] = []
+            save_upload_control.props["field-name"] = "upload"
+            save_upload_control.reset()
 
         def direct_save_upload_started() -> None:
+            if use_indirect_save_upload:
+                return
+            log.info("Direct save upload started: app=%s node=%s", model.app_name, model.node_name)
             ui.notify(
                 f"Upload acknowledged. Sending the save directly to {model.app_friendly}.",
                 type="info",
@@ -971,30 +1010,35 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             ensure_direct_save_transfer()
 
         def direct_save_upload_succeeded() -> None:
+            if use_indirect_save_upload:
+                return
+            log.info("Direct save upload completed: app=%s node=%s", model.app_name, model.node_name)
             finish_direct_save_transfer(error=None)
             upload_dialog.close()
             ui.notify(f"Uploaded the save for {model.app_friendly}.", type="positive")
             self._guarded_reload(ui=ui)
 
         def direct_save_upload_failed() -> None:
-            error = f"Save upload failed before {model.app_friendly} accepted it."
-            ensure_direct_save_transfer()
+            nonlocal use_indirect_save_upload
+            if use_indirect_save_upload:
+                return
+            error = f"Direct save upload failed before {model.app_friendly} accepted it."
+            log.warning("%s app=%s node=%s; enabling portal fallback", error, model.app_name, model.node_name)
             finish_direct_save_transfer(error=error)
+            use_indirect_save_upload = True
+            configure_indirect_save_upload()
             ui.notify(
-                f"{error} "
-                "The node may be unavailable, out of temporary space, or may have rejected the file.",
-                type="negative",
+                f"{error} The portal fallback is ready; choose the same file again to relay it through mod web.",
+                type="warning",
                 multi_line=True,
             )
 
         def direct_save_upload_rejected() -> None:
+            if use_indirect_save_upload:
+                return
             error = "The selected save was rejected before upload."
-            ensure_direct_save_transfer()
             finish_direct_save_transfer(error=error)
-            ui.notify(
-                f"{error} Check the file type and upload limits.",
-                type="warning",
-            )
+            ui.notify(f"{error} Check the file type and upload limits.", type="warning")
 
         async def stage_sevendays_new_save(event: "MultiUploadEventArguments") -> None:
             nonlocal sevendays_new_staged_path, sevendays_new_staged_upload_name, sevendays_new_inspection
@@ -1137,6 +1181,9 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             cleanup_sevendays_new_staging()
             upload_dialog.close()
 
+        def open_save_upload_dialog() -> None:
+            upload_dialog.open()
+
         with ui.dialog() as upload_dialog:
             with ui.card().classes("mod-card mod-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
@@ -1173,23 +1220,27 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                         save_upload_control = ui.upload(
                             label="Choose Save Archive",
                             auto_upload=True,
+                            multiple=True,
+                            max_files=1,
+                            on_multi_upload=upload_generic_save,
                         ).classes("mod-file-upload-zone")
+                        indirect_save_upload_url = str(save_upload_control.props["url"])
+                        save_upload_control.props["accept"] = ".zip"
                         if show_upload_action:
-                            save_upload_control.props["field-name"] = "upload"
                             save_upload_control.on("start", direct_save_upload_started, args=[])
                             save_upload_control.on("uploaded", direct_save_upload_succeeded, args=[])
                             save_upload_control.on("failed", direct_save_upload_failed, args=[])
                             save_upload_control.on("rejected", direct_save_upload_rejected, args=[])
-                            refresh_generic_save_upload_target()
+                            refresh_direct_save_upload_target()
                             direct_save_upload_token_timer = ui.timer(
                                 _DIRECT_UPLOAD_TOKEN_REFRESH_SECONDS,
-                                refresh_generic_save_upload_target,
+                                refresh_direct_save_upload_target,
                             )
                             self._register_timer_cleanup(ui=ui, timer=direct_save_upload_token_timer)
                             self._register_client_cleanup(ui=ui, cleanup=interrupt_direct_save_transfer)
                             if root_select is not None:
-                                root_select.on("update:model-value", lambda: refresh_generic_save_upload_target())
-                        ui.label("ZIP archives are uploaded directly into the selected save target.").classes(
+                                root_select.on("update:model-value", lambda: refresh_direct_save_upload_target())
+                        ui.label("ZIP archives upload directly to the node, with a portal fallback if needed.").classes(
                             "mod-subtitle text-sm"
                         )
                     with ui.row().classes("w-full justify-end"):
@@ -1392,7 +1443,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
                                     on_click=(
                                         lambda: open_sevendays_upload(world_name=None)
                                         if is_sevendays_app
-                                        else upload_dialog.open
+                                        else open_save_upload_dialog()
                                     ),
                                 ).classes("mod-list-button")
 

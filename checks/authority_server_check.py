@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
+from aiohttp import web
+
 import config
 from _authority_server import AuthorityServer
 
@@ -46,9 +48,9 @@ class AuthorityServerBotRegistryTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch.object(AuthorityServer, "_BOT_CONFIGURATION_PATH", path):
-                server = AuthorityServer(cast(config.Name_Cache, SimpleNamespace()))
+                server = AuthorityServer(cast(config.Name_Cache, cast(object, SimpleNamespace())))
                 response = await server._handle_bots_sync(
-                    _FakeJsonRequest({"data": snapshot.model_dump(mode="json")})  # type: ignore[arg-type]
+                    cast(web.Request, cast(object, _FakeJsonRequest({"data": snapshot.model_dump(mode="json")})))
                 )
 
             payload = _response_payload(response)
@@ -74,8 +76,8 @@ class AuthorityServerBotRegistryTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch.object(AuthorityServer, "_BOT_CONFIGURATION_PATH", path):
-                server = AuthorityServer(cast(config.Name_Cache, SimpleNamespace()))
-                response = await server._handle_bots(SimpleNamespace())  # type: ignore[arg-type]
+                server = AuthorityServer(cast(config.Name_Cache, cast(object, SimpleNamespace())))
+                response = await server._handle_bots(cast(web.Request, cast(object, SimpleNamespace())))
 
             payload = _response_payload(response)
             raw_data = payload.get("data")
@@ -87,6 +89,65 @@ class AuthorityServerBotRegistryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(snapshot.profile.label, "Erin")
         self.assertEqual(snapshot.features.oauth, config.PersistedOAuthLinks(guild=None))
+
+
+class AuthorityServerUserSettingsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_user_settings_replace_round_trips_through_authority(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user_settings.json"
+            server = AuthorityServer(cast(config.Name_Cache, cast(object, SimpleNamespace())))
+            user_settings_payload = {
+                "version": 1,
+                "users": {"42": {"appearance": {"color_scheme": "current", "primary_color_hex": None}}},
+            }
+
+            with patch.object(config, "USER_SETTINGS", path):
+                initial_response = await server._handle_user_settings(cast(web.Request, cast(object, SimpleNamespace())))
+                replace_response = await server._handle_user_settings_replace(
+                    cast(web.Request, cast(object, _FakeJsonRequest({"data": user_settings_payload})))
+                )
+                loaded_response = await server._handle_user_settings(cast(web.Request, cast(object, SimpleNamespace())))
+
+            initial_payload = _response_payload(initial_response)
+            replace_payload = _response_payload(replace_response)
+            loaded_payload = _response_payload(loaded_response)
+
+        self.assertEqual(initial_payload, {"data": {}})
+        self.assertTrue(replace_payload["ok"])
+        self.assertEqual(loaded_payload, {"data": user_settings_payload})
+
+    async def test_user_settings_mutation_preserves_other_users(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "user_settings.json"
+            initial_payload = {
+                "version": 1,
+                "users": {"42": {"web_chat": {"use_24_hour_time": True}}},
+            }
+            path.write_text(json.dumps(initial_payload), encoding="utf-8")
+            server = AuthorityServer(cast(config.Name_Cache, cast(object, SimpleNamespace())))
+
+            with patch.object(config, "USER_SETTINGS", path):
+                response = await server._handle_user_settings_mutate(
+                    cast(
+                        web.Request,
+                        cast(
+                            object,
+                            _FakeJsonRequest(
+                                {
+                                    "user_id": 99,
+                                    "settings": {"web_chat": {"use_24_hour_time": False}},
+                                }
+                            ),
+                        ),
+                    )
+                )
+
+            saved_payload = json.loads(path.read_text(encoding="utf-8"))
+
+        response_payload = _response_payload(response)
+        self.assertTrue(response_payload["ok"])
+        self.assertEqual(saved_payload["users"]["42"], initial_payload["users"]["42"])
+        self.assertEqual(saved_payload["users"]["99"], {"web_chat": {"use_24_hour_time": False}})
 
 
 if __name__ == "__main__":

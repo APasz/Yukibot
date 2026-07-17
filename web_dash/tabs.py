@@ -17,6 +17,7 @@ from .types import (
 
 _VERSION_TOKEN_RE: re.Pattern[str] = re.compile(r"\d+|[A-Za-z]+")
 _MINECRAFT_APP_SCOPE = "minecraft"
+_FACTORIO_APP_SCOPE = "factorio"
 _SEVENDAYS_APP_SCOPE = "sevendays"
 _SEVENDAYS_SANDBOX_OPTIONS_MIN_VERSION_TEXT = "3.0.259"
 _KUBEJS_MOD_BASE_NAME = "kubejs"
@@ -67,7 +68,11 @@ class ModWebTabsMixin(ModWebServiceSupport):
     def _resolved_page_tabs(self, model: ModWebBasePageModel) -> tuple[ModWebAppTabDefinition, ...]:
         context: ModWebAppTabContext = self._page_tab_context(model)
         definitions: tuple[ModWebAppTabDefinition, ...] = (
-            self._built_in_page_tab_definitions(model) + self._additional_app_tab_definitions(context=context, is_detail_page=True)
+            self._built_in_page_tab_definitions(model)
+            + self._additional_app_tab_definitions(
+                context=context,
+                is_detail_page=isinstance(model, ModWebPageModel),
+            )
         )
         return self._sorted_page_tabs(definitions)
 
@@ -127,6 +132,20 @@ class ModWebTabsMixin(ModWebServiceSupport):
                     show_on_app_card=False,
                     render_handler_name="_render_minecraft_recipes_section",
                     badge_handler_name="_minecraft_recipes_tab_badges",
+                )
+            )
+        if is_detail_page and self._app_scope_matches(context, _FACTORIO_APP_SCOPE):
+            definitions.append(
+                ModWebAppTabDefinition.custom(
+                    tab_id="generation",
+                    label="Generation",
+                    page_order=225,
+                    app_card_order=675,
+                    app_card_tone="grey",
+                    icon="public",
+                    show_on_app_card=False,
+                    render_handler_name="_render_factorio_generation_section",
+                    badge_handler_name="_factorio_generation_tab_badges",
                 )
             )
         if is_detail_page and self._sevendays_sandbox_options_tab_available(context):

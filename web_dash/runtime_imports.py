@@ -53,6 +53,7 @@ from nicegui.elements.input import Input
 from nicegui.elements.label import Label
 from nicegui.elements.scroll_area import ScrollArea
 from nicegui.elements.select import Select
+from nicegui.elements.slider import Slider
 from nicegui.elements.table import Table
 from nicegui.elements.textarea import Textarea
 from nicegui.elements.timer import Timer
@@ -97,6 +98,8 @@ from apps._config import (
 from apps._node_api import NodeModUploadSource
 from apps._updater import AppUpdateInfo, AppUpdateOperationKind, AppUpdateState, AppUpdateStatus
 from apps.factorio.node_api import (
+    NodeFactorioGenerationState,
+    NodeFactorioMapExchangeString,
     NodeFactorioModSettings,
     NodeModDependencyEntry,
     NodeModDependencyResolutionResult,
@@ -195,6 +198,9 @@ from node_api import (
     NodeSystemCapabilities,
     NodeSystemDiskSummary,
     NodeSystemHistory,
+    NodeSystemLogCatalog,
+    NodeSystemLogEntry,
+    NodeSystemLogTail,
     NodeSystemSample,
     NodeSystemSummary,
     RelayTTSQueue,
@@ -321,6 +327,8 @@ __all__: tuple[str, ...] = (
     "NodeConsoleStdoutSnapshot",
     "NodeConsoleStdoutStreamEvent",
     "NodeFontSourceSettingsMutationResult",
+    "NodeFactorioGenerationState",
+    "NodeFactorioMapExchangeString",
     "NodeFactorioModSettings",
     "NodeMinecraftRecipeMutationAction",
     "NodeMinecraftRecipeMutationResult",
@@ -364,6 +372,9 @@ __all__: tuple[str, ...] = (
     "NodeRestartState",
     "NodeSystemDiskSummary",
     "NodeSystemSample",
+    "NodeSystemLogCatalog",
+    "NodeSystemLogEntry",
+    "NodeSystemLogTail",
     "NodeStateTopic",
     "NodeSystemSummary",
     "OwnUser",
@@ -382,6 +393,7 @@ __all__: tuple[str, ...] = (
     "Response",
     "ScrollArea",
     "Select",
+    "Slider",
     "StarletteResponse",
     "StreamingResponse",
     "Table",

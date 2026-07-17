@@ -267,10 +267,12 @@ class DevClusterManager:
         command: tuple[str, ...] | None = None,
         cwd: Path | None = None,
         printer: _ConsolePrinter | None = None,
+        debug: bool = False,
     ) -> None:
         self._base_env = dict(base_env)
         self._settings = settings
-        self._command = command or (sys.executable, str(Path(__file__).with_name("main.py")))
+        base_command = command or (sys.executable, str(Path(__file__).with_name("main.py")))
+        self._command = (*base_command, "-debug") if debug and "-debug" not in base_command else base_command
         self._cwd = cwd or Path(__file__).resolve().parent
         self._printer = printer or _ConsolePrinter()
         self._processes: dict[ClusterMember, RunningProcess] = {}
@@ -455,7 +457,7 @@ def _parse_command_target(token: str) -> tuple[ClusterMember, ...]:
         raise ValueError(f"Unknown target {token!r}. Expected one of: {expected}, all.") from xcp
 
 
-def _print_banner(printer: _ConsolePrinter, settings: ClusterSettings) -> None:
+def _print_banner(printer: _ConsolePrinter, settings: ClusterSettings, *, debug: bool) -> None:
     printer.line("=" * _TERMINAL_WIDTH)
     printer.line("Yukibot Dev Cluster")
     printer.line(f"env file: {settings.env_file}")
@@ -463,6 +465,7 @@ def _print_banner(printer: _ConsolePrinter, settings: ClusterSettings) -> None:
     printer.line(f"authority: {settings.ports.authority_base_url}")
     printer.line(f"node api: yuki={settings.ports.node_api_base_url(ClusterMember.YUKI)}")
     printer.line(f"node api: erin={settings.ports.node_api_base_url(ClusterMember.ERIN)}")
+    printer.line(f"debug logging: {'enabled' if debug else 'disabled'}")
     printer.line("commands: status | start <name|all> | stop <name|all> | restart <name|all> | quit")
     printer.line("=" * _TERMINAL_WIDTH)
 
@@ -542,6 +545,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Open the control shell without starting processes immediately.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Start every cluster member with project debug logging enabled.",
+    )
     return parser.parse_args(argv)
 
 
@@ -551,8 +559,8 @@ def main(argv: list[str] | None = None) -> int:
     base_env = merged_environment(env_file=env_file)
     settings = settings_from_environment(env=base_env, env_file=env_file)
     printer = _ConsolePrinter()
-    _print_banner(printer, settings)
-    manager = DevClusterManager(base_env=base_env, settings=settings, printer=printer)
+    _print_banner(printer, settings, debug=args.debug)
+    manager = DevClusterManager(base_env=base_env, settings=settings, printer=printer, debug=args.debug)
     _install_signal_handlers(manager, printer)
     if not args.no_start:
         manager.start_all()

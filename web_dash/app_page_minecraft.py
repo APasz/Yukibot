@@ -305,7 +305,7 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
 
         with ui.element("div").classes("mod-recipe-subtabs w-full"):
             with ui.element("div").classes("mod-section-tabs-shell"):
-                with ui.tabs().classes("mod-section-tabs") as recipe_subtabs:
+                with ui.tabs().classes("mod-section-tabs").props("aria-label=Recipe workspace sections") as recipe_subtabs:
                     add_tab = ui.tab("Add", icon="add_circle")
                     manage_tab = ui.tab("Manage", icon="format_list_bulleted")
                     self._attach_badge_tooltip(ui=ui, target=add_tab, text="Create a recipe")

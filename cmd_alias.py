@@ -1,8 +1,9 @@
 import enum
+import hashlib
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Generic, TypeVar, cast
+from typing import Generic, TypeVar
 from urllib.parse import urlparse
 
 import aiohttp
@@ -21,11 +22,11 @@ from hikari_ui import (
     ModalSchema,
     ModalTextField,
     PagedActionCodec,
+    InteractionDeferral,
 )
 
 import config
 from _editor_session import startup_editor_prefix
-from _manager import App_Manager
 from _security import Access_Control
 from config import Name_Cache, UserNames
 
@@ -44,6 +45,11 @@ _MINECRAFT_PROFILE_NAME_FIELD_ID = "profile_name"
 _MINECRAFT_PROFILE_UUID_FIELD_ID = "profile_uuid"
 _ALIAS_PAGE_SIZE = 25
 _MINECRAFT_SCOPE = "minecraft"
+_DISCORD_EMBED_FIELD_VALUE_LIMIT = 1024
+_DISCORD_MESSAGE_CONTENT_LIMIT = 2000
+_DISCORD_SNOWFLAKE_MAX = int(hikari.Snowflake.max())
+_DISCORD_TEXT_INPUT_LIMIT = 100
+_SELECTION_TOKEN_HEX_LENGTH = 16
 
 ValueT = TypeVar("ValueT")
 
@@ -57,15 +63,12 @@ class AliasActionKind(enum.StrEnum):
     CLOSE = enum.auto()
     PAGE = enum.auto()
     REFRESH = enum.auto()
-    REMOVE_APP = enum.auto()
     REMOVE_GENERAL = enum.auto()
     SET_DISPLAY_OVERRIDE = enum.auto()
-    SET_APP = enum.auto()
     SET_MINECRAFT_PROFILE = enum.auto()
     SET_STEAM = enum.auto()
     SHOW_ALIASES = enum.auto()
     SHOW_DISPLAY_OVERRIDES = enum.auto()
-    SHOW_APP_SCOPES = enum.auto()
     SHOW_LINKED_ACCOUNTS = enum.auto()
     SHOW_OVERVIEW = enum.auto()
 
@@ -74,7 +77,6 @@ class AliasEditorSection(enum.StrEnum):
     OVERVIEW = enum.auto()
     DISPLAY_OVERRIDES = enum.auto()
     ALIASES = enum.auto()
-    APP_SCOPES = enum.auto()
     LINKED_ACCOUNTS = enum.auto()
 
 
@@ -89,12 +91,6 @@ class PagedItems(Generic[ValueT]):
     visible: tuple[ValueT, ...]
     total_count: int
     page_state: EditorPageState
-
-
-@dataclass(frozen=True, slots=True)
-class AppAliasEntry:
-    scope: str
-    alias: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,8 +123,6 @@ class AliasEditorView:
     known_names: tuple[str, ...]
     display_overrides: PagedItems[DisplayOverrideEntry]
     general_aliases: PagedItems[str]
-    app_aliases: PagedItems[AppAliasEntry]
-    app_scopes: PagedItems[str]
     linked_accounts: PagedItems[LinkedAccountEntry]
     minecraft_profile: MinecraftProfileEntry
 
@@ -139,11 +133,10 @@ class AliasEditorView:
         if self.section is AliasEditorSection.DISPLAY_OVERRIDES:
             return self.display_overrides.page_state
         if self.section is AliasEditorSection.ALIASES:
-            total_pages = max(self.general_aliases.page_state.total_pages, self.app_aliases.page_state.total_pages)
-            return EditorPageState(page=min(self.general_aliases.page_state.page, total_pages - 1), total_pages=total_pages)
+            return self.general_aliases.page_state
         if self.section is AliasEditorSection.LINKED_ACCOUNTS:
             return self.linked_accounts.page_state
-        return self.app_scopes.page_state
+        raise RuntimeError(f"Unsupported alias editor section: {self.section}")
 
 
 async def ac_discord_usernames(ctx: lightbulb.AutocompleteContext[str], names_cache: Name_Cache) -> None:
@@ -152,21 +145,6 @@ async def ac_discord_usernames(ctx: lightbulb.AutocompleteContext[str], names_ca
     if needle:
         usernames = [username for username in usernames if needle in username.lower()]
     await ctx.respond(usernames[:25])
-
-
-def _all_app_scopes(manager: App_Manager) -> tuple[str, ...]:
-    list_known_scopes = getattr(manager, "list_known_scopes", None)
-    if callable(list_known_scopes):
-        known_scopes = cast("Callable[[], object]", list_known_scopes)()
-        if isinstance(known_scopes, tuple) and all(isinstance(scope, str) for scope in known_scopes):
-            return tuple(scope.strip().lower() for scope in known_scopes if scope.strip())
-    scopes: set[str] = {app.scope.lower() for app in manager.apps.values()}
-    list_create_scopes = getattr(manager, "list_create_scopes", None)
-    if callable(list_create_scopes):
-        create_scopes = cast("Callable[[], object]", list_create_scopes)()
-        if isinstance(create_scopes, tuple) and all(isinstance(scope, str) for scope in create_scopes):
-            scopes.update(scope.strip().lower() for scope in create_scopes if scope.strip())
-    return tuple(sorted(scopes))
 
 
 def _component_text(value: str, /, *, limit: int = 100) -> str:
@@ -179,7 +157,34 @@ def _component_text(value: str, /, *, limit: int = 100) -> str:
 
 
 def _display_value(values: Sequence[str]) -> str:
-    return "\n".join(values) if values else "None"
+    return _component_text(
+        "\n".join(values) if values else "None",
+        limit=_DISCORD_EMBED_FIELD_VALUE_LIMIT,
+    )
+
+
+def _message_text(value: str) -> str:
+    return _component_text(value, limit=_DISCORD_MESSAGE_CONTENT_LIMIT)
+
+
+def _selection_token(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:_SELECTION_TOKEN_HEX_LENGTH]
+
+
+def _resolve_selection_token(selected: str, values: Sequence[str], *, label: str) -> str:
+    matches = tuple(value for value in values if _selection_token(value) == selected)
+    if len(matches) != 1:
+        raise ValueError(f"{label.title()} selection is no longer available.")
+    return matches[0]
+
+
+def _raw_discord_user_id(value: str) -> int:
+    if not value.isascii() or not value.isdigit():
+        raise ValueError("Discord user ID must contain ASCII digits only.")
+    user_id = int(value)
+    if not 0 < user_id <= _DISCORD_SNOWFLAKE_MAX:
+        raise ValueError("Discord user ID must be a valid positive snowflake.")
+    return user_id
 
 
 def _page_count(count: int) -> int:
@@ -217,12 +222,6 @@ def _page_for_sorted_value(values: Sequence[str], needle: str) -> int:
     return index // _ALIAS_PAGE_SIZE
 
 
-def _editor_flags(is_public: bool) -> hikari.MessageFlag | hikari.UndefinedType:
-    if is_public:
-        return hikari.UNDEFINED
-    return hikari.MessageFlag.EPHEMERAL
-
-
 def _section_label(section: AliasEditorSection) -> str:
     if section is AliasEditorSection.OVERVIEW:
         return "Overview"
@@ -233,10 +232,6 @@ def _section_label(section: AliasEditorSection) -> str:
     if section is AliasEditorSection.LINKED_ACCOUNTS:
         return "Linked Accounts"
     return "Advanced Game Aliases"
-
-
-def _app_scope_options(manager: App_Manager) -> tuple[str, ...]:
-    return _all_app_scopes(manager)
 
 
 def _platform_label(platform: str) -> str:
@@ -252,15 +247,6 @@ def _display_override_label() -> str:
 def _require_display_override_selection(value: object) -> None:
     if str(value).strip() != _DISPLAY_OVERRIDE_SELECT_VALUE:
         raise ValueError("Unsupported display name selection.")
-
-
-def _require_known_app_scope(manager: App_Manager, scope: str) -> str:
-    normalised_scope = scope.strip().lower()
-    if not normalised_scope:
-        raise ValueError("App scope must not be empty.")
-    if normalised_scope not in _app_scope_options(manager):
-        raise KeyError(f"Unknown app scope `{normalised_scope}`.")
-    return normalised_scope
 
 
 def _display_override_entries(names: UserNames) -> tuple[DisplayOverrideEntry, ...]:
@@ -308,8 +294,8 @@ def _parse_steamcommunity_identity(value: str) -> tuple[str, str]:
 
 def _exception_message(xcp: Exception) -> str:
     if isinstance(xcp, KeyError) and xcp.args:
-        return str(xcp.args[0])
-    return str(xcp)
+        return _message_text(str(xcp.args[0]))
+    return _message_text(str(xcp))
 
 
 async def _resolve_alias_target_user_id(
@@ -338,7 +324,7 @@ async def _resolve_alias_target_user_id(
 
     requested = requested_user.strip()
     if requested.isdigit():
-        target_user_id = int(requested)
+        target_user_id = _raw_discord_user_id(requested)
         names_cache.upsert_manual_user(target_user_id, display_name=manual_name)
         return target_user_id
 
@@ -367,6 +353,7 @@ class AliasEditorService:
                         label="Alias",
                         style=hikari.TextInputStyle.SHORT,
                         required=True,
+                        max_length=_DISCORD_TEXT_INPUT_LIMIT,
                     )
                 ]
             ),
@@ -380,6 +367,7 @@ class AliasEditorService:
                         label="Display Name",
                         style=hikari.TextInputStyle.SHORT,
                         required=True,
+                        max_length=_DISCORD_TEXT_INPUT_LIMIT,
                     )
                 ]
             ),
@@ -393,6 +381,7 @@ class AliasEditorService:
                         label="Steam ID or URL",
                         style=hikari.TextInputStyle.SHORT,
                         required=True,
+                        max_length=_DISCORD_TEXT_INPUT_LIMIT,
                     )
                 ]
             ),
@@ -424,9 +413,7 @@ class AliasEditorService:
         *,
         ctx: lightbulb.Context,
         names_cache: Name_Cache,
-        manager: App_Manager,
         target_user_id: int,
-        is_public: bool = False,
         status: str = "Manage your identity below.",
     ) -> None:
         locale = self._editor.resolve_locale(ctx.interaction)
@@ -435,14 +422,13 @@ class AliasEditorService:
             actor_user_id=int(ctx.user.id),
             locale=locale,
             names_cache=names_cache,
-            manager=manager,
             state=AliasEditorState(section=AliasEditorSection.OVERVIEW, page=0),
         )
         await ctx.respond(
             status,
             embed=embed,
             components=components,
-            flags=_editor_flags(is_public),
+            flags=hikari.MessageFlag.EPHEMERAL,
         )
 
     async def route_component(
@@ -451,13 +437,11 @@ class AliasEditorService:
         *,
         acl: Access_Control,
         names_cache: Name_Cache,
-        manager: App_Manager,
     ) -> bool:
         return await self._editor.route(
             interaction,
             acl=acl,
             names_cache=names_cache,
-            manager=manager,
         )
 
     async def route_modal(
@@ -466,17 +450,15 @@ class AliasEditorService:
         *,
         acl: Access_Control,
         names_cache: Name_Cache,
-        manager: App_Manager,
     ) -> bool:
         if await self._alias_modal.route(
             interaction,
             on_submit=self._on_alias_modal_submit,
             authoriser=self._authorise_modal_submit,
             unauthorised_message="You are not authorised to use this alias editor.",
-            invalid_message="Alias must not be empty.",
+            invalid_message="Alias must be between 1 and 100 characters.",
             acl=acl,
             names_cache=names_cache,
-            manager=manager,
         ):
             return True
         if await self._display_override_modal.route(
@@ -484,32 +466,31 @@ class AliasEditorService:
             on_submit=self._on_display_override_modal_submit,
             authoriser=self._authorise_modal_submit,
             unauthorised_message="You are not authorised to use this alias editor.",
-            invalid_message="Display name must not be empty.",
+            invalid_message="Display name must be between 1 and 100 characters.",
             acl=acl,
             names_cache=names_cache,
-            manager=manager,
         ):
             return True
         if await self._steam_modal.route(
             interaction,
             on_submit=self._on_steam_modal_submit,
             authoriser=self._authorise_modal_submit,
+            defer_resolver=self._defer_external_lookup_modal_submit,
             unauthorised_message="You are not authorised to use this alias editor.",
-            invalid_message="Steam ID must not be empty.",
+            invalid_message="Steam ID or URL must be between 1 and 100 characters.",
             acl=acl,
             names_cache=names_cache,
-            manager=manager,
         ):
             return True
         return await self._minecraft_profile_modal.route(
             interaction,
             on_submit=self._on_minecraft_profile_modal_submit,
             authoriser=self._authorise_modal_submit,
+            defer_resolver=self._defer_external_lookup_modal_submit,
             unauthorised_message="You are not authorised to use this alias editor.",
-            invalid_message="Minecraft profile name must not be empty.",
+            invalid_message="Minecraft username must be 1–16 characters and UUID at most 36 characters.",
             acl=acl,
             names_cache=names_cache,
-            manager=manager,
         )
 
     async def _authorise_editor_action(self, req: EditorRequest, deps: Mapping[str, object]) -> bool:
@@ -517,6 +498,19 @@ class AliasEditorService:
 
     async def _authorise_modal_submit(self, req: ModalRequest, deps: Mapping[str, object]) -> bool:
         return await self._authorise_request_user(req.user_id, req.scope_id, deps)
+
+    def _defer_external_lookup_modal_submit(
+        self,
+        req: ModalRequest,
+        deps: Mapping[str, object],
+    ) -> InteractionDeferral | None:
+        del deps
+        action = self._action_codec.parse(req.action)
+        if action is None:
+            return None
+        if action.kind in {AliasActionKind.SET_STEAM, AliasActionKind.SET_MINECRAFT_PROFILE}:
+            return InteractionDeferral.create(flags=hikari.MessageFlag.EPHEMERAL)
+        return None
 
     async def _authorise_request_user(
         self,
@@ -645,7 +639,6 @@ class AliasEditorService:
 
     async def _on_editor_action(self, req: EditorRequest, deps: Mapping[str, object]) -> EditorResponse | None:
         names_cache = self._require_names_cache(deps)
-        manager = self._require_manager(deps)
         action = self._action_codec.parse(req.action)
         if action is None:
             return EditorResponse.ephemeral("Unknown alias editor action.")
@@ -671,7 +664,6 @@ class AliasEditorService:
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=state.section,
                 status="Alias editor refreshed." if action.kind is AliasActionKind.REFRESH else "Page updated.",
                 page=state.page,
@@ -695,7 +687,6 @@ class AliasEditorService:
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.OVERVIEW,
                 status="Showing identity overview.",
                 page=0,
@@ -707,7 +698,6 @@ class AliasEditorService:
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.DISPLAY_OVERRIDES,
                 status="Showing display overrides.",
                 page=0,
@@ -719,7 +709,6 @@ class AliasEditorService:
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.ALIASES,
                 status="Showing names and aliases.",
                 page=0,
@@ -731,21 +720,8 @@ class AliasEditorService:
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.LINKED_ACCOUNTS,
                 status="Showing linked accounts.",
-                page=0,
-            )
-
-        if action.kind is AliasActionKind.SHOW_APP_SCOPES:
-            return self._build_editor_response(
-                target_user_id=target_user_id,
-                actor_user_id=actor_user_id,
-                locale=req.locale,
-                names_cache=names_cache,
-                manager=manager,
-                section=AliasEditorSection.APP_SCOPES,
-                status="Showing editable app scopes.",
                 page=0,
             )
 
@@ -760,14 +736,13 @@ class AliasEditorService:
             try:
                 changed = names_cache.set_game_profile(target_user_id, _MINECRAFT_SCOPE, candidate.name, candidate.uuid)
             except ValueError as xcp:
-                return EditorResponse.ephemeral(str(xcp))
+                return EditorResponse.ephemeral(_exception_message(xcp))
             self._clear_pending_minecraft_lookup_candidates(actor_user_id, target_user_id)
             return self._build_editor_response(
                 target_user_id=target_user_id,
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.LINKED_ACCOUNTS,
                 status=(
                     f"Selected Minecraft profile `{candidate.name}` with UUID `{candidate.uuid}`."
@@ -776,26 +751,6 @@ class AliasEditorService:
                 ),
                 page=0,
             )
-
-        if action.kind is AliasActionKind.SET_APP:
-            if not req.values:
-                return EditorResponse.ephemeral("Choose an app to edit first.")
-            try:
-                scope = _require_known_app_scope(manager, req.values[0])
-            except (KeyError, ValueError) as xcp:
-                return EditorResponse.ephemeral(str(xcp))
-            names = _user_names_for_editor(names_cache, target_user_id)
-            current_alias = names.games.get(scope, ("", None))[0]
-            await req.interaction.create_modal_response(
-                f"Set {scope.title()} Alias",
-                self._alias_modal.build_id(
-                    self._action_codec.build(AliasActionKind.SET_APP, page=action.page, value=scope),
-                    scope_id=target_user_id,
-                    user_id=actor_user_id,
-                ),
-                components=self._alias_modal.rows({_ALIAS_MODAL_FIELD_ID: current_alias}),
-            )
-            return None
 
         if action.kind is AliasActionKind.SET_STEAM:
             current_steam_id = names_cache.get_platform_id(target_user_id, "steam") or ""
@@ -806,7 +761,9 @@ class AliasEditorService:
                     scope_id=target_user_id,
                     user_id=actor_user_id,
                 ),
-                components=self._steam_modal.rows({_STEAM_MODAL_FIELD_ID: current_steam_id}),
+                components=self._steam_modal.rows(
+                    {_STEAM_MODAL_FIELD_ID: _component_text(current_steam_id, limit=_DISCORD_TEXT_INPUT_LIMIT)}
+                ),
             )
             return None
 
@@ -834,7 +791,7 @@ class AliasEditorService:
             try:
                 _require_display_override_selection(req.values[0])
             except ValueError as xcp:
-                return EditorResponse.ephemeral(str(xcp))
+                return EditorResponse.ephemeral(_exception_message(xcp))
             names = _user_names_for_editor(names_cache, target_user_id)
             current_value = names.display_overrides.value or ""
             await req.interaction.create_modal_response(
@@ -844,43 +801,37 @@ class AliasEditorService:
                     scope_id=target_user_id,
                     user_id=actor_user_id,
                 ),
-                components=self._display_override_modal.rows({_DISPLAY_OVERRIDE_MODAL_FIELD_ID: current_value}),
+                components=self._display_override_modal.rows(
+                    {
+                        _DISPLAY_OVERRIDE_MODAL_FIELD_ID: _component_text(
+                            current_value,
+                            limit=_DISCORD_TEXT_INPUT_LIMIT,
+                        )
+                    }
+                ),
             )
             return None
 
         if action.kind is AliasActionKind.REMOVE_GENERAL:
             if not req.values:
                 return EditorResponse.ephemeral("Choose a general alias to remove.")
-            alias = req.values[0]
+            try:
+                alias = _resolve_selection_token(
+                    req.values[0],
+                    tuple(_user_names_for_editor(names_cache, target_user_id).nicknames),
+                    label="general alias",
+                )
+            except ValueError as xcp:
+                return EditorResponse.ephemeral(_exception_message(xcp))
             names_cache.remove_name(target_user_id, alias)
             return self._build_editor_response(
                 target_user_id=target_user_id,
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.ALIASES,
                 status=f"Removed general alias `{alias}`.",
                 page=action.page,
-            )
-
-        if action.kind is AliasActionKind.REMOVE_APP:
-            if not req.values:
-                return EditorResponse.ephemeral("Choose an app alias to remove.")
-            try:
-                scope = _require_known_app_scope(manager, req.values[0])
-            except (KeyError, ValueError) as xcp:
-                return EditorResponse.ephemeral(str(xcp))
-            names_cache.remove_game_alias(target_user_id, scope)
-            return self._build_editor_response(
-                target_user_id=target_user_id,
-                actor_user_id=actor_user_id,
-                locale=req.locale,
-                names_cache=names_cache,
-                manager=manager,
-                section=AliasEditorSection.ALIASES,
-                status=f"Removed `{scope.title()}` alias.",
-                page=0,
             )
 
         if action.kind is AliasActionKind.CLEAR_STEAM:
@@ -890,7 +841,6 @@ class AliasEditorService:
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.LINKED_ACCOUNTS,
                 status="Cleared Steam ID." if changed else "No Steam ID was set.",
                 page=0,
@@ -910,7 +860,6 @@ class AliasEditorService:
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.LINKED_ACCOUNTS,
                 status=status,
                 page=0,
@@ -922,14 +871,13 @@ class AliasEditorService:
             try:
                 _require_display_override_selection(req.values[0])
             except ValueError as xcp:
-                return EditorResponse.ephemeral(str(xcp))
+                return EditorResponse.ephemeral(_exception_message(xcp))
             names_cache.set_display_override(target_user_id, None)
             return self._build_editor_response(
                 target_user_id=target_user_id,
                 actor_user_id=actor_user_id,
                 locale=req.locale,
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.DISPLAY_OVERRIDES,
                 status="Cleared display name.",
                 page=action.page,
@@ -944,7 +892,6 @@ class AliasEditorService:
         actor_user_id: int,
         locale: hikari.Locale,
         names_cache: Name_Cache,
-        manager: App_Manager,
         section: AliasEditorSection,
         status: str,
         page: int,
@@ -954,10 +901,29 @@ class AliasEditorService:
             actor_user_id=actor_user_id,
             locale=locale,
             names_cache=names_cache,
-            manager=manager,
             state=AliasEditorState(section=section, page=page),
         )
-        return EditorResponse.update(status, components=components, embeds=[embed])
+        return EditorResponse.update(_message_text(status), components=components, embeds=[embed])
+
+    def _build_modal_editor_response(
+        self,
+        *,
+        target_user_id: int,
+        actor_user_id: int,
+        locale: hikari.Locale,
+        names_cache: Name_Cache,
+        section: AliasEditorSection,
+        status: str,
+        page: int,
+    ) -> EditorResponse:
+        embed, components = self._render_editor(
+            target_user_id=target_user_id,
+            actor_user_id=actor_user_id,
+            locale=locale,
+            names_cache=names_cache,
+            state=AliasEditorState(section=section, page=page),
+        )
+        return EditorResponse.ephemeral(_message_text(status), components=components, embeds=[embed])
 
     def _render_editor(
         self,
@@ -966,12 +932,10 @@ class AliasEditorService:
         actor_user_id: int,
         locale: hikari.Locale,
         names_cache: Name_Cache,
-        manager: App_Manager,
         state: AliasEditorState,
     ) -> tuple[hikari.Embed, list[hikari.api.MessageActionRowBuilder]]:
         view = self._build_view(
             names_cache=names_cache,
-            manager=manager,
             target_user_id=target_user_id,
             state=state,
         )
@@ -981,12 +945,12 @@ class AliasEditorService:
         section_label = _section_label(view.section)
 
         embed = hikari.Embed(
-            title=f"{title_name} Identity Settings",
+            title=f"{_component_text(title_name, limit=256 - len(' Identity Settings'))} Identity Settings",
             description=(
                 "Known names are read-only.\n"
                 f"Section: {section_label}\n"
                 f"Linked accounts: {view.linked_accounts.total_count} | "
-                f"Aliases: {view.general_aliases.total_count + view.app_aliases.total_count} | "
+                f"General aliases: {view.general_aliases.total_count} | "
                 f"Display names: {sum(1 for entry in _display_override_entries(names) if entry.value)} custom"
             ),
             color=0xB00F0F,
@@ -1007,7 +971,7 @@ class AliasEditorService:
                 value=_display_value(
                     [
                         f"General aliases: {view.general_aliases.total_count}",
-                        f"Game aliases: {view.app_aliases.total_count}",
+                        "Game-specific aliases: manage in the web dashboard",
                     ]
                 ),
                 inline=False,
@@ -1032,11 +996,6 @@ class AliasEditorService:
             embed.add_field(
                 name=f"General Aliases ({view.general_aliases.total_count})",
                 value=_display_value(view.general_aliases.visible),
-                inline=False,
-            )
-            embed.add_field(
-                name=f"Game Aliases ({view.app_aliases.total_count})",
-                value=_display_value([f"{entry.scope.title()}: {entry.alias}" for entry in view.app_aliases.visible]),
                 inline=False,
             )
         elif view.section is AliasEditorSection.LINKED_ACCOUNTS:
@@ -1065,19 +1024,8 @@ class AliasEditorService:
                     ),
                     inline=False,
                 )
-        else:
-            embed.add_field(
-                name=f"Game-Specific Alias Targets ({view.app_scopes.total_count})",
-                value=_display_value([scope.title() for scope in view.app_scopes.visible]),
-                inline=False,
-            )
-            embed.add_field(
-                name="Use This Page For",
-                value="Choose a game to set or update its specific alias.",
-                inline=False,
-            )
         if names.account and target_user_id != actor_user_id:
-            embed.set_footer(text=f"Editing {names.account}")
+            embed.set_footer(text=_component_text(f"Editing {names.account}", limit=2048))
 
         editor_ctx = self._editor.context(
             scope_id=target_user_id,
@@ -1184,14 +1132,6 @@ class AliasEditorService:
                 "Add General Alias",
                 style=hikari.ButtonStyle.PRIMARY,
             )
-            layout.add_button(
-                self._build_section_state_action(
-                    AliasActionKind.SHOW_APP_SCOPES,
-                    AliasEditorState(section=AliasEditorSection.APP_SCOPES, page=0),
-                ),
-                "Advanced Game Aliases",
-                style=hikari.ButtonStyle.SECONDARY,
-            )
         if view.section is AliasEditorSection.LINKED_ACCOUNTS:
             layout.add_button(
                 self._action_codec.build(AliasActionKind.SET_STEAM, page=0),
@@ -1234,55 +1174,18 @@ class AliasEditorService:
                     ],
                     placeholder="Choose Minecraft lookup result",
                 )
-        if view.section is AliasEditorSection.APP_SCOPES and view.app_scopes.visible:
-            layout.add_text_select(
-                self._action_codec.build(AliasActionKind.SET_APP, page=view.app_scopes.page_state.page),
-                options=[
-                    EditorSelectOption(
-                        label=_component_text(scope.title()),
-                        value=scope,
-                        description=_component_text(
-                            names.games.get(scope, ("Set or update alias", None))[0] or "Set or update alias"
-                        ),
-                    )
-                    for scope in view.app_scopes.visible
-                ],
-                placeholder="Choose a game-specific alias to edit",
-            )
-        if view.section is AliasEditorSection.APP_SCOPES:
-            layout.add_button(
-                self._build_section_state_action(
-                    AliasActionKind.SHOW_ALIASES,
-                    AliasEditorState(section=AliasEditorSection.APP_SCOPES, page=0),
-                ),
-                "Back To Aliases",
-                style=hikari.ButtonStyle.SECONDARY,
-            )
         if view.section is AliasEditorSection.ALIASES and view.general_aliases.visible:
             layout.add_text_select(
                 self._action_codec.build(AliasActionKind.REMOVE_GENERAL, page=view.general_aliases.page_state.page),
                 options=[
                     EditorSelectOption(
                         label=_component_text(alias),
-                        value=alias,
+                        value=_selection_token(alias),
                         description="Remove this general alias",
                     )
                     for alias in view.general_aliases.visible
                 ],
                 placeholder="Remove general alias",
-            )
-        if view.section is AliasEditorSection.ALIASES and view.app_aliases.visible:
-            layout.add_text_select(
-                self._action_codec.build(AliasActionKind.REMOVE_APP, page=view.app_aliases.page_state.page),
-                options=[
-                    EditorSelectOption(
-                        label=_component_text(entry.scope.title()),
-                        value=entry.scope,
-                        description=_component_text(entry.alias),
-                    )
-                    for entry in view.app_aliases.visible
-                ],
-                placeholder="Remove game alias",
             )
 
         prev_action = None
@@ -1316,7 +1219,6 @@ class AliasEditorService:
 
     async def _on_alias_modal_submit(self, req: ModalRequest, deps: Mapping[str, object]) -> EditorResponse | None:
         names_cache = self._require_names_cache(deps)
-        manager = self._require_manager(deps)
         action = self._action_codec.parse(req.action)
         if action is None:
             return EditorResponse.ephemeral("Unknown alias modal action.")
@@ -1332,38 +1234,17 @@ class AliasEditorService:
             try:
                 names_cache.add_name(target_user_id, alias, False)
             except ValueError as xcp:
-                return EditorResponse.ephemeral(str(xcp))
+                return EditorResponse.ephemeral(_exception_message(xcp))
             nicknames = tuple(sorted(_user_names_for_editor(names_cache, target_user_id).nicknames))
             page = _page_for_sorted_value(nicknames, alias)
-            return self._build_editor_response(
+            return self._build_modal_editor_response(
                 target_user_id=target_user_id,
                 actor_user_id=actor_user_id,
                 locale=self._editor.resolve_locale(req.interaction),
                 names_cache=names_cache,
-                manager=manager,
                 section=AliasEditorSection.ALIASES,
                 status=f"Added general alias `{alias}`.",
                 page=page,
-            )
-
-        if action.kind is AliasActionKind.SET_APP and action.value is not None:
-            try:
-                scope = _require_known_app_scope(manager, action.value)
-            except (KeyError, ValueError) as xcp:
-                return EditorResponse.ephemeral(str(xcp))
-            try:
-                names_cache.set_game_alias(target_user_id, scope, alias)
-            except ValueError as xcp:
-                return EditorResponse.ephemeral(str(xcp))
-            return self._build_editor_response(
-                target_user_id=target_user_id,
-                actor_user_id=actor_user_id,
-                locale=self._editor.resolve_locale(req.interaction),
-                names_cache=names_cache,
-                manager=manager,
-                section=AliasEditorSection.ALIASES,
-                status=f"Set `{scope.title()}` alias to `{alias}`.",
-                page=0,
             )
 
         return EditorResponse.ephemeral("Unknown alias modal action.")
@@ -1374,7 +1255,6 @@ class AliasEditorService:
         deps: Mapping[str, object],
     ) -> EditorResponse | None:
         names_cache = self._require_names_cache(deps)
-        manager = self._require_manager(deps)
         action = self._action_codec.parse(req.action)
         if action is None:
             return EditorResponse.ephemeral("Unknown display override modal action.")
@@ -1388,12 +1268,11 @@ class AliasEditorService:
             return EditorResponse.ephemeral("Display name must not be empty.")
 
         names_cache.set_display_override(target_user_id, display_name)
-        return self._build_editor_response(
+        return self._build_modal_editor_response(
             target_user_id=target_user_id,
             actor_user_id=actor_user_id,
             locale=self._editor.resolve_locale(req.interaction),
             names_cache=names_cache,
-            manager=manager,
             section=AliasEditorSection.DISPLAY_OVERRIDES,
             status=f"Set display name to `{display_name}`.",
             page=action.page,
@@ -1405,7 +1284,6 @@ class AliasEditorService:
         deps: Mapping[str, object],
     ) -> EditorResponse | None:
         names_cache = self._require_names_cache(deps)
-        manager = self._require_manager(deps)
         action = self._action_codec.parse(req.action)
         if action is None:
             return EditorResponse.ephemeral("Unknown Steam modal action.")
@@ -1418,7 +1296,7 @@ class AliasEditorService:
             steam_id = await self._resolve_steam_input(req.values.get(_STEAM_MODAL_FIELD_ID, ""))
             changed = names_cache.set_platform_id(target_user_id, "steam", steam_id)
         except ValueError as xcp:
-            return EditorResponse.ephemeral(str(xcp))
+            return EditorResponse.ephemeral(_exception_message(xcp))
         except aiohttp.ClientError as xcp:
             log.warning("Steam lookup request failed for alias editor: %s", xcp)
             return EditorResponse.ephemeral("Steam lookup failed. Try again later or enter a numeric Steam ID.")
@@ -1428,12 +1306,11 @@ class AliasEditorService:
             if changed and current is not None
             else f"Steam ID is already `{current}`."
         )
-        return self._build_editor_response(
+        return self._build_modal_editor_response(
             target_user_id=target_user_id,
             actor_user_id=actor_user_id,
             locale=self._editor.resolve_locale(req.interaction),
             names_cache=names_cache,
-            manager=manager,
             section=AliasEditorSection.LINKED_ACCOUNTS,
             status=status,
             page=0,
@@ -1445,7 +1322,6 @@ class AliasEditorService:
         deps: Mapping[str, object],
     ) -> EditorResponse | None:
         names_cache = self._require_names_cache(deps)
-        manager = self._require_manager(deps)
         action = self._action_codec.parse(req.action)
         if action is None:
             return EditorResponse.ephemeral("Unknown Minecraft profile modal action.")
@@ -1470,12 +1346,11 @@ class AliasEditorService:
                 return EditorResponse.ephemeral("Minecraft profile was not found. Enter the UUID manually to save it anyway.")
             if len(candidates) > 1:
                 self._set_pending_minecraft_lookup_candidates(actor_user_id, target_user_id, candidates)
-                return self._build_editor_response(
+                return self._build_modal_editor_response(
                     target_user_id=target_user_id,
                     actor_user_id=actor_user_id,
                     locale=self._editor.resolve_locale(req.interaction),
                     names_cache=names_cache,
-                    manager=manager,
                     section=AliasEditorSection.LINKED_ACCOUNTS,
                     status="Multiple Minecraft profiles matched. Choose the correct profile below.",
                     page=0,
@@ -1493,7 +1368,7 @@ class AliasEditorService:
                 resolved_profile_uuid,
             )
         except ValueError as xcp:
-            return EditorResponse.ephemeral(str(xcp))
+            return EditorResponse.ephemeral(_exception_message(xcp))
         self._clear_pending_minecraft_lookup_candidates(actor_user_id, target_user_id)
         profile = _minecraft_profile_entry(_user_names_for_editor(names_cache, target_user_id))
         status = (
@@ -1503,12 +1378,11 @@ class AliasEditorService:
             else f"Minecraft profile is already `{profile.alias}`"
             f"{f' with UUID `{profile.uuid}`' if profile.uuid else ''}."
         )
-        return self._build_editor_response(
+        return self._build_modal_editor_response(
             target_user_id=target_user_id,
             actor_user_id=actor_user_id,
             locale=self._editor.resolve_locale(req.interaction),
             names_cache=names_cache,
-            manager=manager,
             section=AliasEditorSection.LINKED_ACCOUNTS,
             status=status,
             page=0,
@@ -1518,18 +1392,11 @@ class AliasEditorService:
         self,
         *,
         names_cache: Name_Cache,
-        manager: App_Manager,
         target_user_id: int,
         state: AliasEditorState,
     ) -> AliasEditorView:
         names = _user_names_for_editor(names_cache, target_user_id)
-        all_scopes = _app_scope_options(manager)
         nicknames = tuple(sorted(names.nicknames))
-        app_aliases = tuple(
-            AppAliasEntry(scope=scope, alias=data[0])
-            for scope, data in sorted(names.games.items())
-            if scope != _MINECRAFT_SCOPE and data[0]
-        )
         return AliasEditorView(
             account_name=names.account,
             section=state.section,
@@ -1539,11 +1406,6 @@ class AliasEditorService:
                 state.page if state.section is AliasEditorSection.DISPLAY_OVERRIDES else 0,
             ),
             general_aliases=_paginate(nicknames, state.page if state.section is AliasEditorSection.ALIASES else 0),
-            app_aliases=_paginate(
-                app_aliases,
-                state.page if state.section is AliasEditorSection.ALIASES else 0,
-            ),
-            app_scopes=_paginate(all_scopes, state.page if state.section is AliasEditorSection.APP_SCOPES else 0),
             linked_accounts=_paginate(
                 _linked_account_entries(names_cache, target_user_id),
                 state.page if state.section is AliasEditorSection.LINKED_ACCOUNTS else 0,
@@ -1578,20 +1440,11 @@ class AliasEditorService:
             raise TypeError("Alias editor requires Name_Cache")
         return value
 
-    @staticmethod
-    def _require_manager(deps: Mapping[str, object]) -> App_Manager:
-        value = deps.get("manager")
-        if not isinstance(value, App_Manager):
-            raise TypeError("Alias editor requires App_Manager")
-        return value
-
-
 class CMD_Alias(
     lightbulb.SlashCommand,
     name="alias",
     description="Open the identity, alias, and account linking editor",
 ):
-    publc = lightbulb.boolean("publc", "Send the editor as a normal message", default=False)  # type: ignore[reportAssignmentType]
     user = lightbulb.string("user", "Discord username for another user", autocomplete=ac_discord_usernames, default=None)  # pyright: ignore[reportAssignmentType, reportArgumentType]
     manual_name = lightbulb.string("manual_name", "Manual display name for a raw uncached Discord user ID", default=None)  # pyright: ignore[reportAssignmentType, reportArgumentType]
 
@@ -1601,7 +1454,6 @@ class CMD_Alias(
         ctx: lightbulb.Context,
         acl: Access_Control,
         alias_editor: AliasEditorService,
-        manager: App_Manager,
         names_cache: Name_Cache,
     ) -> None:
         await acl.perm_check(ctx.user.id, acl.LvL.guest)
@@ -1620,9 +1472,7 @@ class CMD_Alias(
         await alias_editor.open_editor(
             ctx=ctx,
             names_cache=names_cache,
-            manager=manager,
             target_user_id=target_user_id,
-            is_public=self.publc,
         )
 
 

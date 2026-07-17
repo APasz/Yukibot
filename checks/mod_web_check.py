@@ -145,6 +145,8 @@ from node_api import (
     NodeSystemCapabilities,
     NodeSystemDiskSummary,
     NodeSystemHistory,
+    NodeSystemLogEntry,
+    NodeSystemLogTail,
     NodeSystemSample,
     NodeSystemSummary,
 )
@@ -171,6 +173,7 @@ from web_dash.app_page import (
     _MinecraftRecipeEditorSelection,
     _MinecraftRecipeEditorState,
 )
+from web_dash.app_page_factorio import _ENEMY_EXPANSION_SETTINGS, ModWebAppPageFactorioMixin
 from web_dash.assets import AssetContentEncoding, CacheableTextAsset, extract_html_tag_contents
 from web_dash.backend import ModWebDashboardBackend
 from web_dash.constants import (
@@ -367,6 +370,10 @@ class _FakeTabbedSectionContainer:
         self.class_value = value
         return self
 
+    def props(self, value: str) -> "_FakeTabbedSectionContainer":
+        del value
+        return self
+
     def style(self, *, add: str | None = None, remove: str | None = None) -> "_FakeTabbedSectionContainer":
         self.added_style = add
         self.removed_style = remove
@@ -432,6 +439,27 @@ class _FakeTabbedSectionUi:
 
 
 class ModWebTests(unittest.TestCase):
+    def test_factorio_cooldowns_display_minutes_and_save_as_ticks(self) -> None:
+        cooldowns = {
+            specification.field: specification
+            for specification in _ENEMY_EXPANSION_SETTINGS
+            if specification.field.endswith("expansion_cooldown")
+        }
+        minimum = cooldowns["min_expansion_cooldown"]
+        maximum = cooldowns["max_expansion_cooldown"]
+
+        self.assertEqual(ModWebAppPageFactorioMixin._factorio_map_setting_display_label(minimum), "Minimum cooldown (minutes)")
+        self.assertEqual(ModWebAppPageFactorioMixin._factorio_map_setting_display_value(minimum, 1_440), 0.4)
+        self.assertEqual(ModWebAppPageFactorioMixin._factorio_map_setting_display_value(maximum, 216_000), 60)
+        self.assertEqual(
+            ModWebAppPageFactorioMixin._factorio_map_setting_input_value(minimum, SimpleNamespace(value="0.4")),
+            1_440,
+        )
+        with self.assertRaisesRegex(ValueError, "whole number of Factorio ticks"):
+            ModWebAppPageFactorioMixin._factorio_map_setting_input_value(
+                minimum, SimpleNamespace(value="0.0001")
+            )
+
     def test_portal_recovery_script_targets_health_endpoint(self) -> None:
         script = ModWebService._portal_recovery_head_html()
 
@@ -439,6 +467,13 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("window.modWebPortalRecovery", script)
         self.assertIn("visibilitychange", script)
         self.assertIn("window.location.reload()", script)
+
+    def test_focus_modality_script_hides_keyboard_focus_styling_after_pointer_input(self) -> None:
+        script = ModWebService._focus_modality_head_html()
+
+        self.assertIn("mod-pointer-navigation", script)
+        self.assertIn("pointerdown", script)
+        self.assertIn("keydown", script)
 
     def test_guarded_reload_uses_browser_recovery_helper(self) -> None:
         class FakeNavigate:
@@ -1268,8 +1303,11 @@ class ModWebTests(unittest.TestCase):
                 return self
 
         class FakeDialog(FakeContainer):
+            def __init__(self) -> None:
+                self.opened = False
+
             def open(self) -> None:
-                return None
+                self.opened = True
 
             def close(self) -> None:
                 return None
@@ -1295,6 +1333,10 @@ class ModWebTests(unittest.TestCase):
                 return self
 
         class FakeButton:
+            def __init__(self, *, on_click: Callable[[], None] | None = None, text: str = "") -> None:
+                self.on_click = on_click
+                self.text = text
+
             def classes(self, value: str) -> "FakeButton":
                 del value
                 return self
@@ -2735,6 +2777,89 @@ class ModWebTests(unittest.TestCase):
             ],
         )
 
+    def test_node_system_current_usage_badges_report_overall_cpu_and_ram(self) -> None:
+        badges = ModWebService()._node_system_current_usage_badges(
+            NodeSystemSummary(
+                cpu_percent=31,
+                ram_percent=44,
+                ram_used_bytes=8 * 1024**3,
+                ram_total_bytes=16 * 1024**3,
+                storage_percent=None,
+                storage_free_bytes=None,
+                storage_total_bytes=None,
+            )
+        )
+
+        self.assertEqual(
+            [(badge.text, badge.tone, badge.icon, badge.tooltip_text) for badge in badges],
+            [
+                ("CPU 31%", "grey", "speed", "Overall CPU usage."),
+                ("RAM 44%", "purple", "memory", "Overall RAM usage."),
+            ],
+        )
+
+    def test_machine_log_entries_only_include_structured_machine_sessions(self) -> None:
+        entries = (
+            NodeSystemLogEntry(relative_path="_machine/System.jsonl", size_bytes=120, modified_at_epoch_seconds=100),
+            NodeSystemLogEntry(relative_path="_machine/System.1.jsonl", size_bytes=90, modified_at_epoch_seconds=90),
+            NodeSystemLogEntry(relative_path="_machine/Audit.2.jsonl", size_bytes=60, modified_at_epoch_seconds=80),
+            NodeSystemLogEntry(relative_path="_user/System.log", size_bytes=80, modified_at_epoch_seconds=70),
+            NodeSystemLogEntry(relative_path="minecraft/server.log", size_bytes=40, modified_at_epoch_seconds=60),
+        )
+
+        machine_logs = ModWebService._machine_log_entries(entries)
+
+        self.assertEqual(
+            [(item.log_class, item.session_index, item.entry.relative_path) for item in machine_logs],
+            [
+                ("Audit", 2, "_machine/Audit.2.jsonl"),
+                ("System", 0, "_machine/System.jsonl"),
+                ("System", 1, "_machine/System.1.jsonl"),
+            ],
+        )
+        self.assertEqual(machine_logs[1].log_class_label, "System")
+        self.assertEqual(machine_logs[1].session_label, "Current session")
+        self.assertEqual(machine_logs[2].session_label, "Previous session · .1")
+
+    def test_machine_log_preview_renders_simplified_event_with_hover_context(self) -> None:
+        tail = NodeSystemLogTail(
+            node="erin",
+            entry=NodeSystemLogEntry(relative_path="_machine/System.jsonl", size_bytes=120, modified_at_epoch_seconds=100),
+            lines=(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-17T12:34:56.789Z",
+                        "level": "ERROR",
+                        "logger": "node_api",
+                        "message": "Unable to load <config>",
+                        "node_name": "erin",
+                        "source": {"file": "/srv/node_api.py", "line": 42, "function": "load_config"},
+                        "exception": "RuntimeError: missing config",
+                    }
+                ),
+                "partial machine event",
+            ),
+            truncated=False,
+        )
+
+        markup = ModWebService._machine_log_tail_markup(tail)
+
+        self.assertIn('class="mod-system-log-event mod-system-log-event-error"', markup)
+        self.assertIn('data-utc="2026-07-17T12:34:56.789Z" title="UTC: 2026-07-17 12:34:56.789 UTC">12:34:56</time>', markup)
+        self.assertIn("Unable to load &lt;config&gt;", markup)
+        self.assertIn("node_api.load_config:42", markup)
+        self.assertIn("Exception: RuntimeError: missing config", markup)
+        self.assertIn('class="mod-system-log-event mod-system-log-event-warn"', markup)
+        self.assertIn("partial machine event", markup)
+
+    def test_machine_log_time_localisation_formats_client_time_and_full_hover_context(self) -> None:
+        javascript = ModWebService._machine_log_local_time_javascript()
+
+        self.assertIn("hourCycle: 'h23'", javascript)
+        self.assertIn("timeZoneName: 'short'", javascript)
+        self.assertIn("Local: ${dateTimeFormatter.format(instant)}", javascript)
+        self.assertIn("UTC: ${instant.toISOString()}", javascript)
+
     def test_build_node_system_stats_formats_live_summary(self) -> None:
         stats = ModWebService._build_node_system_stats(
             NodeSystemSummary(
@@ -3946,7 +4071,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(links[0].label, "Portal")
         self.assertEqual(links[0].api_base_url, config.LOCAL_NODE_API_BASE_URL)
         self.assertEqual(links[0].latency_probe_url, f"{config.LOCAL_NODE_API_BASE_URL}/ping")
-        self.assertEqual(links[0].presence_stream_url, f"{config.LOCAL_NODE_API_BASE_URL}/presence/stream")
+        self.assertEqual(links[0].presence_stream_url, "/api/node/presence/stream")
 
     def test_portal_node_links_prefer_dev_cluster_env_over_stale_snapshots(self) -> None:
         stale_yuki_snapshot = config.BotMetadataSnapshot(
@@ -5859,6 +5984,10 @@ class ModWebTests(unittest.TestCase):
                 del value
                 return self
 
+            def props(self, value: str) -> "FakeContainer":
+                del value
+                return self
+
             def style(self, value: str) -> "FakeContainer":
                 del value
                 return self
@@ -5876,6 +6005,10 @@ class ModWebTests(unittest.TestCase):
                 return False
 
         class FakeUi:
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
             def column(self) -> FakeContainer:
                 return FakeContainer()
 
@@ -11319,8 +11452,11 @@ class ModWebTests(unittest.TestCase):
                 self.props["last-method"] = method_name
 
         class FakeDialog(FakeContainer):
+            def __init__(self) -> None:
+                self.opened = False
+
             def open(self) -> None:
-                return None
+                self.opened = True
 
             def close(self) -> None:
                 return None
@@ -12149,7 +12285,7 @@ class ModWebTests(unittest.TestCase):
             json_payload={},
         )
 
-    def test_render_saves_editor_uses_direct_upload_and_settings_search_styling(self) -> None:
+    def test_render_saves_editor_uses_direct_upload_with_relay_fallback_and_settings_search_styling(self) -> None:
         class FakeContainer:
             def __enter__(self) -> "FakeContainer":
                 return self
@@ -12195,8 +12331,9 @@ class ModWebTests(unittest.TestCase):
 
         class FakeUpload:
             def __init__(self) -> None:
-                self.props: dict[str, object] = {}
+                self.props: dict[str, object] = {"url": "/_nicegui/save-upload"}
                 self.handlers: dict[str, Callable[[], None]] = {}
+                self.reset_called = False
 
             def classes(self, value: str) -> "FakeUpload":
                 del value
@@ -12207,7 +12344,14 @@ class ModWebTests(unittest.TestCase):
                 self.props[f"{event_name}-args"] = args
                 return self
 
+            def reset(self) -> None:
+                self.reset_called = True
+
         class FakeButton:
+            def __init__(self, *, on_click: Callable[[], None] | None = None, text: str = "") -> None:
+                self.on_click = on_click
+                self.text = text
+
             def classes(self, value: str) -> "FakeButton":
                 del value
                 return self
@@ -12215,9 +12359,10 @@ class ModWebTests(unittest.TestCase):
         class FakeDialog(FakeContainer):
             def __init__(self) -> None:
                 self.closed = False
+                self.opened = False
 
             def open(self) -> None:
-                return None
+                self.opened = True
 
             def close(self) -> None:
                 self.closed = True
@@ -12238,6 +12383,8 @@ class ModWebTests(unittest.TestCase):
                 self.labels: list[FakeLabel] = []
                 self.selects: list[FakeInput] = []
                 self.notifications: list[tuple[str, str | None]] = []
+                self.buttons: list[FakeButton] = []
+                self.dialogs: list[FakeDialog] = []
                 self.reload_called = False
                 self.navigate = SimpleNamespace(reload=self._reload)
                 self.upload_control = FakeUpload()
@@ -12259,7 +12406,9 @@ class ModWebTests(unittest.TestCase):
                 return FakeContainer()
 
             def dialog(self) -> FakeDialog:
-                return FakeDialog()
+                dialog = FakeDialog()
+                self.dialogs.append(dialog)
+                return dialog
 
             def element(self, *args: object, **kwargs: object) -> FakeContainer:
                 del args, kwargs
@@ -12275,8 +12424,12 @@ class ModWebTests(unittest.TestCase):
                 return object()
 
             def button(self, *args: object, **kwargs: object) -> FakeButton:
-                del args, kwargs
-                return FakeButton()
+                button = FakeButton(
+                    text=str(args[0]) if args else "",
+                    on_click=cast(Callable[[], None] | None, kwargs.get("on_click")),
+                )
+                self.buttons.append(button)
+                return button
 
             def label(self, text: str) -> FakeLabel:
                 label = FakeLabel(text)
@@ -12405,7 +12558,6 @@ class ModWebTests(unittest.TestCase):
             ui.inputs[0].value = "missing"
             search_handler()
 
-            self.assertNotIn("on_upload", ui.upload_kwargs)
             self.assertEqual(
                 ui.upload_control.props["url"],
                 "https://node.example/api/node/apps/factorio/saves/upload",
@@ -12416,31 +12568,29 @@ class ModWebTests(unittest.TestCase):
             )
             self.assertEqual(
                 ui.upload_control.props["form-fields"],
-                [{"name": "root_id", "value": "worlds"}],
+                [
+                    {"name": "root_id", "value": "worlds"},
+                    {"name": "upload_transport", "value": "direct"},
+                ],
             )
-            self.assertEqual(
-                set(ui.upload_control.handlers),
-                {"start", "uploaded", "failed", "rejected"},
-            )
+            self.assertTrue(ui.upload_kwargs["multiple"])
+            self.assertEqual(ui.upload_kwargs["max_files"], 1)
+            self.assertTrue(callable(ui.upload_kwargs["on_multi_upload"]))
+            self.assertEqual(ui.upload_control.props["accept"], ".zip")
+            self.assertEqual(set(ui.upload_control.handlers), {"start", "uploaded", "failed", "rejected"})
 
-            ui.selects[0].value = "archives"
-            ui.selects[0].handlers["update:model-value"]()
-            self.assertEqual(
-                ui.upload_control.props["form-fields"],
-                [{"name": "root_id", "value": "archives"}],
-            )
+            upload_button = next(button for button in ui.buttons if button.text == "Upload Save")
+            if upload_button.on_click is None:
+                raise AssertionError("Upload Save button is missing its click handler")
+            upload_button.on_click()
+            self.assertTrue(ui.dialogs[0].opened)
 
-            ui.upload_control.handlers["start"]()
-            active_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
-            self.assertEqual(active_transfer.label, "Save upload")
-            self.assertIs(active_transfer.state, ModWebNotificationTrayItemState.ACTIVE)
             ui.upload_control.handlers["failed"]()
-            failed_transfer = service._backend.user_transfer_items(user_id=user.discord_id)[0]
-            self.assertIs(failed_transfer.state, ModWebNotificationTrayItemState.ERROR)
-            ui.upload_control.handlers["rejected"]()
-            self.assertEqual([tone for _message, tone in ui.notifications], ["info", "negative", "warning"])
-            self.assertIn("Upload acknowledged", ui.notifications[0][0])
-            self.assertIn("out of temporary space", ui.notifications[1][0])
+            self.assertEqual(ui.upload_control.props["url"], "/_nicegui/save-upload")
+            self.assertEqual(ui.upload_control.props["headers"], [])
+            self.assertEqual(ui.upload_control.props["form-fields"], [])
+            self.assertTrue(ui.upload_control.reset_called)
+            self.assertIn("portal fallback", ui.notifications[-1][0])
 
         self.assertIn("No saves match that search.", [label.text for label in ui.labels])
 
@@ -14566,6 +14716,44 @@ class ModWebTests(unittest.TestCase):
             ["extension", "description", "tune", "save", "terminal"],
         )
 
+    def test_page_tabs_include_factorio_generation_only_on_detail_pages(self) -> None:
+        service = ModWebService()
+        model = ModWebPageModel(
+            node_name="yuki",
+            app_name="factorio_alpha",
+            app_friendly="Factorio Alpha",
+            app_color_hex="#DC6B0F",
+            app_scope="factorio",
+            supports_configs=False,
+            config_read_level=Power_Level.sudo,
+            config_write_level=Power_Level.sudo,
+            supports_save_uploads=False,
+            supports_save_rename=False,
+            save_write_level=Power_Level.user,
+            configs=NodeConfigList(
+                app_name="factorio_alpha",
+                app_friendly="Factorio Alpha",
+                node="yuki",
+                configs=(),
+            ),
+            saves=None,
+            app_stats=None,
+            app_start_blocked=False,
+            settings=None,
+            console_actions=None,
+            mods=self._mod_list(),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+        )
+
+        tabs = service._page_tabs(model)
+        generation_tab = next(tab for tab in tabs if tab.tab_id == "generation")
+
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "generation"])
+        self.assertEqual(generation_tab.icon, "public")
+        self.assertFalse(generation_tab.show_on_app_card)
+
     def test_page_tabs_include_hidden_minecraft_recipes_when_enabled_kubejs_exists(self) -> None:
         service = ModWebService()
         model = ModWebPageModel(
@@ -15612,6 +15800,10 @@ class ModWebTests(unittest.TestCase):
                 del exc_type, exc, tb
 
             def classes(self, value: str) -> "FakeContextElement":
+                del value
+                return self
+
+            def props(self, value: str) -> "FakeContextElement":
                 del value
                 return self
 
@@ -17194,7 +17386,7 @@ class ModWebTests(unittest.TestCase):
         ):
             service._render_user_header(ui=cast(ModWebUi, cast(object, ui)), user=user)
 
-        self.assertIn("Alias", [button.text for button in ui.buttons])
+        self.assertIn("Aliases", [button.text for button in ui.buttons])
         self.assertIn("Discord", [button.text for button in ui.buttons])
         self.assertEqual(
             [control.value for control in ui.inputs],
@@ -17309,7 +17501,7 @@ class ModWebTests(unittest.TestCase):
         ):
             service._render_user_header(ui=cast(ModWebUi, cast(object, ui)), user=user)
 
-        self.assertIn("Alias", [button.text for button in ui.buttons])
+        self.assertIn("Aliases", [button.text for button in ui.buttons])
         self.assertIn("Log out", [button.text for button in ui.buttons])
 
     def test_render_user_header_menu_branch_includes_alias_item(self) -> None:
@@ -17349,8 +17541,11 @@ class ModWebTests(unittest.TestCase):
                 return False
 
         class FakeDialog(FakeContainer):
+            def __init__(self) -> None:
+                self.opened = False
+
             def open(self) -> None:
-                return None
+                self.opened = True
 
             def close(self) -> None:
                 return None
@@ -17358,11 +17553,14 @@ class ModWebTests(unittest.TestCase):
         class FakeButton(FakeContainer):
             def __init__(self, text: str) -> None:
                 self.text = text
+                self.on_click: Callable[[object | None], None] | None = None
 
         class FakeUi:
             def __init__(self) -> None:
                 self.menu_items: list[FakeButton] = []
-                self.navigate = SimpleNamespace(reload=lambda: None, to=lambda *_args, **_kwargs: None)
+                self.dialogs: list[FakeDialog] = []
+                self.navigated_to: list[str] = []
+                self.navigate = SimpleNamespace(reload=lambda: None, to=self.navigated_to.append)
 
             def row(self) -> FakeContainer:
                 return FakeContainer()
@@ -17374,7 +17572,9 @@ class ModWebTests(unittest.TestCase):
                 return FakeContainer()
 
             def dialog(self) -> FakeDialog:
-                return FakeDialog()
+                dialog = FakeDialog()
+                self.dialogs.append(dialog)
+                return dialog
 
             def menu(self) -> FakeContainer:
                 return FakeContainer()
@@ -17396,8 +17596,8 @@ class ModWebTests(unittest.TestCase):
                 return FakeButton("")
 
             def menu_item(self, text: str, **kwargs: object) -> FakeButton:
-                del kwargs
                 item = FakeButton(text)
+                item.on_click = cast(Callable[[object | None], None], kwargs["on_click"])
                 self.menu_items.append(item)
                 return item
 
@@ -17413,13 +17613,25 @@ class ModWebTests(unittest.TestCase):
             patch.object(service, "_user_can_manage_discord_settings", return_value=False),
             patch.object(service, "_user_can_use_fake_chat_preview", return_value=False),
             patch.object(service, "_user_has_level", side_effect=lambda _user, level: level is Power_Level.sudo),
+            patch.object(service, "_web_display_name", return_value="Finch"),
         ):
             service._render_user_utility_launcher(ui=cast(ModWebUi, cast(object, ui)), user=user)
 
         self.assertEqual(
             [item.text for item in ui.menu_items],
-            ["Sim Upload", "Sim Download", "Clear Transfers", "Alias", "Log out"],
+            ["Sim Upload", "Sim Download", "Clear Transfers", "Settings", "Aliases", "Log out"],
         )
+        settings_item = next(item for item in ui.menu_items if item.text == "Settings")
+        if settings_item.on_click is None:
+            raise AssertionError("Settings menu item is missing a click handler.")
+        with patch.object(service, "_web_display_name", return_value="Finch"):
+            settings_item.on_click(None)
+        self.assertTrue(ui.dialogs[0].opened)
+        aliases_item = next(item for item in ui.menu_items if item.text == "Aliases")
+        if aliases_item.on_click is None:
+            raise AssertionError("Aliases menu item is missing a click handler.")
+        aliases_item.on_click(None)
+        self.assertEqual(ui.navigated_to, ["/aliases"])
 
     def test_alias_target_label_does_not_duplicate_unknown_discord_id(self) -> None:
         cache = object.__new__(config.Name_Cache)
@@ -17430,6 +17642,14 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(label, "42")
 
+    def test_manual_alias_target_user_id_requires_discord_snowflake(self) -> None:
+        self.assertEqual(ModWebService._parse_manual_alias_target_user_id("123456789012345678"), 123456789012345678)
+
+        with self.assertRaisesRegex(ValueError, "ASCII digits"):
+            ModWebService._parse_manual_alias_target_user_id("not-a-user")
+        with self.assertRaisesRegex(ValueError, "valid positive snowflake"):
+            ModWebService._parse_manual_alias_target_user_id(str(1 << 63))
+
     def test_alias_known_scopes_includes_configured_app_scopes_without_manager(self) -> None:
         service = ModWebService()
 
@@ -17437,7 +17657,7 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(scopes, tuple(sorted((scope.value for scope in config.AppScopes), key=str.casefold)))
 
-    def test_persist_alias_dialog_draft_saves_factorio_and_minecraft_aliases(self) -> None:
+    def test_persist_alias_draft_saves_factorio_and_minecraft_aliases(self) -> None:
         with TemporaryDirectory() as tmp:
             cache = object.__new__(config.Name_Cache)
             cache.pointer = Path(tmp) / "discord_names.json"
@@ -17459,7 +17679,7 @@ class ModWebTests(unittest.TestCase):
             )
 
             with patch.object(ModWebService, "_sync_name_cache_with_authority_if_remote") as sync_mock:
-                changed_fields = ModWebService._persist_alias_dialog_draft(
+                changed_fields = ModWebService._persist_alias_draft(
                     name_cache=cache,
                     target_user_id=42,
                     draft=draft,
@@ -17660,11 +17880,14 @@ class ModWebTests(unittest.TestCase):
 
         with patch.object(config, "Name_Cache", return_value=cache):
             with patch.object(service, "_user_has_level", return_value=False):
-                open_panel = service._build_alias_panel(ui=cast(ModWebUi, cast(object, ui)), user=user)
-                open_panel()
+                service._render_alias_page_editor(
+                    ui=cast(ModWebUi, cast(object, ui)),
+                    user=user,
+                    selected_user_id=None,
+                )
 
         self.assertEqual(len(ui.selects), 1)
-        self.assertEqual(ui.selects[0].label, "User")
+        self.assertEqual(ui.selects[0].label, "Editing User")
         self.assertTrue(ui.selects[0].disabled)
         self.assertEqual(ui.selects[0].value, "42")
 
@@ -17794,11 +18017,14 @@ class ModWebTests(unittest.TestCase):
 
         with patch.object(config, "Name_Cache", return_value=cache):
             with patch.object(service, "_user_has_level", side_effect=lambda _user, level: level is Power_Level.sudo):
-                open_panel = service._build_alias_panel(ui=cast(ModWebUi, cast(object, ui)), user=user)
-                open_panel()
+                service._render_alias_page_editor(
+                    ui=cast(ModWebUi, cast(object, ui)),
+                    user=user,
+                    selected_user_id=None,
+                )
 
         self.assertEqual(len(ui.selects), 1)
-        self.assertEqual(ui.selects[0].label, "User")
+        self.assertEqual(ui.selects[0].label, "Editing User")
         self.assertFalse(ui.selects[0].disabled)
         self.assertEqual(ui.selects[0].value, "42")
         self.assertEqual(

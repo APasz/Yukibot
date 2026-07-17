@@ -42,6 +42,9 @@ from .runtime_imports import (
     NodeSystemAction,
     NodeSystemCapabilities,
     NodeSystemHistory,
+    NodeSystemLogCatalog,
+    NodeSystemLogEntry,
+    NodeSystemLogTail,
     NodeSystemSample,
     NodeSystemSummary,
     Power_Level,
@@ -49,14 +52,17 @@ from .runtime_imports import (
     RestartTarget,
     Select,
     Tooltip,
+    Utilities,
     app_scope_from_name,
     asyncio,
     cast,
     config,
     dataclass,
     escape,
+    json,
     mod_web_badge_class,
     quote,
+    re,
     replace,
 )
 from .utils import _format_player_capacity, _format_uptime_seconds
@@ -82,6 +88,56 @@ _RESTART_SCHEDULE_FIELD_PROPS = "filled square dense hide-bottom-space color=acc
 _SYSTEM_TREND_WINDOW_SECONDS = 10 * 60
 _SYSTEM_WARNING_PERCENT = 75
 _SYSTEM_CRITICAL_PERCENT = 90
+_NODE_SYSTEM_LOG_TAIL_LINES = 200
+_MACHINE_LOG_PATH_PATTERN = re.compile(r"^_machine/(?P<log_class>[^/]+?)(?:\.(?P<session_index>[1-9][0-9]*))?\.jsonl$")
+
+
+@dataclass(frozen=True, slots=True)
+class _ModWebMachineLogEntry:
+    """A structured machine-log file, grouped by its log class and session."""
+
+    log_class: str
+    session_index: int
+    entry: NodeSystemLogEntry
+
+    @property
+    def log_class_label(self) -> str:
+        return self.log_class.replace("_", " ").title()
+
+    @property
+    def session_label(self) -> str:
+        return "Current session" if self.session_index == 0 else f"Previous session · .{self.session_index}"
+
+
+class _ModWebNodeSystemTab(Enum):
+    STATS = "stats"
+    SYSTEM = "system"
+    PROPERTIES = "properties"
+    LOGS = "logs"
+
+    @property
+    def label(self) -> str:
+        match self:
+            case _ModWebNodeSystemTab.STATS:
+                return "Stats"
+            case _ModWebNodeSystemTab.SYSTEM:
+                return "System"
+            case _ModWebNodeSystemTab.PROPERTIES:
+                return "Properties"
+            case _ModWebNodeSystemTab.LOGS:
+                return "Logs"
+
+    @property
+    def icon(self) -> str:
+        match self:
+            case _ModWebNodeSystemTab.STATS:
+                return "bar_chart"
+            case _ModWebNodeSystemTab.SYSTEM:
+                return "restart_alt"
+            case _ModWebNodeSystemTab.PROPERTIES:
+                return "tune"
+            case _ModWebNodeSystemTab.LOGS:
+                return "article"
 
 
 class _RestartWeekday(Enum):
@@ -375,6 +431,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         show_api_actions: bool,
     ) -> None:
         self._apply_theme(ui=ui)
+        ModWebUiHelpersMixin._render_skip_link(ui=ui)
         simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
         simulated_down_keys = {node_name.casefold() for node_name in simulated_down_node_names}
         summary_nodes = tuple(
@@ -447,7 +504,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             )
 
         with ui.column().classes("w-full gap-6 px-4 py-8 md:px-8"):
-            with ui.column().classes("mod-page w-full gap-6"):
+            with ui.column().classes("mod-page w-full gap-6").props("id=mod-main-content role=main tabindex=-1"):
                 self._render_user_header(ui=ui, user=user)
                 hero_card: Card
                 with (hero_card := ui.card()).classes(f"{self._hero_card_classes()} mod-home-hero"):
@@ -919,6 +976,27 @@ class ModWebHomeMixin(ModWebServiceSupport):
         ) or _ModWebBadgeSpec(text="Unavailable", tone="grey", icon="memory", tooltip_text="RAM")
         return (system_uptime, bot_uptime, cpu_points, ram_points)
 
+    def _node_system_current_usage_badges(
+        self,
+        system_summary: NodeSystemSummary,
+    ) -> tuple[_ModWebBadgeSpec, ...]:
+        cpu_value, cpu_tone = self._system_cpu_entry(system_summary)
+        ram_value, ram_tone = self._system_ram_percent_entry(system_summary)
+        return (
+            _ModWebBadgeSpec(
+                text=f"CPU {cpu_value}",
+                tone=cpu_tone,
+                icon="speed",
+                tooltip_text="Overall CPU usage.",
+            ),
+            _ModWebBadgeSpec(
+                text=f"RAM {ram_value}",
+                tone=ram_tone,
+                icon="memory",
+                tooltip_text="Overall RAM usage.",
+            ),
+        )
+
     @staticmethod
     def _node_system_load_trend_badges(history: NodeSystemHistory) -> tuple[_ModWebBadgeSpec, ...]:
         if len(history.samples) < 2:
@@ -1296,6 +1374,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         initial_restart_schedules: NodeRestartScheduleState | None,
         initial_restart_state: NodeRestartState | None,
         initial_system_capabilities: NodeSystemCapabilities | None,
+        initial_system_logs: NodeSystemLogCatalog | None,
         initial_node_capacity: config.NodeCapacityProfile | None,
         initial_node_font_sources: config.NodeFontSourceSettings | None,
         initial_node_disk_settings: NodeDiskManagementState | None,
@@ -1309,6 +1388,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
         self._apply_theme(ui=ui)
         current_app_entries = initial_app_entries
         current_system_summary = initial_system_summary
+        current_history = self._append_node_system_history(
+            initial_system_history,
+            initial_system_summary,
+        )
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_user_header(ui=ui, user=user)
             with ui.card().classes(self._hero_card_classes()):
@@ -1362,75 +1445,219 @@ class ModWebHomeMixin(ModWebServiceSupport):
                             current_scope_badges = self._node_system_scope_badges(current_app_entries)
                             _render_system_scope_badges(current_scope_badges)
 
-                    apply_system_stats: Callable[[tuple[ModWebTitleStat, ...]], None] = (
-                        self._render_live_title_stats(
-                            ui=ui,
-                            initial_stats=self._build_node_system_stats(initial_system_summary),
-                        )
-                    )
+                    current_usage_badges = self._node_system_current_usage_badges(current_system_summary)
+                    load_trend_badges = self._node_system_load_trend_badges(current_history)
+                    warning_badges = self._node_system_warning_badges(current_system_summary)
+                    current_usage_badge_bindings: list[tuple[Element, Label]] = []
+                    load_trend_badge_bindings: list[tuple[Element, Label]] = []
+                    warning_badge_bindings: list[tuple[Element, Label]] = []
 
-            current_history = self._append_node_system_history(
-                initial_system_history,
-                initial_system_summary,
-            )
-            with ui.card().classes("mod-card w-full"):
-                with ui.column().classes("w-full gap-3 p-4"):
-                    with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
-                        with ui.column().classes("gap-0"):
-                            ui.label("Utilisation history").classes("text-lg font-black mod-title-small")
-                            ui.label("One-hour rolling window · streamed live").classes("mod-subtitle text-xs")
-                        self._badge(
+                    def _render_live_signal_badge(badge: _ModWebBadgeSpec) -> tuple[Element, Label]:
+                        if badge.icon is None:
+                            badge_label = self._badge_spec(ui=ui, badge=badge)
+                            return badge_label, cast(Label, badge_label)
+                        return ModWebUiHelpersMixin._badge_icon_parts(
                             ui=ui,
-                            text=f"{initial_system_history.sample_interval_seconds}s samples",
-                            tone="grey",
+                            text=badge.text,
+                            tone=badge.tone,
+                            icon=badge.icon,
+                            tooltip_text=badge.tooltip_text,
                         )
-                    chart: Html = ui.html(self._node_system_history_svg(current_history, animate=True))
-                    chart.classes("mod-system-chart-shell w-full")
 
-            @ui.refreshable
-            def _render_system_signals(
-                system_summary: NodeSystemSummary,
-                history: NodeSystemHistory,
-            ) -> None:
-                with ui.card().classes("mod-card w-full"):
-                    with ui.column().classes("w-full gap-3 p-4"):
-                        ui.label("Operational signals").classes("text-lg font-black mod-title-small")
+                    def _apply_live_signal_badges(
+                        *,
+                        previous_badges: tuple[_ModWebBadgeSpec, ...],
+                        next_badges: tuple[_ModWebBadgeSpec, ...],
+                        bindings: list[tuple[Element, Label]],
+                        refresh_badges: Callable[[tuple[_ModWebBadgeSpec, ...]], None],
+                    ) -> tuple[_ModWebBadgeSpec, ...]:
+                        if next_badges == previous_badges:
+                            return previous_badges
+                        previous_structure = tuple(badge.icon is not None for badge in previous_badges)
+                        next_structure = tuple(badge.icon is not None for badge in next_badges)
+                        if next_structure != previous_structure:
+                            refresh_badges(next_badges)
+                            return next_badges
+                        for (badge_element, value_label), previous_badge, next_badge in zip(
+                            bindings,
+                            previous_badges,
+                            next_badges,
+                            strict=True,
+                        ):
+                            if previous_badge.text != next_badge.text:
+                                value_label.set_text(next_badge.text)
+                                self._pulse_live_value(value_label)
+                            if previous_badge.tone != next_badge.tone:
+                                extra_classes = "mod-badge-icon-label" if next_badge.icon is not None else ""
+                                badge_element.classes(
+                                    replace=self._badge_class_name(
+                                        tone=next_badge.tone,
+                                        extra_classes=extra_classes,
+                                    )
+                                )
+                        return next_badges
+
+                    with ui.column().classes("mod-system-operational-signals w-full gap-2"):
                         with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                            ui.label("Current usage").classes("mod-subtitle text-xs shrink-0")
+
+                            @ui.refreshable
+                            def _render_current_usage_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
+                                current_usage_badge_bindings.clear()
+                                for badge in badges:
+                                    current_usage_badge_bindings.append(_render_live_signal_badge(badge))
+
+                            _render_current_usage_badges(current_usage_badges)
                             self._badge_spec(
                                 ui=ui,
                                 badge=self._node_network_health_badge(initial_node_status),
                             )
-                        ui.label("10-minute load trend").classes("mod-subtitle text-xs")
                         with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                            for badge in self._node_system_load_trend_badges(history):
-                                self._badge_spec(ui=ui, badge=badge)
-                        ui.label("Warnings").classes("mod-subtitle text-xs")
+                            ui.label("10-minute load trend").classes("mod-subtitle text-xs shrink-0")
+
+                            @ui.refreshable
+                            def _render_load_trend_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
+                                load_trend_badge_bindings.clear()
+                                for badge in badges:
+                                    load_trend_badge_bindings.append(_render_live_signal_badge(badge))
+
+                            _render_load_trend_badges(load_trend_badges)
                         with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                            for badge in self._node_system_warning_badges(system_summary):
-                                self._badge_spec(ui=ui, badge=badge)
+                            ui.label("Warnings").classes("mod-subtitle text-xs shrink-0")
 
-            _render_system_signals(current_system_summary, current_history)
+                            @ui.refreshable
+                            def _render_warning_badges(badges: tuple[_ModWebBadgeSpec, ...]) -> None:
+                                warning_badge_bindings.clear()
+                                for badge in badges:
+                                    warning_badge_bindings.append(_render_live_signal_badge(badge))
 
-            can_manage_node_configuration = self._user_has_level(user, Power_Level.root)
-            self._render_node_system_properties(
-                ui=ui,
-                node=node,
-                user=user,
-                can_manage_node_configuration=can_manage_node_configuration,
-                initial_capacity=initial_node_capacity,
-                initial_font_sources=initial_node_font_sources,
-                initial_disk_settings=initial_node_disk_settings,
-                current_url=current_url,
-                simulated_down_node_names=simulated_down_node_names,
-            )
-            self._render_node_system_actions(
-                ui=ui,
-                node=node,
-                user=user,
-                initial_restart_schedules=initial_restart_schedules,
-                initial_restart_state=initial_restart_state,
-                initial_system_capabilities=initial_system_capabilities,
-            )
+                            _render_warning_badges(warning_badges)
+
+            with ui.column().classes("mod-section-layout w-full"):
+                with ui.element("div").classes("mod-section-tabs-shell"):
+                    selected_system_tab = _ModWebNodeSystemTab.STATS
+                    system_tab_buttons: dict[_ModWebNodeSystemTab, Element] = {}
+                    system_tab_panels: dict[_ModWebNodeSystemTab, Element] = {}
+
+                    def _select_system_tab(tab: _ModWebNodeSystemTab) -> None:
+                        nonlocal selected_system_tab
+                        selected_system_tab = tab
+                        for candidate in _ModWebNodeSystemTab:
+                            is_selected = candidate is selected_system_tab
+                            system_tab_buttons[candidate].classes(
+                                replace=(
+                                    "mod-system-native-tab mod-system-native-tab-active"
+                                    if is_selected
+                                    else "mod-system-native-tab"
+                                )
+                            )
+                            system_tab_buttons[candidate].props(f"aria-selected={'true' if is_selected else 'false'}")
+                            system_tab_panels[candidate].set_visibility(is_selected)
+
+                    with ui.element("div").classes("mod-system-native-tabs").props(
+                        "role=tablist aria-label=Node system sections"
+                    ):
+                        for tab in _ModWebNodeSystemTab:
+                            tab_button = (
+                                ui.element("button")
+                                .classes(
+                                    "mod-system-native-tab mod-system-native-tab-active"
+                                    if tab is selected_system_tab
+                                    else "mod-system-native-tab"
+                                )
+                                .props(
+                                    f"type=button role=tab aria-selected={'true' if tab is selected_system_tab else 'false'}"
+                                )
+                            )
+                            with tab_button:
+                                ui.icon(tab.icon).classes("mod-system-native-tab-icon")
+                                ui.label(tab.label).classes("mod-system-native-tab-label")
+                            tab_button.on("click", lambda _, target_tab=tab: _select_system_tab(target_tab))
+                            system_tab_buttons[tab] = tab_button
+
+                with ui.element("div").classes("mod-system-native-tab-content w-full"):
+                    stats_panel = ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
+                    system_tab_panels[_ModWebNodeSystemTab.STATS] = stats_panel
+                    with stats_panel:
+                        with ui.column().classes("w-full gap-6"):
+                            apply_system_stats: Callable[[tuple[ModWebTitleStat, ...]], None] = (
+                                self._render_live_title_stats(
+                                    ui=ui,
+                                    initial_stats=self._build_node_system_stats(initial_system_summary),
+                                )
+                            )
+                            with ui.card().classes("mod-card w-full"):
+                                with ui.column().classes("w-full gap-3 p-4"):
+                                    with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+                                        with ui.column().classes("gap-0"):
+                                            ui.label("Utilisation history").classes(
+                                                "text-lg font-black mod-title-small"
+                                            )
+                                            ui.label("One-hour rolling window · streamed live").classes(
+                                                "mod-subtitle text-xs"
+                                            )
+                                        self._badge(
+                                            ui=ui,
+                                            text=f"{initial_system_history.sample_interval_seconds}s samples",
+                                            tone="grey",
+                                        )
+                                    chart: Html = ui.html(self._node_system_history_svg(current_history, animate=True))
+                                    chart.classes("mod-system-chart-shell w-full")
+                            with ui.card().classes("mod-card w-full"):
+                                with ui.column().classes("w-full gap-3 p-4"):
+                                    ui.label("Network").classes("text-lg font-black mod-title-small")
+                                    ui.label("Remote node API connectivity from this dashboard.").classes(
+                                        "mod-subtitle text-xs"
+                                    )
+                                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                        self._badge_spec(
+                                            ui=ui,
+                                            badge=self._node_network_health_badge(initial_node_status),
+                                        )
+
+                    system_panel = (
+                        ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
+                    )
+                    system_tab_panels[_ModWebNodeSystemTab.SYSTEM] = system_panel
+                    with system_panel:
+                        self._render_node_system_actions(
+                            ui=ui,
+                            node=node,
+                            user=user,
+                            initial_restart_schedules=initial_restart_schedules,
+                            initial_restart_state=initial_restart_state,
+                            initial_system_capabilities=initial_system_capabilities,
+                        )
+
+                    properties_panel = (
+                        ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
+                    )
+                    system_tab_panels[_ModWebNodeSystemTab.PROPERTIES] = properties_panel
+                    with properties_panel:
+                        self._render_node_system_properties(
+                            ui=ui,
+                            node=node,
+                            user=user,
+                            can_manage_node_configuration=self._user_has_level(user, Power_Level.root),
+                            initial_capacity=initial_node_capacity,
+                            initial_font_sources=initial_node_font_sources,
+                            initial_disk_settings=initial_node_disk_settings,
+                            current_url=current_url,
+                            simulated_down_node_names=simulated_down_node_names,
+                        )
+
+                    logs_panel = ui.element("section").classes("mod-system-native-panel w-full").props("role=tabpanel")
+                    system_tab_panels[_ModWebNodeSystemTab.LOGS] = logs_panel
+                    with logs_panel:
+                        self._render_node_system_logs(
+                            ui=ui,
+                            node=node,
+                            user=user,
+                            initial_catalog=initial_system_logs,
+                        )
+
+                    for tab, panel in system_tab_panels.items():
+                        panel.set_visibility(tab is selected_system_tab)
 
             page_closed = False
             loop: AbstractEventLoop = asyncio.get_running_loop()
@@ -1438,6 +1665,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             def _apply_update(event: NodeStateStreamEvent) -> None:
                 nonlocal current_app_entries, current_history, current_scope_badges
                 nonlocal current_system_summary, operational_badge_specs
+                nonlocal current_usage_badges, load_trend_badges, warning_badges
                 if page_closed:
                     return
                 if event.app_entries is not None:
@@ -1474,7 +1702,24 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 if next_history != current_history:
                     current_history = next_history
                     chart.set_content(self._node_system_history_svg(current_history))
-                _render_system_signals.refresh(current_system_summary, current_history)
+                current_usage_badges = _apply_live_signal_badges(
+                    previous_badges=current_usage_badges,
+                    next_badges=self._node_system_current_usage_badges(current_system_summary),
+                    bindings=current_usage_badge_bindings,
+                    refresh_badges=_render_current_usage_badges.refresh,
+                )
+                load_trend_badges = _apply_live_signal_badges(
+                    previous_badges=load_trend_badges,
+                    next_badges=self._node_system_load_trend_badges(current_history),
+                    bindings=load_trend_badge_bindings,
+                    refresh_badges=_render_load_trend_badges.refresh,
+                )
+                warning_badges = _apply_live_signal_badges(
+                    previous_badges=warning_badges,
+                    next_badges=self._node_system_warning_badges(current_system_summary),
+                    bindings=warning_badge_bindings,
+                    refresh_badges=_render_warning_badges.refresh,
+                )
 
             def _handle_update(event: NodeStateStreamEvent) -> None:
                 loop.call_soon_threadsafe(lambda: _apply_update(event))
@@ -1487,6 +1732,250 @@ class ModWebHomeMixin(ModWebServiceSupport):
                 unsubscribe()
 
             self._register_client_cleanup(ui=ui, cleanup=_cleanup_live_updates)
+
+    def _render_node_system_logs(
+        self,
+        *,
+        ui: ModWebUi,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+        initial_catalog: NodeSystemLogCatalog | None,
+    ) -> None:
+        with ui.card().classes("mod-card w-full"):
+            with ui.column().classes("w-full gap-4 p-4"):
+                if initial_catalog is None:
+                    ui.label("Logs are unavailable. Reload the page to try again.").classes("mod-subtitle text-sm")
+                    return
+                machine_logs = self._machine_log_entries(initial_catalog.entries)
+                if not machine_logs:
+                    ui.label("No structured machine logs are available on this node.").classes("mod-subtitle text-sm")
+                    return
+
+                logs_by_class: dict[str, dict[int, _ModWebMachineLogEntry]] = {}
+                for machine_log in machine_logs:
+                    logs_by_class.setdefault(machine_log.log_class, {})[machine_log.session_index] = machine_log
+                log_class_options = {
+                    log_class: logs_by_class[log_class][min(logs_by_class[log_class])].log_class_label
+                    for log_class in logs_by_class
+                }
+                selected_log_class = "System" if "System" in logs_by_class else next(iter(logs_by_class))
+
+                def _session_options(log_class: str) -> dict[str, str]:
+                    return {
+                        str(session_index): machine_log.session_label
+                        for session_index, machine_log in sorted(logs_by_class[log_class].items())
+                    }
+
+                initial_session_index = min(logs_by_class[selected_log_class])
+                with ui.row().classes("mod-system-log-selectors w-full gap-3"):
+                    log_class_select = (
+                        ui.select(
+                            options=log_class_options,
+                            value=selected_log_class,
+                            label="Log class",
+                        )
+                        .props(
+                            "filled square dense hide-bottom-space color=accent options-dark "
+                            "popup-content-class=mod-setting-menu"
+                        )
+                        .classes("mod-app-details-field mod-system-log-selector")
+                    )
+                    session_select = (
+                        ui.select(
+                            options=_session_options(selected_log_class),
+                            value=str(initial_session_index),
+                            label="Session",
+                        )
+                        .props(
+                            "filled square dense hide-bottom-space color=accent options-dark "
+                            "popup-content-class=mod-setting-menu"
+                        )
+                        .classes("mod-app-details-field mod-system-log-selector")
+                    )
+                    load_button = ui.button("Load Preview").classes("mod-list-button mod-system-log-load-button")
+                log_feed = cast(
+                    Html,
+                    ui.html(
+                        '<div class="mod-system-log-output mod-system-log-empty">Log preview has not been loaded.</div>'
+                    ).classes("w-full"),
+                )
+                status_label = ui.label("Load a log preview to see its event count and size.").classes(
+                    "mod-subtitle text-xs"
+                )
+
+                def _log_tail_markup(tail: NodeSystemLogTail) -> str:
+                    return self._machine_log_tail_markup(tail)
+
+                async def _load_selected_log(_: object | None = None) -> None:
+                    log_class = _value_as_text(log_class_select).strip()
+                    session_text = _value_as_text(session_select).strip()
+                    try:
+                        session_index = int(session_text)
+                    except ValueError:
+                        ui.notify("Choose a log session first.", type="warning")
+                        return
+                    selected_log = logs_by_class.get(log_class, {}).get(session_index)
+                    if selected_log is None:
+                        ui.notify("That log selection is no longer available.", type="warning")
+                        return
+                    load_button.disable()
+                    try:
+                        tail = await self._remote_node_system_log_tail_async(
+                            node=node,
+                            log_path=selected_log.entry.relative_path,
+                            max_lines=_NODE_SYSTEM_LOG_TAIL_LINES,
+                            user=user,
+                        )
+                    except Exception as xcp:
+                        log.warning(
+                            "Node system log read failed: node=%s log=%s error=%s",
+                            node.node_name,
+                            selected_log.entry.relative_path,
+                            xcp,
+                        )
+                        status_label.set_text(f"Unable to load {selected_log.log_class_label}: {xcp}")
+                        ui.notify(f"Unable to load log: {xcp}", type="negative")
+                        load_button.enable()
+                        return
+                    log_feed.set_content(_log_tail_markup(tail))
+                    ui.run_javascript(self._machine_log_local_time_javascript())
+                    status_label.set_text(
+                        f"{len(tail.lines)} events · {Utilities.humanise_bytes(tail.entry.size_bytes, precision=1)}"
+                    )
+                    load_button.enable()
+
+                async def _log_class_changed(_: object | None = None) -> None:
+                    log_class = _value_as_text(log_class_select).strip()
+                    if log_class not in logs_by_class:
+                        return
+                    preferred_session_index = min(logs_by_class[log_class])
+                    session_select.set_options(_session_options(log_class), value=str(preferred_session_index))
+                    await _load_selected_log()
+
+                log_class_select.on("update:model-value", _log_class_changed)
+                session_select.on("update:model-value", _load_selected_log)
+                load_button.on("click", _load_selected_log)
+
+    @staticmethod
+    def _machine_log_entries(entries: tuple[NodeSystemLogEntry, ...]) -> tuple[_ModWebMachineLogEntry, ...]:
+        machine_logs: list[_ModWebMachineLogEntry] = []
+        for entry in entries:
+            match = _MACHINE_LOG_PATH_PATTERN.fullmatch(entry.relative_path)
+            if match is None:
+                continue
+            session_index_text = match.group("session_index")
+            machine_logs.append(
+                _ModWebMachineLogEntry(
+                    log_class=match.group("log_class"),
+                    session_index=0 if session_index_text is None else int(session_index_text),
+                    entry=entry,
+                )
+            )
+        return tuple(sorted(machine_logs, key=lambda item: (item.log_class.casefold(), item.session_index)))
+
+    @staticmethod
+    def _machine_log_tail_markup(tail: NodeSystemLogTail) -> str:
+        if not tail.lines:
+            return '<div class="mod-system-log-output mod-system-log-empty">This log session is empty.</div>'
+        return (
+            '<div class="mod-system-log-output">'
+            + "".join(ModWebHomeMixin._machine_log_event_markup(line) for line in tail.lines)
+            + "</div>"
+        )
+
+    @staticmethod
+    def _machine_log_event_markup(line: str) -> str:
+        try:
+            raw_event = json.loads(line)
+        except json.JSONDecodeError:
+            raw_event = None
+        if not isinstance(raw_event, dict):
+            return (
+                '<article class="mod-system-log-event mod-system-log-event-warn" '
+                'title="This machine-log line was not valid JSON.">'
+                '<span class="mod-system-log-level">RAW</span>'
+                f'<div class="mod-system-log-message">{escape(line)}</div>'
+                "</article>"
+            )
+
+        level = raw_event.get("level")
+        level_text = level.upper() if isinstance(level, str) and level else "INFO"
+        timestamp = raw_event.get("timestamp")
+        timestamp_text = (
+            timestamp.replace("T", " ").replace("Z", " UTC") if isinstance(timestamp, str) else "Unknown time"
+        )
+        time_match = (
+            re.search(r"T(?P<time>[0-9]{2}:[0-9]{2}:[0-9]{2})", timestamp)
+            if isinstance(timestamp, str)
+            else None
+        )
+        time_text = time_match.group("time") if time_match is not None else "--:--:--"
+        logger_name = raw_event.get("logger")
+        logger_text = logger_name if isinstance(logger_name, str) and logger_name else "Unknown logger"
+        message = raw_event.get("message")
+        message_text = message if isinstance(message, str) and message else "No message"
+        source = raw_event.get("source")
+        source_detail_text = ""
+        source_text = logger_text
+        if isinstance(source, dict):
+            source_file = source.get("file")
+            source_line = source.get("line")
+            source_function = source.get("function")
+            source_parts = [
+                value
+                for value in (source_function, source_file, str(source_line) if isinstance(source_line, int) else None)
+                if isinstance(value, str) and value
+            ]
+            source_detail_text = " · ".join(source_parts)
+            if isinstance(source_function, str) and source_function:
+                source_text = f"{logger_text}.{source_function}"
+            if isinstance(source_line, int):
+                source_text = f"{source_text}:{source_line}"
+        context = [f"Level: {level_text}", f"Logger: {logger_text}", f"Timestamp: {timestamp_text}"]
+        if source_detail_text:
+            context.append(f"Source: {source_detail_text}")
+        node_name = raw_event.get("node_name")
+        if isinstance(node_name, str) and node_name:
+            context.append(f"Node: {node_name}")
+        exception = raw_event.get("exception")
+        if isinstance(exception, str) and exception:
+            context.append(f"Exception: {exception}")
+        event_tone = "error" if level_text in {"ERROR", "CRITICAL"} else "warn" if level_text == "WARNING" else "info"
+        return (
+            f'<article class="mod-system-log-event mod-system-log-event-{event_tone}" '
+            f'title="{escape(chr(10).join(context))}">'
+            '<div class="mod-system-log-meta">'
+            f'<span class="mod-system-log-level">{escape(level_text)}</span>'
+            f'<time class="mod-system-log-time" data-utc="{escape(timestamp if isinstance(timestamp, str) else '')}" '
+            f'title="UTC: {escape(timestamp_text)}">{escape(time_text)}</time>'
+            "</div>"
+            '<div class="mod-system-log-event-body">'
+            f'<div class="mod-system-log-message">{escape(message_text)}</div>'
+            f'<div class="mod-system-log-context">{escape(source_text)}</div>'
+            "</div>"
+            "</article>"
+        )
+
+    @staticmethod
+    def _machine_log_local_time_javascript() -> str:
+        return """
+            (() => {
+                const timeFormatter = new Intl.DateTimeFormat(undefined, {
+                    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+                });
+                const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+                    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                    timeZoneName: 'short', hourCycle: 'h23',
+                });
+                document.querySelectorAll('.mod-system-log-time[data-utc]').forEach((element) => {
+                    const instant = new Date(element.dataset.utc);
+                    if (Number.isNaN(instant.getTime())) return;
+                    element.textContent = timeFormatter.format(instant);
+                    element.title = `Local: ${dateTimeFormatter.format(instant)}\\nUTC: ${instant.toISOString()}`;
+                });
+            })();
+        """
 
     @staticmethod
     def _parse_required_non_negative_int(*, raw_value: str, field_label: str) -> int:

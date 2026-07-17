@@ -1251,6 +1251,52 @@ class SettingTests(unittest.TestCase):
             self.assertIs(saved["non_blocking_saving"], True)
             self.assertEqual(saved["_comment_token"], payload["_comment_token"])
 
+    def test_factorio_settings_selects_a_discovered_save_without_modifying_server_settings(self) -> None:
+        with TemporaryDirectory[str]() as temp_dir:
+            root = Path(temp_dir)
+            pointer = root / "data" / "server-settings.json"
+            pointer.parent.mkdir()
+            pointer.write_text("{}", encoding="utf-8")
+            saves_directory = root / "saves"
+            saves_directory.mkdir()
+            (saves_directory / "Alpha.zip").write_bytes(b"save")
+            selected_save: list[str | None] = [None]
+            create_fresh_world: list[bool] = [False]
+
+            settings = Factorio_Settings(
+                pointer,
+                saves_directory=saves_directory,
+                save_file_getter=lambda: selected_save[0],
+                save_selection_setter=lambda filename, create: (
+                    selected_save.__setitem__(0, filename),
+                    create_fresh_world.__setitem__(0, create),
+                ),
+            )
+            selection = settings.get_setting("factorio_save_selection")
+            if selection is None:
+                raise AssertionError("Missing Factorio save selection setting")
+
+            self.assertEqual(
+                selection.spec.choice_items(),
+                (("Latest Save", "latest"), ("Create Fresh World", "fresh"), ("Alpha.zip", "save:Alpha.zip")),
+            )
+            selection.update("Alpha.zip")
+            settings.save()
+
+            self.assertEqual(selected_save[0], "Alpha.zip")
+            self.assertFalse(create_fresh_world[0])
+            self.assertNotIn("factorio_save_selection", json.loads(pointer.read_text(encoding="utf-8")))
+
+            fresh_save_name = settings.get_setting("factorio_fresh_save_file")
+            if fresh_save_name is None:
+                raise AssertionError("Missing Factorio fresh save name setting")
+            selection.update("Create Fresh World")
+            fresh_save_name.update("Orbit")
+            settings.save()
+
+            self.assertEqual(selected_save[0], "Orbit.zip")
+            self.assertTrue(create_fresh_world[0])
+
     def test_settings_state_round_trips(self) -> None:
         state: AppManageState = AppManageState(
             mode=AppManageMode.SETTINGS,

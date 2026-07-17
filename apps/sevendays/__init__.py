@@ -2325,7 +2325,7 @@ class SevenDays(App[App_Config]):
 
         self.process = None
         file_settings = cfg.directory.absolute() / "serverconfig.xml"
-        self.cmd_start = cfg.cmd_start or ["bash", "startserver.sh", f"-configfile={file_settings.name}"]
+        self.cmd_start = ["bash", "startserver.sh", f"-configfile={file_settings.name}"]
         super().__init__(bot, am, cfg, SevenDays_Settings(file_settings, version_getter=lambda: cfg.version), Mod_7D2D)
         self.act_err_threshold = 100
         if cfg.steam_update is not None:

@@ -344,7 +344,7 @@ class BeamMP(App[App_Config]):
         self.process = None
         self.proc_name = "BeamMP-Server"
         self.proc_cmd = ["script", "-qfc", self.proc_name, "/dev/null"]
-        self.cmd_start = cfg.cmd_start or [
+        self.cmd_start = [
             "./BeamMP-Server",
         ]
         file_settings: Path = cfg.directory.absolute() / "ServerConfig.toml"

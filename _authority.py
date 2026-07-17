@@ -33,6 +33,7 @@ class AuthorityResource(StrEnum):
     BOTS = "bots"
     USERS = "users"
     NAMES = "names"
+    USER_SETTINGS = "user-settings"
 
 
 class NameMutationKind(StrEnum):

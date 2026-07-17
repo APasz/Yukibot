@@ -41,7 +41,7 @@ class Base(App):
         self.manage_embed_color = 0x6B7280
         self.proc_name = ""
         self.proc_cmd = [""]
-        self.cmd_start = cfg.cmd_start or [
+        self.cmd_start = [
             "",
         ]
 

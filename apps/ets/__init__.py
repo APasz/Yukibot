@@ -155,7 +155,7 @@ class ETS(App):
         self.proc_name = "eurotrucks2_server"
         self.proc_cmd = [self.proc_name]
         file_settings: Path = cfg.directory.absolute() / "home_data" / "Euro Truck Simulator 2" / "server_config.sii"
-        self.cmd_start = cfg.cmd_start or ["./server_launch.sh"]
+        self.cmd_start = ["./server_launch.sh"]
         self.cmd_cwd = cfg.directory.absolute() / "bin" / "linux_x64"
 
         self.process = None

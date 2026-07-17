@@ -155,12 +155,17 @@ from apps._save_files import AppSaveEntry, AppSaveEntryKind
 from apps._settings import Setting, Settings_Manager
 from apps._updater import AppUpdateInfo, AppUpdateStatus
 from apps.factorio import (
+    Factorio,
     FactorioModPortalCandidate,
     FactorioVanillaMod,
     factorio_mod_settings_path,
 )
 from apps.factorio.node_api import (
     FactorioModUpdateApplyResult,
+    NodeFactorioGenerationState,
+    NodeFactorioGenerationUpdateRequest,
+    NodeFactorioMapExchangeImportRequest,
+    NodeFactorioMapExchangeString,
     NodeFactorioModSettings,
     NodeModDependencyEntry,
     NodeModDependencyResolutionResult,
@@ -176,7 +181,13 @@ from apps.factorio.node_api import (
     NodeModUpdateStatus,
 )
 from apps.factorio.node_api import (
+    build_factorio_generation_state as _build_factorio_generation_state,
+)
+from apps.factorio.node_api import (
     build_factorio_mod_settings_download_response as _build_factorio_mod_settings_download_response,
+)
+from apps.factorio.node_api import (
+    import_factorio_map_exchange_string as _import_factorio_map_exchange_string,
 )
 from apps.factorio.node_api import (
     build_factorio_mod_settings_state as _build_factorio_mod_settings_state,
@@ -213,6 +224,9 @@ from apps.factorio.node_api import (
 )
 from apps.factorio.node_api import (
     list_mod_link_versions as _list_factorio_mod_link_versions,
+)
+from apps.factorio.node_api import (
+    write_factorio_generation_settings as _write_factorio_generation_settings,
 )
 from apps.factorio.node_api import (
     resolve_mod_link_dependencies as _resolve_factorio_mod_link_dependencies,
@@ -306,6 +320,7 @@ _NODE_SYSTEM_HISTORY_RETENTION_SECONDS = 60 * 60
 _NODE_SYSTEM_HISTORY_MAX_SAMPLES = (
     _NODE_SYSTEM_HISTORY_RETENTION_SECONDS // int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS)
 )
+_NODE_SYSTEM_LOG_MAX_LINES = 500
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
 _SQUAREMAP_REQUEST_TIMEOUT_SECONDS = 10.0
@@ -313,6 +328,8 @@ _MAP_SOURCE_HEADER_NAME = "X-Yukibot-Map-Source"
 _MAP_CACHE_UPDATED_AT_HEADER_NAME = "X-Yukibot-Map-Cache-Updated-At"
 _DEFAULT_REMOTE_CONFIG_READ_LEVEL = Power_Level.sudo
 _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL = Power_Level.root
+FACTORIO_MOD_SETTINGS_ACCESS_LEVEL = Power_Level.sudo
+FACTORIO_GENERATION_ACCESS_LEVEL = Power_Level.sudo
 _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.APPS_READ: Power_Level.visitor,
     NodeApiScope.MAP_READ: Power_Level.visitor,
@@ -425,6 +442,11 @@ class NodeAppTransitionState(StrEnum):
     NONE = "none"
     STARTING = "starting"
     STOPPING = "stopping"
+
+
+class NodeSaveUploadTransport(StrEnum):
+    DIRECT = "direct"
+    RELAY = "relay"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2442,6 +2464,104 @@ class NodeSystemHistory:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class NodeSystemLogEntry:
+    relative_path: str
+    size_bytes: int
+    modified_at_epoch_seconds: int
+
+    def __post_init__(self) -> None:
+        path = PurePosixPath(self.relative_path)
+        if (
+            not self.relative_path.strip()
+            or path.is_absolute()
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("System log path is invalid.")
+        if self.size_bytes < 0:
+            raise ValueError("System log size must not be negative.")
+        if self.modified_at_epoch_seconds < 0:
+            raise ValueError("System log modification time must not be negative.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemLogEntry:
+        return cls(
+            relative_path=_required_string(payload, "relative_path"),
+            size_bytes=_required_int(payload, "size_bytes"),
+            modified_at_epoch_seconds=_required_int(payload, "modified_at_epoch_seconds"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "relative_path": self.relative_path,
+            "size_bytes": self.size_bytes,
+            "modified_at_epoch_seconds": self.modified_at_epoch_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSystemLogCatalog:
+    node: str
+    entries: tuple[NodeSystemLogEntry, ...]
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemLogCatalog:
+        raw_entries = payload.get("entries")
+        if not isinstance(raw_entries, Sequence) or isinstance(raw_entries, (str, bytes)):
+            raise ValueError("System log entries are invalid.")
+        entries: list[NodeSystemLogEntry] = []
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, Mapping):
+                raise ValueError("System log entry is invalid.")
+            entries.append(NodeSystemLogEntry.from_mapping(raw_entry))
+        return cls(node=_required_string(payload, "node"), entries=tuple(entries))
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "entries": [entry.to_mapping() for entry in self.entries],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NodeSystemLogTail:
+    node: str
+    entry: NodeSystemLogEntry
+    lines: tuple[str, ...]
+    truncated: bool
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemLogTail:
+        raw_entry = payload.get("entry")
+        if not isinstance(raw_entry, Mapping):
+            raise ValueError("System log tail entry is invalid.")
+        raw_lines = payload.get("lines")
+        if not isinstance(raw_lines, Sequence) or isinstance(raw_lines, (str, bytes)):
+            raise ValueError("System log tail lines are invalid.")
+        lines: list[str] = []
+        for raw_line in raw_lines:
+            if not isinstance(raw_line, str):
+                raise ValueError("System log tail line is invalid.")
+            lines.append(raw_line)
+        truncated = payload.get("truncated")
+        if not isinstance(truncated, bool):
+            raise ValueError("System log tail truncation is invalid.")
+        return cls(
+            node=_required_string(payload, "node"),
+            entry=NodeSystemLogEntry.from_mapping(raw_entry),
+            lines=tuple(lines),
+            truncated=truncated,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "node": self.node,
+            "entry": self.entry.to_mapping(),
+            "lines": list(self.lines),
+            "truncated": self.truncated,
+        }
+
+
 class NodeSystemAction(StrEnum):
     RESTART_PROCESS = "restart_process"
     REBOOT_HOST = "reboot_host"
@@ -4370,6 +4490,28 @@ class NodeApiService:
             self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
             return self.build_system_history().to_mapping()
 
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/logs")
+        async def _system_logs(request: Request, access_token: str | None = None) -> dict[str, object]:
+            traffic_log.info("Node API system log catalog request: node=%s", self.node_name)
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+            return self.build_system_log_catalog().to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/logs/{{log_path:path}}")
+        async def _system_log_tail(
+            log_path: str,
+            request: Request,
+            access_token: str | None = None,
+            max_lines: int = 200,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API system log tail request: node=%s log=%s", self.node_name, log_path)
+            if max_lines < 1 or max_lines > _NODE_SYSTEM_LOG_MAX_LINES:
+                raise _http_exception(
+                    400,
+                    f"System log line limit must be between 1 and {_NODE_SYSTEM_LOG_MAX_LINES}.",
+                )
+            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
+            return self.build_system_log_tail(log_path=log_path, max_lines=max_lines).to_mapping()
+
         @nicegui_app.get(f"{_NODE_API_PREFIX}/system/capabilities")
         async def _system_capabilities(request: Request, access_token: str | None = None) -> dict[str, object]:
             traffic_log.info("Node API system capabilities request: node=%s", self.node_name)
@@ -5641,10 +5783,124 @@ class NodeApiService:
                 access_token=access_token,
                 app_name=app_name,
                 scopes=(NodeApiScope.CONFIGS_READ,),
-                required_level=app.config_file_read_level,
+                required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
                 verified_grant=grant,
             )
             return self.factorio_mod_settings_state(app=app).to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/generation")
+        async def _factorio_generation_state(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Factorio generation state request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_READ,),
+                required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
+                verified_grant=grant,
+            )
+            return self.factorio_generation_state(app=app).to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/generation")
+        async def _update_factorio_generation(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Factorio generation update request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_WRITE,),
+                required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
+                verified_grant=grant,
+            )
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_WRITE,),
+                verified_grant=grant,
+            )
+            result = self.update_factorio_generation(
+                app=app,
+                update=NodeFactorioGenerationUpdateRequest.model_validate(payload),
+            )
+            audit_log(
+                "factorio.generation_updated",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                required_level=FACTORIO_GENERATION_ACCESS_LEVEL.name,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.post(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/generation/map-exchange-string")
+        async def _import_factorio_map_exchange_string(
+            app_name: str,
+            payload: dict[str, object],
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Factorio map exchange import request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_WRITE,),
+                required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
+                verified_grant=grant,
+            )
+            actor_user_id = self._request_actor_user_id(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_WRITE,),
+                verified_grant=grant,
+            )
+            result = await self.import_factorio_map_exchange_string(
+                app=app,
+                import_request=NodeFactorioMapExchangeImportRequest.model_validate(payload),
+            )
+            audit_log(
+                "factorio.map_exchange_imported",
+                actor_user_id=actor_user_id,
+                node_name=self.node_name,
+                app_name=app.name,
+                required_level=FACTORIO_GENERATION_ACCESS_LEVEL.name,
+            )
+            return result.to_mapping()
+
+        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/generation/map-exchange-string")
+        async def _export_factorio_map_exchange_string(
+            app_name: str,
+            request: Request,
+            access_token: str | None = None,
+        ) -> dict[str, object]:
+            traffic_log.info("Node API Factorio map exchange export request: node=%s app=%s", self.node_name, app_name)
+            grant = self._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_READ,))
+            app = self._resolve_app(app_name)
+            await self._require_actor_level_for_request(
+                request=request,
+                access_token=access_token,
+                app_name=app_name,
+                scopes=(NodeApiScope.CONFIGS_READ,),
+                required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
+                verified_grant=grant,
+            )
+            return (await self.export_factorio_map_exchange_string(app=app)).to_mapping()
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/factorio/mod-settings/download")
         async def _download_factorio_mod_settings(
@@ -5660,7 +5916,7 @@ class NodeApiService:
                 access_token=access_token,
                 app_name=app_name,
                 scopes=(NodeApiScope.CONFIGS_READ,),
-                required_level=app.config_file_read_level,
+                required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
                 verified_grant=grant,
             )
             return self.build_factorio_mod_settings_download_response(app=app)
@@ -5681,7 +5937,7 @@ class NodeApiService:
                 access_token=access_token,
                 app_name=app_name,
                 scopes=(NodeApiScope.CONFIGS_WRITE,),
-                required_level=app.config_file_write_level,
+                required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
                 verified_grant=grant,
             )
             actor_user_id = self._request_actor_user_id(
@@ -5702,7 +5958,7 @@ class NodeApiService:
                 actor_user_id=actor_user_id,
                 node_name=self.node_name,
                 app_name=app.name,
-                required_level=app.config_file_write_level.name,
+                required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL.name,
             )
             return result.to_mapping()
 
@@ -5720,7 +5976,7 @@ class NodeApiService:
                 access_token=access_token,
                 app_name=app_name,
                 scopes=(NodeApiScope.CONFIGS_WRITE,),
-                required_level=app.config_file_write_level,
+                required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
                 verified_grant=grant,
             )
             actor_user_id = self._request_actor_user_id(
@@ -5736,7 +5992,7 @@ class NodeApiService:
                 actor_user_id=actor_user_id,
                 node_name=self.node_name,
                 app_name=app.name,
-                required_level=app.config_file_write_level.name,
+                required_level=FACTORIO_MOD_SETTINGS_ACCESS_LEVEL.name,
             )
             return result.to_mapping()
 
@@ -5874,9 +6130,16 @@ class NodeApiService:
             root_id: Annotated[str, Form()],
             upload: Annotated[UploadFile, File()],
             filename: Annotated[str | None, Form()] = None,
+            upload_transport: Annotated[NodeSaveUploadTransport, Form()] = NodeSaveUploadTransport.DIRECT,
             access_token: str | None = None,
         ) -> dict[str, object]:
-            traffic_log.info("Node API save upload request: node=%s app=%s root=%s", self.node_name, app_name, root_id)
+            traffic_log.info(
+                "Node API save upload request: node=%s app=%s root=%s transport=%s",
+                self.node_name,
+                app_name,
+                root_id,
+                upload_transport.value,
+            )
             grant: NodeAccessGrant | None = self._require_access(
                 request, access_token, app_name=app_name, scopes=(NodeApiScope.SAVES_WRITE,)
             )
@@ -5902,6 +6165,7 @@ class NodeApiService:
                 upload=upload,
                 upload_name=filename,
                 actor_user_id=actor_user_id,
+                upload_transport=upload_transport,
             )
             audit_log(
                 "save.file_uploaded",
@@ -5911,6 +6175,7 @@ class NodeApiService:
                 save_id=result.save.id,
                 root_id=root_id,
                 required_level=app.save_file_write_level.name,
+                upload_transport=upload_transport.value,
             )
             return result.to_mapping()
 
@@ -6688,6 +6953,100 @@ class NodeApiService:
             retention_seconds=_NODE_SYSTEM_HISTORY_RETENTION_SECONDS,
             sample_interval_seconds=int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS),
             samples=samples,
+        )
+
+    @staticmethod
+    def _read_log_tail(*, path: Path, max_lines: int) -> tuple[tuple[str, ...], bool]:
+        if max_lines < 1:
+            raise ValueError("Log tail line limit must be at least 1.")
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            file_size = handle.tell()
+            if file_size <= 0:
+                return (), False
+
+            chunk_size = 8192
+            position = file_size
+            buffer = bytearray()
+            newline_count = 0
+            while position > 0 and newline_count <= max_lines:
+                read_size = min(chunk_size, position)
+                position -= read_size
+                handle.seek(position)
+                chunk = handle.read(read_size)
+                if not chunk:
+                    break
+                buffer[:0] = chunk
+                newline_count = buffer.count(b"\n")
+
+        lines = tuple(deque(buffer.decode(config.STR_ENCODE, errors="replace").splitlines(), maxlen=max_lines))
+        return lines, position > 0 or newline_count > max_lines
+
+    @staticmethod
+    def _system_log_entries_with_paths() -> tuple[tuple[NodeSystemLogEntry, Path], ...]:
+        log_root = config.DIR_LOG.resolve(strict=False)
+        if not log_root.exists():
+            return ()
+        if not log_root.is_dir():
+            raise RuntimeError(f"System log directory is not a directory: {log_root}")
+
+        candidates = sorted(
+            (candidate for candidate in log_root.rglob("*") if candidate.is_file()),
+            key=lambda candidate: (len(candidate.relative_to(log_root).parts), candidate.as_posix().casefold()),
+        )
+        entries_by_target: dict[Path, tuple[NodeSystemLogEntry, Path]] = {}
+        for candidate in candidates:
+            relative_path = candidate.relative_to(log_root).as_posix()
+            try:
+                target_path = candidate.resolve(strict=True)
+                if not target_path.is_relative_to(log_root):
+                    log.warning("Skipping system log outside log directory: path=%s", candidate)
+                    continue
+                stat = target_path.stat()
+            except OSError as xcp:
+                log.warning("Skipping unreadable system log: path=%s error=%s", candidate, xcp)
+                continue
+            entries_by_target.setdefault(
+                target_path,
+                (
+                    NodeSystemLogEntry(
+                        relative_path=relative_path,
+                        size_bytes=stat.st_size,
+                        modified_at_epoch_seconds=max(0, int(stat.st_mtime)),
+                    ),
+                    target_path,
+                ),
+            )
+        return tuple(
+            sorted(entries_by_target.values(), key=lambda item: item[0].relative_path.casefold())
+        )
+
+    def build_system_log_catalog(self) -> NodeSystemLogCatalog:
+        return NodeSystemLogCatalog(
+            node=self.node_name,
+            entries=tuple(entry for entry, _path in self._system_log_entries_with_paths()),
+        )
+
+    def build_system_log_tail(self, *, log_path: str, max_lines: int = 200) -> NodeSystemLogTail:
+        if max_lines < 1 or max_lines > _NODE_SYSTEM_LOG_MAX_LINES:
+            raise ValueError(f"System log line limit must be between 1 and {_NODE_SYSTEM_LOG_MAX_LINES}.")
+        path_by_relative_path = {
+            entry.relative_path: (entry, path)
+            for entry, path in self._system_log_entries_with_paths()
+        }
+        resolved = path_by_relative_path.get(log_path)
+        if resolved is None:
+            raise _http_exception(404, "Unknown system log.")
+        entry, path = resolved
+        try:
+            lines, truncated = self._read_log_tail(path=path, max_lines=max_lines)
+        except OSError as xcp:
+            raise _http_exception(500, f"System log read failed: {xcp}") from xcp
+        return NodeSystemLogTail(
+            node=self.node_name,
+            entry=entry,
+            lines=lines,
+            truncated=truncated,
         )
 
     def _build_system_summary_uncached(self) -> NodeSystemSummary:
@@ -9486,6 +9845,61 @@ class NodeApiService:
         if app.scope != config.AppScopes.factorio.value:
             raise _http_exception(400, f"{app.friendly} does not support Factorio mod settings.")
 
+    @staticmethod
+    def _factorio_app(app: App) -> Factorio:
+        if not isinstance(app, Factorio):
+            raise _http_exception(400, f"{app.friendly} does not support Factorio generation settings.")
+        return app
+
+    def factorio_generation_state(self, *, app: App) -> NodeFactorioGenerationState:
+        factorio_app = self._factorio_app(app)
+        return _build_factorio_generation_state(app=factorio_app, node_name=self.node_name)
+
+    def update_factorio_generation(
+        self,
+        *,
+        app: App,
+        update: NodeFactorioGenerationUpdateRequest,
+    ) -> NodeFactorioGenerationState:
+        factorio_app = self._factorio_app(app)
+        try:
+            _write_factorio_generation_settings(
+                app=factorio_app,
+                map_gen_settings=update.map_gen_settings,
+                map_settings=update.map_settings,
+            )
+        except (OSError, ValueError) as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        traffic_log.info("Node API updated Factorio generation settings: node=%s app=%s", self.node_name, app.name)
+        self._invalidate_state_caches(app_name=app.name)
+        return self.factorio_generation_state(app=app)
+
+    async def import_factorio_map_exchange_string(
+        self,
+        *,
+        app: App,
+        import_request: NodeFactorioMapExchangeImportRequest,
+    ) -> NodeFactorioGenerationState:
+        factorio_app = self._factorio_app(app)
+        try:
+            await _import_factorio_map_exchange_string(
+                app=factorio_app,
+                map_exchange_string=import_request.map_exchange_string,
+            )
+        except (OSError, ValueError, RuntimeError) as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        traffic_log.info("Node API imported Factorio map exchange string: node=%s app=%s", self.node_name, app.name)
+        self._invalidate_state_caches(app_name=app.name)
+        return self.factorio_generation_state(app=app)
+
+    async def export_factorio_map_exchange_string(self, *, app: App) -> NodeFactorioMapExchangeString:
+        factorio_app = self._factorio_app(app)
+        try:
+            map_exchange_string = await factorio_app.export_map_exchange_string()
+        except (OSError, ValueError, RuntimeError) as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        return NodeFactorioMapExchangeString(map_exchange_string=map_exchange_string)
+
     def factorio_mod_settings_state(self, *, app: App) -> NodeFactorioModSettings:
         self._require_factorio_app(app)
         try:
@@ -9701,6 +10115,7 @@ class NodeApiService:
         upload: UploadFile,
         upload_name: str | None,
         actor_user_id: int,
+        upload_transport: NodeSaveUploadTransport = NodeSaveUploadTransport.DIRECT,
     ) -> NodeSaveMutationResult:
         if not app.supports_save_uploads:
             raise _http_exception(409, f"{app.friendly} does not support save uploads.")
@@ -9716,6 +10131,7 @@ class NodeApiService:
                 source_path=temp_path,
                 upload_name=resolved_upload_name,
                 actor_user_id=actor_user_id,
+                upload_transport=upload_transport,
             )
         finally:
             temp_path.unlink(missing_ok=True)
@@ -9728,6 +10144,7 @@ class NodeApiService:
         source_path: Path,
         upload_name: str,
         actor_user_id: int,
+        upload_transport: NodeSaveUploadTransport = NodeSaveUploadTransport.DIRECT,
     ) -> NodeSaveMutationResult:
         if not app.supports_save_uploads:
             raise _http_exception(409, f"{app.friendly} does not support save uploads.")
@@ -9748,12 +10165,13 @@ class NodeApiService:
             raise _http_exception(500, f"Save upload failed: {xcp}") from xcp
 
         traffic_log.info(
-            "Node API save uploaded: node=%s app=%s root=%s save=%s actor=%s",
+            "Node API save uploaded: node=%s app=%s root=%s save=%s actor=%s transport=%s",
             self.node_name,
             app.name,
             root_id,
             updated.id,
             actor_user_id,
+            upload_transport.value,
         )
         return NodeSaveMutationResult(
             app_name=app.name,
@@ -11532,7 +11950,10 @@ class NodeApiService:
             scopes=scopes,
             verified_grant=verified_grant,
         )
-        await self._acl.perm_check(actor_user_id, required_level)
+        try:
+            await self._acl.perm_check(actor_user_id, required_level)
+        except PermissionError as xcp:
+            raise _http_exception(403, str(xcp)) from xcp
 
     @staticmethod
     def _actor_user_id_from_subject(subject: str) -> int:

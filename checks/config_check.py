@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import sys
 import unittest
 from datetime import date, datetime
 from pathlib import Path
@@ -106,6 +108,17 @@ class AppModCapabilitiesTests(unittest.TestCase):
             ("server_scripts/events.js", "startup_scripts/registry.js"),
         )
 
+    def test_app_config_rejects_removed_custom_start_command(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cmd_start"):
+            App_Config(
+                name="minecraft_test",
+                instance_key="test",
+                directory=Path("/tmp/minecraft-test"),
+                apps_dir=Path("/tmp"),
+                scope="minecraft",
+                cmd_start=["bash", "run.sh"],
+            )
+
     def test_app_config_reports_duplicate_client_pack_published_mod_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "Duplicate Mod"):
             App_Config(
@@ -168,14 +181,229 @@ class AppModCapabilitiesTests(unittest.TestCase):
 
 
 class ConfigLoggingTests(unittest.TestCase):
-    def test_noisy_loggers_use_dedicated_non_propagating_files(self) -> None:
-        expected_files = {
-            config.LOGGER_TRAFFIC: "Traffic.log",
-            config.LOGGER_TTS: "TTS.log",
-            config.LOGGER_AUDIT: "Audit.log",
+    def test_log_file_name_prefixes_development_logs_with_node_name(self) -> None:
+        with patch.object(config, "INDEV", True), patch.object(config, "NODE_NAME", "portal"):
+            self.assertEqual(config._log_file_name("Modules.log"), "portal-Modules.log")
+
+    def test_log_file_name_preserves_production_log_names(self) -> None:
+        with patch.object(config, "INDEV", False), patch.object(config, "NODE_NAME", "portal"):
+            self.assertEqual(config._log_file_name("Modules.log"), "Modules.log")
+
+    @staticmethod
+    def _record(*, name: str, level: int, pathname: str, message: str) -> logging.LogRecord:
+        return logging.LogRecord(
+            name=name,
+            level=level,
+            pathname=pathname,
+            lineno=1,
+            msg=message,
+            args=(),
+            exc_info=None,
+        )
+
+    def test_session_log_handler_keeps_current_and_two_prior_sessions(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            log_directory = Path(temp_dir)
+            current_path = log_directory / "user" / "System.log"
+            current_link_path = log_directory / "System.log"
+            first_archive_path = log_directory / "user" / "System.1.log"
+            second_archive_path = log_directory / "user" / "System.2.log"
+            current_link_path.write_text("current session", encoding="utf-8")
+            (log_directory / "System.1.log").write_text("first prior session", encoding="utf-8")
+            (log_directory / "System.2.log").write_text("discarded session", encoding="utf-8")
+
+            handler = config.SessionRotatingFileHandler(
+                current_path,
+                legacy_path=current_link_path,
+                current_link_path=current_link_path,
+            )
+            handler.close()
+
+            self.assertEqual("", current_path.read_text(encoding="utf-8"))
+            self.assertEqual("current session", first_archive_path.read_text(encoding="utf-8"))
+            self.assertEqual("first prior session", second_archive_path.read_text(encoding="utf-8"))
+            self.assertTrue(current_link_path.is_symlink())
+            self.assertEqual(current_path, current_link_path.resolve())
+            self.assertFalse((log_directory / "System.1.log").exists())
+            self.assertFalse((log_directory / "System.2.log").exists())
+
+    def test_session_log_handler_tolerates_concurrent_archive_rotation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            log_directory = Path(temp_dir)
+            current_path = log_directory / "System.log"
+            first_archive_path = log_directory / "System.1.log"
+            current_path.write_text("current session", encoding="utf-8")
+            first_archive_path.write_text("first prior session", encoding="utf-8")
+            original_replace = Path.replace
+
+            def _replace_after_concurrent_move(path: Path, target: Path) -> Path:
+                if path == first_archive_path:
+                    path.unlink()
+                    raise FileNotFoundError(path)
+                return original_replace(path, target)
+
+            with patch.object(Path, "replace", new=_replace_after_concurrent_move):
+                handler = config.SessionRotatingFileHandler(current_path)
+            handler.close()
+
+            self.assertEqual("current session", first_archive_path.read_text(encoding="utf-8"))
+
+    def test_session_log_handler_tolerates_concurrent_current_link_removal(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            log_directory = Path(temp_dir)
+            current_path = log_directory / "user" / "System.log"
+            current_link_path = log_directory / "System.log"
+            current_link_path.symlink_to(current_path)
+            original_unlink = Path.unlink
+
+            def _unlink_after_concurrent_removal(path: Path, missing_ok: bool = False) -> None:
+                if path == current_link_path:
+                    original_unlink(path, missing_ok=missing_ok)
+                    raise FileNotFoundError(path)
+                original_unlink(path, missing_ok=missing_ok)
+
+            with patch.object(Path, "unlink", new=_unlink_after_concurrent_removal):
+                handler = config.SessionRotatingFileHandler(
+                    current_path,
+                    current_link_path=current_link_path,
+                )
+            handler.close()
+
+            self.assertTrue(current_link_path.is_symlink())
+            self.assertEqual(current_path, current_link_path.resolve())
+
+    def test_machine_json_formatter_uses_utc_session_context(self) -> None:
+        formatter = config.MachineJsonFormatter(node_name="yuki", bot_profile="yuki")
+        record = self._record(
+            name="system",
+            level=logging.INFO,
+            pathname=str(Path(config.__file__).resolve()),
+            message="Machine-readable message",
+        )
+        record.created = 1_784_401_200.123
+
+        event = json.loads(formatter.format(record))
+
+        self.assertTrue(event["timestamp"].endswith("Z"))
+        self.assertEqual("Machine-readable message", event["message"])
+        self.assertEqual("yuki", event["node_name"])
+        self.assertEqual("yuki", event["bot_profile"])
+        self.assertIn("session_id", event)
+
+    def test_machine_json_formatter_ignores_non_tuple_exception_metadata(self) -> None:
+        formatter = config.MachineJsonFormatter()
+        record = self._record(
+            name="asyncio",
+            level=logging.ERROR,
+            pathname=__file__,
+            message="Exception in default exception handler",
+        )
+        setattr(record, "exc_info", True)
+
+        event = json.loads(formatter.format(record))
+
+        self.assertNotIn("exception", event)
+
+    def test_repeated_external_logs_are_rate_limited_with_a_summary(self) -> None:
+        repeat_filter = config.SuppressRepeatedExternalLogsFilter(window_seconds=60)
+        first_record = self._record(
+            name="hikari",
+            level=logging.ERROR,
+            pathname="/venv/lib/python3.14/site-packages/hikari/impl/shard.py",
+            message="Gateway connection failed",
+        )
+        repeated_record = self._record(
+            name="hikari",
+            level=logging.ERROR,
+            pathname="/venv/lib/python3.14/site-packages/hikari/impl/shard.py",
+            message="Gateway connection failed",
+        )
+        summary_record = self._record(
+            name="hikari",
+            level=logging.ERROR,
+            pathname="/venv/lib/python3.14/site-packages/hikari/impl/shard.py",
+            message="Gateway connection failed",
+        )
+
+        with patch("config.monotonic", side_effect=(100.0, 101.0, 160.0)):
+            self.assertTrue(repeat_filter.filter(first_record))
+            self.assertFalse(repeat_filter.filter(repeated_record))
+            self.assertTrue(repeat_filter.filter(summary_record))
+
+        self.assertIn("suppressed 1 matching external log records", summary_record.getMessage())
+
+    def test_repeated_external_log_filter_ignores_non_tuple_exception_metadata(self) -> None:
+        repeat_filter = config.SuppressRepeatedExternalLogsFilter(window_seconds=60)
+        record = self._record(
+            name="asyncio",
+            level=logging.ERROR,
+            pathname="/venv/lib/python3.14/site-packages/asyncio/base_events.py",
+            message="Exception in default exception handler",
+        )
+        setattr(record, "exc_info", True)
+
+        self.assertTrue(repeat_filter.filter(record))
+
+    def test_project_and_external_module_filters_route_records_by_source_path(self) -> None:
+        project_record = logging.LogRecord(
+            name="project",
+            level=logging.INFO,
+            pathname=str(Path(config.__file__).resolve()),
+            lineno=1,
+            msg="project message",
+            args=(),
+            exc_info=None,
+        )
+        external_record = logging.LogRecord(
+            name="hikari",
+            level=logging.INFO,
+            pathname="/venv/lib/python3.14/site-packages/hikari/impl/shard.py",
+            lineno=1,
+            msg="module message",
+            args=(),
+            exc_info=None,
+        )
+        dynamic_record = logging.LogRecord(
+            name="external",
+            level=logging.INFO,
+            pathname="<string>",
+            lineno=1,
+            msg="dynamic message",
+            args=(),
+            exc_info=None,
+        )
+
+        project_filter = config.ProjectLogFilter()
+        external_filter = config.ExternalModuleLogFilter()
+
+        self.assertTrue(project_filter.filter(project_record))
+        self.assertFalse(external_filter.filter(project_record))
+        self.assertFalse(project_filter.filter(external_record))
+        self.assertTrue(external_filter.filter(external_record))
+        self.assertFalse(project_filter.filter(dynamic_record))
+        self.assertTrue(external_filter.filter(dynamic_record))
+
+    def test_hikari_logs_use_the_dedicated_modules_file(self) -> None:
+        hikari_logger = logging.getLogger("hikari")
+        file_names = {
+            Path(handler.baseFilename).name
+            for handler in hikari_logger.handlers
+            if isinstance(handler, logging.FileHandler)
         }
 
-        for logger_name, filename in expected_files.items():
+        self.assertIn(config._log_file_name("Modules.log"), file_names)
+        self.assertIn(config._log_file_name("Modules.jsonl"), file_names)
+        self.assertNotIn(config._log_file_name("System.log"), file_names)
+
+    def test_noisy_loggers_use_dedicated_non_propagating_files(self) -> None:
+        expected_files = {
+            config.LOGGER_TRAFFIC: {"Traffic.log", "Traffic.jsonl"},
+            config.LOGGER_TTS: {"TTS.log", "TTS.jsonl"},
+            config.LOGGER_AUDIT: {"Audit.log", "Audit.jsonl"},
+            config.LOGGER_TENOR: {"Tenor.log", "Tenor.jsonl"},
+        }
+
+        for logger_name, filenames in expected_files.items():
             with self.subTest(logger_name=logger_name):
                 logger = logging.getLogger(logger_name)
                 file_names = {
@@ -183,7 +411,8 @@ class ConfigLoggingTests(unittest.TestCase):
                     for handler in logger.handlers
                     if isinstance(handler, logging.FileHandler)
                 }
-                self.assertIn(filename, file_names)
+                expected_file_names = {config._log_file_name(filename) for filename in filenames}
+                self.assertTrue(expected_file_names.issubset(file_names))
                 self.assertFalse(logger.propagate)
 
     def test_known_warning_filter_suppresses_websocket_deprecation_noise(self) -> None:
@@ -209,6 +438,61 @@ class ConfigLoggingTests(unittest.TestCase):
 
         self.assertFalse(warning_filter.filter(warning_record))
         self.assertTrue(warning_filter.filter(regular_record))
+
+    def test_expected_gateway_socket_close_keeps_log_line_without_traceback(self) -> None:
+        gateway_filter = config.SuppressExpectedGatewayTracebackFilter()
+        try:
+            raise hikari.GatewayConnectionError("Failed to connect to server: 'Socket has closed'")
+        except hikari.GatewayConnectionError:
+            expected_record = logging.LogRecord(
+                name="asyncio",
+                level=logging.ERROR,
+                pathname=__file__,
+                lineno=1,
+                msg="GatewayConnectionError exception in shielded future",
+                args=(),
+                exc_info=sys.exc_info(),
+            )
+
+        self.assertTrue(gateway_filter.filter(expected_record))
+        self.assertIsNotNone(expected_record.exc_info)
+        self.assertTrue(getattr(expected_record, "_yukibot_suppress_traceback"))
+        self.assertNotIn(
+            "hikari.errors.GatewayConnectionError",
+            config.HumanLogFormatter("%(message)s").format(expected_record),
+        )
+        machine_event = json.loads(config.MachineJsonFormatter().format(expected_record))
+        self.assertEqual("hikari.errors.GatewayConnectionError", machine_event["exception"]["type"])
+
+    def test_expected_gateway_filter_ignores_non_tuple_exception_metadata(self) -> None:
+        gateway_filter = config.SuppressExpectedGatewayTracebackFilter()
+        record = self._record(
+            name="asyncio",
+            level=logging.ERROR,
+            pathname=__file__,
+            message="Exception in default exception handler",
+        )
+        setattr(record, "exc_info", True)
+
+        self.assertTrue(gateway_filter.filter(record))
+
+    def test_unexpected_asyncio_gateway_error_retains_traceback(self) -> None:
+        gateway_filter = config.SuppressExpectedGatewayTracebackFilter()
+        try:
+            raise hikari.GatewayConnectionError("Failed to connect to server: 'Connection refused'")
+        except hikari.GatewayConnectionError:
+            unexpected_record = logging.LogRecord(
+                name="asyncio",
+                level=logging.ERROR,
+                pathname=__file__,
+                lineno=1,
+                msg="GatewayConnectionError exception in shielded future",
+                args=(),
+                exc_info=sys.exc_info(),
+            )
+
+        self.assertTrue(gateway_filter.filter(unexpected_record))
+        self.assertIsNotNone(unexpected_record.exc_info)
 
 
 class AppVersionTests(unittest.TestCase):

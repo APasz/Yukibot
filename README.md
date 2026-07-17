@@ -66,7 +66,7 @@ Sister bots also push a typed bot-metadata snapshot to Yuki through the same aut
 - Mods with a `download_block_reason` in their mod DB entry are listed in the web UI but excluded from downloads; 7D2D built-in mods are marked this way automatically.
 - Downloadable mods may define `client_pack.policy` as `required` (the default), `optional`, or `alternative`. Optional mods start selected in the client-pack dialog.
 - Alternative mods must share a non-empty `client_pack.choice_group`; every group requires at least two mods and exactly one entry with `client_pack.default_choice` set to `true`.
-- For local multi-node testing, use `uv run python dev_cluster.py`. It launches Yuki, Erin, and Portal as separate processes with local loopback ports and gives you `start` / `stop` / `restart` controls in one terminal.
+- For local multi-node testing, use `uv run python dev_cluster.py`. It launches Yuki, Erin, and Portal as separate processes with local loopback ports and gives you `start` / `stop` / `restart` controls in one terminal. Add `--debug` to enable project debug logging for every member.
 
 All other bot profiles act as clients.
 

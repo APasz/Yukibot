@@ -1014,6 +1014,14 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                     show_api_actions=self._app_list_api_actions_enabled(request),
                 )
 
+        @ui.page("/aliases")
+        @ui.page("/mod-web/aliases")
+        async def _aliases_page(request: Request) -> None:
+            traffic_log.info("Rendering alias page")
+            user = await self._authorised_page_user(ui=ui, request=request, required_level=Power_Level.visitor)
+            if user is not None:
+                await self._render_alias_page(ui=ui, user=user, request=request)
+
         @ui.page("/apps/{app_name}")
         async def _app_alias_page(app_name: str, request: Request) -> None:
             traffic_log.info("Rendering app alias page: app=%s", app_name)

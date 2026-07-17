@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from font_assets import font_assets
 
@@ -45,6 +45,8 @@ _LIVE_VALUE_PULSE_CLASSES: tuple[str, str] = (
     "mod-live-value-pulse-a",
     "mod-live-value-pulse-b",
 )
+_MAIN_CONTENT_ID: Final[str] = "mod-main-content"
+_POINTER_NAVIGATION_CLASS: Final[str] = "mod-pointer-navigation"
 
 def copy_text_to_clipboard(
     *,
@@ -85,6 +87,11 @@ def copy_text_to_clipboard(
 
 
 class ModWebUiHelpersMixin(ModWebServiceSupport):
+    @staticmethod
+    def _render_skip_link(*, ui: ModWebUi, target_id: str = _MAIN_CONTENT_ID) -> None:
+        with ui.element("a").props(f"href=#{target_id}").classes("mod-skip-link"):
+            ui.label("Skip to main content")
+
     @staticmethod
     def _make_activatable(
         *,
@@ -331,6 +338,22 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
         """
 
     @staticmethod
+    def _focus_modality_head_html() -> str:
+        return f"""
+            <script>
+            (() => {{
+              const root = document.documentElement;
+              if (root.dataset.modWebFocusModality === 'installed') {{
+                return;
+              }}
+              root.dataset.modWebFocusModality = 'installed';
+              window.addEventListener('pointerdown', () => root.classList.add('{_POINTER_NAVIGATION_CLASS}'), true);
+              window.addEventListener('keydown', () => root.classList.remove('{_POINTER_NAVIGATION_CLASS}'), true);
+            }})();
+            </script>
+        """
+
+    @staticmethod
     def _badge_class_name(*, tone: BadgeTone, extra_classes: str = "") -> str:
         return f"{mod_web_badge_class(tone)} {extra_classes}".strip()
 
@@ -352,6 +375,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
     def _apply_theme(*, ui: ModWebUi) -> None:
         apply_mod_web_theme(ui=ui)
         ui.add_head_html(ModWebUiHelpersMixin._portal_recovery_head_html())
+        ui.add_head_html(ModWebUiHelpersMixin._focus_modality_head_html())
         font_face_css_html = font_assets.font_face_css_html(base_path="/mod-web/assets/fonts")
         if font_face_css_html:
             ui.add_head_html(font_face_css_html)

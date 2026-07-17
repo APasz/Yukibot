@@ -62,9 +62,11 @@ from apps.factorio import (
     factorio_mod_settings_path,
     factorio_vanilla_mods,
     list_factorio_mod_portal_release_options,
+    normalise_factorio_map_exchange_string,
     parse_factorio_mod_portal_url,
     resolve_factorio_mod_portal_candidates,
 )
+from apps.factorio.node_api import build_factorio_generation_state
 
 
 class _FakeFactorioUpdateApp:
@@ -98,6 +100,124 @@ class _FakeFactorioUpdateApp:
 
 
 class FactorioVersionDetectionTests(unittest.TestCase):
+    def test_map_exchange_string_normalisation_removes_export_line_wraps(self) -> None:
+        self.assertEqual(
+            normalise_factorio_map_exchange_string(">>>eA==\n<<<"),
+            ">>>eA==<<<",
+        )
+
+    def test_map_exchange_string_normalisation_rejects_invalid_markers(self) -> None:
+        with self.assertRaisesRegex(ValueError, "start"):
+            normalise_factorio_map_exchange_string("eA==")
+
+    def test_generation_state_reports_space_age_and_json_settings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            map_gen_path = directory / "data" / "map-gen-settings.json"
+            map_gen_path.parent.mkdir(parents=True)
+            map_gen_path.write_text(
+                json.dumps({"seed": 12345, "autoplace_controls": {"tungsten_ore": {"size": 2}}}),
+                encoding="utf-8",
+            )
+            (directory / "data" / "map-settings.json").write_text(
+                json.dumps(
+                    {
+                        "difficulty_settings": {"technology_price_multiplier": 2},
+                        "asteroids": {"spawning_rate": 0.5},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (directory / "data" / "space-age").mkdir()
+            mod_list_path = directory / "mods" / "mod-list.json"
+            mod_list_path.parent.mkdir()
+            mod_list_path.write_text(json.dumps({"mods": [{"name": "space-age", "enabled": True}]}), encoding="utf-8")
+            app = cast(Factorio, object.__new__(Factorio))
+            app.name = "factorio_alpha"
+            app.friendly = "Factorio Alpha"
+            app.directory = directory
+            app.process = None
+
+            state = build_factorio_generation_state(app=app, node_name="yuki")
+
+        self.assertTrue(state.space_age_enabled)
+        self.assertFalse(state.map_exchange_available)
+        self.assertIsNone(state.load_error)
+        self.assertEqual(state.map_gen_settings, {"seed": 12345, "autoplace_controls": {"tungsten_ore": {"size": 2}}})
+        self.assertEqual(
+            state.map_settings,
+            {"difficulty_settings": {"technology_price_multiplier": 2}, "asteroids": {"spawning_rate": 0.5}},
+        )
+
+    def test_map_exchange_import_uses_factorio_parser_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            app = cast(Factorio, object.__new__(Factorio))
+            app.directory = directory
+            app.friendly = "Factorio Alpha"
+            app.process = MagicMock()
+            app.process.poll.return_value = None
+            app._map_exchange_lock = asyncio.Lock()
+
+            async def send(_command: str) -> None:
+                output_path = directory / "script-output" / "yukibot-map-exchange-settings.json"
+                output_path.parent.mkdir()
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "map_gen_settings": {"seed": 7},
+                            "map_settings": {"enemy_evolution": {"enabled": False}},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            app._relay = SimpleNamespace(send=AsyncMock(side_effect=send))
+
+            imported = asyncio.run(app.import_map_exchange_string(">>>eA==<<<"))
+            output_removed = not (directory / "script-output" / "yukibot-map-exchange-settings.json").exists()
+
+        self.assertEqual(imported.map_gen_settings, {"seed": 7})
+        self.assertEqual(imported.map_settings, {"enemy_evolution": {"enabled": False}})
+        app._relay.send.assert_awaited_once()
+        self.assertTrue(output_removed)
+
+    def test_selected_save_changes_the_generated_start_command(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        with patch("apps.factorio.config.env_req", return_value="secret"):
+            command = app._factorio_start_command(Path("/srv/factorio/data/server-settings.json"), save_file="Alpha.zip")
+
+        self.assertEqual(
+            command[:3],
+            ["bin/x64/factorio", "--start-server", "saves/Alpha.zip"],
+        )
+
+    def test_factorio_does_not_support_save_renames(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+
+        self.assertFalse(app.supports_save_rename)
+
+    def test_create_fresh_world_generates_selected_save_with_map_settings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = cast(Any, object.__new__(Factorio))
+            app.directory = root
+            app.friendly = "Factorio Alpha"
+
+            async def run_create(_function: object, command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                self.assertEqual(command[:3], ["bin/x64/factorio", "--create", "saves/Orbit.zip"])
+                self.assertIn("--map-gen-settings", command)
+                self.assertIn("--map-settings", command)
+                self.assertEqual(kwargs["cwd"], root)
+                (root / "saves").mkdir(exist_ok=True)
+                (root / "saves" / "Orbit.zip").write_bytes(b"fresh world")
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("apps.factorio.run_blocking", new=AsyncMock(side_effect=run_create)):
+                asyncio.run(app._create_fresh_world("Orbit.zip"))
+
+            self.assertTrue((root / "saves" / "Orbit.zip").is_file())
+
     def test_detect_description_reads_info_json_from_factorio_archive(self) -> None:
         with TemporaryDirectory() as temp_dir:
             mods_dir = Path(temp_dir)

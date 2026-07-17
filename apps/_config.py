@@ -1889,9 +1889,11 @@ class App_Config(BaseModel):
     relay_notice_player_death: bool = True
     relay_notice_progress: bool = True
     disabled_activity_provider_ids: tuple[str, ...] = Field(default_factory=tuple)
-    cmd_start: list[str] = Field(default_factory=list)
     provider_alt_text: str | None = None
     factorio_chat_relay_use_shout: bool = True
+    factorio_save_file: str | None = None
+    factorio_create_fresh_world: bool = False
+    factorio_fresh_save_file: str = "New World.zip"
     rcon_requires_online_players: bool | None = None
     version: AppVersion | None = None
     steam_update: SteamUpdateConfig | None = None
@@ -1905,6 +1907,28 @@ class App_Config(BaseModel):
     @classmethod
     def validate_friendly_name(cls, raw: object) -> str | None:
         return normalise_optional_friendly_name(raw)
+
+    @field_validator("factorio_save_file")
+    @classmethod
+    def validate_factorio_save_file(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        filename = value.strip()
+        if not filename:
+            return None
+        if Path(filename).name != filename or Path(filename).suffix.casefold() != ".zip":
+            raise ValueError("factorio_save_file must be a .zip filename without directories")
+        return filename
+
+    @field_validator("factorio_fresh_save_file")
+    @classmethod
+    def validate_factorio_fresh_save_file(cls, value: str) -> str:
+        filename = value.strip()
+        if not filename:
+            raise ValueError("factorio_fresh_save_file must not be blank")
+        if Path(filename).name != filename:
+            raise ValueError("factorio_fresh_save_file must not include directories")
+        return filename
 
     @field_validator("client_pack_current_hash", "client_pack_published_hash", "client_pack_verified_hash")
     @classmethod
@@ -2043,6 +2067,8 @@ class App_Config(BaseModel):
         if not isinstance(raw, dict):
             return raw
         payload = dict(raw)
+        if "cmd_start" in payload:
+            raise ValueError("cmd_start has been removed; each app now uses its built-in launch command")
         if "join_port" not in payload and "port" in payload:
             payload["join_port"] = payload["port"]
         return payload

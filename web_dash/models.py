@@ -27,6 +27,7 @@ from .constants import (
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     _REMOTE_NODE_STREAM_CHUNK_SIZE_BYTES,
     _REMOTE_NODE_TOKEN_TTL_SECONDS,
+    _SAME_ORIGIN_NODE_API_BASE,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
     log,
@@ -74,6 +75,8 @@ from .runtime_imports import (
     NodeConsoleActionExecutionResult,
     NodeConsoleActionList,
     NodeConsoleStdoutSnapshot,
+    NodeFactorioGenerationState,
+    NodeFactorioMapExchangeString,
     NodeFactorioModSettings,
     NodeMinecraftRecipeWorkspaceState,
     NodeModDependencyResolutionResult,
@@ -87,6 +90,8 @@ from .runtime_imports import (
     NodeSettingsActionResult,
     NodeSevenDaysSandboxOptionsState,
     NodeSystemHistory,
+    NodeSystemLogCatalog,
+    NodeSystemLogTail,
     NodeSystemSummary,
     PackFormat,
     PackPurpose,
@@ -158,6 +163,7 @@ class _LocalAppPageData:
     minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None
     minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None
     sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None
+    factorio_generation: NodeFactorioGenerationState | None = None
     factorio_mod_settings: NodeFactorioModSettings | None = None
     load_warnings: tuple[ModWebPageLoadWarning, ...] = ()
 
@@ -390,11 +396,13 @@ class ModWebModelsMixin(ModWebServiceSupport):
 
     def _current_node_link(self) -> ModWebNodeLink:
         node_name = config.MOD_WEB_SERVER.node_name
+        is_portal = config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL
         api_base_url = (
             config.LOCAL_NODE_API_BASE_URL
-            if config.ACTIVE_BOT_PROFILE.name is config.BotProfileName.PORTAL
+            if is_portal
             else self._absolute_node_api_base_url(config.MOD_WEB_SERVER.node_api_base_url)
         )
+        browser_api_base_url = _SAME_ORIGIN_NODE_API_BASE if is_portal else api_base_url
         return ModWebNodeLink(
             node_name=node_name,
             label=self._current_node_label(),
@@ -403,7 +411,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
             is_current=True,
             latency_probe_url=self._node_api.ping_url(base_url=api_base_url),
-            presence_stream_url=self._node_api.presence_stream_url(base_url=api_base_url),
+            presence_stream_url=self._node_api.presence_stream_url(base_url=browser_api_base_url),
         )
 
     @staticmethod
@@ -690,7 +698,18 @@ class ModWebModelsMixin(ModWebServiceSupport):
         minecraft_recipes = self._minecraft_recipe_summary(app)
         minecraft_item_registry = self._minecraft_item_registry_summary(app)
         sevendays_sandbox_options = self._sevendays_sandbox_options_summary(app)
+        factorio_generation: NodeFactorioGenerationState | None = None
         factorio_mod_settings: NodeFactorioModSettings | None = None
+        if app_entry.scope == config.AppScopes.factorio.value and self._user_has_level(user, Power_Level.sudo):
+            try:
+                factorio_generation = self._node_api.factorio_generation_state(app=app)
+            except Exception as xcp:
+                self._warn_page_section_load_failure(
+                    context=context,
+                    section_label="Factorio generation settings",
+                    error=xcp,
+                    load_warnings=load_warnings,
+                )
         if app_entry.scope == config.AppScopes.factorio.value and self._user_has_level(user, config_read_level):
             try:
                 factorio_mod_settings = self._node_api.factorio_mod_settings_state(app=app)
@@ -715,6 +734,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             minecraft_recipes=minecraft_recipes,
             minecraft_item_registry=minecraft_item_registry,
             sevendays_sandbox_options=sevendays_sandbox_options,
+            factorio_generation=factorio_generation,
             factorio_mod_settings=factorio_mod_settings,
             load_warnings=tuple(load_warnings),
         )
@@ -792,6 +812,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             minecraft_recipes=page_data.minecraft_recipes,
             minecraft_item_registry=page_data.minecraft_item_registry,
             sevendays_sandbox_options=page_data.sevendays_sandbox_options,
+            factorio_generation=page_data.factorio_generation,
             factorio_mod_settings=page_data.factorio_mod_settings,
         )
 
@@ -851,6 +872,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             rcon_requires_online_players=page_data.app_entry.rcon_requires_online_players,
             activity_providers=page_data.app_entry.activity_providers,
             load_warnings=page_data.load_warnings,
+            factorio_generation=page_data.factorio_generation,
             factorio_mod_settings=page_data.factorio_mod_settings,
         )
 
@@ -924,6 +946,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         minecraft_recipes: ModWebMinecraftRecipeBookSummary | None = None,
         minecraft_item_registry: ModWebMinecraftItemRegistrySummary | None = None,
         sevendays_sandbox_options: ModWebSevenDaysSandboxOptionsSummary | None = None,
+        factorio_generation: NodeFactorioGenerationState | None = None,
         factorio_mod_settings: NodeFactorioModSettings | None = None,
     ) -> ModWebPageModel:
         app_api_url: str = self._node_app_api_url(node, mods.app_name)
@@ -992,6 +1015,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     minecraft_recipes=minecraft_recipes,
                     minecraft_item_registry=minecraft_item_registry,
                     sevendays_sandbox_options=sevendays_sandbox_options,
+                    factorio_generation=factorio_generation,
                     factorio_mod_settings=factorio_mod_settings,
                     download_all_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'false'})}",
                     download_enabled_url=f"{app_api_url}/mods/download?{urlencode({'enabled_only': 'true'})}",
@@ -1052,6 +1076,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
         rcon_requires_online_players: bool | None = None,
         activity_providers: tuple[NodeAppActivityProviderEntry, ...] = (),
         load_warnings: tuple[ModWebPageLoadWarning, ...] = (),
+        factorio_generation: NodeFactorioGenerationState | None = None,
         factorio_mod_settings: NodeFactorioModSettings | None = None,
     ) -> ModWebOverviewPageModel:
         app_api_url: str = self._node_app_api_url(node, app_name)
@@ -1104,6 +1129,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
                     rcon_requires_online_players=rcon_requires_online_players,
                     activity_providers=activity_providers,
                     load_warnings=load_warnings,
+                    factorio_generation=factorio_generation,
                     factorio_mod_settings=factorio_mod_settings,
                 ),
             ),
@@ -1676,6 +1702,78 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeFactorioModSettings.from_mapping(payload)
 
+    async def _remote_factorio_generation_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeFactorioGenerationState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/factorio/generation",
+            scopes=(NodeApiScope.CONFIGS_READ,),
+            user=user,
+        )
+        return NodeFactorioGenerationState.from_mapping(payload)
+
+    async def _remote_factorio_generation_update_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        map_gen_settings: Mapping[str, object],
+        map_settings: Mapping[str, object],
+        user: ModWebUser,
+    ) -> NodeFactorioGenerationState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/factorio/generation",
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={
+                "map_gen_settings": dict(map_gen_settings),
+                "map_settings": dict(map_settings),
+            },
+        )
+        return NodeFactorioGenerationState.from_mapping(payload)
+
+    async def _remote_factorio_map_exchange_import_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        map_exchange_string: str,
+        user: ModWebUser,
+    ) -> NodeFactorioGenerationState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/factorio/generation/map-exchange-string",
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            user=user,
+            method="POST",
+            json_payload={"map_exchange_string": map_exchange_string},
+            timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+        )
+        return NodeFactorioGenerationState.from_mapping(payload)
+
+    async def _remote_factorio_map_exchange_export_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeFactorioMapExchangeString:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/factorio/generation/map-exchange-string",
+            scopes=(NodeApiScope.CONFIGS_READ,),
+            user=user,
+            timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+        )
+        return NodeFactorioMapExchangeString.from_mapping(payload)
+
     def _remote_factorio_mod_settings_upload(
         self,
         node: ModWebNodeLink,
@@ -1781,7 +1879,7 @@ class ModWebModelsMixin(ModWebServiceSupport):
             with upload_path.open("rb") as handle:
                 response: Response = self._remote_sync_http_client().post(
                     url,
-                    data={"root_id": root_id, "filename": upload_name},
+                    data={"root_id": root_id, "filename": upload_name, "upload_transport": "relay"},
                     files={"upload": (upload_name, handle, "application/octet-stream")},
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=_REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
@@ -1932,6 +2030,37 @@ class ModWebModelsMixin(ModWebServiceSupport):
             user=user,
         )
         return NodeSystemHistory.from_mapping(payload)
+
+    async def _remote_node_system_log_catalog_async(
+        self,
+        node: ModWebNodeLink,
+        user: ModWebUser,
+    ) -> NodeSystemLogCatalog:
+        payload: dict[str, object] = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path="/system/logs",
+            scopes=(NodeApiScope.NODE_OPERATE,),
+            user=user,
+        )
+        return NodeSystemLogCatalog.from_mapping(payload)
+
+    async def _remote_node_system_log_tail_async(
+        self,
+        node: ModWebNodeLink,
+        log_path: str,
+        *,
+        max_lines: int,
+        user: ModWebUser,
+    ) -> NodeSystemLogTail:
+        payload: dict[str, object] = await self._remote_json_async(
+            node=node,
+            app_name=None,
+            path=f"/system/logs/{quote(log_path, safe='/')}?max_lines={max_lines}",
+            scopes=(NodeApiScope.NODE_OPERATE,),
+            user=user,
+        )
+        return NodeSystemLogTail.from_mapping(payload)
 
     async def _remote_node_system_summary_or_none_async(
         self,

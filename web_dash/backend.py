@@ -28,6 +28,7 @@ from .types import (
     ModWebNotificationTrayItemState,
     _ModWebNotificationTrayItem,
 )
+from .user_settings import ModWebUserSettings, ModWebUserSettingsStore
 from .utils import _http_exception
 
 _USER_TRANSFER_LIMIT = 3
@@ -57,6 +58,7 @@ class ModWebDashboardBackend:
         auth: ModWebAuthService | None = None,
         node_api: NodeApiService | None = None,
         client_pack_drafts: ClientPackDraftStore | None = None,
+        user_settings: ModWebUserSettingsStore | None = None,
     ) -> None:
         self._manager: App_Manager | None = None
         self._acl: Access_Control | None = None
@@ -71,6 +73,7 @@ class ModWebDashboardBackend:
         self._client_pack_drafts = client_pack_drafts or ClientPackDraftStore(
             draft_cache_directory
         )
+        self._user_settings = user_settings or ModWebUserSettingsStore()
         self._chat_relay: WebChatRelayPublisher | None = None
         self._transfer_lock = threading.Lock()
         self._transfer_records: dict[int, _TransferRecord] = {}
@@ -100,6 +103,12 @@ class ModWebDashboardBackend:
     @property
     def chat_relay(self) -> WebChatRelayPublisher | None:
         return self._chat_relay
+
+    def user_settings_for(self, *, user_id: int) -> ModWebUserSettings:
+        return self._user_settings.get(user_id=user_id)
+
+    def save_user_settings(self, *, user_id: int, settings: ModWebUserSettings) -> bool:
+        return self._user_settings.set(user_id=user_id, settings=settings)
 
     def set_manager(self, manager: App_Manager) -> None:
         self._manager = manager

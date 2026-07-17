@@ -62,6 +62,9 @@ class AuthorityServer:
         _ = app.router.add_post(path="/authority/users/replace", handler=self._handle_users_replace)
         _ = app.router.add_get(path="/authority/names", handler=self._handle_names)
         _ = app.router.add_post(path="/authority/names/mutate", handler=self._handle_names_mutate)
+        _ = app.router.add_get(path="/authority/user-settings", handler=self._handle_user_settings)
+        _ = app.router.add_post(path="/authority/user-settings/replace", handler=self._handle_user_settings_replace)
+        _ = app.router.add_post(path="/authority/user-settings/mutate", handler=self._handle_user_settings_mutate)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(
@@ -124,6 +127,39 @@ class AuthorityServer:
         data = _json_object(payload.get("data"), label="payload.data")
 
         write_json_object(path=config.FILE_USERS, payload=data)
+        return web.json_response(data={"ok": True, "data": data})
+
+    async def _handle_user_settings(self, request: web.Request) -> web.Response:
+        del request
+        data: dict[str, object] = (
+            read_json_object(path=config.USER_SETTINGS) if config.USER_SETTINGS.exists() else {}
+        )
+        return web.json_response(data={"data": data})
+
+    async def _handle_user_settings_replace(self, request: web.Request) -> web.Response:
+        payload = await _request_json_object(request, label="payload")
+        data = _json_object(payload.get("data"), label="payload.data")
+
+        write_json_object(path=config.USER_SETTINGS, payload=data)
+        return web.json_response(data={"ok": True, "data": data})
+
+    async def _handle_user_settings_mutate(self, request: web.Request) -> web.Response:
+        """Atomically replace one user's settings while preserving every other user."""
+        payload = await _request_json_object(request, label="payload")
+        raw_user_id = payload.get("user_id")
+        if isinstance(raw_user_id, bool) or not isinstance(raw_user_id, int) or raw_user_id <= 0:
+            raise web.HTTPBadRequest(text="payload.user_id must be a positive integer")
+        settings = _json_object(payload.get("settings"), label="payload.settings")
+
+        existing = read_json_object(path=config.USER_SETTINGS) if config.USER_SETTINGS.exists() else {}
+        raw_version = existing.get("version", 1)
+        if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+            raise web.HTTPBadRequest(text="Stored user settings version must be an integer")
+        raw_users = existing.get("users", {})
+        users = _json_object(raw_users, label="Stored user settings users")
+        users[str(raw_user_id)] = settings
+        data: dict[str, object] = {"version": raw_version, "users": users}
+        write_json_object(path=config.USER_SETTINGS, payload=data)
         return web.json_response(data={"ok": True, "data": data})
 
     async def _handle_names(self, request: web.Request) -> web.Response:

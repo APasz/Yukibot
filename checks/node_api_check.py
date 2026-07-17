@@ -107,6 +107,7 @@ from chat_hub import ChatAuthor, ChatAuthorKind, ChatEndpoint, ChatEndpointId, C
 from maintenance import MaintenanceService
 from map_annotations import MapAnnotationDraft
 from node_api import (
+    FACTORIO_MOD_SETTINGS_ACCESS_LEVEL,
     NodeApiService,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
@@ -185,7 +186,7 @@ from node_api import (
     required_app_mutation_scope,
     required_mod_mutation_level,
 )
-from node_auth import NodeApiScope, verify_node_token
+from node_auth import NodeAccessGrant, NodeApiScope, verify_node_token
 from restart_state import RestartKind, RestartRecord
 from restart_targets import RestartTarget
 
@@ -4588,6 +4589,36 @@ class NodeApiTests(unittest.TestCase):
 
         self.assertEqual(getattr(raised.exception, "status_code"), 403)
 
+    def test_actor_level_requirement_returns_forbidden_for_insufficient_level(self) -> None:
+        service = NodeApiService()
+        acl = Access_Control(pointer=Path("missing-users.json"))
+        acl._roles = {42: Power_Level.sudo}  # type: ignore[attr-defined]
+        service.set_acl(acl)
+        grant = NodeAccessGrant(
+            subject="web:42",
+            node="erin",
+            app="factorio_alpha",
+            scopes=frozenset({NodeApiScope.CONFIGS_READ}),
+            expires_at=2_000_000_000,
+        )
+
+        with self.assertRaisesRegex(HTTPException, "Insufficient level: Sudo < Root") as raised:
+            asyncio.run(
+                service._require_actor_level_for_request(
+                    request=self._request(),
+                    access_token=None,
+                    app_name="factorio_alpha",
+                    scopes=(NodeApiScope.CONFIGS_READ,),
+                    required_level=Power_Level.root,
+                    verified_grant=grant,
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_factorio_mod_settings_access_requires_sudo(self) -> None:
+        self.assertEqual(FACTORIO_MOD_SETTINGS_ACCESS_LEVEL, Power_Level.sudo)
+
     def test_required_mod_mutation_level_allows_admin_toggle_for_regular_mods(self) -> None:
         self.assertEqual(required_mod_mutation_level(NodeModMutationAction.ENABLE), Power_Level.admin)
         self.assertEqual(required_mod_mutation_level(NodeModMutationAction.DISABLE), Power_Level.admin)
@@ -7208,6 +7239,35 @@ class NodeApiTests(unittest.TestCase):
                 captured_at_epoch_seconds=10_000,
             ),
         )
+
+    def test_system_log_catalog_and_tail_include_managed_files_only(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            log_directory = root / "logs"
+            log_directory.mkdir()
+            system_log = log_directory / "System.log"
+            system_log.write_text("first\nsecond\nthird\n", encoding="utf-8")
+            app_log = log_directory / "minecraft_alpha" / "stdout.log"
+            app_log.parent.mkdir()
+            app_log.write_text("starting\nready\n", encoding="utf-8")
+            outside_log = root / "outside.log"
+            outside_log.write_text("private\n", encoding="utf-8")
+            (log_directory / "outside-link.log").symlink_to(outside_log)
+
+            with patch.object(config, "DIR_LOG", log_directory):
+                service = NodeApiService()
+                catalog = service.build_system_log_catalog()
+                tail = service.build_system_log_tail(log_path="System.log", max_lines=2)
+
+        self.assertEqual(catalog.node, service.node_name)
+        self.assertEqual(
+            [entry.relative_path for entry in catalog.entries],
+            ["minecraft_alpha/stdout.log", "System.log"],
+        )
+        self.assertEqual(type(catalog).from_mapping(catalog.to_mapping()), catalog)
+        self.assertEqual(tail.lines, ("second", "third"))
+        self.assertTrue(tail.truncated)
+        self.assertEqual(type(tail).from_mapping(tail.to_mapping()), tail)
 
     def test_system_history_round_trip_preserves_typed_samples(self) -> None:
         history = NodeSystemHistory(

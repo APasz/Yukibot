@@ -496,6 +496,10 @@ class App(Generic[ConfigT], ABC):
             overrides["steam_update"] = self.cfg.steam_update.model_dump(mode="json", exclude_none=True)
         if self.cfg.factorio_update is not None:
             overrides["factorio_update"] = self.cfg.factorio_update.model_dump(mode="json", exclude_none=True)
+        if self.scope == "factorio":
+            overrides["factorio_save_file"] = self.cfg.factorio_save_file
+            overrides["factorio_create_fresh_world"] = self.cfg.factorio_create_fresh_world
+            overrides["factorio_fresh_save_file"] = self.cfg.factorio_fresh_save_file
         if self.cfg.rcon_requires_online_players is not None:
             overrides["rcon_requires_online_players"] = self.cfg.rcon_requires_online_players
         if self.config_file_read_level_override is not None:

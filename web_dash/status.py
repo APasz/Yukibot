@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from fastapi.exceptions import RequestValidationError
+from hikari import Snowflake
 
 from _async_utils import run_blocking
 from relay_notices import (
@@ -75,6 +76,7 @@ from .runtime_imports import (
     urlencode,
 )
 from .service_base import ModWebServiceSupport
+from .ui_helpers import ModWebUiHelpersMixin
 from .types import (
     ModWebNodeStatus,
     ModWebNotificationTrayItemKind,
@@ -107,10 +109,11 @@ _LOGIN_ADMINISTRATOR_LEVELS: tuple[Power_Level, ...] = (
 )
 # Historical ACL members who cannot serve as active support contacts.
 _LOGIN_CONTACT_EXCLUDED_USER_IDS: frozenset[int] = frozenset({792_857_784_508_219_404})
+_DISCORD_SNOWFLAKE_MAX = int(Snowflake.max())
 
 
 @dataclass(slots=True)
-class _AliasDialogDraft:
+class _AliasDraft:
     display_name: str = ""
     add_alias: str = ""
     app_aliases: dict[str, str] = field(default_factory=dict)
@@ -136,12 +139,12 @@ class ModWebStatusMixin(ModWebServiceSupport):
         await run_blocking(cls._sync_name_cache_with_authority_if_remote, name_cache=name_cache)
 
     @classmethod
-    def _persist_alias_dialog_draft(
+    def _persist_alias_draft(
         cls,
         *,
         name_cache: config.Name_Cache,
         target_user_id: int,
-        draft: _AliasDialogDraft,
+        draft: _AliasDraft,
         scopes: tuple[str, ...],
         sync_authority: bool = True,
     ) -> tuple[str, ...]:
@@ -1096,23 +1099,50 @@ class ModWebStatusMixin(ModWebServiceSupport):
             for user_id in ordered_user_ids
         }
 
-    def _build_alias_panel(self, *, ui: ModWebUi, user: ModWebUser) -> Callable[[], None]:
+    @staticmethod
+    def _parse_manual_alias_target_user_id(value: object) -> int:
+        raw_value = str(value).strip()
+        if not raw_value.isascii() or not raw_value.isdigit():
+            raise ValueError("Manual Discord user ID must contain ASCII digits only.")
+        user_id = int(raw_value)
+        if not 0 < user_id <= _DISCORD_SNOWFLAKE_MAX:
+            raise ValueError("Manual Discord user ID must be a valid positive snowflake.")
+        return user_id
+
+    async def _render_alias_page(self, *, ui: ModWebUi, user: ModWebUser, request: Request) -> None:
+        self._apply_theme(ui=ui)
+        ModWebUiHelpersMixin._render_skip_link(ui=ui)
+        selected_user_id: int | None = None
+        raw_selected_user_id = request.query_params.get("user")
+        if raw_selected_user_id and self._user_has_level(user, Power_Level.sudo):
+            try:
+                selected_user_id = self._parse_manual_alias_target_user_id(raw_selected_user_id)
+            except ValueError:
+                ui.notify("The requested alias user is invalid; showing your profile instead.", type="warning")
+
+        with ui.column().classes("w-full gap-6 px-4 py-8 md:px-8"):
+            with ui.column().classes("mod-page w-full gap-6").props("id=mod-main-content role=main tabindex=-1"):
+                self._render_user_header(ui=ui, user=user)
+                self._render_alias_page_editor(ui=ui, user=user, selected_user_id=selected_user_id)
+
+    def _render_alias_page_editor(
+        self,
+        *,
+        ui: ModWebUi,
+        user: ModWebUser,
+        selected_user_id: int | None,
+    ) -> None:
         can_switch_user = self._user_has_level(user, Power_Level.sudo)
-        alias_dialog = None
-        alias_dialog_rendered = False
 
-        def _show_alias_panel() -> None:
-            nonlocal alias_dialog, alias_dialog_rendered
-            if alias_dialog_rendered:
-                if alias_dialog is None:
-                    raise RuntimeError("Alias dialog was not rendered.")
-                alias_dialog.open()
-                return
-
-            alias_dialog_rendered = True
+        def _render_alias_page() -> None:
             name_cache = config.Name_Cache()
-            state: dict[str, int] = {"target_user_id": user.discord_id}
-            drafts_by_user: dict[int, _AliasDialogDraft] = {}
+            initial_target_user_id = (
+                selected_user_id
+                if can_switch_user and selected_user_id is not None and selected_user_id in name_cache.by_id
+                else user.discord_id
+            )
+            state: dict[str, int] = {"target_user_id": initial_target_user_id}
+            drafts_by_user: dict[int, _AliasDraft] = {}
             form_controls: dict[str, ModWebValueContainer] = {}
             app_alias_controls: dict[str, ModWebValueContainer] = {}
             def _refresh_alias_body() -> None:
@@ -1129,8 +1159,8 @@ class ModWebStatusMixin(ModWebServiceSupport):
             def _current_app_scopes() -> tuple[str, ...]:
                 return self._alias_known_scopes()
 
-            def _build_alias_draft(target_user_id: int) -> _AliasDialogDraft:
-                return _AliasDialogDraft(
+            def _build_alias_draft(target_user_id: int) -> _AliasDraft:
+                return _AliasDraft(
                     display_name=name_cache.get_display_override(target_user_id) or "",
                     app_aliases={
                         scope: name_cache.get_game_alias(target_user_id, scope) or "" for scope in _current_app_scopes()
@@ -1139,7 +1169,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     minecraft_uuid=name_cache.get_game_uuid(target_user_id, "minecraft") or "",
                 )
 
-            def _draft_for_user(target_user_id: int) -> _AliasDialogDraft:
+            def _draft_for_user(target_user_id: int) -> _AliasDraft:
                 draft = drafts_by_user.get(target_user_id)
                 if draft is None:
                     draft = _build_alias_draft(target_user_id)
@@ -1167,7 +1197,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
                 target_user_id = _target_user_id()
                 draft = _draft_for_user(target_user_id)
                 try:
-                    changed_fields = self._persist_alias_dialog_draft(
+                    changed_fields = self._persist_alias_draft(
                         name_cache=name_cache,
                         target_user_id=target_user_id,
                         draft=draft,
@@ -1202,19 +1232,19 @@ class ModWebStatusMixin(ModWebServiceSupport):
                 state["target_user_id"] = next_user_id
                 refresh_alias_body()
 
-            with ui.dialog() as alias_dialog:
-                with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
+            with ui.column().classes("w-full"):
+                with ui.card().classes("mod-card w-full max-w-5xl self-center"):
                     with ui.column().classes("w-full gap-4 mod-app-details-layout"):
                         with ui.column().classes("gap-1"):
-                            ui.label("Alias").classes("text-xl font-black mod-title-small")
-                            ui.label("Manage display names, aliases, game handles, and linked identities.").classes(
+                            ui.label("Identity & Aliases").classes("text-xl font-black mod-title-small")
+                            ui.label("Manage display names, aliases, game handles, and linked accounts.").classes(
                                 "mod-subtitle text-sm"
                             )
                         target_select = (
                             ui.select(
                                 self._alias_target_options(name_cache=name_cache, viewer=user),
                                 value=str(state["target_user_id"]),
-                                label="User",
+                                label="Editing User",
                                 on_change=_handle_target_user_change,
                             )
                             .props("filled square dense hide-bottom-space color=accent options-dark")
@@ -1222,6 +1252,55 @@ class ModWebStatusMixin(ModWebServiceSupport):
                         )
                         if not can_switch_user:
                             target_select.disable()
+                        if can_switch_user:
+                            with ui.column().classes("mod-app-details-section gap-3"):
+                                ui.label("Manual User").classes("mod-stat-label")
+                                manual_user_id_input = (
+                                    ui.input("Discord User ID")
+                                    .props("filled square dense hide-bottom-space color=accent")
+                                    .classes("mod-app-details-field w-full")
+                                )
+                                manual_display_name_input = (
+                                    ui.input("Manual Display Name (optional)")
+                                    .props("filled square dense hide-bottom-space color=accent")
+                                    .classes("mod-app-details-field w-full")
+                                )
+
+                                async def _open_manual_user() -> None:
+                                    target_user_id: int | None = None
+                                    try:
+                                        target_user_id = self._parse_manual_alias_target_user_id(
+                                            _value_as_object(manual_user_id_input)
+                                        )
+                                        if target_user_id in name_cache.by_id:
+                                            raise ValueError("User is already cached; select them from the user list instead.")
+                                        display_name = _value_as_text(manual_display_name_input) or None
+                                        changed = name_cache.upsert_manual_user(
+                                            target_user_id,
+                                            display_name=display_name,
+                                        )
+                                        if changed:
+                                            await self._sync_name_cache_with_authority_if_remote_async(
+                                                name_cache=name_cache
+                                            )
+                                    except ValueError as xcp:
+                                        ui.notify(str(xcp), type="negative")
+                                        return
+                                    except Exception as xcp:
+                                        ui.notify(
+                                            f"Manual user was saved locally, but authority sync failed: {xcp}",
+                                            type="warning",
+                                        )
+                                    if target_user_id is None:
+                                        raise RuntimeError("Manual user ID was not resolved.")
+                                    _capture_alias_draft()
+                                    state["target_user_id"] = target_user_id
+                                    target_select.options = self._alias_target_options(name_cache=name_cache, viewer=user)
+                                    _set_control_value(target_select, str(target_user_id))
+                                    drafts_by_user[target_user_id] = _build_alias_draft(target_user_id)
+                                    refresh_alias_body()
+
+                                ui.button("Open Manual User", on_click=_open_manual_user).classes("mod-list-button secondary")
 
                         def _render_inline_alias_input(
                             *,
@@ -1383,11 +1462,12 @@ class ModWebStatusMixin(ModWebServiceSupport):
                         render_alias_body()
                         with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
                             ui.button("Save", on_click=_save_alias_form).classes("mod-list-button")
-                            ui.button("Close", on_click=alias_dialog.close).classes("mod-list-button secondary")
+                            ui.button(
+                                "Back to Dashboard",
+                                on_click=lambda: ui.navigate.to(self.index_path()),
+                            ).classes("mod-list-button secondary")
 
-            alias_dialog.open()
-
-        return _show_alias_panel
+        _render_alias_page()
 
     @staticmethod
     def _save_alias_display_override(
@@ -1510,7 +1590,11 @@ class ModWebStatusMixin(ModWebServiceSupport):
         refresh()
 
     def _render_user_utility_launcher(self, *, ui: ModWebUi, user: ModWebUser) -> None:
-        open_alias_panel = self._build_alias_panel(ui=ui, user=user)
+        open_user_settings = self._build_user_settings_panel(ui=ui, user=user)
+
+        def _open_alias_page() -> None:
+            ui.navigate.to("/aliases")
+
         open_discord_settings = (
             self._build_discord_settings_panel(ui=ui, user=user) if self._user_can_manage_discord_settings(user) else None
         )
@@ -1554,8 +1638,9 @@ class ModWebStatusMixin(ModWebServiceSupport):
                     ("Sim Download", lambda: _simulate(ModWebNotificationTrayItemKind.DOWNLOAD)),
                     ("Clear Transfers", _clear_transfers),
                 )
-            )
-        action_specs.append(("Alias", open_alias_panel))
+        )
+        action_specs.append(("Settings", open_user_settings))
+        action_specs.append(("Aliases", _open_alias_page))
         if open_discord_settings is not None:
             action_specs.append(("Discord", open_discord_settings))
         if open_fake_chat_preview is not None:
@@ -1585,6 +1670,23 @@ class ModWebStatusMixin(ModWebServiceSupport):
         ui.button("", on_click=utility_dialog.open).props("icon=menu flat aria-label=Utilities").classes(
             f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-menu-button"
         )
+
+    def _build_user_settings_panel(self, *, ui: ModWebUi, user: ModWebUser) -> Callable[[], None]:
+        def _show_user_settings_panel() -> None:
+            with ui.dialog() as settings_dialog:
+                with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
+                    with ui.column().classes("w-full gap-4 mod-app-details-layout"):
+                        with ui.column().classes("gap-1"):
+                            ui.label(f"{self._web_display_name(user)} Settings").classes(
+                                "text-xl font-black mod-title-small"
+                            )
+                        with ui.column().classes("mod-app-details-section gap-2"):
+                            ui.label("Coming soon").classes("mod-stat-label")
+                        with ui.row().classes("w-full justify-end mod-app-details-actions"):
+                            ui.button("Close", on_click=settings_dialog.close).classes("mod-list-button secondary")
+                settings_dialog.open()
+
+        return _show_user_settings_panel
 
     def _render_user_notification_tray(self, *, ui: ModWebUi, user: ModWebUser) -> None:
         def _render_items(items: tuple[_ModWebNotificationTrayItem, ...]) -> None:

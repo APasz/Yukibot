@@ -37,6 +37,8 @@ from .runtime_imports import (
     NodeConsoleStdoutSnapshot,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
+    NodeFactorioGenerationState,
+    NodeFactorioMapExchangeString,
     NodeFactorioModSettings,
     NodeFontSourceSettingsMutationResult,
     NodeMinecraftRecipeMutationResult,
@@ -58,6 +60,8 @@ from .runtime_imports import (
     NodeSystemActionResult,
     NodeSystemCapabilities,
     NodeSystemHistory,
+    NodeSystemLogCatalog,
+    NodeSystemLogTail,
     NodeSystemSummary,
     Path,
     Power_Level,
@@ -596,6 +600,26 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(
+        self, name: Literal["_remote_factorio_generation_async"]
+    ) -> Callable[..., Awaitable[NodeFactorioGenerationState]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_factorio_generation_update_async"]
+    ) -> Callable[..., Awaitable[NodeFactorioGenerationState]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_factorio_map_exchange_import_async"]
+    ) -> Callable[..., Awaitable[NodeFactorioGenerationState]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_factorio_map_exchange_export_async"]
+    ) -> Callable[..., Awaitable[NodeFactorioMapExchangeString]]: ...
+
+    @overload
+    def __getattr__(
         self, name: Literal["_remote_factorio_mod_settings_async"]
     ) -> Callable[..., Awaitable[NodeFactorioModSettings]]: ...
 
@@ -698,6 +722,16 @@ class ModWebServiceSupport:
     def __getattr__(
         self, name: Literal["_remote_node_system_history_async"]
     ) -> Callable[..., Awaitable[NodeSystemHistory]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_node_system_log_catalog_async"]
+    ) -> Callable[..., Awaitable[NodeSystemLogCatalog]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_node_system_log_tail_async"]
+    ) -> Callable[..., Awaitable[NodeSystemLogTail]]: ...
 
     @overload
     def __getattr__(
@@ -853,6 +887,9 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_render_home_page"]) -> Callable[..., Awaitable[None]]: ...
+
+    @overload
+    def __getattr__(self, name: Literal["_render_alias_page"]) -> Callable[..., Awaitable[None]]: ...
 
     @overload
     def __getattr__(

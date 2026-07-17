@@ -24,6 +24,7 @@ from apps._config import (
     resolve_app_title_font,
 )
 from font_assets import font_assets
+from mod_web_theme import mod_web_tooltip_css
 
 from .app_page_minecraft import (
     ModWebAppPageMinecraftMixin,
@@ -36,6 +37,7 @@ from .app_page_minecraft import (
     _MinecraftRecipeEditorSelection,
     _MinecraftRecipeEditorState,
 )
+from .app_page_factorio import ModWebAppPageFactorioMixin
 from .app_page_sevendays import ModWebAppPageSevenDaysMixin
 from .app_page_updates import ModWebAppPageUpdateMixin
 from .assets import extract_html_tag_contents
@@ -226,6 +228,7 @@ def _leaflet_vendor_asset(file_name: str) -> str:
 
 
 class ModWebAppPageMixin(
+    ModWebAppPageFactorioMixin,
     ModWebAppPageMinecraftMixin,
     ModWebAppPageSevenDaysMixin,
     ModWebAppPageUpdateMixin,
@@ -379,9 +382,10 @@ class ModWebAppPageMixin(
         if chat_surface is not None and not model.supports_chat:
             raise ValueError("App page received chat configuration for an app without chat support.")
         self._apply_theme(ui=ui)
+        ModWebUiHelpersMixin._render_skip_link(ui=ui)
         current_model: ModWebBasePageModel = model
         last_system_summary: NodeSystemSummary | None = initial_system_summary
-        with ui.column().classes(self._app_page_classes()):
+        with ui.column().classes(self._app_page_classes()).props("id=mod-main-content role=main tabindex=-1"):
             self._render_user_header(ui=ui, user=user)
             hero_card: Card = ui.card().classes(self._app_hero_card_classes(model.app_stats)).style(
                 self._hero_card_style(model.app_color_hex)
@@ -488,9 +492,10 @@ class ModWebAppPageMixin(
         if chat_surface is not None and not model.supports_chat:
             raise ValueError("Overview page received chat configuration for an app without chat support.")
         self._apply_theme(ui=ui)
+        ModWebUiHelpersMixin._render_skip_link(ui=ui)
         current_model: ModWebBasePageModel = model
         last_system_summary: NodeSystemSummary | None = initial_system_summary
-        with ui.column().classes(self._app_page_classes()):
+        with ui.column().classes(self._app_page_classes()).props("id=mod-main-content role=main tabindex=-1"):
             self._render_user_header(ui=ui, user=user)
             hero_card: Card = ui.card().classes(self._app_hero_card_classes(model.app_stats)).style(
                 self._hero_card_style(model.app_color_hex)
@@ -1655,6 +1660,9 @@ class ModWebAppPageMixin(
         return """
             <style>
               __LEAFLET_CSS__
+            </style>
+            <style>
+              __MOD_WEB_TOOLTIP_CSS__
             </style>
             <script>
               __LEAFLET_JS__
@@ -3345,8 +3353,8 @@ class ModWebAppPageMixin(
               }
             </script>
             """.replace("__LEAFLET_CSS__", _leaflet_vendor_asset("leaflet.css")).replace(
-            "__LEAFLET_JS__", _leaflet_vendor_asset("leaflet.js")
-        )
+            "__MOD_WEB_TOOLTIP_CSS__", mod_web_tooltip_css()
+        ).replace("__LEAFLET_JS__", _leaflet_vendor_asset("leaflet.js"))
 
     @staticmethod
     def _map_client_bootstrap_script(*, config_payload: dict[str, object]) -> str:
@@ -3634,7 +3642,9 @@ class ModWebAppPageMixin(
             target_panel = section_panel_by_tab_id[next_tab_id]
             target_panel.clear()
             with target_panel:
-                ui.label("Loading tab…").classes("mod-subtitle text-sm mod-tab-loading")
+                ui.label("Loading tab…").classes("mod-subtitle text-sm mod-tab-loading").props(
+                    "role=status aria-live=polite"
+                )
             try:
                 loaded = await load_tab(next_tab_id)
                 if not self._ui_client_is_alive(ui=ui):
@@ -3669,7 +3679,11 @@ class ModWebAppPageMixin(
         with ui.column().classes("mod-section-layout w-full"):
             with ui.row().classes("mod-section-strip w-full items-start justify-between gap-3 flex-wrap"):
                 with ui.element("div").classes("mod-section-tabs-shell"):
-                    with ui.tabs(value=initial_tab_id, on_change=sync_section).classes("mod-section-tabs") as section_tabs:
+                    with (
+                        ui.tabs(value=initial_tab_id, on_change=sync_section)
+                        .classes("mod-section-tabs")
+                        .props("aria-label=App sections")
+                    ) as section_tabs:
                         for tab in tabs:
                             tab_element = ui.tab(tab.tab_id, label=tab.label, icon=tab.icon)
                             tab_by_id[tab.tab_id] = tab_element

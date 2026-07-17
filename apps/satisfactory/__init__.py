@@ -1811,7 +1811,7 @@ class Satisfactory(App[Satisfactory_Config]):
         self.manage_embed_color = 0xF59E0B
         self.proc_name = "FactoryServer-Linux-Shipping"
         self.proc_cmd = [self.proc_name]
-        self.cmd_start = cfg.cmd_start or ["bash", "FactoryServer.sh"]
+        self.cmd_start = ["bash", "FactoryServer.sh"]
         self.process = None
 
         host: str | None = cfg.effective_api_host

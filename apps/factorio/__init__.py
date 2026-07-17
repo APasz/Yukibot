@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import hashlib
 import json
@@ -124,6 +125,9 @@ _FACTORIO_CONFIG_FILENAMES: tuple[str, ...] = (
     "map-gen-settings.json",
 )
 _FACTORIO_MOD_SETTINGS_FILENAME = "mod-settings.dat"
+_FACTORIO_MAP_EXCHANGE_MAX_LENGTH = 262_144
+_FACTORIO_MAP_EXCHANGE_OUTPUT_FILENAME = "yukibot-map-exchange-settings.json"
+_FACTORIO_MAP_EXCHANGE_STRING_OUTPUT_FILENAME = "yukibot-map-exchange-string.txt"
 _FACTORIO_STOP_SAVE_GRACE_SECONDS = 1.0
 _FACTORIO_GRACEFUL_STOP_TIMEOUT_SECONDS = 30.0
 _FACTORIO_RESEARCH_FINISHED_RE: Pattern[str] = re.compile(r"\[RESEARCH FINISHED\]\s+(?P<research>.+)$", re.IGNORECASE)
@@ -177,6 +181,26 @@ def _json_object(value: object, *, label: str) -> dict[str, object]:
 
 def _load_json_object(raw: str | bytes, *, label: str) -> dict[str, object]:
     return _json_object(cast(object, json.loads(raw)), label=label)
+
+
+@dataclass(frozen=True, slots=True)
+class FactorioMapExchangeData:
+    map_gen_settings: dict[str, object]
+    map_settings: dict[str, object]
+
+
+def normalise_factorio_map_exchange_string(raw_value: str) -> str:
+    normalised = "".join(raw_value.split())
+    if not normalised.startswith(">>>") or not normalised.endswith("<<<"):
+        raise ValueError("Factorio map exchange strings must start with `>>>` and end with `<<<`.")
+    if len(normalised) < 7 or len(normalised) > _FACTORIO_MAP_EXCHANGE_MAX_LENGTH:
+        raise ValueError("Factorio map exchange string has an invalid length.")
+    encoded = normalised[3:-3]
+    try:
+        base64.b64decode(encoded, validate=True)
+    except ValueError as xcp:
+        raise ValueError("Factorio map exchange string is not valid base64 data.") from xcp
+    return normalised
 
 
 def _optional_factorio_metadata_text(
@@ -336,6 +360,44 @@ def _is_positive_int_text(text: str) -> bool:
 
 def factorio_server_settings_path(directory: Path) -> Path:
     return directory.absolute() / "data" / "server-settings.json"
+
+
+_FACTORIO_LOAD_LATEST_SELECTION = "latest"
+_FACTORIO_CREATE_FRESH_WORLD_SELECTION = "fresh"
+_FACTORIO_SAVE_SELECTION_PREFIX = "save:"
+
+
+def _normalise_factorio_save_filename(value: object) -> str:
+    filename = str(value).strip()
+    if not filename:
+        raise ValueError("Factorio save filename must not be blank.")
+    if Path(filename).name != filename or Path(filename).suffix.casefold() != ".zip":
+        raise ValueError("Factorio save filename must be a .zip file without directories.")
+    return filename
+
+
+def _normalise_factorio_fresh_save_filename(value: object) -> str:
+    filename = str(value).strip()
+    if filename and Path(filename).suffix.casefold() != ".zip":
+        filename = f"{filename}.zip"
+    return _normalise_factorio_save_filename(filename)
+
+
+def _factorio_save_selection(filename: str | None) -> str:
+    if filename is None:
+        return _FACTORIO_LOAD_LATEST_SELECTION
+    return f"{_FACTORIO_SAVE_SELECTION_PREFIX}{_normalise_factorio_save_filename(filename)}"
+
+
+def _factorio_save_filename_from_selection(selection: object) -> str | None:
+    if selection == _FACTORIO_LOAD_LATEST_SELECTION:
+        return None
+    if not isinstance(selection, str):
+        raise TypeError("Factorio save selection must be a string.")
+    filename = selection.removeprefix(_FACTORIO_SAVE_SELECTION_PREFIX)
+    if filename == selection:
+        raise ValueError("Factorio save selection is invalid.")
+    return _normalise_factorio_save_filename(filename)
 
 
 def factorio_mod_settings_path(directory: Path) -> Path:
@@ -1377,11 +1439,83 @@ _FACTORIO_SETTING_DEFINITIONS: tuple[_FactorioSettingDefinitionItem, ...] = (
 
 
 class Factorio_Settings(App_Settings):
-    def __init__(self, pointer: Path, *, version_getter: Callable[[], AppVersion | None] | None = None) -> None:
+    def __init__(
+        self,
+        pointer: Path,
+        *,
+        saves_directory: Path | None = None,
+        save_file_getter: Callable[[], str | None] | None = None,
+        create_fresh_world_getter: Callable[[], bool] | None = None,
+        save_selection_setter: Callable[[str | None, bool], None] | None = None,
+        fresh_save_file_getter: Callable[[], str] | None = None,
+        fresh_save_file_setter: Callable[[str], None] | None = None,
+        version_getter: Callable[[], AppVersion | None] | None = None,
+    ) -> None:
         self._definitions: tuple[_FactorioSettingDefinitionItem, ...] = _FACTORIO_SETTING_DEFINITIONS
-        super().__init__(
-            pointer, [definition.create_setting() for definition in self._definitions], version_getter=version_getter
+        self._saves_directory = saves_directory or pointer.parent.parent / "saves"
+        self._save_file_getter = save_file_getter or (lambda: None)
+        self._create_fresh_world_getter = create_fresh_world_getter or (lambda: False)
+        self._save_selection_setter = save_selection_setter or (lambda _filename, _create_fresh_world: None)
+        self._fresh_save_file_getter = fresh_save_file_getter or (lambda: "New World.zip")
+        self._fresh_save_file_setter = fresh_save_file_setter or (lambda _filename: None)
+        self._save_selection_setting = Setting[str](
+            StringSettingSpec(
+                ChoiceSpec(
+                    ChoiceOption(_FACTORIO_LOAD_LATEST_SELECTION, "Latest Save"),
+                    ChoiceOption(_FACTORIO_CREATE_FRESH_WORLD_SELECTION, "Create Fresh World"),
+                )
+            ),
+            "Save To Load",
+            "factorio_save_selection",
+            [],
+            default=_FACTORIO_LOAD_LATEST_SELECTION,
+            power_level=Power_Level.sudo,
+            desc="Choose an existing save, load the latest save, or create a fresh world when the server next starts.",
         )
+        self._fresh_save_file_setting = Setting[str](
+            StringSettingSpec(raw_validator=lambda value: bool(value.strip()) and Path(value).name == value.strip()),
+            "Fresh Save Name",
+            "factorio_fresh_save_file",
+            [],
+            default="New World.zip",
+            power_level=Power_Level.sudo,
+            desc="Used only when Create Fresh World is selected. The .zip suffix is optional.",
+        )
+        super().__init__(
+            pointer,
+            [
+                *(definition.create_setting() for definition in self._definitions),
+                self._save_selection_setting,
+                self._fresh_save_file_setting,
+            ],
+            version_getter=version_getter,
+        )
+
+    @property
+    def options(self) -> list[Setting[Any]]:
+        self._refresh_save_selection_choices()
+        return super().options
+
+    def _refresh_save_selection_choices(self) -> None:
+        configured_filename = self._save_file_getter()
+        filenames = {
+            _normalise_factorio_save_filename(path.name)
+            for path in self._saves_directory.glob("*.zip")
+            if path.is_file()
+        } if self._saves_directory.is_dir() else set[str]()
+        if configured_filename is not None and not self._create_fresh_world_getter():
+            filenames.add(_normalise_factorio_save_filename(configured_filename))
+        choices = [
+            ChoiceOption(_FACTORIO_LOAD_LATEST_SELECTION, "Latest Save"),
+            ChoiceOption(_FACTORIO_CREATE_FRESH_WORLD_SELECTION, "Create Fresh World"),
+        ]
+        for filename in sorted(filenames, key=str.casefold):
+            label = filename if (self._saves_directory / filename).is_file() else f"{filename} (missing)"
+            choices.append(ChoiceOption(_factorio_save_selection(filename), label))
+        spec = self._save_selection_setting.spec
+        if not isinstance(spec, StringSettingSpec):
+            raise TypeError("Factorio save selection must use a string setting specification.")
+        spec.choice_spec = ChoiceSpec(*choices)
 
     def _apply_descriptions(self, data: dict[str, object]) -> None:
         for definition in self._definitions:
@@ -1400,16 +1534,44 @@ class Factorio_Settings(App_Settings):
     def load(self) -> None:
         data = _load_json_object(self.pointer.read_text(config.STR_ENCODE), label="Factorio server settings")
         self._apply_descriptions(data)
-        for opt in self.options:
-            opt.get(data)
+        for definition in self._definitions:
+            setting = self.get_setting(definition.key)
+            if setting is None:
+                raise ValueError(f"Missing Factorio setting definition for {definition.key}")
+            setting.get(data)
+        self._refresh_save_selection_choices()
+        selection = (
+            _FACTORIO_CREATE_FRESH_WORLD_SELECTION
+            if self._create_fresh_world_getter()
+            else _factorio_save_selection(self._save_file_getter())
+        )
+        self._save_selection_setting.load_value(selection)
+        self._fresh_save_file_setting.load_value(self._fresh_save_file_getter())
 
     def save(self) -> dict[str, object]:
         data = _load_json_object(self.pointer.read_text(config.STR_ENCODE), label="Factorio server settings")
-        for opt in self.options:
-            opt.set(data)
+        for definition in self._definitions:
+            setting = self.get_setting(definition.key)
+            if setting is None:
+                raise ValueError(f"Missing Factorio setting definition for {definition.key}")
+            setting.set(data)
 
         string: str = json.dumps(data, indent=4)
         self.pointer.write_text(string, config.STR_ENCODE)
+        fresh_save_file = self._fresh_save_file_setting.value
+        if not isinstance(fresh_save_file, str):
+            raise TypeError("Factorio fresh save name must be a string.")
+        self._fresh_save_file_setter(fresh_save_file)
+        if self._save_selection_setting.value == _FACTORIO_CREATE_FRESH_WORLD_SELECTION:
+            self._save_selection_setter(
+                _normalise_factorio_fresh_save_filename(fresh_save_file),
+                True,
+            )
+        else:
+            self._save_selection_setter(
+                _factorio_save_filename_from_selection(self._save_selection_setting.value),
+                False,
+            )
         return data
 
 
@@ -1727,20 +1889,27 @@ class Factorio(App[App_Config]):
         self.proc_cmd = [self.proc_name, "--start-server"]
         ensure_factorio_config_files(cfg.directory)
         file_settings: Path = factorio_server_settings_path(cfg.directory)
-        self.cmd_start = cfg.cmd_start or [
-            "bin/x64/factorio",
-            "--start-server-load-latest",
-            "--server-settings",
-            f"{file_settings}",
-            "--rcon-port",
-            "27015",
-            "--rcon-password",
-            f"{config.env_req('APP_COMM_PASS')}",
-        ]
+        self.cmd_start = self._factorio_start_command(
+            file_settings,
+            save_file=cfg.factorio_save_file,
+        )
 
         self.process = None
         super().__init__(
-            bot, am, cfg, Factorio_Settings(file_settings, version_getter=lambda: cfg.version), Mod_Factorio
+            bot,
+            am,
+            cfg,
+            Factorio_Settings(
+                file_settings,
+                saves_directory=cfg.directory / "saves",
+                save_file_getter=lambda: cfg.factorio_save_file,
+                create_fresh_world_getter=lambda: cfg.factorio_create_fresh_world,
+                save_selection_setter=self._set_configured_save_selection,
+                fresh_save_file_getter=lambda: cfg.factorio_fresh_save_file,
+                fresh_save_file_setter=self._set_configured_fresh_save_file,
+                version_getter=lambda: cfg.version,
+            ),
+            Mod_Factorio,
         )
         self.act_err_threshold = 100
         self._lock: Path = self.directory / ".lock"
@@ -1753,6 +1922,7 @@ class Factorio(App[App_Config]):
         self._tail_machers: set[_FACTORIO_LINE_MATCHER] = set()
         self._bridge_events_tail: Tailer | None = None
         self._bridge_tail_matchers: set[_FACTORIO_LINE_MATCHER] = set()
+        self._map_exchange_lock = asyncio.Lock()
         self._startup_error: str | None = None
         self._players: Players = Players(self)
         self._activities: FactorioActivities = FactorioActivities(self)
@@ -1774,6 +1944,131 @@ class Factorio(App[App_Config]):
             log.exception(f"{__name__} Read Settings")
 
         log.debug(f"{__name__}.Created")
+
+    def _factorio_start_command(self, file_settings: Path, *, save_file: str | None) -> list[str]:
+        load_argument = (
+            ["--start-server-load-latest"]
+            if save_file is None
+            else ["--start-server", f"saves/{_normalise_factorio_save_filename(save_file)}"]
+        )
+        return [
+            "bin/x64/factorio",
+            *load_argument,
+            "--server-settings",
+            f"{file_settings}",
+            "--rcon-port",
+            "27015",
+            "--rcon-password",
+            f"{config.env_req('APP_COMM_PASS')}",
+        ]
+
+    async def _create_fresh_world(self, save_file: str) -> None:
+        filename = _normalise_factorio_save_filename(save_file)
+        save_path = self.directory / "saves" / filename
+        if save_path.exists():
+            raise FileExistsError(f"Cannot create a fresh Factorio world because the save already exists: {filename}")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            "bin/x64/factorio",
+            "--create",
+            f"saves/{filename}",
+            "--map-gen-settings",
+            str(factorio_config_path(self.directory, "map-gen-settings.json")),
+            "--map-settings",
+            str(factorio_config_path(self.directory, "map-settings.json")),
+        ]
+        log.info("Creating fresh Factorio world for %s: %s", self.friendly, filename)
+        try:
+            await run_blocking(
+                subprocess.run,
+                command,
+                cwd=self.directory,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding=config.STR_ENCODE,
+            )
+        except subprocess.CalledProcessError as xcp:
+            detail = (xcp.stderr or xcp.stdout or "Factorio did not provide an error message.").strip()
+            raise RuntimeError(f"Failed to create fresh Factorio world {filename}: {detail}") from xcp
+        if not save_path.is_file():
+            raise RuntimeError(f"Factorio did not create the requested fresh world save: {filename}")
+
+    @property
+    def _map_exchange_output_directory(self) -> Path:
+        return self.directory / "script-output"
+
+    async def import_map_exchange_string(self, raw_value: str) -> FactorioMapExchangeData:
+        map_exchange_string = normalise_factorio_map_exchange_string(raw_value)
+        output_path = self._map_exchange_output_directory / _FACTORIO_MAP_EXCHANGE_OUTPUT_FILENAME
+        lua_string = json.dumps(map_exchange_string)
+        lua_command = (
+            "/c helpers.write_file("
+            f"'{_FACTORIO_MAP_EXCHANGE_OUTPUT_FILENAME}', "
+            f"helpers.table_to_json(helpers.parse_map_exchange_string({lua_string})), false)"
+        )
+        async with self._map_exchange_lock:
+            if not self.check_running():
+                raise RuntimeError(f"{self.friendly} must be running to import a map exchange string.")
+            output_path.unlink(missing_ok=True)
+            response = await self._relay.send(lua_command)
+            if _factorio_command_failed(response):
+                raise ValueError(response or "Factorio rejected the map exchange string.")
+            try:
+                payload = _load_json_object(
+                    output_path.read_text(config.STR_ENCODE),
+                    label="Factorio map exchange output",
+                )
+            except OSError as xcp:
+                raise RuntimeError("Factorio did not produce map exchange settings output.") from xcp
+            finally:
+                output_path.unlink(missing_ok=True)
+        return FactorioMapExchangeData(
+            map_gen_settings=_json_object(
+                payload.get("map_gen_settings"),
+                label="Factorio map exchange map_gen_settings",
+            ),
+            map_settings=_json_object(
+                payload.get("map_settings"),
+                label="Factorio map exchange map_settings",
+            ),
+        )
+
+    async def export_map_exchange_string(self) -> str:
+        output_path = self._map_exchange_output_directory / _FACTORIO_MAP_EXCHANGE_STRING_OUTPUT_FILENAME
+        lua_command = (
+            "/c helpers.write_file("
+            f"'{_FACTORIO_MAP_EXCHANGE_STRING_OUTPUT_FILENAME}', game.get_map_exchange_string(), false)"
+        )
+        async with self._map_exchange_lock:
+            if not self.check_running():
+                raise RuntimeError(f"{self.friendly} must be running to export its map exchange string.")
+            output_path.unlink(missing_ok=True)
+            response = await self._relay.send(lua_command)
+            if _factorio_command_failed(response):
+                raise RuntimeError(response or "Factorio could not export the map exchange string.")
+            try:
+                return normalise_factorio_map_exchange_string(output_path.read_text(config.STR_ENCODE))
+            except OSError as xcp:
+                raise RuntimeError("Factorio did not produce a map exchange string.") from xcp
+            finally:
+                output_path.unlink(missing_ok=True)
+
+    def _set_configured_save_selection(self, filename: str | None, create_fresh_world: bool) -> None:
+        if (
+            self.cfg.factorio_save_file == filename
+            and self.cfg.factorio_create_fresh_world == create_fresh_world
+        ):
+            return
+        self.cfg.factorio_save_file = filename
+        self.cfg.factorio_create_fresh_world = create_fresh_world
+        self.persist_instance_config_overrides()
+
+    def _set_configured_fresh_save_file(self, filename: str) -> None:
+        if self.cfg.factorio_fresh_save_file == filename:
+            return
+        self.cfg.factorio_fresh_save_file = filename
+        self.persist_instance_config_overrides()
 
     async def post_init(self) -> None:
         await super().post_init()
@@ -1895,7 +2190,7 @@ class Factorio(App[App_Config]):
 
     @property
     def supports_save_rename(self) -> bool:
-        return True
+        return False
 
     @property
     def supports_save_delete(self) -> bool:
@@ -1913,32 +2208,6 @@ class Factorio(App[App_Config]):
         target = target_dir / relative_path
         File_Utils.copy(source_path, target, overwrite=True)
         return describe_app_save_path(root=root, path=target, relative_path=relative_path)
-
-    def relocate_save_file(
-        self,
-        *,
-        save_id: str,
-        destination_root_id: str,
-        destination_relative_path: str,
-    ) -> AppSaveEntry:
-        source_root = get_app_save_root(self.save_file_roots, "saves")
-        if destination_root_id != source_root.id:
-            raise ValueError("Factorio saves can only be renamed within the saves root.")
-        relative_path = normalise_app_save_relative_path(destination_relative_path)
-        if Path(relative_path).name != relative_path:
-            raise ValueError("Factorio save name must not include directories.")
-        if Path(relative_path).suffix.casefold() != ".zip":
-            raise ValueError("Factorio save names must use the .zip suffix.")
-        source = self.resolve_save_file(save_id)
-        if not source.exists():
-            raise FileNotFoundError(f"Save file does not exist: {Path(save_id).name}")
-        target = source_root.resolved_path / relative_path
-        if target == source:
-            return describe_app_save_path(root=source_root, path=source, relative_path=relative_path)
-        if target.exists():
-            raise FileExistsError(f"Save file already exists: {relative_path}")
-        File_Utils.move(source, target, overwrite=False)
-        return describe_app_save_path(root=source_root, path=target, relative_path=relative_path)
 
     def delete_save_file(self, *, file_id: str) -> AppSaveEntry:
         if self.check_running():
@@ -1960,6 +2229,23 @@ class Factorio(App[App_Config]):
         log.info(f"{__name__}.start")
         _ensure_factorio_binary_executable(self.directory / "bin" / "x64" / "factorio")
         self._startup_error = None
+
+        selected_save_file = self.cfg.factorio_save_file
+        if self.cfg.factorio_create_fresh_world:
+            if selected_save_file is None:
+                raise ValueError("A fresh Factorio world requires a save filename.")
+            await self._create_fresh_world(selected_save_file)
+            self.cfg.factorio_create_fresh_world = False
+            self.persist_instance_config_overrides()
+
+        if selected_save_file is not None:
+            selected_save_path = self.directory / "saves" / _normalise_factorio_save_filename(selected_save_file)
+            if not selected_save_path.is_file():
+                raise FileNotFoundError(f"Selected Factorio save does not exist: {selected_save_file}")
+        self.cmd_start = self._factorio_start_command(
+            factorio_server_settings_path(self.directory),
+            save_file=selected_save_file,
+        )
 
         for item in (self.directory / "saves").iterdir():
             if item.is_dir():

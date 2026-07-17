@@ -39,8 +39,18 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("--mod-motion-tab-accent: 320ms", css)
         self.assertIn("--mod-motion-ease: cubic-bezier(0.22, 1, 0.36, 1)", css)
         self.assertIn(".mod-card", css)
+        self.assertIn(".mod-skip-link", css)
+        self.assertIn(".mod-skip-link:focus-visible", css)
         self.assertIn(".q-notification.bg-warning", css)
         self.assertIn(".q-notification.bg-negative", css)
+        self.assertIn(".q-tooltip,", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.q-tooltip,.*?\.leaflet-tooltip \{.*?max-width: min\(22rem, calc\(100vw - 2rem\)\);.*?"
+            r"border-radius: 0 !important;.*?background: #000000 !important;.*?"
+            r"font-size: 0\.88rem !important;.*?overflow-wrap: anywhere;",
+        )
+        self.assertRegex(css, r"(?s)\.q-tooltip \{.*?white-space: pre-line;")
         self.assertIn(".nicegui-error-popup", css)
         self.assertIn("#popup.nicegui-error-popup", css)
         self.assertIn("#too_long_message_popup.nicegui-error-popup", css)
@@ -75,6 +85,7 @@ class ModWebThemeTests(unittest.TestCase):
             r"(?s)@container mod-app-hero .*?\.mod-app-node-badge-wrap \{.*?position: relative;",
         )
         self.assertIn(".mod-hero-app-title-block", css)
+        self.assertIn(".mod-section-tabs .q-tab:focus-visible", css)
         self.assertIn(".mod-app-hero-starting::after", css)
         self.assertIn(".mod-app-hero-running::after", css)
         self.assertIn(".mod-app-card-link::before", css)
@@ -127,6 +138,14 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertIn(".mod-home-hero-header", css)
         self.assertIn(".mod-home-hero-title", css)
+        self.assertIn(
+            ".mod-home-hero-actionable:hover:not(:has(.mod-home-node-card:hover))",
+            css,
+        )
+        self.assertIn(
+            "html:not(.mod-pointer-navigation) :is(.mod-home-hero-actionable, .mod-home-node-card-actionable):focus-visible",
+            css,
+        )
         self.assertRegex(
             css,
             r"(?s)\.mod-home-node-grid \{.*?display: grid !important;.*?"
@@ -166,6 +185,49 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertRegex(
             css,
             r"(?s)\.mod-system-hero-header \{.*?display: grid;.*?grid-template-columns:",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-hero-shell \{.*?gap: 0\.5rem !important;.*?padding-top: 1\.9rem !important;",
+        )
+        self.assertIn(".mod-system-operational-signals", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-section-tabs-shell \{.*?flex: 0 0 auto;.*?\.mod-section-strip > \.mod-section-tabs-shell \{.*?flex: 1 1 24rem;",
+        )
+        self.assertRegex(css, r"(?s)\.mod-section-layout > \.mod-section-tabs-shell \{.*?width: 100%;")
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-config-select \{.*?flex: 0 1 auto;.*?\.mod-tab-toolbar > \.mod-config-select \{.*?flex: 1 1 26rem;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-config-search \{.*?flex: 0 1 auto;.*?min-width: min\(15rem, 100%\);",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-native-tabs \{.*?display: inline-flex;.*?flex-wrap: wrap;",
+        )
+        self.assertIn(".mod-system-native-tab-active", css)
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-log-output \{.*?max-height: min\(58dvh, 44rem\);.*?overflow: auto;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-log-selectors \{.*?flex-wrap: wrap;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-system-log-event \{.*?grid-template-columns: minmax\(4\.75rem, auto\) minmax\(0, 1fr\);",
+        )
+        self.assertIn(".mod-system-log-event-error", css)
+        self.assertIn(".mod-system-log-meta", css)
+        self.assertIn(".mod-system-log-context", css)
+        self.assertRegex(
+            css,
+            r"(?s):is\(\.mod-system-log-event-error, \.mod-system-log-event-warn\)::before "
+            r"\{.*?top: 0;.*?bottom: 0;.*?width: calc\(3px \+ 0\.85rem \+ 4\.75rem \+ 0\.75rem\);",
         )
         self.assertIn("@container mod-app-hero (max-width: 52rem)", css)
         self.assertIn("@container mod-app-hero (max-width: 34rem)", css)
@@ -279,10 +341,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertNotRegex(css, r"(?s)\.mod-row:hover \{[^}]*border-color:")
         self.assertNotIn(".mod-row-disabled:hover", css)
         self.assertNotIn(".mod-row-client-only:hover", css)
-        self.assertNotRegex(
-            css,
-            r"(?s)\.mod-row,\s*\.mod-save-card.*?animation: mod-list-item-enter",
-        )
+        self.assertNotIn("mod-list-item-enter", css)
         self.assertRegex(
             css,
             r"(?s)\.mod-mods-toolbar-actions \.mod-toolbar-selection-button \{.*?"
@@ -341,6 +400,9 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertNotIn("@keyframes mod-dialog-accent-arrive", css)
         self.assertIn(".mod-dialog-card:focus-within", css)
         self.assertIn("overscroll-behavior: contain", css)
+        self.assertIn("100dvh", css)
+        self.assertIn("safe-area-inset-bottom", css)
+        self.assertIn("-webkit-overflow-scrolling: touch", css)
         self.assertIn("@media (prefers-reduced-motion: reduce)", css)
         self.assertIn(".mod-mod-details-dialog-card", css)
         self.assertIn(".mod-mod-details-header", css)
@@ -657,6 +719,54 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertEqual(mod_web_badge_class("red"), "mod-badge red")
         self.assertEqual(mod_web_badge_class("warn"), "mod-badge warn")
         self.assertEqual(mod_web_badge_class("grey"), "mod-badge grey")
+
+    def test_factorio_generator_styles_preserve_compact_contrast_and_responsive_tables(self) -> None:
+        css = DEFAULT_MOD_WEB_THEME.stylesheet()
+
+        self.assertIn(".mod-factorio-generator", css)
+        self.assertIn(".mod-factorio-titlebar", css)
+        self.assertRegex(css, r"(?s)\.mod-factorio-generator \{.*?width: 100% !important;.*?max-width: none !important;")
+        self.assertIn(".mod-factorio-header-actions", css)
+        self.assertIn(".mod-factorio-tabs-shell", css)
+        self.assertIn("overflow-x: auto;", css)
+        self.assertRegex(css, r"(?s)\.mod-factorio-panel \{.*?width: 100% !important;.*?max-width: none !important;")
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-factorio-control-table,\s*\.mod-factorio-option-group \{.*?display: block !important;.*?"
+            r"width: 100% !important;.*?max-width: none !important;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-factorio-advanced-grid \{.*?width: 100%;.*?grid-template-columns: minmax\(0, 1fr\);",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-factorio-control-table-cols-2 :is\(\.mod-factorio-control-header, "
+            r"\.mod-factorio-control-row\) \{.*?grid-template-columns: minmax\(12rem, 1\.2fr\) repeat\(2, minmax\(10rem, 1fr\)\);",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-factorio-range-value \{.*?width: 6rem;.*?min-width: 6rem;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-factorio-advanced-top-grid \{.*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);",
+        )
+        self.assertIn(".mod-factorio-control-row:has(.mod-factorio-control-enabled", css)
+        self.assertIn("pointer-events: none;", css)
+        self.assertIn(".mod-factorio-slider {", css)
+        self.assertIn("min-width: 2.75rem;", css)
+        self.assertIn(".mod-factorio-map-string-input textarea", css)
+        self.assertIn("min-height: 4.75rem !important;", css)
+        self.assertIn("resize: vertical !important;", css)
+        self.assertIn(".mod-factorio-save", css)
+        self.assertNotIn(".mod-factorio-footer", css)
+        self.assertIn("color: #112a16 !important;", css)
+        self.assertIn("background: #57bd5d !important;", css)
+        self.assertIn(".mod-factorio-generator input[type=\"number\"]", css)
+        self.assertIn("::-webkit-inner-spin-button", css)
+        self.assertIn("::-webkit-outer-spin-button", css)
+        self.assertIn("-webkit-text-fill-color: #f4f4f5 !important;", css)
 
     def test_apply_theme_uses_palette_and_head_css(self) -> None:
         ui = _FakeUi()

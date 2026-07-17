@@ -9,6 +9,42 @@ from mod_web_toasts import MOD_WEB_TOAST_VERSION
 BadgeTone = Literal["black", "purple", "red", "warn", "grey"]
 
 
+def mod_web_tooltip_css() -> str:
+    return """
+                .q-tooltip,
+                .leaflet-tooltip {
+                    max-width: min(22rem, calc(100vw - 2rem));
+                    padding: 0.4rem 0.55rem !important;
+                    border: 1px solid rgba(139, 92, 246, 0.7) !important;
+                    border-radius: 0 !important;
+                    color: var(--mod-text) !important;
+                    background: #000000 !important;
+                    box-shadow:
+                        0 14px 30px rgba(0, 0, 0, 0.5),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+                    font-size: 0.88rem !important;
+                    font-weight: 650;
+                    line-height: 1.4;
+                    letter-spacing: 0.01em;
+                    overflow-wrap: anywhere;
+                    backdrop-filter: blur(10px);
+                }
+                .q-tooltip .q-icon {
+                    color: inherit !important;
+                }
+                .q-tooltip {
+                    white-space: pre-line;
+                }
+                .leaflet-tooltip {
+                    white-space: normal;
+                }
+                .leaflet-tooltip-top::before { border-top-color: rgba(10, 10, 14, 0.98); }
+                .leaflet-tooltip-bottom::before { border-bottom-color: rgba(10, 10, 14, 0.98); }
+                .leaflet-tooltip-left::before { border-left-color: rgba(10, 10, 14, 0.98); }
+                .leaflet-tooltip-right::before { border-right-color: rgba(10, 10, 14, 0.98); }
+            """
+
+
 @dataclass(frozen=True, slots=True)
 class NiceGuiPalette:
     primary: str
@@ -144,6 +180,7 @@ class ModWebTheme:
                 .q-notification .q-icon {{
                     color: inherit !important;
                 }}
+{mod_web_tooltip_css()}
                 .q-notification .mod-toast-progress {{
                     --mod-toast-progress-scale: 1;
                     position: absolute;
@@ -222,6 +259,25 @@ class ModWebTheme:
                     animation: mod-page-enter var(--mod-motion-medium) var(--mod-motion-ease) both;
                 }}
                 .mod-page-app {{ max-width: 1380px; }}
+                .mod-skip-link {{
+                    position: fixed;
+                    top: 0.75rem;
+                    left: 0.75rem;
+                    z-index: 2147483000;
+                    padding: 0.6rem 0.85rem;
+                    border: 1px solid rgba(196, 181, 253, 0.82);
+                    color: #ffffff !important;
+                    background: #241044;
+                    box-shadow: 0 12px 26px rgba(0, 0, 0, 0.36);
+                    text-decoration: none !important;
+                    transform: translateY(-160%);
+                    transition: transform 140ms ease;
+                }}
+                .mod-skip-link:focus-visible {{
+                    transform: translateY(0);
+                    outline: 2px solid var(--mod-accent);
+                    outline-offset: 3px;
+                }}
                 .mod-card-hero .mod-title {{
                     animation: mod-hero-title-enter var(--mod-motion-slow) var(--mod-motion-ease) 40ms both;
                 }}
@@ -244,13 +300,6 @@ class ModWebTheme:
                 .mod-home-node-grid > :nth-child(4),
                 .mod-home-section-grid > :nth-child(4),
                 .mod-stat-grid > :nth-child(4) {{ animation-delay: 135ms; }}
-                .mod-save-card,
-                .mod-config-file-row,
-                .mod-setting-shell {{
-                    outline: 1px solid transparent;
-                    outline-offset: -1px;
-                    animation: mod-list-item-enter var(--mod-motion-medium) var(--mod-motion-ease) both;
-                }}
                 .mod-live-value-pulse-a {{
                     animation: mod-live-value-pulse-a 520ms var(--mod-motion-ease);
                 }}
@@ -272,11 +321,6 @@ class ModWebTheme:
                 @keyframes mod-card-enter {{
                     from {{ opacity: 0; translate: 0 0.34rem; }}
                     to {{ opacity: 1; translate: 0 0; }}
-                }}
-                @keyframes mod-list-item-enter {{
-                    0% {{ opacity: 0.68; translate: -0.2rem 0; outline-color: rgba(139, 92, 246, 0); }}
-                    45% {{ opacity: 1; outline-color: rgba(167, 139, 250, 0.58); }}
-                    100% {{ opacity: 1; translate: 0 0; outline-color: transparent; }}
                 }}
                 @keyframes mod-live-value-pulse-a {{
                     0% {{ color: #ffffff; filter: brightness(1.75); translate: 0 1px; }}
@@ -1002,8 +1046,11 @@ class ModWebTheme:
                     align-items: flex-start;
                 }}
                 .mod-section-tabs-shell {{
-                    flex: 1 1 24rem;
+                    flex: 0 0 auto;
                     min-width: 0;
+                }}
+                .mod-section-strip > .mod-section-tabs-shell {{
+                    flex: 1 1 24rem;
                 }}
                 .mod-section-tabs {{
                     display: inline-flex;
@@ -1068,6 +1115,17 @@ class ModWebTheme:
                     box-shadow:
                         inset 0 0 0 1px rgba(196, 181, 253, 0.14),
                         0 12px 26px rgba(0, 0, 0, 0.28);
+                }}
+                .mod-section-tabs .q-tab:hover,
+                .mod-section-tabs .q-tab:focus-visible {{
+                    color: var(--mod-text) !important;
+                    border-color: rgba(139, 92, 246, 0.72);
+                    outline: none;
+                }}
+                .mod-section-tabs .q-tab:focus-visible {{
+                    box-shadow:
+                        inset 0 0 0 1px rgba(196, 181, 253, 0.4),
+                        0 0 0 2px rgba(124, 58, 237, 0.42);
                 }}
                 .mod-section-tabs .q-tab--active::after {{
                     transform: scaleX(1);
@@ -1138,6 +1196,84 @@ class ModWebTheme:
                     padding: 0 !important;
                     background: transparent !important;
                 }}
+                .mod-system-native-tabs {{
+                    display: inline-flex;
+                    width: auto !important;
+                    max-width: 100%;
+                    flex-wrap: wrap;
+                    gap: 0.4rem;
+                    align-self: flex-start;
+                    border-bottom: 1px solid rgba(82, 82, 91, 0.44);
+                    padding-bottom: 0.25rem;
+                }}
+                .mod-system-native-tab {{
+                    position: relative;
+                    display: inline-flex;
+                    min-height: 2.65rem;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 0.4rem;
+                    padding: 0.4rem 0.78rem;
+                    border: 1px solid rgba(63, 63, 70, 0.88);
+                    color: var(--mod-muted) !important;
+                    background:
+                        linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
+                        rgba(12, 12, 18, 0.88) !important;
+                    box-shadow:
+                        inset 0 1px 0 rgba(255, 255, 255, 0.03),
+                        0 10px 22px rgba(0, 0, 0, 0.24);
+                    cursor: pointer;
+                    font: inherit;
+                    font-size: 0.78rem;
+                    font-weight: 900;
+                    letter-spacing: 0.1em;
+                    line-height: 1.2;
+                    text-transform: uppercase;
+                    overflow: hidden;
+                }}
+                .mod-system-native-tab-icon {{
+                    font-size: 1.05rem;
+                }}
+                .mod-system-native-tab::after {{
+                    content: "";
+                    position: absolute;
+                    right: 0;
+                    bottom: 0;
+                    left: 0;
+                    height: 2px;
+                    background: linear-gradient(90deg, #7c3aed 0%, #c4b5fd 50%, #7c3aed 100%);
+                    transform: scaleX(0);
+                    transform-origin: center;
+                    transition: transform var(--mod-motion-tab-accent) var(--mod-motion-ease);
+                }}
+                .mod-system-native-tab:hover,
+                .mod-system-native-tab:focus-visible {{
+                    color: var(--mod-text) !important;
+                    border-color: rgba(139, 92, 246, 0.72);
+                    outline: none;
+                }}
+                .mod-system-native-tab:focus-visible {{
+                    box-shadow:
+                        inset 0 0 0 1px rgba(196, 181, 253, 0.4),
+                        0 0 0 2px rgba(124, 58, 237, 0.42);
+                }}
+                .mod-system-native-tab-active {{
+                    color: var(--mod-text) !important;
+                    border-color: rgba(139, 92, 246, 0.72) !important;
+                    background:
+                        linear-gradient(135deg, rgba(139, 92, 246, 0.16), transparent 65%),
+                        rgba(24, 16, 36, 0.96) !important;
+                    box-shadow:
+                        inset 0 0 0 1px rgba(196, 181, 253, 0.14),
+                        0 12px 26px rgba(0, 0, 0, 0.28);
+                }}
+                .mod-system-native-tab-active::after {{
+                    transform: scaleX(1);
+                }}
+                .mod-system-native-tab-content,
+                .mod-system-native-panel {{
+                    min-height: 0;
+                }}
                 .mod-tab-header {{
                     display: flex;
                     flex-direction: column;
@@ -1164,6 +1300,9 @@ class ModWebTheme:
                 }}
                 .mod-section-layout {{
                     gap: 0.35rem;
+                }}
+                .mod-section-layout > .mod-section-tabs-shell {{
+                    width: 100%;
                 }}
                 .mod-tab-empty-detail {{
                     max-width: min(56rem, 100%);
@@ -1570,8 +1709,12 @@ class ModWebTheme:
                         0 12px 28px rgba(0, 0, 0, 0.24) !important;
                 }}
                 .mod-config-select {{
+                    flex: 0 1 auto;
+                    min-width: min(18rem, 100%);
+                    max-width: 100%;
+                }}
+                .mod-tab-toolbar > .mod-config-select {{
                     flex: 1 1 26rem;
-                    min-width: 18rem;
                 }}
                 :is(.mod-config-input, .mod-config-select) .q-field__control {{
                     color: var(--mod-text) !important;
@@ -2112,8 +2255,9 @@ class ModWebTheme:
                     background: rgba(36, 17, 58, 0.92) !important;
                 }}
                 .mod-config-search {{
-                    flex: 0 1 18rem;
-                    min-width: 15rem;
+                    flex: 0 1 auto;
+                    min-width: min(15rem, 100%);
+                    max-width: 100%;
                 }}
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__control {{
                     background: rgba(12, 12, 15, 0.96) !important;
@@ -3540,9 +3684,18 @@ class ModWebTheme:
                     cursor: pointer !important;
                     transition: border-color 140ms ease, box-shadow 140ms ease;
                 }}
-                .mod-home-hero-actionable:hover {{
+                .mod-home-hero-actionable:hover:not(:has(.mod-home-node-card:hover)) {{
                     border-color: rgba(124, 58, 237, 0.78) !important;
                     box-shadow: 0 0 0 1px rgba(124, 58, 237, 0.2), 0 14px 34px rgba(0, 0, 0, 0.24) !important;
+                }}
+                :is(.mod-home-hero-actionable, .mod-home-node-card-actionable):focus {{
+                    outline: none;
+                }}
+                html:not(.mod-pointer-navigation) :is(.mod-home-hero-actionable, .mod-home-node-card-actionable):focus-visible {{
+                    border-color: rgba(124, 58, 237, 0.78) !important;
+                    box-shadow: 0 0 0 1px rgba(124, 58, 237, 0.2), 0 14px 34px rgba(0, 0, 0, 0.24) !important;
+                    outline: 2px solid var(--mod-accent) !important;
+                    outline-offset: 3px;
                 }}
                 .mod-home-edge-badge-wrap {{
                     position: relative !important;
@@ -3623,13 +3776,15 @@ class ModWebTheme:
                     gap: 0.5rem;
                 }}
                 .mod-system-hero-shell {{
-                    padding-top: 2.8rem !important;
+                    gap: 0.5rem !important;
+                    padding-top: 1.9rem !important;
+                    padding-bottom: 0.75rem !important;
                 }}
                 .mod-system-hero-header {{
                     display: grid;
                     grid-template-columns: minmax(0, 1fr) minmax(0, auto);
                     align-items: start;
-                    gap: 1rem 1.5rem;
+                    gap: 0.5rem 1.5rem;
                     width: 100%;
                 }}
                 .mod-system-hero-identity {{
@@ -3649,6 +3804,10 @@ class ModWebTheme:
                     flex-wrap: wrap;
                     justify-content: flex-end;
                     gap: 0.5rem;
+                }}
+                .mod-system-operational-signals {{
+                    padding-top: 0.5rem;
+                    border-top: 1px solid rgba(82, 82, 91, 0.56);
                 }}
                 @container mod-app-hero (max-width: 52rem) {{
                     .mod-system-hero-header {{
@@ -3699,14 +3858,11 @@ class ModWebTheme:
                 }}
                 .mod-home-node-card-actionable {{
                     cursor: pointer !important;
-                    transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+                    transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease, transform 140ms ease;
                 }}
-                .mod-home-node-card-actionable:hover,
-                .mod-home-node-card-actionable:focus-visible {{
+                .mod-home-node-card-actionable:hover {{
                     background: rgba(20, 18, 30, 0.94) !important;
                     border-color: #a78bfa !important;
-                    outline: 2px solid var(--mod-accent) !important;
-                    outline-offset: 3px;
                     transform: translateY(-1px);
                 }}
                 .mod-home-node-title {{
@@ -3942,6 +4098,137 @@ class ModWebTheme:
                     font-weight: 750;
                     text-align: center;
                 }}
+                .mod-system-log-output {{
+                    min-height: 18rem;
+                    max-height: min(58dvh, 44rem);
+                    overflow: auto;
+                    overscroll-behavior: contain;
+                    border: 1px solid rgba(113, 113, 122, 0.42);
+                    background: rgba(5, 5, 8, 0.72);
+                }}
+                .mod-system-log-selectors {{
+                    align-items: stretch;
+                    flex-wrap: wrap;
+                }}
+                .mod-system-log-selector {{
+                    flex: 1 1 16rem;
+                    min-width: min(16rem, 100%);
+                }}
+                .mod-system-log-load-button {{
+                    flex: 0 0 auto;
+                    align-self: end;
+                    min-height: 2.5rem;
+                }}
+                .mod-system-log-empty {{
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 2rem;
+                    color: var(--mod-muted);
+                    font-size: 0.82rem;
+                    font-weight: 750;
+                    text-align: center;
+                }}
+                .mod-system-log-event {{
+                    position: relative;
+                    display: grid;
+                    grid-template-columns: minmax(4.75rem, auto) minmax(0, 1fr);
+                    gap: 0.75rem;
+                    align-items: start;
+                    padding: 0.72rem 0.85rem;
+                    border-left: 3px solid rgba(161, 161, 170, 0.54);
+                    border-bottom: 1px solid rgba(82, 82, 91, 0.3);
+                    isolation: isolate;
+                    transition: background-color 160ms var(--mod-motion-ease);
+                }}
+                .mod-system-log-event > * {{
+                    position: relative;
+                    z-index: 1;
+                }}
+                .mod-system-log-event:hover {{
+                    background: rgba(255, 255, 255, 0.045);
+                }}
+                .mod-system-log-event-error {{
+                    border-left-color: #f87171;
+                }}
+                .mod-system-log-event-warn {{
+                    border-left-color: #fbbf24;
+                }}
+                .mod-system-log-event-info {{
+                    border-left-color: #60a5fa;
+                }}
+                :is(.mod-system-log-event-error, .mod-system-log-event-warn)::before {{
+                    content: "";
+                    position: absolute;
+                    top: 0;
+                    bottom: 0;
+                    left: 0;
+                    width: calc(3px + 0.85rem + 4.75rem + 0.75rem);
+                    pointer-events: none;
+                }}
+                .mod-system-log-event-error::before {{
+                    background: linear-gradient(90deg, rgba(127, 29, 29, 0.16), rgba(127, 29, 29, 0.015));
+                }}
+                .mod-system-log-event-warn::before {{
+                    background: linear-gradient(90deg, rgba(146, 64, 14, 0.14), rgba(146, 64, 14, 0.015));
+                }}
+                .mod-system-log-level {{
+                    min-width: 4.55rem;
+                    padding: 0.15rem 0.35rem;
+                    border: 1px solid rgba(161, 161, 170, 0.48);
+                    color: var(--mod-muted);
+                    font-family: "IBM Plex Mono", "JetBrains Mono", "Fira Code", monospace;
+                    font-size: 0.66rem;
+                    font-weight: 850;
+                    letter-spacing: 0.055em;
+                    line-height: 1.2;
+                    text-align: center;
+                }}
+                .mod-system-log-meta {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.35rem;
+                    align-items: stretch;
+                    min-width: 4.75rem;
+                    padding: 0.08rem 0.2rem 0.08rem 0;
+                }}
+                .mod-system-log-event-error .mod-system-log-level {{
+                    border-color: rgba(248, 113, 113, 0.7);
+                    color: #fecaca;
+                }}
+                .mod-system-log-event-warn .mod-system-log-level {{
+                    border-color: rgba(251, 191, 36, 0.7);
+                    color: #fde68a;
+                }}
+                .mod-system-log-time {{
+                    color: var(--mod-muted);
+                    font-family: "IBM Plex Mono", "JetBrains Mono", "Fira Code", monospace;
+                    font-size: 0.68rem;
+                    line-height: 1.35;
+                    text-align: center;
+                    white-space: nowrap;
+                }}
+                .mod-system-log-event-body {{
+                    min-width: 0;
+                }}
+                .mod-system-log-message {{
+                    color: var(--mod-text);
+                    font-size: 0.81rem;
+                    font-weight: 650;
+                    line-height: 1.4;
+                    overflow-wrap: anywhere;
+                    white-space: pre-wrap;
+                }}
+                .mod-system-log-context {{
+                    margin-top: 0.22rem;
+                    color: var(--mod-muted);
+                    font-family: "IBM Plex Mono", "JetBrains Mono", "Fira Code", monospace;
+                    font-size: 0.67rem;
+                    line-height: 1.3;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }}
                 .mod-system-danger-zone {{
                     border: 1px solid rgba(220, 38, 38, 0.64);
                     background: linear-gradient(135deg, rgba(30, 18, 42, 0.88), rgba(11, 10, 15, 0.94));
@@ -4068,11 +4355,14 @@ class ModWebTheme:
                     width: min(30rem, calc(100vw - 2rem)) !important;
                     max-width: none !important;
                     max-height: calc(100vh - 1.5rem);
+                    max-height: calc(100dvh - 1.5rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
                     position: relative;
                     isolation: isolate;
                     overflow-x: hidden;
                     overflow-y: auto;
                     overscroll-behavior: contain;
+                    scroll-padding-block: 0.75rem;
+                    -webkit-overflow-scrolling: touch;
                     scrollbar-color: rgba(139, 92, 246, 0.58) rgba(9, 9, 13, 0.88);
                     transition: border-color 160ms ease, box-shadow 160ms ease;
                 }}
@@ -4092,6 +4382,9 @@ class ModWebTheme:
                     .mod-dialog-card {{
                         width: calc(100vw - 0.75rem) !important;
                         max-height: calc(100vh - 0.75rem);
+                        max-height: calc(
+                            100dvh - 0.75rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)
+                        );
                     }}
                 }}
                 .mod-client-pack-dialog-card {{
@@ -5798,7 +6091,7 @@ class ModWebTheme:
                     .mod-section-strip {{
                         align-items: stretch;
                     }}
-                    .mod-section-tabs-shell {{
+                    .mod-section-strip > .mod-section-tabs-shell {{
                         flex: 1 1 100%;
                     }}
                     .mod-section-tabs {{
@@ -5862,8 +6155,10 @@ class ModWebTheme:
                         display: none !important;
                     }}
                     .mod-toolbar-menu-mobile-only {{ display: flex !important; }}
-                    .mod-config-select,
-                    .mod-config-search {{ flex-basis: 100%; min-width: 0; }}
+                    .mod-tab-toolbar > :is(.mod-config-select, .mod-config-search) {{
+                        flex-basis: 100%;
+                        min-width: 0;
+                    }}
                     .mod-app-details-dialog-card {{ width: calc(100vw - 1rem) !important; }}
                     .mod-app-details-section {{ padding: 0.85rem 0.85rem; }}
                     .mod-app-details-point-field {{
@@ -6037,6 +6332,322 @@ class ModWebTheme:
                         grid-column: 2;
                         width: 100%;
                     }}
+                }}
+                .mod-factorio-generator {{
+                    display: block !important;
+                    width: 100% !important;
+                    max-width: none !important;
+                    box-sizing: border-box;
+                    overflow: hidden;
+                    border-color: rgba(113, 113, 122, 0.68) !important;
+                    background:
+                        linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 7rem),
+                        #121216 !important;
+                    box-shadow:
+                        inset 0 0 0 1px rgba(0, 0, 0, 0.9),
+                        inset 0 0 0 3px rgba(255, 255, 255, 0.018),
+                        0 20px 50px rgba(0, 0, 0, 0.34) !important;
+                }}
+                .mod-factorio-titlebar {{
+                    display: flex;
+                    width: 100%;
+                    box-sizing: border-box;
+                    gap: 1rem;
+                    align-items: center;
+                    padding: 0.82rem 0.9rem;
+                    border-bottom: 2px solid #050506;
+                    background:
+                        repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0 2px, transparent 2px 5px),
+                        linear-gradient(180deg, #323238, #222228) !important;
+                }}
+                .mod-factorio-title {{
+                    color: #fff0cb !important;
+                    font-size: 1.24rem !important;
+                    font-weight: 950 !important;
+                    letter-spacing: 0.015em;
+                    line-height: 1.1 !important;
+                    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.95);
+                }}
+                .mod-factorio-kicker {{
+                    color: rgba(244, 244, 245, 0.63) !important;
+                    font-size: 0.74rem !important;
+                    font-weight: 800 !important;
+                    letter-spacing: 0.04em;
+                    text-transform: uppercase;
+                }}
+                .mod-factorio-header-actions {{ margin-left: auto; justify-content: flex-end; }}
+                .mod-factorio-seed {{ min-width: min(22rem, 100%); justify-content: flex-end; }}
+                .mod-factorio-seed .mod-factorio-plain-number {{ margin-top: 0; }}
+                .mod-factorio-seed-label {{ color: #fff0cb !important; font-weight: 900 !important; }}
+                .mod-factorio-notice {{
+                    display: flex;
+                    width: 100%;
+                    box-sizing: border-box;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 0.85rem;
+                    padding: 0.78rem 0.9rem;
+                    color: var(--mod-text);
+                    font-size: 0.9rem;
+                    background: #25252a;
+                    border-bottom: 1px solid rgba(82, 82, 91, 0.75);
+                }}
+                .mod-factorio-tabs-shell {{
+                    width: 100%;
+                    box-sizing: border-box;
+                    padding: 0.42rem 0.9rem 0;
+                    overflow-x: auto;
+                    border-bottom: 1px solid rgba(82, 82, 91, 0.75);
+                    background: #16161a;
+                    scrollbar-color: #52525b #16161a;
+                }}
+                .mod-factorio-tabs {{ gap: 0.22rem; min-width: max-content; min-height: 2.7rem; }}
+                .mod-factorio-tabs .q-tab {{
+                    flex: 0 0 auto !important;
+                    min-height: 2.7rem !important;
+                    padding: 0 0.95rem !important;
+                    color: #c4c4cb !important;
+                    background: linear-gradient(180deg, #4a4a50, #35353a) !important;
+                    border: 1px solid #101012;
+                    border-bottom: 0;
+                    font-weight: 950 !important;
+                    text-transform: none !important;
+                }}
+                .mod-factorio-tabs .q-tab--active {{
+                    color: #ffebc1 !important;
+                    background: #29292e !important;
+                    box-shadow: inset 0 3px 0 #f59e0b !important;
+                }}
+                .mod-factorio-tabs .q-tab__indicator {{ display: none !important; }}
+                .mod-factorio-panels {{ background: #29292e !important; }}
+                .mod-factorio-panel {{
+                    width: 100% !important;
+                    max-width: none !important;
+                    padding: 0.5rem 0.9rem 0.8rem !important;
+                }}
+                .mod-factorio-panel-intro {{
+                    display: flex;
+                    align-items: baseline;
+                    justify-content: space-between;
+                    gap: 0.8rem;
+                    margin: 0 0 0.28rem;
+                }}
+                .mod-factorio-panel-title {{
+                    color: #fff0cb !important;
+                    font-size: 1.08rem !important;
+                    font-weight: 950 !important;
+                }}
+                .mod-factorio-group-title {{
+                    color: #fff0cb !important;
+                    font-size: 0.92rem !important;
+                    font-weight: 950 !important;
+                }}
+                .mod-factorio-group-hint {{
+                    color: #c4c4cb !important;
+                    font-size: 0.74rem !important;
+                    font-weight: 800 !important;
+                    white-space: nowrap;
+                }}
+                .mod-factorio-control-table,
+                .mod-factorio-option-group {{
+                    display: block !important;
+                    width: 100% !important;
+                    max-width: none !important;
+                    box-sizing: border-box;
+                    margin-top: 0.38rem;
+                    padding: 0.56rem;
+                    border: 1px solid #131316;
+                    background: #38383d;
+                    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.055);
+                }}
+                .mod-factorio-control-table > .mod-factorio-group-title {{
+                    display: block;
+                    padding: 0.02rem 0.08rem 0.42rem;
+                }}
+                .mod-factorio-control-header,
+                .mod-factorio-control-row {{
+                    display: grid;
+                    grid-template-columns: minmax(12rem, 1.2fr) repeat(3, minmax(10rem, 1fr));
+                    gap: 0;
+                }}
+                .mod-factorio-control-table-cols-2 :is(.mod-factorio-control-header, .mod-factorio-control-row) {{
+                    grid-template-columns: minmax(12rem, 1.2fr) repeat(2, minmax(10rem, 1fr));
+                }}
+                .mod-factorio-control-header {{
+                    color: #e4e4e7;
+                    background: #303035;
+                    border: 1px solid #18181b;
+                    font-size: 0.78rem;
+                    font-weight: 900;
+                }}
+                .mod-factorio-control-header > * {{
+                    padding: 0.48rem 0.55rem;
+                    border-left: 1px solid #18181b;
+                    text-align: center;
+                }}
+                .mod-factorio-control-header > :first-child {{ border-left: 0; text-align: left; }}
+                .mod-factorio-control-row {{
+                    align-items: stretch;
+                    background: #3f3f44;
+                    border: 1px solid #18181b;
+                    border-top: 0;
+                }}
+                .mod-factorio-control-row > * {{
+                    min-width: 0;
+                    padding: 0.45rem 0.55rem;
+                    border-left: 1px solid #202024;
+                }}
+                .mod-factorio-control-row > :first-child {{ border-left: 0; }}
+                .mod-factorio-control-row:nth-child(even) {{ background: #39393e; }}
+                .mod-factorio-control-enabled .q-checkbox__inner {{ color: #f59e0b !important; }}
+                .mod-factorio-control-row:has(.mod-factorio-control-enabled .q-checkbox__inner:not(.q-checkbox__inner--truthy)) .mod-factorio-range-field {{
+                    opacity: 0.46;
+                    pointer-events: none;
+                }}
+                .mod-factorio-control-label {{
+                    min-width: 0;
+                    color: #f4f4f5 !important;
+                    font-weight: 800 !important;
+                    overflow-wrap: anywhere;
+                }}
+                .mod-factorio-range-field {{ min-width: 0; gap: 0.2rem !important; }}
+                .mod-factorio-range-label {{
+                    color: #d4d4d8 !important;
+                    font-size: 0.72rem !important;
+                    font-weight: 850 !important;
+                    line-height: 1.1 !important;
+                }}
+                .mod-factorio-range-value {{ width: 6rem; min-width: 6rem; }}
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) .q-field__control {{
+                    min-height: 2rem !important;
+                    background: #16161a !important;
+                    border: 1px solid #111114 !important;
+                    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.055) !important;
+                }}
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) .q-field__control::before,
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) .q-field__control::after {{
+                    border: 0 !important;
+                }}
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) .q-field__native,
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) .q-field__input,
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) input,
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) textarea,
+                .mod-factorio-map-type .q-field__label,
+                .mod-factorio-map-type .q-icon {{
+                    color: #f4f4f5 !important;
+                    -webkit-text-fill-color: #f4f4f5 !important;
+                    opacity: 1 !important;
+                    font-variant-numeric: tabular-nums;
+                }}
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) .q-field__label {{
+                    color: #c4c4cb !important;
+                    opacity: 1 !important;
+                }}
+                :is(.mod-factorio-range-value, .mod-factorio-plain-value, .mod-factorio-map-string-input, .mod-factorio-map-type) .q-field--focused .q-field__label {{
+                    color: #f8c45b !important;
+                }}
+                .mod-factorio-generator input[type="number"] {{
+                    appearance: textfield;
+                    -moz-appearance: textfield;
+                    color-scheme: dark;
+                }}
+                .mod-factorio-generator input[type="number"]::-webkit-inner-spin-button,
+                .mod-factorio-generator input[type="number"]::-webkit-outer-spin-button {{
+                    margin: 0;
+                    appearance: none;
+                    -webkit-appearance: none;
+                }}
+                .mod-factorio-map-type {{ width: min(28rem, 100%); margin-top: 0.5rem; }}
+                .mod-factorio-slider {{ min-width: 2.75rem; }}
+                .mod-factorio-slider .q-slider__track-container {{ height: 0.55rem !important; }}
+                .mod-factorio-slider .q-slider__track {{ color: #141416 !important; opacity: 1 !important; }}
+                .mod-factorio-slider .q-slider__track--active {{ color: #f59e0b !important; }}
+                .mod-factorio-slider .q-slider__thumb {{ color: #d4d4d8 !important; }}
+                .mod-factorio-slider .q-slider__focus-ring {{ color: rgba(245, 158, 11, 0.25) !important; }}
+                .mod-factorio-range-hint {{ color: var(--mod-muted) !important; font-size: 0.69rem !important; line-height: 1.15 !important; }}
+                .mod-factorio-option-grid {{
+                    width: 100%;
+                    max-width: none;
+                    box-sizing: border-box;
+                    display: grid;
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                    gap: 0.65rem;
+                    margin-top: 0.62rem;
+                }}
+                .mod-factorio-option-grid > .mod-factorio-range-field {{
+                    padding: 0.45rem;
+                    background: rgba(0, 0, 0, 0.14);
+                    border: 1px solid rgba(24, 24, 27, 0.85);
+                }}
+                .mod-factorio-toggle-row {{
+                    justify-content: center;
+                    gap: 0.35rem !important;
+                    padding: 0.45rem;
+                    background: rgba(0, 0, 0, 0.14);
+                    border: 1px solid rgba(24, 24, 27, 0.85);
+                }}
+                .mod-factorio-toggle-row .q-toggle__inner,
+                .mod-factorio-section-toggle .q-checkbox__inner {{ color: #f59e0b !important; }}
+                .mod-factorio-advanced-grid {{
+                    width: 100%;
+                    max-width: none;
+                    box-sizing: border-box;
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr);
+                    gap: 0.7rem;
+                }}
+                .mod-factorio-advanced-top-grid {{
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                }}
+                .mod-factorio-plain-number {{ margin-top: 0.5rem; }}
+                .mod-factorio-map-string {{
+                    display: grid;
+                    grid-template-columns: minmax(12rem, 0.8fr) minmax(18rem, 1.7fr) auto;
+                    align-items: center;
+                    gap: 0.7rem;
+                    padding: 0.8rem 0.9rem;
+                    background: #1d1d21;
+                    border-top: 2px solid #111114;
+                }}
+                .mod-factorio-map-string-input textarea {{
+                    min-height: 4.75rem !important;
+                    max-height: 11rem !important;
+                    overflow: auto !important;
+                    resize: vertical !important;
+                }}
+                .mod-factorio-save {{
+                    min-width: min(15rem, 100%);
+                    justify-content: center;
+                    color: #112a16 !important;
+                    background: #57bd5d !important;
+                    border-color: #82e589 !important;
+                    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.16), 0 8px 20px rgba(0, 0, 0, 0.28) !important;
+                }}
+                @media (max-width: 64rem) {{
+                    .mod-factorio-control-header,
+                    .mod-factorio-control-row {{ grid-template-columns: minmax(10rem, 1fr) repeat(3, minmax(8rem, 1fr)); }}
+                    .mod-factorio-control-table-cols-2 :is(.mod-factorio-control-header, .mod-factorio-control-row) {{
+                        grid-template-columns: minmax(10rem, 1fr) repeat(2, minmax(8rem, 1fr));
+                    }}
+                    .mod-factorio-map-string {{ grid-template-columns: 1fr; align-items: stretch; }}
+                }}
+                @media (max-width: 48rem) {{
+                    .mod-factorio-titlebar,
+                    .mod-factorio-notice,
+                    .mod-factorio-panel-intro {{ align-items: flex-start; flex-direction: column; }}
+                    .mod-factorio-header-actions {{ width: 100%; margin-left: 0; justify-content: flex-start; }}
+                    .mod-factorio-seed {{ width: 100%; justify-content: flex-start; }}
+                    .mod-factorio-control-header {{ display: none; }}
+                    .mod-factorio-control-row {{
+                        grid-template-columns: 1fr;
+                        gap: 0;
+                        border-top: 1px solid #18181b;
+                    }}
+                    .mod-factorio-control-row > * {{ border-left: 0; border-top: 1px solid #202024; }}
+                    .mod-factorio-control-row > :first-child {{ border-top: 0; }}
+                    .mod-factorio-option-grid,
+                    .mod-factorio-advanced-grid {{ grid-template-columns: 1fr; }}
+                    .mod-factorio-header-actions .mod-factorio-save {{ width: 100%; }}
                 }}
                 @media (prefers-reduced-motion: reduce) {{
                     *,

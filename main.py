@@ -1024,7 +1024,6 @@ def main():
                 interaction,
                 acl=acl,
                 names_cache=name_cache,
-                manager=app_manager,
             )
             if handled:
                 return
@@ -1085,7 +1084,6 @@ def main():
                 interaction,
                 acl=acl,
                 names_cache=name_cache,
-                manager=app_manager,
             )
             if handled:
                 return
