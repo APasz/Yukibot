@@ -180,11 +180,11 @@ class ChatAuthor:
         if self.color_hex is not None:
             color = self.color_hex.strip()
             if not color.startswith("#") or len(color) != 7:
-                raise ValueError("Chat author color must be a #RRGGBB value.")
+                raise ValueError("Chat author colour must be a #RRGGBB value.")
             try:
                 int(color[1:], 16)
             except ValueError as xcp:
-                raise ValueError("Chat author color must be a #RRGGBB value.") from xcp
+                raise ValueError("Chat author colour must be a #RRGGBB value.") from xcp
         if self.avatar_uri is not None and not self.avatar_uri.strip():
             raise ValueError("Chat author avatar URI must not be empty.")
 
@@ -400,7 +400,7 @@ class ChatEmbed:
     def from_mapping(cls, payload: Mapping[str, object]) -> "ChatEmbed":
         color = payload.get("color")
         if isinstance(color, bool) or not isinstance(color, int):
-            raise ValueError("color is invalid.")
+            raise ValueError("colour is invalid.")
         return cls(
             title=_required_string(payload, "title"),
             description=_required_string(payload, "description"),

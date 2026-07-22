@@ -15,7 +15,7 @@ def mod_web_tooltip_css() -> str:
                 .leaflet-tooltip {
                     max-width: min(22rem, calc(100vw - 2rem));
                     padding: 0.4rem 0.55rem !important;
-                    border: 1px solid rgba(139, 92, 246, 0.7) !important;
+                    border: 1px solid var(--mod-accent-border-strong) !important;
                     border-radius: 0 !important;
                     color: var(--mod-text) !important;
                     background: #000000 !important;
@@ -97,11 +97,46 @@ class ModWebTheme:
                     --mod-purple: {palette.purple};
                     --mod-purple-dark: {palette.purple_dark};
                     --mod-accent: {palette.purple};
+                    --mod-accent-dark: color-mix(in srgb, var(--mod-accent) 38%, #050507);
+                    --mod-accent-surface: color-mix(in srgb, var(--mod-accent) 22%, #050507);
+                    --mod-accent-panel: color-mix(in srgb, var(--mod-accent) 16%, #111118);
+                    --mod-accent-text: color-mix(in srgb, var(--mod-accent) 36%, #ffffff);
+                    --mod-accent-text-strong: color-mix(in srgb, var(--mod-accent) 18%, #ffffff);
+                    --mod-accent-border: color-mix(in srgb, var(--mod-accent) 58%, transparent);
+                    --mod-accent-border-strong: color-mix(in srgb, var(--mod-accent) 74%, transparent);
+                    --mod-accent-glow: color-mix(in srgb, var(--mod-accent) 24%, transparent);
+                    --mod-accent-faint: color-mix(in srgb, var(--mod-accent) 12%, transparent);
+                    --mod-accent-wash: color-mix(in srgb, var(--mod-accent) 8%, transparent);
+                    --mod-info: {palette.nicegui.info};
+                    --mod-info-dark: color-mix(in srgb, var(--mod-info) 38%, #050507);
+                    --mod-info-surface: color-mix(in srgb, var(--mod-info) 22%, #050507);
+                    --mod-info-text: color-mix(in srgb, var(--mod-info) 22%, #ffffff);
+                    --mod-info-border: color-mix(in srgb, var(--mod-info) 58%, transparent);
+                    --mod-info-border-strong: color-mix(in srgb, var(--mod-info) 74%, transparent);
+                    --mod-info-glow: color-mix(in srgb, var(--mod-info) 24%, transparent);
+                    --mod-positive: {palette.nicegui.positive};
+                    --mod-positive-dark: color-mix(in srgb, var(--mod-positive) 38%, #050507);
+                    --mod-positive-surface: color-mix(in srgb, var(--mod-positive) 22%, #050507);
+                    --mod-positive-text: color-mix(in srgb, var(--mod-positive) 22%, #ffffff);
+                    --mod-positive-border: color-mix(in srgb, var(--mod-positive) 58%, transparent);
+                    --mod-positive-border-strong: color-mix(in srgb, var(--mod-positive) 74%, transparent);
+                    --mod-positive-glow: color-mix(in srgb, var(--mod-positive) 24%, transparent);
                     --mod-red: {palette.red};
-                    --mod-red-dark: {palette.red_dark};
+                    --mod-negative: var(--mod-red);
+                    --mod-red-dark: color-mix(in srgb, var(--mod-negative) 42%, #050507);
+                    --mod-negative-dark: var(--mod-red-dark);
+                    --mod-negative-surface: color-mix(in srgb, var(--mod-negative) 22%, #050507);
+                    --mod-negative-text: color-mix(in srgb, var(--mod-negative) 22%, #ffffff);
+                    --mod-negative-border: color-mix(in srgb, var(--mod-negative) 58%, transparent);
+                    --mod-negative-border-strong: color-mix(in srgb, var(--mod-negative) 74%, transparent);
+                    --mod-negative-glow: color-mix(in srgb, var(--mod-negative) 24%, transparent);
                     --mod-warning: {palette.warning};
-                    --mod-warning-dark: {palette.warning_dark};
-                    --mod-warning-text: {palette.warning_text};
+                    --mod-warning-dark: color-mix(in srgb, var(--mod-warning) 30%, #050507);
+                    --mod-warning-surface: color-mix(in srgb, var(--mod-warning) 18%, #050507);
+                    --mod-warning-text: color-mix(in srgb, var(--mod-warning) 28%, #ffffff);
+                    --mod-warning-border: color-mix(in srgb, var(--mod-warning) 58%, transparent);
+                    --mod-warning-border-strong: color-mix(in srgb, var(--mod-warning) 74%, transparent);
+                    --mod-warning-glow: color-mix(in srgb, var(--mod-warning) 24%, transparent);
                     --mod-panel: {palette.panel};
                     --mod-scrollbar-thumb: rgba(161, 161, 170, 0.34);
                     --mod-scrollbar-thumb-hover: rgba(161, 161, 170, 0.52);
@@ -194,35 +229,35 @@ class ModWebTheme:
                 }}
                 .q-notification.bg-positive,
                 .q-notification--standard.bg-positive {{
-                    border-color: rgba(107, 114, 128, 0.72) !important;
+                    border-color: var(--mod-positive-border-strong) !important;
                     background:
-                        linear-gradient(135deg, rgba(148, 163, 184, 0.14), transparent 45%),
+                        linear-gradient(135deg, var(--mod-positive-glow), transparent 45%),
                         linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
-                        rgba(20, 24, 31, 0.97) !important;
+                        var(--mod-positive-dark) !important;
                 }}
                 .q-notification.bg-info,
                 .q-notification--standard.bg-info {{
-                    border-color: rgba(139, 92, 246, 0.72) !important;
+                    border-color: var(--mod-info-border-strong) !important;
                     background:
-                        linear-gradient(135deg, rgba(139, 92, 246, 0.2), transparent 45%),
+                        linear-gradient(135deg, var(--mod-info-glow), transparent 45%),
                         linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
-                        var(--mod-purple-dark) !important;
+                        var(--mod-info-dark) !important;
                 }}
                 .q-notification.bg-warning,
                 .q-notification--standard.bg-warning {{
-                    border-color: rgba(245, 158, 11, 0.72) !important;
+                    border-color: var(--mod-warning-border-strong) !important;
                     background:
-                        linear-gradient(135deg, rgba(245, 158, 11, 0.2), transparent 45%),
+                        linear-gradient(135deg, var(--mod-warning-glow), transparent 45%),
                         linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
                         var(--mod-warning-dark) !important;
                 }}
                 .q-notification.bg-negative,
                 .q-notification--standard.bg-negative {{
-                    border-color: rgba(220, 38, 38, 0.72) !important;
+                    border-color: var(--mod-negative-border-strong) !important;
                     background:
-                        linear-gradient(135deg, rgba(220, 38, 38, 0.2), transparent 45%),
+                        linear-gradient(135deg, var(--mod-negative-glow), transparent 45%),
                         linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
-                        var(--mod-red-dark) !important;
+                        var(--mod-negative-dark) !important;
                 }}
                 .nicegui-error-popup {{
                     color: var(--mod-text) !important;
@@ -240,18 +275,18 @@ class ModWebTheme:
                     color: var(--mod-muted) !important;
                 }}
                 #popup.nicegui-error-popup {{
-                    border-color: rgba(245, 158, 11, 0.72) !important;
+                    border-color: var(--mod-warning-border-strong) !important;
                     background:
-                        linear-gradient(135deg, rgba(245, 158, 11, 0.2), transparent 45%),
+                        linear-gradient(135deg, var(--mod-warning-glow), transparent 45%),
                         linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
                         var(--mod-warning-dark) !important;
                 }}
                 #too_long_message_popup.nicegui-error-popup {{
-                    border-color: rgba(220, 38, 38, 0.72) !important;
+                    border-color: var(--mod-negative-border-strong) !important;
                     background:
-                        linear-gradient(135deg, rgba(220, 38, 38, 0.2), transparent 45%),
+                        linear-gradient(135deg, var(--mod-negative-glow), transparent 45%),
                         linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0)),
-                        var(--mod-red-dark) !important;
+                        var(--mod-negative-dark) !important;
                 }}
                 .mod-page {{
                     max-width: 1180px;
@@ -259,15 +294,110 @@ class ModWebTheme:
                     animation: mod-page-enter var(--mod-motion-medium) var(--mod-motion-ease) both;
                 }}
                 .mod-page-app {{ max-width: 1380px; }}
+                .text-primary,
+                .text-accent {{
+                    color: var(--mod-accent) !important;
+                }}
+                .text-info {{
+                    color: var(--mod-info) !important;
+                }}
+                .text-positive {{
+                    color: var(--mod-positive) !important;
+                }}
+                .text-warning {{
+                    color: var(--mod-warning) !important;
+                }}
+                .text-negative {{
+                    color: var(--mod-negative) !important;
+                }}
+                .bg-primary,
+                .bg-accent {{
+                    background: var(--mod-accent) !important;
+                }}
+                .bg-info {{
+                    background: var(--mod-info) !important;
+                }}
+                .bg-positive {{
+                    background: var(--mod-positive) !important;
+                }}
+                .bg-warning {{
+                    background: var(--mod-warning) !important;
+                }}
+                .bg-negative {{
+                    background: var(--mod-negative) !important;
+                }}
+                .border-primary,
+                .border-accent {{
+                    border-color: var(--mod-accent) !important;
+                }}
+                .border-info {{
+                    border-color: var(--mod-info) !important;
+                }}
+                .border-positive {{
+                    border-color: var(--mod-positive) !important;
+                }}
+                .border-warning {{
+                    border-color: var(--mod-warning) !important;
+                }}
+                .border-negative {{
+                    border-color: var(--mod-negative) !important;
+                }}
+                .q-btn.bg-primary,
+                .q-btn.bg-accent {{
+                    border: 1px solid var(--mod-accent-border) !important;
+                    background:
+                        linear-gradient(180deg, var(--mod-accent-glow), transparent),
+                        var(--mod-accent-dark) !important;
+                    color: var(--mod-accent-text-strong) !important;
+                    box-shadow:
+                        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+                        inset 0 -1px 0 var(--mod-accent-glow) !important;
+                }}
+                .q-btn.bg-primary:hover,
+                .q-btn.bg-accent:hover {{
+                    border-color: var(--mod-accent-border-strong) !important;
+                    background:
+                        linear-gradient(180deg, var(--mod-accent-border), var(--mod-accent-faint)),
+                        var(--mod-accent-surface) !important;
+                    color: #ffffff !important;
+                }}
+                .q-btn.bg-info {{
+                    border: 1px solid var(--mod-info-border) !important;
+                    background:
+                        linear-gradient(180deg, var(--mod-info-glow), transparent),
+                        var(--mod-info-dark) !important;
+                    color: var(--mod-info-text) !important;
+                }}
+                .q-btn.bg-positive {{
+                    border: 1px solid var(--mod-positive-border) !important;
+                    background:
+                        linear-gradient(180deg, var(--mod-positive-glow), transparent),
+                        var(--mod-positive-dark) !important;
+                    color: var(--mod-positive-text) !important;
+                }}
+                .q-btn.bg-warning {{
+                    border: 1px solid var(--mod-warning-border) !important;
+                    background:
+                        linear-gradient(180deg, var(--mod-warning-glow), transparent),
+                        var(--mod-warning-dark) !important;
+                    color: var(--mod-warning-text) !important;
+                }}
+                .q-btn.bg-negative {{
+                    border: 1px solid var(--mod-negative-border) !important;
+                    background:
+                        linear-gradient(180deg, var(--mod-negative-glow), transparent),
+                        var(--mod-negative-dark) !important;
+                    color: var(--mod-negative-text) !important;
+                }}
                 .mod-skip-link {{
                     position: fixed;
                     top: 0.75rem;
                     left: 0.75rem;
                     z-index: 2147483000;
                     padding: 0.6rem 0.85rem;
-                    border: 1px solid rgba(196, 181, 253, 0.82);
+                    border: 1px solid var(--mod-accent-border-strong);
                     color: #ffffff !important;
-                    background: #241044;
+                    background: var(--mod-accent-surface);
                     box-shadow: 0 12px 26px rgba(0, 0, 0, 0.36);
                     text-decoration: none !important;
                     transform: translateY(-160%);
@@ -324,12 +454,12 @@ class ModWebTheme:
                 }}
                 @keyframes mod-live-value-pulse-a {{
                     0% {{ color: #ffffff; filter: brightness(1.75); translate: 0 1px; }}
-                    45% {{ text-shadow: 0 0 0.7rem rgba(196, 181, 253, 0.58); }}
+                    45% {{ text-shadow: 0 0 0.7rem var(--mod-accent-border); }}
                     100% {{ filter: brightness(1); translate: 0 0; text-shadow: none; }}
                 }}
                 @keyframes mod-live-value-pulse-b {{
                     0% {{ color: #ffffff; filter: brightness(1.75); translate: 0 1px; }}
-                    45% {{ text-shadow: 0 0 0.7rem rgba(196, 181, 253, 0.58); }}
+                    45% {{ text-shadow: 0 0 0.7rem var(--mod-accent-border); }}
                     100% {{ filter: brightness(1); translate: 0 0; text-shadow: none; }}
                 }}
                 .mod-card {{
@@ -422,7 +552,7 @@ class ModWebTheme:
                     letter-spacing: 0.01em;
                 }}
                 .mod-app-hero-status-value-grey {{ color: rgba(228, 228, 231, 0.76) !important; }}
-                .mod-app-hero-status-value-purple {{ color: #d8b4fe !important; }}
+                .mod-app-hero-status-value-purple {{ color: var(--mod-accent-text) !important; }}
                 .mod-app-hero-status-value-warn {{ color: #fbbf24 !important; }}
                 .mod-app-hero-status-value-red {{ color: #f87171 !important; }}
                 .mod-app-hero-join-addresses {{
@@ -499,8 +629,8 @@ class ModWebTheme:
                     display: block;
                     width: clamp(4.75rem, 8vw, 6.5rem);
                     height: auto;
-                    color: rgba(248, 113, 113, 0.88);
-                    filter: drop-shadow(0 12px 24px rgba(220, 38, 38, 0.24));
+                    color: var(--mod-negative-text);
+                    filter: drop-shadow(0 12px 24px var(--mod-negative-glow));
                 }}
                 .mod-status-header-main {{
                     gap: 0.7rem;
@@ -523,13 +653,13 @@ class ModWebTheme:
                     gap: 0.45rem;
                     padding: 0.95rem 1rem;
                     background:
-                        linear-gradient(135deg, rgba(220, 38, 38, 0.13), transparent 58%),
+                        linear-gradient(135deg, var(--mod-negative-glow), transparent 58%),
                         rgba(9, 9, 13, 0.82);
-                    border: 1px solid rgba(248, 113, 113, 0.3);
+                    border: 1px solid var(--mod-negative-border);
                     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
                 }}
                 .mod-status-detail-label {{
-                    color: rgba(248, 113, 113, 0.82) !important;
+                    color: var(--mod-negative-text) !important;
                     font-size: 0.72rem;
                     font-weight: 800;
                     letter-spacing: 0.16em;
@@ -840,14 +970,14 @@ class ModWebTheme:
                 }}
                 @keyframes mod-app-card-live-pulse {{
                     0% {{
-                        border-color: rgba(139, 92, 246, 0.9) !important;
+                        border-color: var(--mod-accent-border-strong) !important;
                         box-shadow:
-                            0 0 0 1px rgba(196, 181, 253, 0.24),
+                            0 0 0 1px var(--mod-accent-glow),
                             0 24px 70px rgba(0, 0, 0, 0.48),
                             inset 0 1px 0 rgba(255, 255, 255, 0.04) !important;
                     }}
                     55% {{
-                        border-color: rgba(196, 181, 253, 0.72) !important;
+                        border-color: var(--mod-accent-border-strong) !important;
                     }}
                     100% {{
                         border-color: var(--mod-border) !important;
@@ -933,7 +1063,7 @@ class ModWebTheme:
                         opacity: 1;
                     }}
                     58% {{
-                        box-shadow: 0 0 0 0.18rem rgba(196, 181, 253, 0.16);
+                        box-shadow: 0 0 0 0.18rem var(--mod-accent-faint);
                     }}
                     100% {{
                         transform: translateY(0);
@@ -944,7 +1074,7 @@ class ModWebTheme:
                 .mod-node-card {{
                     border-radius: 0 !important;
                     background: #08080c !important;
-                    border-color: #30203a !important;
+                    border-color: var(--mod-accent-border) !important;
                 }}
                 .mod-card-empty {{
                     border-style: dashed !important;
@@ -1101,31 +1231,31 @@ class ModWebTheme:
                     bottom: 0;
                     left: 0;
                     height: 2px;
-                    background: linear-gradient(90deg, #7c3aed 0%, #c4b5fd 50%, #7c3aed 100%);
+                    background: linear-gradient(90deg, var(--mod-accent) 0%, var(--mod-accent-text) 50%, var(--mod-accent) 100%);
                     transform: scaleX(0);
                     transform-origin: center;
                     transition: transform var(--mod-motion-tab-accent) var(--mod-motion-ease);
                 }}
                 .mod-section-tabs .q-tab--active {{
                     color: var(--mod-text) !important;
-                    border-color: rgba(139, 92, 246, 0.72) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     background:
-                        linear-gradient(135deg, rgba(139, 92, 246, 0.16), transparent 65%),
-                        rgba(24, 16, 36, 0.96) !important;
+                        linear-gradient(135deg, var(--mod-accent-faint), transparent 65%),
+                        var(--mod-accent-panel) !important;
                     box-shadow:
-                        inset 0 0 0 1px rgba(196, 181, 253, 0.14),
+                        inset 0 0 0 1px var(--mod-accent-faint),
                         0 12px 26px rgba(0, 0, 0, 0.28);
                 }}
                 .mod-section-tabs .q-tab:hover,
                 .mod-section-tabs .q-tab:focus-visible {{
                     color: var(--mod-text) !important;
-                    border-color: rgba(139, 92, 246, 0.72);
+                    border-color: var(--mod-accent-border-strong);
                     outline: none;
                 }}
                 .mod-section-tabs .q-tab:focus-visible {{
                     box-shadow:
-                        inset 0 0 0 1px rgba(196, 181, 253, 0.4),
-                        0 0 0 2px rgba(124, 58, 237, 0.42);
+                        inset 0 0 0 1px var(--mod-accent-border),
+                        0 0 0 2px var(--mod-accent-border);
                 }}
                 .mod-section-tabs .q-tab--active::after {{
                     transform: scaleX(1);
@@ -1241,7 +1371,7 @@ class ModWebTheme:
                     bottom: 0;
                     left: 0;
                     height: 2px;
-                    background: linear-gradient(90deg, #7c3aed 0%, #c4b5fd 50%, #7c3aed 100%);
+                    background: linear-gradient(90deg, var(--mod-accent) 0%, var(--mod-accent-text) 50%, var(--mod-accent) 100%);
                     transform: scaleX(0);
                     transform-origin: center;
                     transition: transform var(--mod-motion-tab-accent) var(--mod-motion-ease);
@@ -1249,22 +1379,22 @@ class ModWebTheme:
                 .mod-system-native-tab:hover,
                 .mod-system-native-tab:focus-visible {{
                     color: var(--mod-text) !important;
-                    border-color: rgba(139, 92, 246, 0.72);
+                    border-color: var(--mod-accent-border-strong);
                     outline: none;
                 }}
                 .mod-system-native-tab:focus-visible {{
                     box-shadow:
-                        inset 0 0 0 1px rgba(196, 181, 253, 0.4),
-                        0 0 0 2px rgba(124, 58, 237, 0.42);
+                        inset 0 0 0 1px var(--mod-accent-border),
+                        0 0 0 2px var(--mod-accent-border);
                 }}
                 .mod-system-native-tab-active {{
                     color: var(--mod-text) !important;
-                    border-color: rgba(139, 92, 246, 0.72) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     background:
-                        linear-gradient(135deg, rgba(139, 92, 246, 0.16), transparent 65%),
-                        rgba(24, 16, 36, 0.96) !important;
+                        linear-gradient(135deg, var(--mod-accent-faint), transparent 65%),
+                        var(--mod-accent-panel) !important;
                     box-shadow:
-                        inset 0 0 0 1px rgba(196, 181, 253, 0.14),
+                        inset 0 0 0 1px var(--mod-accent-faint),
                         0 12px 26px rgba(0, 0, 0, 0.28);
                 }}
                 .mod-system-native-tab-active::after {{
@@ -1379,11 +1509,11 @@ class ModWebTheme:
                     margin-left: 0.35rem;
                 }}
                 .mod-list-button.mod-toolbar-primary {{
-                    background: linear-gradient(135deg, #4c1d75, #6d28d9) !important;
-                    border-color: rgba(196, 181, 253, 0.64) !important;
+                    background: linear-gradient(135deg, var(--mod-accent-dark), var(--mod-accent)) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.12),
-                        0 10px 26px rgba(76, 29, 149, 0.36) !important;
+                        0 10px 26px var(--mod-accent-glow) !important;
                 }}
                 .mod-toolbar-button {{
                     flex: 1 1 11rem;
@@ -1415,15 +1545,15 @@ class ModWebTheme:
                     min-width: 9.5rem;
                     width: auto;
                     opacity: 1 !important;
-                    color: #f5f3ff !important;
-                    border-color: rgba(139, 92, 246, 0.52) !important;
+                    color: var(--mod-accent-text-strong) !important;
+                    border-color: var(--mod-accent-border) !important;
                     background: rgba(24, 16, 34, 0.78) !important;
                     cursor: default !important;
                 }}
                 .mod-mods-toolbar .mod-toolbar-status-button .q-btn__content {{
                     opacity: 1 !important;
-                    color: #f5f3ff !important;
-                    text-shadow: 0 0 12px rgba(216, 180, 254, 0.2);
+                    color: var(--mod-accent-text-strong) !important;
+                    text-shadow: 0 0 12px var(--mod-accent-glow);
                 }}
                 .mod-toolbar-menu {{
                     min-width: 12rem;
@@ -1542,7 +1672,7 @@ class ModWebTheme:
                     min-height: 0 !important;
                     max-height: none !important;
                     border-radius: 0 !important;
-                    border: 1px solid rgba(139, 92, 246, 0.48) !important;
+                    border: 1px solid var(--mod-accent-border) !important;
                     background: rgba(13, 13, 18, 0.96) !important;
                     color: var(--mod-text) !important;
                     box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24) !important;
@@ -1550,9 +1680,9 @@ class ModWebTheme:
                 :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__header {{
                     min-height: 2.5rem;
                     border-radius: 0 !important;
-                    background: var(--mod-purple-dark) !important;
+                    background: var(--mod-accent-dark) !important;
                     color: #fff !important;
-                    border-bottom: 1px solid rgba(139, 92, 246, 0.52) !important;
+                    border-bottom: 1px solid var(--mod-accent-border) !important;
                     box-shadow: none !important;
                 }}
                 :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__title,
@@ -1567,7 +1697,7 @@ class ModWebTheme:
                     letter-spacing: 0.02em;
                 }}
                 :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__subtitle {{
-                    color: rgba(245, 243, 255, 0.74) !important;
+                    color: var(--mod-accent-text) !important;
                 }}
                 :is(.mod-file-upload-zone, .mod-save-upload-zone) .q-uploader__list {{
                     min-height: 0 !important;
@@ -1593,15 +1723,16 @@ class ModWebTheme:
                     background: rgba(24, 24, 31, 0.9) !important;
                     border: 1px solid rgba(63, 63, 70, 0.82) !important;
                 }}
-                .mod-list-button {{
+                .mod-list-button,
+                .q-btn.mod-list-button {{
                     border-radius: 0 !important;
                     min-height: 2.25rem !important;
                     padding: 0.45rem 0.8rem !important;
                     font-weight: 900 !important;
                     letter-spacing: 0.02em;
                     color: #fff !important;
-                    background: var(--mod-purple-dark) !important;
-                    border: 1px solid rgba(139, 92, 246, 0.52) !important;
+                    background: var(--mod-accent-dark) !important;
+                    border: 1px solid var(--mod-accent-border) !important;
                     box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
                 :is(.mod-list-button, .mod-toolbar-button, .mod-action, .mod-badge-link, .mod-badge-action):focus-visible {{
@@ -1618,17 +1749,18 @@ class ModWebTheme:
                         inset 0 0 0 6px rgba(255, 255, 255, 0.08),
                         0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
-                .mod-list-button.secondary {{
-                    color: var(--mod-text) !important;
-                    background: #15151b !important;
-                    border-color: #34343d !important;
+                .mod-list-button.secondary,
+                .q-btn.mod-list-button.secondary {{
+                    color: var(--mod-accent-text-strong) !important;
+                    background: var(--mod-accent-panel) !important;
+                    border-color: var(--mod-accent-border) !important;
                     box-shadow: none !important;
                 }}
                 .mod-list-button.state-enabled {{
-                    background: #24113a !important;
-                    border-color: #7c3aed !important;
+                    background: var(--mod-accent-surface) !important;
+                    border-color: var(--mod-accent) !important;
                     box-shadow:
-                        inset 0 0 0 2px rgba(196, 181, 253, 0.22),
+                        inset 0 0 0 2px var(--mod-accent-glow),
                         0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
                 .mod-list-button.state-disabled {{
@@ -1640,11 +1772,11 @@ class ModWebTheme:
                         0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
                 .mod-list-button.state-core-on {{
-                    color: #fef2f2 !important;
-                    background: #3a1117 !important;
-                    border-color: #dc2626 !important;
+                    color: var(--mod-negative-text) !important;
+                    background: var(--mod-negative-surface) !important;
+                    border-color: var(--mod-negative) !important;
                     box-shadow:
-                        inset 0 0 0 2px rgba(254, 202, 202, 0.2),
+                        inset 0 0 0 2px var(--mod-negative-glow),
                         0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
                 .mod-list-button.state-core-off {{
@@ -1656,11 +1788,11 @@ class ModWebTheme:
                         0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
                 .mod-list-button.state-blocked {{
-                    color: #fecaca !important;
-                    background: #311218 !important;
-                    border-color: #b91c1c !important;
+                    color: var(--mod-negative-text) !important;
+                    background: var(--mod-negative-surface) !important;
+                    border-color: var(--mod-negative-border-strong) !important;
                     box-shadow:
-                        inset 0 0 0 2px rgba(254, 202, 202, 0.18),
+                        inset 0 0 0 2px var(--mod-negative-glow),
                         0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
                 .mod-list-button.state-open {{
@@ -1671,9 +1803,11 @@ class ModWebTheme:
                         inset 0 0 0 2px rgba(228, 228, 231, 0.12),
                         0 10px 24px rgba(0, 0, 0, 0.28) !important;
                 }}
-                .mod-list-button.danger {{
-                    background: #5f111b !important;
-                    border-color: rgba(220, 38, 38, 0.7) !important;
+                .mod-list-button.danger,
+                .q-btn.mod-list-button.danger {{
+                    color: var(--mod-negative-text) !important;
+                    background: var(--mod-negative-dark) !important;
+                    border-color: var(--mod-negative-border-strong) !important;
                 }}
                 .mod-list-count {{ color: var(--mod-muted) !important; font-size: 0.88rem; font-weight: 800; }}
                 .mod-list {{ display: flex; flex-direction: column; gap: 0.4rem; }}
@@ -1727,7 +1861,7 @@ class ModWebTheme:
                 :is(.mod-config-input, .mod-config-select) textarea {{
                     color: var(--mod-text) !important;
                     -webkit-text-fill-color: var(--mod-text) !important;
-                    caret-color: var(--mod-purple) !important;
+                    caret-color: var(--mod-accent) !important;
                     opacity: 1 !important;
                 }}
                 :is(.mod-config-input, .mod-config-select) .q-field__label,
@@ -1738,7 +1872,7 @@ class ModWebTheme:
                 }}
                 :is(.mod-config-input, .mod-config-select) .q-field--focused .q-field__label,
                 :is(.mod-config-input, .mod-config-select) .q-field--float .q-field__label {{
-                    color: #ddd6fe !important;
+                    color: var(--mod-accent-text-strong) !important;
                 }}
                 :is(.mod-config-input, .mod-config-select) .q-field__native::placeholder,
                 :is(.mod-config-input, .mod-config-select) .q-field__input::placeholder,
@@ -1753,7 +1887,7 @@ class ModWebTheme:
                 :is(.mod-config-input, .mod-config-select) input:-webkit-autofill:focus {{
                     -webkit-text-fill-color: var(--mod-text) !important;
                     box-shadow: 0 0 0 1000px rgba(17, 17, 24, 0.98) inset !important;
-                    caret-color: var(--mod-purple) !important;
+                    caret-color: var(--mod-accent) !important;
                 }}
                 .mod-recipe-field .q-field__control {{
                     min-height: 3.05rem !important;
@@ -1771,14 +1905,14 @@ class ModWebTheme:
                 }}
                 .mod-recipe-field:hover .q-field__control,
                 .mod-recipe-field .q-field--focused .q-field__control {{
-                    border-color: rgba(139, 92, 246, 0.72) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     background:
-                        linear-gradient(180deg, rgba(221, 214, 254, 0.08), rgba(221, 214, 254, 0)),
-                        rgba(20, 14, 31, 0.98) !important;
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
+                        var(--mod-accent-panel) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.05),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.22),
-                        0 0 0 1px rgba(139, 92, 246, 0.24),
+                        inset 0 -1px 0 var(--mod-accent-glow),
+                        0 0 0 1px var(--mod-accent-glow),
                         0 12px 28px rgba(0, 0, 0, 0.28) !important;
                 }}
                 .mod-recipe-field .q-field__label {{
@@ -1790,7 +1924,7 @@ class ModWebTheme:
                 }}
                 .mod-recipe-field .q-field__label.q-field__label--focused,
                 .mod-recipe-field .q-field--float .q-field__label {{
-                    color: #ddd6fe !important;
+                    color: var(--mod-accent-text-strong) !important;
                 }}
                 .mod-recipe-field .q-field__native,
                 .mod-recipe-field .q-field__input,
@@ -1905,13 +2039,13 @@ class ModWebTheme:
                         rgba(16, 16, 22, 0.96) !important;
                     box-shadow:
                         inset 0 0 0 1px rgba(255, 255, 255, 0.03),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.12),
+                        inset 0 -1px 0 var(--mod-accent-faint),
                         0 12px 24px rgba(0, 0, 0, 0.24) !important;
                 }}
                 .mod-recipe-slot:hover {{
-                    border-color: rgba(139, 92, 246, 0.64) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     background:
-                        linear-gradient(180deg, rgba(221, 214, 254, 0.08), rgba(221, 214, 254, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(22, 18, 30, 0.98) !important;
                 }}
                 .mod-recipe-slot-drop-active {{
@@ -1970,7 +2104,7 @@ class ModWebTheme:
                     word-break: break-word;
                 }}
                 .mod-recipe-slot-value {{
-                    color: #c4b5fd !important;
+                    color: var(--mod-accent-text) !important;
                     font-size: 0.68rem !important;
                     line-height: 0.95rem;
                     font-weight: 800 !important;
@@ -2020,7 +2154,7 @@ class ModWebTheme:
                 .mod-recipe-icon-tag,
                 .mod-recipe-icon-empty,
                 .mod-recipe-icon-fallback {{
-                    color: #ede9fe;
+                    color: var(--mod-accent-text-strong);
                     font-size: 1.1rem;
                     font-weight: 900;
                     letter-spacing: 0.04em;
@@ -2035,7 +2169,7 @@ class ModWebTheme:
                     color: #a1a1aa;
                 }}
                 .mod-recipe-icon-fallback {{
-                    color: #c4b5fd;
+                    color: var(--mod-accent-text);
                 }}
                 .mod-recipe-browser-toolbar {{
                     display: flex;
@@ -2075,7 +2209,7 @@ class ModWebTheme:
                 }}
                 .mod-recipe-browser-card:hover {{
                     transform: translateY(-1px);
-                    border-color: rgba(139, 92, 246, 0.68) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     background:
                         linear-gradient(135deg, rgba(18, 16, 26, 0.98), rgba(26, 18, 36, 0.96)) !important;
                 }}
@@ -2099,7 +2233,7 @@ class ModWebTheme:
                     width: 100%;
                     height: 100%;
                     border: 0;
-                    border-left: 1px solid rgba(139, 92, 246, 0.58);
+                    border-left: 1px solid var(--mod-accent-border);
                     box-shadow: none;
                 }}
                 .mod-recipe-browser-card .mod-recipe-icon-stack {{
@@ -2168,8 +2302,8 @@ class ModWebTheme:
                     text-transform: uppercase;
                 }}
                 .mod-recipe-operation {{
-                    color: #f5f3ff;
-                    background: rgba(36, 17, 58, 0.9);
+                    color: var(--mod-accent-text-strong);
+                    background: var(--mod-accent-surface);
                 }}
                 .mod-recipe-operation-add {{
                     border-color: rgba(34, 197, 94, 0.56);
@@ -2182,7 +2316,7 @@ class ModWebTheme:
                     color: #fecaca;
                 }}
                 .mod-recipe-kind {{
-                    color: #ddd6fe;
+                    color: var(--mod-accent-text-strong);
                     background: rgba(18, 18, 24, 0.9);
                 }}
                 .mod-console-select {{
@@ -2203,27 +2337,27 @@ class ModWebTheme:
                     border: 1px solid rgba(82, 82, 91, 0.9) !important;
                     border-radius: 0 !important;
                     background:
-                        linear-gradient(180deg, rgba(237, 233, 254, 0.05), rgba(237, 233, 254, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(16, 16, 22, 0.96) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                        inset 0 -1px 0 rgba(124, 58, 237, 0.14),
+                        inset 0 -1px 0 var(--mod-accent-faint),
                         0 10px 24px rgba(0, 0, 0, 0.2) !important;
                 }}
                 .mod-console-select:hover .q-field__control,
                 .mod-console-select .q-field--focused .q-field__control {{
-                    border-color: rgba(139, 92, 246, 0.62) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.05),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.22),
-                        0 0 0 1px rgba(139, 92, 246, 0.14),
+                        inset 0 -1px 0 var(--mod-accent-glow),
+                        0 0 0 1px var(--mod-accent-faint),
                         0 12px 26px rgba(0, 0, 0, 0.26) !important;
                 }}
                 .mod-console-select .q-field--filled .q-field__control::before {{
-                    border-bottom: 1px solid rgba(139, 92, 246, 0.26) !important;
+                    border-bottom: 1px solid var(--mod-accent-glow) !important;
                 }}
                 .mod-console-select .q-field--filled .q-field__control::after {{
-                    border-bottom: 2px solid rgba(196, 181, 253, 0.88) !important;
+                    border-bottom: 2px solid var(--mod-accent-border-strong) !important;
                 }}
                 .mod-console-select .q-field__native,
                 .mod-console-select .q-field__input,
@@ -2231,7 +2365,7 @@ class ModWebTheme:
                 .mod-console-select .q-field__prepend,
                 .mod-console-select .q-field__marginal,
                 .mod-console-select .q-icon {{
-                    color: #f5f3ff !important;
+                    color: var(--mod-accent-text-strong) !important;
                 }}
                 .mod-console-select.mod-console-select-black .q-field__control,
                 .mod-console-select.mod-console-select-black:hover .q-field__control,
@@ -2241,18 +2375,18 @@ class ModWebTheme:
                 }}
                 .mod-console-select-menu {{
                     background: rgba(6, 6, 10, 0.98) !important;
-                    color: #f5f3ff !important;
+                    color: var(--mod-accent-text-strong) !important;
                     border: 1px solid rgba(82, 82, 91, 0.9) !important;
                 }}
                 .mod-console-select-menu .q-item,
                 .mod-console-select-menu .q-item__label,
                 .mod-console-select-menu .q-icon {{
-                    color: #f5f3ff !important;
+                    color: var(--mod-accent-text-strong) !important;
                 }}
                 .mod-console-select-menu .q-item--active,
                 .mod-console-select-menu .q-item.q-manual-focusable--focused,
                 .mod-console-select-menu .q-item[aria-selected="true"] {{
-                    background: rgba(36, 17, 58, 0.92) !important;
+                    background: var(--mod-accent-surface) !important;
                 }}
                 .mod-config-search {{
                     flex: 0 1 auto;
@@ -2266,21 +2400,21 @@ class ModWebTheme:
                         inset 0 -1px 0 rgba(255, 255, 255, 0.04) !important;
                 }}
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field--filled .q-field__control::before {{
-                    border-bottom: 1px solid rgba(139, 92, 246, 0.34) !important;
+                    border-bottom: 1px solid var(--mod-accent-border) !important;
                 }}
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field--filled .q-field__control::after {{
-                    border-bottom: 2px solid var(--mod-purple) !important;
+                    border-bottom: 2px solid var(--mod-accent) !important;
                 }}
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__native,
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__input,
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__append,
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__prepend,
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-icon {{
-                    color: #ede9fe !important;
+                    color: var(--mod-accent-text-strong) !important;
                 }}
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) .q-field__native::placeholder,
                 :is(.mod-settings-search, .mod-mods-toolbar-sort) input::placeholder {{
-                    color: #c4b5fd !important;
+                    color: var(--mod-accent-text) !important;
                     opacity: 1;
                 }}
                 .mod-tab-toolbar-actions {{
@@ -2318,7 +2452,7 @@ class ModWebTheme:
                 }}
                 .mod-save-card:hover {{
                     transform: translateY(-1px);
-                    border-color: rgba(139, 92, 246, 0.48) !important;
+                    border-color: var(--mod-accent-border) !important;
                     background: linear-gradient(135deg, rgba(13, 13, 18, 0.98), rgba(22, 16, 28, 0.98)) !important;
                 }}
                 .mod-save-card > .nicegui-content,
@@ -2400,7 +2534,7 @@ class ModWebTheme:
                         rgba(9, 9, 13, 0.9) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.025),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.14) !important;
+                        inset 0 -1px 0 var(--mod-accent-faint) !important;
                 }}
                 .mod-setting-control-surface-paragraph {{
                     position: absolute;
@@ -2515,7 +2649,7 @@ class ModWebTheme:
                 .mod-setting-field .q-field--filled .q-field__control::after {{
                     left: 0;
                     right: 0;
-                    border-bottom: 2px solid rgba(139, 92, 246, 0.8) !important;
+                    border-bottom: 2px solid var(--mod-accent-border-strong) !important;
                 }}
                 .mod-setting-field .q-field__native,
                 .mod-setting-field .q-field__input,
@@ -2630,7 +2764,7 @@ class ModWebTheme:
                     box-shadow:
                         0 14px 34px rgba(0, 0, 0, 0.38),
                         inset 0 1px 0 rgba(255, 255, 255, 0.03),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.14) !important;
+                        inset 0 -1px 0 var(--mod-accent-faint) !important;
                 }}
                 .mod-setting-menu .q-virtual-scroll__content,
                 .mod-fake-chat-menu .q-virtual-scroll__content {{
@@ -2655,8 +2789,8 @@ class ModWebTheme:
                 .mod-fake-chat-menu .q-item.q-manual-focusable--focused,
                 .mod-fake-chat-menu .q-item[aria-selected="true"],
                 .mod-fake-chat-menu .q-item--active {{
-                    background: rgba(124, 58, 237, 0.18) !important;
-                    color: #ddd6fe !important;
+                    background: var(--mod-accent-glow) !important;
+                    color: var(--mod-accent-text-strong) !important;
                 }}
                 .mod-setting-switch {{
                     padding: 0.1rem 0.25rem;
@@ -2664,7 +2798,7 @@ class ModWebTheme:
                     margin-left: -0.28rem;
                 }}
                 .mod-setting-switch .q-toggle__inner {{
-                    color: var(--mod-purple) !important;
+                    color: var(--mod-accent) !important;
                 }}
                 .mod-setting-meta-value {{
                     color: var(--mod-text) !important;
@@ -2706,7 +2840,7 @@ class ModWebTheme:
                     margin: 0;
                     padding: 0;
                     overflow: hidden;
-                    border-left: 1px solid rgba(124, 58, 237, 0.46);
+                    border-left: 1px solid var(--mod-accent-border);
                     background:
                         linear-gradient(180deg, rgba(127, 29, 29, 0.18), rgba(9, 9, 12, 0.08)),
                         rgba(13, 10, 18, 0.96);
@@ -2747,7 +2881,7 @@ class ModWebTheme:
                     outline: none;
                 }}
                 .mod-setting-meta-secret-revealable:focus-visible {{
-                    box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.5);
+                    box-shadow: 0 0 0 1px var(--mod-accent-border);
                 }}
                 .mod-setting-meta-secret-layer {{
                     display: block;
@@ -3167,14 +3301,14 @@ class ModWebTheme:
                     transform: translateY(-1px);
                 }}
                 .mod-setting-input-feedback.active {{
-                    color: #fca5a5 !important;
+                    color: var(--mod-negative-text) !important;
                     transform: translateY(0);
                 }}
                 .mod-setting-field-invalid .q-field__control {{
-                    border-color: rgba(220, 38, 38, 0.88) !important;
+                    border-color: var(--mod-negative-border-strong) !important;
                     box-shadow:
-                        0 0 0 1px rgba(220, 38, 38, 0.42),
-                        0 0 18px rgba(127, 29, 29, 0.22) !important;
+                        0 0 0 1px var(--mod-negative-border),
+                        0 0 18px var(--mod-negative-glow) !important;
                 }}
                 .mod-setting-field-shake .q-field__control {{
                     animation: mod-setting-invalid-shake 180ms ease;
@@ -3197,7 +3331,7 @@ class ModWebTheme:
                     background:
                         linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0)),
                         linear-gradient(135deg, rgba(10, 10, 14, 0.98), rgba(20, 13, 26, 0.98)) !important;
-                    border-color: rgba(124, 58, 237, 0.3) !important;
+                    border-color: var(--mod-accent-border) !important;
                 }}
                 .mod-card-notepad.mod-card-plain {{
                     background: transparent !important;
@@ -3207,13 +3341,13 @@ class ModWebTheme:
                 .mod-card-notepad .mod-tab-toolbar {{
                     align-items: stretch;
                     padding: 0.68rem 0.78rem;
-                    border: 1px solid rgba(124, 58, 237, 0.18);
+                    border: 1px solid var(--mod-accent-glow);
                     background:
-                        linear-gradient(180deg, rgba(196, 181, 253, 0.05), rgba(196, 181, 253, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(8, 8, 12, 0.78) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.03),
-                        inset 0 -1px 0 rgba(124, 58, 237, 0.14) !important;
+                        inset 0 -1px 0 var(--mod-accent-faint) !important;
                 }}
                 .mod-card-notepad .mod-config-select .q-field__control {{
                     min-height: 3.05rem !important;
@@ -3221,11 +3355,11 @@ class ModWebTheme:
                     border: 1px solid rgba(82, 82, 91, 0.9) !important;
                     border-radius: 0 !important;
                     background:
-                        linear-gradient(180deg, rgba(237, 233, 254, 0.06), rgba(237, 233, 254, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(17, 17, 24, 0.96) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                        inset 0 -1px 0 rgba(124, 58, 237, 0.16),
+                        inset 0 -1px 0 var(--mod-accent-faint),
                         0 10px 24px rgba(0, 0, 0, 0.24) !important;
                     transition:
                         border-color 120ms ease,
@@ -3234,14 +3368,14 @@ class ModWebTheme:
                 }}
                 .mod-card-notepad .mod-config-select:hover .q-field__control,
                 .mod-card-notepad .mod-config-select .q-field--focused .q-field__control {{
-                    border-color: rgba(139, 92, 246, 0.72) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     background:
-                        linear-gradient(180deg, rgba(221, 214, 254, 0.08), rgba(221, 214, 254, 0)),
-                        rgba(20, 14, 31, 0.98) !important;
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
+                        var(--mod-accent-panel) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.05),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.22),
-                        0 0 0 1px rgba(139, 92, 246, 0.24),
+                        inset 0 -1px 0 var(--mod-accent-glow),
+                        0 0 0 1px var(--mod-accent-glow),
                         0 12px 28px rgba(0, 0, 0, 0.28) !important;
                 }}
                 .mod-card-notepad .mod-config-select .q-field--outlined .q-field__control::before,
@@ -3257,7 +3391,7 @@ class ModWebTheme:
                 }}
                 .mod-card-notepad .mod-config-select .q-field__label.q-field__label--focused,
                 .mod-card-notepad .mod-config-select .q-field--float .q-field__label {{
-                    color: #ddd6fe !important;
+                    color: var(--mod-accent-text-strong) !important;
                 }}
                 .mod-card-notepad .mod-config-select .q-field__native,
                 .mod-card-notepad .mod-config-select .q-field__input,
@@ -3280,14 +3414,14 @@ class ModWebTheme:
                 }}
                 .mod-notepad-menu {{
                     border-radius: 0 !important;
-                    border: 1px solid rgba(124, 58, 237, 0.32) !important;
+                    border: 1px solid var(--mod-accent-border) !important;
                     background:
-                        linear-gradient(180deg, rgba(221, 214, 254, 0.05), rgba(221, 214, 254, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(8, 8, 12, 0.985) !important;
                     box-shadow:
                         0 20px 42px rgba(0, 0, 0, 0.44),
                         inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                        inset 0 -1px 0 rgba(124, 58, 237, 0.18) !important;
+                        inset 0 -1px 0 var(--mod-accent-glow) !important;
                     backdrop-filter: blur(10px);
                 }}
                 .mod-notepad-menu .q-virtual-scroll__content {{
@@ -3310,17 +3444,17 @@ class ModWebTheme:
                 }}
                 .mod-notepad-menu .q-item:hover {{
                     background:
-                        linear-gradient(90deg, rgba(139, 92, 246, 0.14), transparent 78%),
+                        linear-gradient(90deg, var(--mod-accent-faint), transparent 78%),
                         rgba(39, 39, 42, 0.42) !important;
                 }}
                 .mod-notepad-menu .q-item.q-manual-focusable--focused,
                 .mod-notepad-menu .q-item[aria-selected="true"],
                 .mod-notepad-menu .q-item--active {{
                     background:
-                        linear-gradient(90deg, rgba(139, 92, 246, 0.24), transparent 88%),
+                        linear-gradient(90deg, var(--mod-accent-glow), transparent 88%),
                         rgba(91, 33, 182, 0.26) !important;
-                    color: #ede9fe !important;
-                    box-shadow: inset 3px 0 0 rgba(196, 181, 253, 0.84);
+                    color: var(--mod-accent-text-strong) !important;
+                    box-shadow: inset 3px 0 0 var(--mod-accent-border-strong);
                 }}
                 .mod-config-editor-shell {{
                     position: relative;
@@ -3353,7 +3487,7 @@ class ModWebTheme:
                     pointer-events: auto;
                 }}
                 .mod-config-wrap-toggle:hover {{
-                    border-color: rgba(139, 92, 246, 0.55);
+                    border-color: var(--mod-accent-border);
                 }}
                 .mod-config-wrap-toggle .q-checkbox__label {{
                     font-size: 0.72rem !important;
@@ -3362,7 +3496,7 @@ class ModWebTheme:
                     text-transform: uppercase;
                 }}
                 .mod-config-wrap-toggle .q-checkbox__inner {{
-                    color: var(--mod-purple) !important;
+                    color: var(--mod-accent) !important;
                 }}
                 .mod-config-editor .cm-editor {{
                     min-height: 0 !important;
@@ -3390,7 +3524,7 @@ class ModWebTheme:
                     line-height: 1.45 !important;
                 }}
                 .mod-config-editor .cm-content {{
-                    caret-color: var(--mod-purple) !important;
+                    caret-color: var(--mod-accent) !important;
                 }}
                 .mod-config-editor .cm-gutters {{
                     background: #050507 !important;
@@ -3399,15 +3533,15 @@ class ModWebTheme:
                 }}
                 .mod-config-editor .cm-activeLine,
                 .mod-config-editor .cm-activeLineGutter {{
-                    background: rgba(139, 92, 246, 0.12) !important;
+                    background: var(--mod-accent-faint) !important;
                 }}
                 .mod-config-editor .cm-focused {{
-                    outline: 1px solid rgba(139, 92, 246, 0.42) !important;
+                    outline: 1px solid var(--mod-accent-border) !important;
                 }}
                 .mod-config-editor .cm-selectionBackground,
                 .mod-config-editor .cm-focused .cm-selectionBackground,
                 .mod-config-editor ::selection {{
-                    background: rgba(139, 92, 246, 0.28) !important;
+                    background: var(--mod-accent-glow) !important;
                 }}
                 .mod-row {{
                     display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 0.75rem; align-items: center;
@@ -3417,7 +3551,7 @@ class ModWebTheme:
                     border-radius: 0 !important;
                     background: #0b0b10 !important;
                     border: 1px solid #25252c !important;
-                    box-shadow: inset 3px 0 0 rgba(139, 92, 246, 0.5);
+                    box-shadow: inset 3px 0 0 var(--mod-accent-border);
                     transition: background 120ms ease, transform 120ms ease;
                 }}
                 .mod-row:hover {{
@@ -3503,7 +3637,7 @@ class ModWebTheme:
                     color: var(--mod-dim);
                 }}
                 .mod-list-pagination {{ margin: 0.75rem auto 0; color: var(--mod-text); }}
-                .mod-row .q-checkbox__inner {{ color: var(--mod-purple) !important; }}
+                .mod-row .q-checkbox__inner {{ color: var(--mod-accent) !important; }}
                 .mod-row-main {{
                     width: 100%;
                     min-width: 0;
@@ -3534,12 +3668,12 @@ class ModWebTheme:
                 }}
                 .mod-pill.enabled {{ background: #1f1f27 !important; color: #d4d4d8 !important; border-color: #3f3f46; }}
                 .mod-pill.disabled {{ background: #24151a !important; color: #fca5a5 !important; border-color: #7f1d1d; }}
-                .mod-pill.core {{ background: #2a1430 !important; color: #c4b5fd !important; border-color: #6d28d9; }}
+                .mod-pill.core {{ background: var(--mod-accent-surface) !important; color: var(--mod-accent-text) !important; border-color: var(--mod-accent); }}
                 .mod-pill.blocked {{ background: #3a1117 !important; color: #fecaca !important; border-color: #b91c1c; }}
                 .mod-pill.origin {{ background: #15151b !important; color: #a1a1aa !important; border-color: #303038; }}
                 .mod-pill.size {{ background: #15151b !important; color: #d4d4d8 !important; border-color: #3f3f46; }}
                 .mod-row-download {{
-                    color: #c4b5fd !important;
+                    color: var(--mod-accent-text) !important;
                     font-weight: 950;
                     font-size: 0.82rem;
                     text-decoration: none !important;
@@ -3578,8 +3712,8 @@ class ModWebTheme:
                     filter: brightness(1.08);
                 }}
                 .mod-badge.black {{ background: #050507 !important; border-color: #52525b; }}
-                .mod-badge.purple {{ background: var(--mod-purple-dark) !important; border-color: var(--mod-accent); color: #ddd6fe !important; }}
-                .mod-badge.red {{ background: #3a1117 !important; border-color: #dc2626; color: #fecaca !important; }}
+                .mod-badge.purple {{ background: var(--mod-accent-dark) !important; border-color: var(--mod-accent); color: var(--mod-accent-text-strong) !important; }}
+                .mod-badge.red {{ background: var(--mod-negative-dark) !important; border-color: var(--mod-negative); color: var(--mod-negative-text) !important; }}
                 .mod-badge.warn {{ background: var(--mod-warning-dark) !important; border-color: var(--mod-warning); color: var(--mod-warning-text) !important; }}
                 .mod-badge.grey {{ background: #18181f !important; border-color: #3f3f46; color: #d4d4d8 !important; }}
                 .mod-badge .mod-app-activity-alert {{
@@ -3685,15 +3819,15 @@ class ModWebTheme:
                     transition: border-color 140ms ease, box-shadow 140ms ease;
                 }}
                 .mod-home-hero-actionable:hover:not(:has(.mod-home-node-card:hover)) {{
-                    border-color: rgba(124, 58, 237, 0.78) !important;
-                    box-shadow: 0 0 0 1px rgba(124, 58, 237, 0.2), 0 14px 34px rgba(0, 0, 0, 0.24) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
+                    box-shadow: 0 0 0 1px var(--mod-accent-glow), 0 14px 34px rgba(0, 0, 0, 0.24) !important;
                 }}
                 :is(.mod-home-hero-actionable, .mod-home-node-card-actionable):focus {{
                     outline: none;
                 }}
                 html:not(.mod-pointer-navigation) :is(.mod-home-hero-actionable, .mod-home-node-card-actionable):focus-visible {{
-                    border-color: rgba(124, 58, 237, 0.78) !important;
-                    box-shadow: 0 0 0 1px rgba(124, 58, 237, 0.2), 0 14px 34px rgba(0, 0, 0, 0.24) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
+                    box-shadow: 0 0 0 1px var(--mod-accent-glow), 0 14px 34px rgba(0, 0, 0, 0.24) !important;
                     outline: 2px solid var(--mod-accent) !important;
                     outline-offset: 3px;
                 }}
@@ -3845,10 +3979,10 @@ class ModWebTheme:
                     border-color: #4b5563 !important;
                 }}
                 .mod-home-node-card-purple {{
-                    border-color: rgba(124, 58, 237, 0.72) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                 }}
                 .mod-home-node-card-red {{
-                    border-color: rgba(220, 38, 38, 0.78) !important;
+                    border-color: var(--mod-negative-border-strong) !important;
                 }}
                 .mod-home-node-card-warn {{
                     border-color: var(--mod-warning) !important;
@@ -3862,7 +3996,7 @@ class ModWebTheme:
                 }}
                 .mod-home-node-card-actionable:hover {{
                     background: rgba(20, 18, 30, 0.94) !important;
-                    border-color: #a78bfa !important;
+                    border-color: var(--mod-accent-text) !important;
                     transform: translateY(-1px);
                 }}
                 .mod-home-node-title {{
@@ -3903,11 +4037,11 @@ class ModWebTheme:
                 }}
                 .mod-home-node-metric-icon.mod-tone-purple,
                 .mod-home-node-running-icon.mod-tone-purple {{
-                    color: #a78bfa !important;
+                    color: var(--mod-accent-text) !important;
                 }}
                 .mod-home-node-metric-icon.mod-tone-red,
                 .mod-home-node-running-icon.mod-tone-red {{
-                    color: #f87171 !important;
+                    color: var(--mod-negative-text) !important;
                 }}
                 .mod-home-node-metric-icon.mod-tone-warn,
                 .mod-home-node-running-icon.mod-tone-warn {{
@@ -3961,9 +4095,9 @@ class ModWebTheme:
                     box-shadow: none !important;
                 }}
                 .mod-stat-card.black {{ border-color: #4b5563 !important; }}
-                .mod-stat-card.purple {{ border-color: rgba(124, 58, 237, 0.72) !important; }}
-                .mod-stat-card.red {{ border-color: rgba(220, 38, 38, 0.78) !important; }}
-                .mod-stat-card.warn {{ border-color: rgba(127, 29, 29, 0.82) !important; }}
+                .mod-stat-card.purple {{ border-color: var(--mod-accent-border-strong) !important; }}
+                .mod-stat-card.red {{ border-color: var(--mod-negative-border-strong) !important; }}
+                .mod-stat-card.warn {{ border-color: var(--mod-warning-border-strong) !important; }}
                 .mod-stat-card.grey {{ border-color: #3f3f46 !important; }}
                 .mod-system-hero-shell .mod-stat-card {{
                     border-color: #2f2f37 !important;
@@ -4016,7 +4150,7 @@ class ModWebTheme:
                 .mod-stat-tone-purple,
                 .mod-stat-line:has(.mod-stat-tone-purple) .mod-stat-line-label,
                 .mod-stat-section:has(.mod-stat-tone-purple) .mod-stat-section-label {{
-                    color: #c4b5fd !important;
+                    color: var(--mod-accent-text) !important;
                 }}
                 .mod-stat-tone-warn,
                 .mod-stat-line:has(.mod-stat-tone-warn) .mod-stat-line-label,
@@ -4230,7 +4364,7 @@ class ModWebTheme:
                     white-space: nowrap;
                 }}
                 .mod-system-danger-zone {{
-                    border: 1px solid rgba(220, 38, 38, 0.64);
+                    border: 1px solid var(--mod-negative-border-strong);
                     background: linear-gradient(135deg, rgba(30, 18, 42, 0.88), rgba(11, 10, 15, 0.94));
                 }}
                 .mod-system-schedule-section-title {{
@@ -4240,10 +4374,10 @@ class ModWebTheme:
                     border-top: 1px solid var(--mod-border);
                 }}
                 .mod-system-schedule-disable {{
-                    color: #fecaca !important;
+                    color: var(--mod-negative-text) !important;
                     background: #1b1520 !important;
-                    border-color: rgba(220, 38, 38, 0.7) !important;
-                    box-shadow: inset 0 0 0 1px rgba(127, 29, 29, 0.22) !important;
+                    border-color: var(--mod-negative-border-strong) !important;
+                    box-shadow: inset 0 0 0 1px var(--mod-negative-glow) !important;
                 }}
                 .mod-system-disk-select {{
                     flex: 1 1 18rem;
@@ -4363,14 +4497,14 @@ class ModWebTheme:
                     overscroll-behavior: contain;
                     scroll-padding-block: 0.75rem;
                     -webkit-overflow-scrolling: touch;
-                    scrollbar-color: rgba(139, 92, 246, 0.58) rgba(9, 9, 13, 0.88);
+                    scrollbar-color: var(--mod-accent-border) rgba(9, 9, 13, 0.88);
                     transition: border-color 160ms ease, box-shadow 160ms ease;
                 }}
                 .mod-dialog-card:focus-within {{
-                    border-color: rgba(139, 92, 246, 0.68) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     box-shadow:
                         0 24px 70px rgba(0, 0, 0, 0.52),
-                        0 0 0 1px rgba(139, 92, 246, 0.14),
+                        0 0 0 1px var(--mod-accent-faint),
                         inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
                 }}
                 .mod-dialog-card > .nicegui-content {{
@@ -4506,7 +4640,7 @@ class ModWebTheme:
                     content: "•";
                     position: absolute;
                     left: 0;
-                    color: var(--mod-purple);
+                    color: var(--mod-accent);
                     font-weight: 900;
                 }}
                 .mod-client-pack-option-list,
@@ -4636,7 +4770,7 @@ class ModWebTheme:
                     color: rgba(228, 228, 231, 0.78) !important;
                 }}
                 .mod-client-pack-checkbox .q-checkbox__inner--truthy {{
-                    color: var(--mod-purple) !important;
+                    color: var(--mod-accent) !important;
                 }}
                 .mod-client-pack-checkbox .q-checkbox__bg {{
                     border-radius: 0 !important;
@@ -4667,7 +4801,7 @@ class ModWebTheme:
                 .mod-client-pack-changelog .q-field__marginal,
                 .mod-client-pack-changelog .q-icon {{
                     color: var(--mod-text) !important;
-                    caret-color: var(--mod-purple) !important;
+                    caret-color: var(--mod-accent) !important;
                 }}
                 .mod-client-pack-changelog .q-field__native::placeholder,
                 .mod-client-pack-changelog .q-field__input::placeholder,
@@ -4760,15 +4894,15 @@ class ModWebTheme:
                 }}
                 .mod-metadata-review-link {{
                     min-width: 0;
-                    color: #d8b4fe !important;
+                    color: var(--mod-accent-text) !important;
                     font-size: 0.78rem;
                     line-height: 1.35;
                     overflow-wrap: anywhere;
-                    text-decoration-color: rgba(216, 180, 254, 0.42) !important;
+                    text-decoration-color: var(--mod-accent-border) !important;
                     text-underline-offset: 0.18rem;
                 }}
                 .mod-metadata-review-link:hover {{
-                    color: #f3e8ff !important;
+                    color: var(--mod-accent-text-strong) !important;
                     text-decoration-color: rgba(243, 232, 255, 0.8) !important;
                 }}
                 .mod-metadata-review-reference {{
@@ -4850,6 +4984,24 @@ class ModWebTheme:
                 .mod-app-details-field {{
                     width: 100%;
                 }}
+                .mod-user-appearance-section {{
+                    gap: 0.65rem;
+                    padding: 0.85rem 0.95rem;
+                }}
+                .mod-user-appearance-grid {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr));
+                    gap: 0.55rem 0.8rem;
+                    width: 100%;
+                    min-width: 0;
+                }}
+                .mod-user-accent-input .q-field__control {{
+                    min-height: 2.65rem !important;
+                    height: 2.65rem !important;
+                }}
+                .mod-user-accent-input .q-field__native {{
+                    min-height: 2.65rem !important;
+                }}
                 .mod-page-editor-controls {{
                     display: grid !important;
                     grid-template-columns: minmax(0, 1fr) max-content;
@@ -4869,10 +5021,10 @@ class ModWebTheme:
                     min-width: 0;
                 }}
                 .mod-list-button.secondary.mod-details-tab-active {{
-                    color: #faf5ff !important;
-                    background: #2e1648 !important;
-                    border-color: #8b5cf6 !important;
-                    box-shadow: inset 0 -2px 0 #a78bfa !important;
+                    color: var(--mod-accent-text-strong) !important;
+                    background: var(--mod-accent-surface) !important;
+                    border-color: var(--mod-accent) !important;
+                    box-shadow: inset 0 -2px 0 var(--mod-accent-text) !important;
                 }}
                 .mod-app-details-point-field {{
                     flex: 0 1 11.5rem;
@@ -4896,11 +5048,11 @@ class ModWebTheme:
                 }}
                 .mod-app-details-field.q-field--focused .q-field__control,
                 .mod-app-details-field .q-field--focused .q-field__control {{
-                    border-color: rgba(139, 92, 246, 0.62) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
                     box-shadow:
                         inset 0 1px 0 rgba(255, 255, 255, 0.05),
-                        inset 0 -1px 0 rgba(139, 92, 246, 0.2),
-                        0 0 0 1px rgba(139, 92, 246, 0.16);
+                        inset 0 -1px 0 var(--mod-accent-glow),
+                        0 0 0 1px var(--mod-accent-faint);
                 }}
                 .mod-app-details-field .q-field__native,
                 .mod-app-details-field .q-field__input,
@@ -4924,17 +5076,17 @@ class ModWebTheme:
                 .mod-mod-override-field .q-field__control {{
                     border-color: rgba(113, 113, 122, 0.92) !important;
                     background:
-                        linear-gradient(180deg, rgba(139, 92, 246, 0.1), rgba(139, 92, 246, 0.015)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(15, 15, 22, 0.99) !important;
                 }}
                 .mod-mod-override-field .q-field__label {{
-                    color: #d8b4fe !important;
+                    color: var(--mod-accent-text) !important;
                     opacity: 1 !important;
                 }}
                 .mod-mod-override-field .q-field__native,
                 .mod-mod-override-field .q-field__input {{
-                    color: #fafafa !important;
-                    -webkit-text-fill-color: #fafafa !important;
+                    color: var(--mod-text) !important;
+                    -webkit-text-fill-color: var(--mod-text) !important;
                     opacity: 1 !important;
                 }}
                 .mod-mod-override-field input::placeholder {{
@@ -4993,7 +5145,7 @@ class ModWebTheme:
                     color: rgba(228, 228, 231, 0.78) !important;
                 }}
                 .mod-app-details-toggle .q-checkbox__inner--truthy {{
-                    color: var(--mod-purple) !important;
+                    color: var(--mod-accent) !important;
                 }}
                 .mod-app-details-toggle .q-checkbox__bg {{
                     border-radius: 0 !important;
@@ -5023,7 +5175,7 @@ class ModWebTheme:
                     padding: 0 !important;
                     overflow-x: hidden;
                     overflow-y: auto;
-                    scrollbar-color: rgba(139, 92, 246, 0.58) rgba(9, 9, 13, 0.88);
+                    scrollbar-color: var(--mod-accent-border) rgba(9, 9, 13, 0.88);
                 }}
                 .mod-mod-details-header {{
                     position: sticky;
@@ -5132,8 +5284,8 @@ class ModWebTheme:
                     justify-content: flex-end;
                 }}
                 .mod-mod-details-discovery-button {{
-                    border-color: rgba(139, 92, 246, 0.78) !important;
-                    box-shadow: inset 0 -2px 0 rgba(196, 181, 253, 0.28) !important;
+                    border-color: var(--mod-accent-border-strong) !important;
+                    box-shadow: inset 0 -2px 0 var(--mod-accent-glow) !important;
                 }}
                 .mod-mod-details-danger-zone {{
                     width: calc(100% - 2.5rem) !important;
@@ -5143,9 +5295,9 @@ class ModWebTheme:
                     box-sizing: border-box;
                     margin: 0 1.25rem 1rem;
                     padding: 0.85rem 1rem;
-                    border: 1px solid rgba(220, 38, 38, 0.48);
+                    border: 1px solid var(--mod-negative-border);
                     background:
-                        linear-gradient(135deg, rgba(127, 29, 29, 0.14), transparent 62%),
+                        linear-gradient(135deg, var(--mod-negative-glow), transparent 62%),
                         rgba(10, 7, 9, 0.72);
                 }}
                 .mod-mod-details-danger-zone .mod-stat-label {{
@@ -5201,7 +5353,7 @@ class ModWebTheme:
                 }}
                 .mod-fake-chat-field .q-field__control {{
                     background:
-                        linear-gradient(180deg, rgba(139, 92, 246, 0.08), rgba(139, 92, 246, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(8, 8, 12, 0.94) !important;
                     border: 1px solid rgba(82, 82, 91, 0.82) !important;
                     min-height: 2.6rem;
@@ -5216,8 +5368,8 @@ class ModWebTheme:
                 }}
                 .mod-fake-chat-field.q-field--focused .q-field__control,
                 .mod-fake-chat-field .q-field--focused .q-field__control {{
-                    border-color: rgba(139, 92, 246, 0.62) !important;
-                    box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.18);
+                    border-color: var(--mod-accent-border-strong) !important;
+                    box-shadow: 0 0 0 1px var(--mod-accent-glow);
                 }}
                 .mod-fake-chat-field .q-field__native,
                 .mod-fake-chat-field .q-field__input,
@@ -5305,7 +5457,7 @@ class ModWebTheme:
                 .mod-chat-header {{
                     gap: 0.7rem;
                     padding: 0.1rem 0.15rem 0.95rem;
-                    border-bottom: 1px solid rgba(124, 58, 237, 0.24);
+                    border-bottom: 1px solid var(--mod-accent-glow);
                 }}
                 .mod-chat-header-top {{
                     align-items: flex-end;
@@ -5365,7 +5517,7 @@ class ModWebTheme:
                     border-left: 0;
                     border-right: 0;
                     background:
-                        linear-gradient(180deg, rgba(139, 92, 246, 0.08), rgba(139, 92, 246, 0) 22%),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent 22%),
                         rgba(7, 7, 10, 0.92);
                     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
                     flex: 1 1 auto;
@@ -5401,7 +5553,7 @@ class ModWebTheme:
                     padding: 2.2rem 1.2rem;
                     border: 1px dashed rgba(82, 82, 91, 0.78);
                     background:
-                        radial-gradient(circle at 14% 18%, rgba(139, 92, 246, 0.14), transparent 19rem),
+                        radial-gradient(circle at 14% 18%, var(--mod-accent-faint), transparent 19rem),
                         linear-gradient(180deg, rgba(10, 10, 14, 0.94), rgba(10, 10, 14, 0.72));
                 }}
                 .mod-chat-message {{
@@ -5424,7 +5576,7 @@ class ModWebTheme:
                     background: linear-gradient(
                         90deg,
                         var(--mod-chat-source-glow),
-                        rgba(139, 92, 246, 0) 44%
+                        transparent 44%
                     ) !important;
                 }}
                 .mod-chat-message::before {{
@@ -5470,8 +5622,8 @@ class ModWebTheme:
                     gap: 0.12rem !important;
                 }}
                 .mod-chat-message.game {{
-                    --mod-chat-source-rail: #7c3aed;
-                    --mod-chat-source-glow: rgba(124, 58, 237, 0.14);
+                    --mod-chat-source-rail: var(--mod-accent);
+                    --mod-chat-source-glow: var(--mod-accent-faint);
                 }}
                 .mod-chat-message.discord {{
                     --mod-chat-source-rail: #52525b;
@@ -5536,7 +5688,7 @@ class ModWebTheme:
                 .mod-chat-markup-heading {{
                     margin: 0;
                     max-width: 100%;
-                    color: #f5f3ff;
+                    color: var(--mod-accent-text-strong);
                     font-weight: 950;
                     letter-spacing: -0.02em;
                     line-height: 1.08;
@@ -5584,16 +5736,16 @@ class ModWebTheme:
                     color: inherit;
                 }}
                 .mod-chat-markup a {{
-                    color: #c4b5fd;
+                    color: var(--mod-accent-text);
                     text-decoration: underline;
-                    text-decoration-color: rgba(196, 181, 253, 0.58);
+                    text-decoration-color: var(--mod-accent-border);
                     text-underline-offset: 0.12rem;
                     overflow-wrap: anywhere;
                     word-break: break-word;
                 }}
                 .mod-chat-markup a:hover {{
-                    color: #ddd6fe;
-                    text-decoration-color: rgba(221, 214, 254, 0.86);
+                    color: var(--mod-accent-text-strong);
+                    text-decoration-color: var(--mod-accent-border-strong);
                 }}
                 .mod-chat-inline-code {{
                     display: inline-block;
@@ -5601,7 +5753,7 @@ class ModWebTheme:
                     padding: 0.06rem 0.26rem;
                     border: 1px solid rgba(82, 82, 91, 0.86);
                     background: rgba(10, 10, 14, 0.92);
-                    color: #f5f3ff;
+                    color: var(--mod-accent-text-strong);
                     font-family: "IBM Plex Mono", "Fira Code", monospace;
                     font-size: 0.84em;
                     line-height: 1.2;
@@ -5615,7 +5767,7 @@ class ModWebTheme:
                     padding: 0.48rem 0.58rem;
                     border: 1px solid rgba(82, 82, 91, 0.82);
                     background: rgba(6, 6, 10, 0.94);
-                    color: #f5f3ff;
+                    color: var(--mod-accent-text-strong);
                     font-family: "IBM Plex Mono", "Fira Code", monospace;
                     font-size: 0.81em;
                     line-height: 1.42;
@@ -5640,20 +5792,20 @@ class ModWebTheme:
                 }}
                 @keyframes mod-console-output-pulse {{
                     0% {{
-                        border-left-color: #c4b5fd;
-                        box-shadow: inset 3px 0 0 rgba(139, 92, 246, 0.76);
+                        border-left-color: var(--mod-accent-text);
+                        box-shadow: inset 3px 0 0 var(--mod-accent-border-strong);
                     }}
                     100% {{
                         border-left-color: rgba(82, 82, 91, 0.82);
-                        box-shadow: inset 3px 0 0 rgba(139, 92, 246, 0);
+                        box-shadow: inset 3px 0 0 transparent;
                     }}
                 }}
                 .mod-chat-quote {{
                     margin: 0.18rem 0 0;
                     padding: 0.22rem 0 0.22rem 0.62rem;
-                    border-left: 3px solid rgba(139, 92, 246, 0.56);
+                    border-left: 3px solid var(--mod-accent-border);
                     color: rgba(228, 228, 231, 0.88);
-                    background: linear-gradient(90deg, rgba(139, 92, 246, 0.08), rgba(139, 92, 246, 0) 58%);
+                    background: linear-gradient(90deg, var(--mod-accent-wash), transparent 58%);
                     overflow-wrap: anywhere;
                     word-break: break-word;
                 }}
@@ -5717,11 +5869,11 @@ class ModWebTheme:
                     border: 1px solid rgba(82, 82, 91, 0.86);
                     border-radius: 0 !important;
                     background:
-                        linear-gradient(180deg, rgba(26, 13, 46, 0.96), rgba(11, 10, 17, 0.98))
+                        linear-gradient(180deg, var(--mod-accent-panel), rgba(11, 10, 17, 0.98))
                         !important;
                     box-shadow:
                         0 16px 42px rgba(0, 0, 0, 0.5),
-                        inset 0 1px 0 rgba(196, 181, 253, 0.16) !important;
+                        inset 0 1px 0 var(--mod-accent-faint) !important;
                     color: var(--mod-text) !important;
                     overflow: hidden;
                 }}
@@ -5731,7 +5883,7 @@ class ModWebTheme:
                 .mod-chat-entry-menu-item {{
                     min-height: 0 !important;
                     padding: 0.48rem 0.74rem !important;
-                    color: #f5f3ff !important;
+                    color: var(--mod-accent-text-strong) !important;
                     font-size: 0.8rem !important;
                     font-weight: 800 !important;
                     letter-spacing: 0.03em;
@@ -5741,17 +5893,17 @@ class ModWebTheme:
                 .mod-chat-entry-menu-item:hover,
                 .mod-chat-entry-menu-item.q-manual-focusable--focused,
                 .mod-chat-entry-menu-item[aria-selected="true"] {{
-                    background: rgba(139, 92, 246, 0.22) !important;
+                    background: var(--mod-accent-glow) !important;
                     color: #ffffff !important;
                 }}
                 .mod-chat-reference {{
                     gap: 0.16rem !important;
                     padding: 0.34rem 0.46rem 0.38rem;
-                    border-left: 2px solid rgba(139, 92, 246, 0.6);
+                    border-left: 2px solid var(--mod-accent-border-strong);
                     background: rgba(32, 19, 53, 0.34);
                 }}
                 .mod-chat-reference-label {{
-                    color: rgba(196, 181, 253, 0.9) !important;
+                    color: var(--mod-accent-border-strong) !important;
                     font-size: 0.63rem !important;
                     font-weight: 900 !important;
                     letter-spacing: 0.05em;
@@ -5791,7 +5943,7 @@ class ModWebTheme:
                     max-width: min(28rem, 100%);
                     border: 1px solid rgba(63, 63, 70, 0.82);
                     background:
-                        linear-gradient(180deg, rgba(139, 92, 246, 0.06), rgba(139, 92, 246, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(5, 5, 7, 0.92);
                     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
                     overflow: hidden;
@@ -5845,14 +5997,14 @@ class ModWebTheme:
                 }}
                 .mod-chat-reply-banner {{
                     padding: 0.38rem 0.42rem;
-                    border: 1px solid rgba(139, 92, 246, 0.34);
+                    border: 1px solid var(--mod-accent-border);
                     background: linear-gradient(90deg, rgba(61, 37, 97, 0.58), rgba(16, 16, 22, 0.84));
                 }}
                 .mod-chat-reply-copy {{
                     flex: 1 1 0;
                 }}
                 .mod-chat-reply-label {{
-                    color: rgba(196, 181, 253, 0.92) !important;
+                    color: var(--mod-accent-border-strong) !important;
                     font-size: 0.63rem !important;
                     font-weight: 950 !important;
                     letter-spacing: 0.07em;
@@ -5873,7 +6025,7 @@ class ModWebTheme:
                     padding: 0.56rem;
                     border: 1px solid rgba(63, 63, 70, 0.74);
                     background:
-                        linear-gradient(180deg, rgba(139, 92, 246, 0.06), rgba(139, 92, 246, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(8, 8, 12, 0.92);
                     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
                 }}
@@ -5886,13 +6038,13 @@ class ModWebTheme:
                 }}
                 .mod-chat-input .q-field__control {{
                     background:
-                        linear-gradient(180deg, rgba(139, 92, 246, 0.08), rgba(139, 92, 246, 0)),
+                        linear-gradient(180deg, var(--mod-accent-wash), transparent),
                         rgba(8, 8, 12, 0.94) !important;
                     border: 1px solid rgba(82, 82, 91, 0.78);
                     min-height: 2.7rem;
                 }}
                 .mod-chat-input.q-field--focused .q-field__control {{
-                    border-color: rgba(139, 92, 246, 0.56);
+                    border-color: var(--mod-accent-border);
                 }}
                 .mod-chat-input .q-field__native,
                 .mod-chat-input input {{
@@ -5934,7 +6086,7 @@ class ModWebTheme:
                     max-width: min(16rem, calc(100% - 1.44rem));
                     min-height: 2rem;
                     padding: 0.28rem 0.62rem;
-                    border: 1px solid rgba(139, 92, 246, 0.34);
+                    border: 1px solid var(--mod-accent-border);
                     border-radius: 0;
                     background: rgba(16, 16, 22, 0.92);
                     box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
@@ -5944,7 +6096,7 @@ class ModWebTheme:
                 }}
                 .mod-chat-unread-bar:hover {{
                     background: rgba(28, 28, 38, 0.96);
-                    border-color: rgba(196, 181, 253, 0.52);
+                    border-color: var(--mod-accent-border);
                 }}
                 .mod-chat-unread-live {{
                     animation: mod-chat-unread-arrive 260ms var(--mod-motion-ease) both;
@@ -5979,20 +6131,20 @@ class ModWebTheme:
                     width: 100%;
                 }}
                 .mod-mod-page-link {{
-                    color: #c4b5fd !important;
+                    color: var(--mod-accent-text) !important;
                     font-size: 0.88rem !important;
                     font-weight: 900 !important;
                     text-decoration: underline !important;
-                    text-decoration-color: rgba(167, 139, 250, 0.62) !important;
+                    text-decoration-color: var(--mod-accent-border-strong) !important;
                     text-underline-offset: 0.2rem;
                 }}
                 .mod-mod-page-link:hover {{
-                    color: #ede9fe !important;
-                    text-decoration-color: #c4b5fd !important;
+                    color: var(--mod-accent-text-strong) !important;
+                    text-decoration-color: var(--mod-accent-text) !important;
                 }}
                 .mod-action {{
                     border-radius: 0 !important;
-                    background: var(--mod-purple-dark) !important;
+                    background: var(--mod-accent-dark) !important;
                     color: #fff !important;
                     border: 1px solid var(--mod-accent);
                     text-decoration: none !important;
@@ -6003,7 +6155,7 @@ class ModWebTheme:
                 .mod-action-border-accent {{
                     background: transparent !important;
                     color: var(--mod-text) !important;
-                    border-color: rgba(139, 92, 246, 0.58) !important;
+                    border-color: var(--mod-accent-border) !important;
                     box-shadow: none !important;
                 }}
                 .mod-toolbar-chat-button,
@@ -6011,7 +6163,7 @@ class ModWebTheme:
                 .mod-toolbar-chat-button:focus-visible {{
                     background: transparent !important;
                     color: var(--mod-text) !important;
-                    border-color: rgba(139, 92, 246, 0.58) !important;
+                    border-color: var(--mod-accent-border) !important;
                     box-shadow: none !important;
                 }}
                 .mod-action:hover {{ filter: brightness(1.14); transform: translateY(-1px); }}
@@ -6161,6 +6313,7 @@ class ModWebTheme:
                     }}
                     .mod-app-details-dialog-card {{ width: calc(100vw - 1rem) !important; }}
                     .mod-app-details-section {{ padding: 0.85rem 0.85rem; }}
+                    .mod-user-appearance-section {{ padding: 0.75rem 0.75rem; }}
                     .mod-app-details-point-field {{
                         flex-basis: calc(50% - 0.25rem);
                         max-width: none;

@@ -11,7 +11,7 @@ from itertools import zip_longest
 from pathlib import Path, PurePosixPath
 from re import Pattern
 from string import Formatter
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit, urlunsplit
 
 import hikari
 from modmux.models import Provider
@@ -1081,12 +1081,74 @@ class KnownModPageProvider(enum.StrEnum):
                 return ("gitlab.com",)
 
 
+_MOD_PAGE_TRACKING_QUERY_NAMES: frozenset[str] = frozenset(
+    {
+        "fbclid",
+        "gclid",
+        "dclid",
+        "gbraid",
+        "wbraid",
+        "mc_cid",
+        "mc_eid",
+        "msclkid",
+        "igshid",
+    }
+)
+_MOD_PAGE_TRACKING_QUERY_PREFIXES: tuple[str, ...] = ("utm_",)
+
+
+def _is_tracking_query_name(name: str) -> bool:
+    normalised_name = name.casefold()
+    return normalised_name in _MOD_PAGE_TRACKING_QUERY_NAMES or normalised_name.startswith(
+        _MOD_PAGE_TRACKING_QUERY_PREFIXES
+    )
+
+
+def _normalise_mod_page_query(parsed_url: SplitResult) -> str:
+    query = parsed_url.query
+    hostname = parsed_url.hostname
+    path = parsed_url.path
+    if hostname is None:
+        raise ValueError("Mod page URLs must include a host")
+
+    query_values = tuple(parse_qsl(query, keep_blank_values=True))
+    if not query_values:
+        return ""
+
+    normalised_hostname = hostname.casefold()
+    if normalised_hostname == "steamcommunity.com" or normalised_hostname.endswith(".steamcommunity.com"):
+        path_segments = tuple(segment for segment in path.split("/") if segment)
+        if path_segments == ("sharedfiles", "filedetails"):
+            return urlencode(
+                tuple(("id", value) for name, value in query_values if name.casefold() == "id")
+            )
+
+    ignored_query_names: frozenset[str] = frozenset()
+    if normalised_hostname == "nexusmods.com" or normalised_hostname.endswith(".nexusmods.com"):
+        ignored_query_names = frozenset({"tab"})
+
+    return urlencode(
+        tuple(
+            (name, value)
+            for name, value in query_values
+            if name.casefold() not in ignored_query_names and not _is_tracking_query_name(name)
+        )
+    )
+
+
 def normalise_mod_page_url(raw: object) -> str:
     url = _normalise_required_text(raw, field_name="Mod page URL")
     parsed = urlsplit(url)
     if parsed.scheme.casefold() != "https" or parsed.hostname is None:
         raise ValueError("Mod page URLs must be absolute HTTPS URLs")
-    return url
+    try:
+        port = parsed.port
+    except ValueError as xcp:
+        raise ValueError("Mod page URL has an invalid port") from xcp
+    netloc = parsed.hostname.casefold()
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit(("https", netloc, parsed.path, _normalise_mod_page_query(parsed), ""))
 
 
 def known_mod_page_provider_for_url(raw: object) -> KnownModPageProvider | None:

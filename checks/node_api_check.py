@@ -4446,7 +4446,7 @@ class NodeApiTests(unittest.TestCase):
         portal_profile = config.BOT_PROFILES[config.BotProfileName.PORTAL]
         with (
             patch.object(config, "ACTIVE_BOT_PROFILE", portal_profile),
-            patch.object(service, "_portal_node_latencies_async", new=AsyncMock(return_value={"yuki": 12, "erin": 34})),
+            patch.object(service, "portal_node_latencies_async", new=AsyncMock(return_value={"yuki": 12, "erin": 34})),
         ):
             asyncio.run(service._serve_presence_stream(websocket=cast(Any, _PresenceWebSocket())))
 

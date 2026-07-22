@@ -797,7 +797,29 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                 const sampleLatencyMeasurement = async (nodeName) => {{
                     const connection = controllerState.connectionsByNode[nodeName];
                     const spec = getSpec(nodeName);
-                    if (!connection || !spec || !spec.show_latency || !connection.socket || connection.socket.readyState !== WebSocket.OPEN) {{
+                    if (!connection || !spec || !spec.show_latency) {{
+                        return null;
+                    }}
+                    if (spec.presence_health_url) {{
+                        const abortController = new AbortController();
+                        const timeoutHandle = window.setTimeout(() => abortController.abort(), latencyTimeoutMs);
+                        const startedAt = performance.now();
+                        try {{
+                            const response = await fetch(spec.presence_health_url, {{
+                                cache: 'no-store',
+                                signal: abortController.signal,
+                            }});
+                            if (!response.ok) {{
+                                return null;
+                            }}
+                            return Math.max(1, Math.round(performance.now() - startedAt));
+                        }} catch (_error) {{
+                            return null;
+                        }} finally {{
+                            window.clearTimeout(timeoutHandle);
+                        }}
+                    }}
+                    if (!connection.socket || connection.socket.readyState !== WebSocket.OPEN) {{
                         return null;
                     }}
                     return await new Promise((resolve) => {{
@@ -855,10 +877,56 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                     renderBadge(spec, nextText, spec.healthy_class_name);
                     refreshTooltip(nodeName);
                 }};
+                const renderDownState = (nodeName) => {{
+                    const connection = controllerState.connectionsByNode[nodeName];
+                    const spec = getSpec(nodeName);
+                    if (!connection || !spec) {{
+                        return;
+                    }}
+                    connection.lastText = spec.down_text;
+                    connection.lastClassName = spec.unhealthy_class_name;
+                    renderBadge(spec, spec.down_text, spec.unhealthy_class_name);
+                    refreshTooltip(nodeName);
+                }};
                 const requestPortalNodeLatencies = (nodeName) => {{
                     const connection = controllerState.connectionsByNode[nodeName];
                     const spec = getSpec(nodeName);
-                    if (!connection || !spec || spec.tooltip_mode !== 'portal' || !connection.socket || connection.socket.readyState !== WebSocket.OPEN) {{
+                    if (!connection || !spec || spec.tooltip_mode !== 'portal') {{
+                        return;
+                    }}
+                    if (spec.portal_node_latencies_url) {{
+                        if (connection.portalLatencyRequestInFlight) {{
+                            return;
+                        }}
+                        connection.portalLatencyRequestInFlight = true;
+                        void fetch(spec.portal_node_latencies_url, {{cache: 'no-store'}})
+                            .then(async (response) => {{
+                                if (!response.ok) {{
+                                    return null;
+                                }}
+                                return await response.json();
+                            }})
+                            .then((payload) => {{
+                                if (
+                                    controllerState.connectionsByNode[nodeName] !== connection
+                                    || !payload
+                                    || typeof payload !== 'object'
+                                    || payload.node !== nodeName
+                                    || !payload.latencies
+                                    || typeof payload.latencies !== 'object'
+                                ) {{
+                                    return;
+                                }}
+                                connection.portalNodeLatencies = payload.latencies;
+                                refreshTooltip(nodeName);
+                            }})
+                            .catch(() => {{}})
+                            .finally(() => {{
+                                connection.portalLatencyRequestInFlight = false;
+                            }});
+                        return;
+                    }}
+                    if (!connection.socket || connection.socket.readyState !== WebSocket.OPEN) {{
                         return;
                     }}
                     connection.socket.send(JSON.stringify({{type: 'node_latencies'}}));
@@ -879,6 +947,10 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         }}
                     }}
                     const summary = summariseLatencyMeasurements(measurements);
+                    if (spec.presence_health_url && summary === null) {{
+                        renderDownState(nodeName);
+                        return;
+                    }}
                     await renderAliveState(nodeName, summary);
                     requestPortalNodeLatencies(nodeName);
                 }};
@@ -888,6 +960,10 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         return;
                     }}
                     const latency = await sampleLatencyMeasurement(nodeName);
+                    if (spec.presence_health_url && latency === null) {{
+                        renderDownState(nodeName);
+                        return;
+                    }}
                     await renderAliveState(nodeName, latency);
                     requestPortalNodeLatencies(nodeName);
                 }};
@@ -909,7 +985,7 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         closeConnection(nodeName);
                         return;
                     }}
-                    if (!spec.presence_stream_url) {{
+                    if (!spec.presence_stream_url && !spec.presence_health_url) {{
                         renderBadge(spec, spec.pending_text, spec.pending_class_name);
                         closeConnection(nodeName);
                         return;
@@ -933,9 +1009,21 @@ class ModWebUiHelpersMixin(ModWebServiceSupport):
                         lastLatencyMs: null,
                         discordLatencyMs: null,
                         portalNodeLatencies: {{}},
+                        portalLatencyRequestInFlight: false,
                     }};
                     controllerState.connectionsByNode[nodeName] = connection;
                     renderBadge(spec, spec.pending_text, spec.pending_class_name);
+                    if (spec.presence_health_url) {{
+                        if (spec.show_latency) {{
+                            void runLatencyBootstrap(nodeName);
+                            connection.latencyIntervalId = window.setInterval(() => {{
+                                void runLatencySample(nodeName);
+                            }}, latencyRefreshIntervalMs);
+                        }} else {{
+                            void renderAliveState(nodeName, null);
+                        }}
+                        return;
+                    }}
                     const socket = new WebSocket(websocketUrl(spec.presence_stream_url));
                     connection.socket = socket;
                     socket.addEventListener('open', () => {{

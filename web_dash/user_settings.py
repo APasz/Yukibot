@@ -23,21 +23,31 @@ class ModWebColorScheme(StrEnum):
 
 
 class ModWebAppearanceSettings(BaseModel):
-    """Stored appearance choices. They are not applied until the UI supports them."""
+    """Stored appearance choices for the mod-web UI."""
 
     color_scheme: ModWebColorScheme = ModWebColorScheme.CURRENT
     primary_color_hex: str | None = None
+    positive_color_hex: str | None = None
+    warning_color_hex: str | None = None
+    negative_color_hex: str | None = None
+    info_color_hex: str | None = None
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    @field_validator("primary_color_hex")
+    @field_validator(
+        "primary_color_hex",
+        "positive_color_hex",
+        "warning_color_hex",
+        "negative_color_hex",
+        "info_color_hex",
+    )
     @classmethod
-    def _validate_primary_color_hex(cls, value: str | None) -> str | None:
+    def _validate_color_hex(cls, value: str | None) -> str | None:
         if value is None:
             return None
         normalized = value.strip()
         if not _HEX_COLOR_PATTERN.fullmatch(normalized):
-            raise ValueError("primary_color_hex must be a six-digit #RRGGBB colour.")
+            raise ValueError("Appearance colours must be six-digit #RRGGBB values.")
         return normalized.upper()
 
 

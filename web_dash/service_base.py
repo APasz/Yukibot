@@ -970,6 +970,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_render_user_header"]) -> Callable[..., None]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_apply_theme_for_user"]) -> Callable[..., None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_request_path"]) -> Callable[..., str]: ...
 
     @overload

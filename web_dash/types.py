@@ -106,7 +106,7 @@ class ModWebDirectUploadTarget:
         if not self.authorization_header.startswith("Bearer ") or not self.authorization_header.removeprefix(
             "Bearer "
         ).strip():
-            raise ValueError("Direct upload authorization must use a bearer token.")
+            raise ValueError("Direct upload authorisation must use a bearer token.")
 
 
 class ModWebMinecraftRecipeOperationKind(Enum):
@@ -658,6 +658,8 @@ class ModWebNodeLink:
     is_current: bool
     latency_probe_url: str | None = field(default=None, kw_only=True)
     presence_stream_url: str | None = field(default=None, kw_only=True)
+    presence_health_url: str | None = field(default=None, kw_only=True)
+    portal_node_latencies_url: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,6 +692,8 @@ class _ModWebNodePresenceBadgeSpec:
     pending_class_name: str
     healthy_class_name: str
     unhealthy_class_name: str
+    presence_health_url: str | None = None
+    portal_node_latencies_url: str | None = None
     tooltip_element_id: int | None = None
     show_latency: bool = False
     tooltip_mode: Literal["basic", "discord", "portal"] = "basic"
@@ -705,6 +709,8 @@ class _ModWebNodePresenceBadgeSpec:
             "alive_text": self.alive_text,
             "down_text": self.down_text,
             "presence_stream_url": self.presence_stream_url,
+            "presence_health_url": self.presence_health_url,
+            "portal_node_latencies_url": self.portal_node_latencies_url,
             "pending_class_name": self.pending_class_name,
             "healthy_class_name": self.healthy_class_name,
             "unhealthy_class_name": self.unhealthy_class_name,

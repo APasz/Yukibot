@@ -381,7 +381,7 @@ class ModWebAppPageMixin(
     ) -> None:
         if chat_surface is not None and not model.supports_chat:
             raise ValueError("App page received chat configuration for an app without chat support.")
-        self._apply_theme(ui=ui)
+        self._apply_theme_for_user(ui=ui, user=user)
         ModWebUiHelpersMixin._render_skip_link(ui=ui)
         current_model: ModWebBasePageModel = model
         last_system_summary: NodeSystemSummary | None = initial_system_summary
@@ -491,7 +491,7 @@ class ModWebAppPageMixin(
     ) -> None:
         if chat_surface is not None and not model.supports_chat:
             raise ValueError("Overview page received chat configuration for an app without chat support.")
-        self._apply_theme(ui=ui)
+        self._apply_theme_for_user(ui=ui, user=user)
         ModWebUiHelpersMixin._render_skip_link(ui=ui)
         current_model: ModWebBasePageModel = model
         last_system_summary: NodeSystemSummary | None = initial_system_summary
@@ -1532,7 +1532,7 @@ class ModWebAppPageMixin(
                 f'<div class="mod-map-toolbar-group mod-map-toolbar-group-dimension">'
                 f'<select id="{world_id}" class="mod-map-select" aria-label="Dimension"></select>'
                 f'<div class="mod-map-toolbar-pair mod-map-toolbar-pair-dimension">'
-                f'<input id="{color_id}" class="mod-map-color" type="color" value="#22C55E" aria-label="Annotation color">'
+                f'<input id="{color_id}" class="mod-map-color" type="color" value="#22C55E" aria-label="Annotation colour">'
                 f'<label class="mod-map-toggle" for="{snap_id}"><input id="{snap_id}" type="checkbox" checked>45°</label>'
                 f"</div>"
                 f"</div>"
@@ -1756,17 +1756,17 @@ class ModWebAppPageMixin(
                 gap: 0.55rem;
                 width: min(19rem, calc(100% - 1rem));
                 padding: 0.8rem 0.85rem;
-                border: 1px solid rgba(139, 92, 246, 0.42);
+                border: 1px solid var(--mod-accent-border);
                 border-radius: 0;
                 background: rgba(0, 0, 0, 0.96);
                 box-shadow:
                   0 18px 42px rgba(3, 7, 18, 0.34),
                   inset 0 1px 0 rgba(255, 255, 255, 0.05),
-                  inset 0 -1px 0 rgba(139, 92, 246, 0.16);
+                  inset 0 -1px 0 var(--mod-accent-faint);
                 transform: translate(-50%, calc(-100% - 0.85rem));
               }
               .mod-map-label-prompt-title {
-                color: #ddd6fe;
+                color: var(--mod-accent-text-strong);
                 font-size: 0.85rem;
                 font-weight: 700;
                 letter-spacing: 0.02em;
@@ -1782,26 +1782,26 @@ class ModWebAppPageMixin(
                 width: 100%;
                 min-height: 2.5rem;
                 padding: 0 0.9rem;
-                border: 1px solid rgba(139, 92, 246, 0.42);
+                border: 1px solid var(--mod-accent-border);
                 border-radius: 0;
                 background:
-                  linear-gradient(180deg, rgba(196, 181, 253, 0.08), rgba(196, 181, 253, 0)),
-                  rgba(36, 17, 58, 0.72);
+                  linear-gradient(180deg, var(--mod-accent-wash), transparent),
+                  var(--mod-accent-surface);
                 box-shadow:
                   inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                  inset 0 -1px 0 rgba(139, 92, 246, 0.24);
-                color: #f5f3ff;
+                  inset 0 -1px 0 var(--mod-accent-glow);
+                color: var(--mod-accent-text-strong);
               }
               .mod-map-label-input::placeholder {
-                color: rgba(237, 233, 254, 0.62);
+                color: var(--mod-accent-border-strong);
               }
               .mod-map-label-input:focus {
                 outline: none;
-                border-color: rgba(196, 181, 253, 0.9);
+                border-color: var(--mod-accent-border-strong);
                 box-shadow:
-                  0 0 0 1px rgba(196, 181, 253, 0.35),
+                  0 0 0 1px var(--mod-accent-border),
                   inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                  inset 0 -1px 0 rgba(139, 92, 246, 0.24);
+                  inset 0 -1px 0 var(--mod-accent-glow);
               }
               .mod-map-label-prompt-actions {
                 display: flex;
@@ -1817,26 +1817,26 @@ class ModWebAppPageMixin(
                 display: flex;
                 justify-content: center;
                 padding: 0.7rem;
-                border: 1px solid rgba(139, 92, 246, 0.24);
+                border: 1px solid var(--mod-accent-glow);
                 background:
-                  linear-gradient(180deg, rgba(76, 29, 149, 0.14), rgba(24, 24, 27, 0)),
+                  linear-gradient(180deg, var(--mod-accent-faint), rgba(24, 24, 27, 0)),
                   rgba(12, 10, 18, 0.62);
                 box-shadow:
                   inset 0 1px 0 rgba(255, 255, 255, 0.03),
-                  inset 0 -1px 0 rgba(139, 92, 246, 0.1);
+                  inset 0 -1px 0 var(--mod-accent-wash);
               }
               .mod-map-select,
               .mod-map-color,
               .mod-map-toggle {
-                border: 1px solid rgba(139, 92, 246, 0.42);
+                border: 1px solid var(--mod-accent-border);
                 border-radius: 0;
                 background:
-                  linear-gradient(180deg, rgba(196, 181, 253, 0.08), rgba(196, 181, 253, 0)),
-                  rgba(36, 17, 58, 0.72);
+                  linear-gradient(180deg, var(--mod-accent-wash), transparent),
+                  var(--mod-accent-surface);
                 box-shadow:
                   inset 0 1px 0 rgba(255, 255, 255, 0.04),
-                  inset 0 -1px 0 rgba(139, 92, 246, 0.24);
-                color: #f5f3ff;
+                  inset 0 -1px 0 var(--mod-accent-glow);
+                color: var(--mod-accent-text-strong);
                 min-height: 2.5rem;
               }
               .mod-map-select {
@@ -1846,8 +1846,8 @@ class ModWebAppPageMixin(
                 appearance: none;
               }
               .mod-map-select option {
-                background: #1f1630;
-                color: #f5f3ff;
+                background: var(--mod-accent-surface);
+                color: var(--mod-accent-text-strong);
               }
               .mod-map-color {
                 width: 2.5rem;
@@ -1871,15 +1871,15 @@ class ModWebAppPageMixin(
                 min-width: 0;
               }
               .mod-map-toolbar .mod-list-button.mod-toolbar-button.mod-map-button.mod-map-button-active {
-                border-color: rgba(168, 85, 247, 0.9) !important;
+                border-color: var(--mod-accent-border-strong) !important;
                 box-shadow:
                   inset 0 1px 0 rgba(255, 255, 255, 0.06),
-                  inset 0 -1px 0 rgba(216, 180, 254, 0.28),
-                  0 0 0 1px rgba(168, 85, 247, 0.18) !important;
+                  inset 0 -1px 0 var(--mod-accent-glow),
+                  0 0 0 1px var(--mod-accent-faint) !important;
                 background:
-                  linear-gradient(180deg, rgba(168, 85, 247, 0.28), rgba(126, 34, 206, 0.18)),
-                  rgba(67, 26, 95, 0.92) !important;
-                color: #faf5ff !important;
+                  linear-gradient(180deg, var(--mod-accent-glow), var(--mod-accent-faint)),
+                  var(--mod-accent-surface) !important;
+                color: var(--mod-accent-text-strong) !important;
               }
               .mod-map-toggle {
                 display: inline-flex;
@@ -1888,7 +1888,7 @@ class ModWebAppPageMixin(
                 font-size: 0.92rem;
                 min-width: 2.5rem;
                 padding: 0 0.75rem;
-                color: #ede9fe;
+                color: var(--mod-accent-text-strong);
               }
               .mod-map-toggle[data-disabled="true"] {
                 border-color: rgba(115, 115, 125, 0.36);
@@ -1902,7 +1902,7 @@ class ModWebAppPageMixin(
                 opacity: 0.8;
               }
               .mod-map-toggle input {
-                accent-color: #a855f7;
+                accent-color: var(--mod-accent);
               }
               .mod-map-toggle input:disabled {
                 cursor: not-allowed;
@@ -1959,14 +1959,14 @@ class ModWebAppPageMixin(
                 min-height: 0;
                 height: auto;
                 border-radius: 0;
-                border: 1px solid rgba(196, 181, 253, 0.2);
+                border: 1px solid var(--mod-accent-faint);
                 overflow: hidden;
                 background:
                   radial-gradient(circle at top, rgba(56, 189, 248, 0.22), transparent 34%),
                   linear-gradient(180deg, rgba(226, 232, 240, 0.94), rgba(248, 250, 252, 0.98));
                 box-shadow:
                   0 20px 48px rgba(3, 7, 18, 0.26),
-                  0 0 0 1px rgba(139, 92, 246, 0.08);
+                  0 0 0 1px var(--mod-accent-wash);
               }
               .mod-map-canvas .leaflet-container {
                 width: 100%;
@@ -1975,7 +1975,7 @@ class ModWebAppPageMixin(
                 font: inherit;
               }
               .mod-map-canvas .leaflet-control-zoom {
-                border: 1px solid rgba(139, 92, 246, 0.28);
+                border: 1px solid var(--mod-accent-glow);
                 border-radius: 0;
                 overflow: hidden;
                 box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
@@ -1988,8 +1988,8 @@ class ModWebAppPageMixin(
               }
               .mod-map-canvas .leaflet-control-zoom a:hover {
                 background:
-                  linear-gradient(180deg, rgba(237, 233, 254, 0.96), rgba(221, 214, 254, 0.92));
-                color: #4c1d95;
+                  linear-gradient(180deg, var(--mod-accent-text-strong), var(--mod-accent-text-strong));
+                color: var(--mod-accent-dark);
               }
               .mod-map-player-label,
               .mod-map-annotation-label {

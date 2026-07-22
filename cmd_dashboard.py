@@ -360,7 +360,7 @@ def _dashboard_embed_guild_ids(current_guild_id: hikari.Snowflake | None) -> tup
 
 
 def _dashboard_embed_color(bot: hikari.GatewayBot, current_guild_id: hikari.Snowflake | None) -> int:
-    """Resolve the dashboard embed color from the bot's highest cached role."""
+    """Resolve the dashboard embed colour from the bot's highest cached role."""
     return cached_top_role_color(bot, guild_ids=_dashboard_embed_guild_ids(current_guild_id)) or (
         _DEFAULT_DASHBOARD_EMBED_COLOR
     )

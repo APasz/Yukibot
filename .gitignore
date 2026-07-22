@@ -2,6 +2,7 @@ _*.txt
 discord_names.json
 test*
 users.json
+user_settings.json
 apps.json
 data/*
 
@@ -35,10 +36,9 @@ voice_target_labels.json
 resources/icon/*
 resources/minecraft_default_skins/*
 .cache/*
-.yukibot/map_cache.json
+.yukibot/*
 tmp*
 restart_type_sentinel.json
-.yukibot/map_cache.json
 apps/*/instances.json
 moddb;*.jsonl
 mod-metadata;*.json

@@ -60,7 +60,7 @@ Sister bots also push a typed bot-metadata snapshot to Yuki through the same aut
 - `MOD_WEB_SESSION_CACHE_DIR` defaults to `.cache/mod_web_sessions`; Portal persists browser sessions and pending OAuth state there so Portal restarts do not force users to sign in again.
 - `MOD_WEB_BUILD_SHA` optionally exposes the deployed Git commit on the login page and links it to GitHub.
 - Normal sign-ins use a browser-session cookie with a 16-hour server expiry. “Remember me” uses a persistent cookie with a 30-day absolute expiry.
-- Mod web browser sessions authenticate as Discord user IDs and authorize through `users.json` / `Access_Control`; `visitor` access can use chat-only web relay routes, while `user` and above can use the broader mod web tools.
+- Mod web browser sessions authenticate as Discord user IDs and authorise through `users.json` / `Access_Control`; `visitor` access can use chat-only web relay routes, while `user` and above can use the broader mod web tools.
 - `BYPASS_WEB_AUTH=true` skips Discord web auth only when `INDEV` is also set. It is intended for local development and is ignored outside `INDEV`.
 - When the standalone portal hosts the web UI, sibling nodes do not need Discord OAuth credentials; the portal reads their node API with short-lived tokens signed by the shared `NODE_API_TOKEN_SECRET` / `DATA_AUTHORITY_TOKEN`, and remote downloads redirect to the owning node with a scoped short-lived token.
 - Mods with a `download_block_reason` in their mod DB entry are listed in the web UI but excluded from downloads; 7D2D built-in mods are marked this way automatically.

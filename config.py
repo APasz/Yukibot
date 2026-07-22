@@ -778,9 +778,9 @@ class BotMetadataPresentation(BaseModel):
             return None
         text = str(value).strip()
         if not text:
-            raise ValueError("bot metadata accent color must not be empty.")
+            raise ValueError("bot metadata accent colour must not be empty.")
         if re.fullmatch(r"#[0-9a-fA-F]{6}", text) is None:
-            raise ValueError("bot metadata accent color must be a hex color in #rrggbb format.")
+            raise ValueError("bot metadata accent colour must be a hex colour in #rrggbb format.")
         return text.casefold()
 
 

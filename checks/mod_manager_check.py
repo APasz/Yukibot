@@ -74,6 +74,33 @@ class ModManagerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             ModPageLink(name="Modrinth", url="http://modrinth.com/mod/example")
 
+    def test_mod_page_links_normalise_unneeded_url_parts(self) -> None:
+        page = ModPageLink(
+            name="Modrinth",
+            url=" HTTPS://MODRINTH.COM/mod/example?utm_source=discord&version=1#gallery ",
+        )
+
+        self.assertEqual(page.url, "https://modrinth.com/mod/example?version=1")
+
+    def test_steam_workshop_mod_page_links_keep_only_identity_query(self) -> None:
+        page = ModPageLink(
+            name="Steam Workshop",
+            url=(
+                "https://steamcommunity.com/sharedfiles/filedetails/"
+                "?utm_source=discord&ID=1234&searchtext=example#comments"
+            ),
+        )
+
+        self.assertEqual(page.url, "https://steamcommunity.com/sharedfiles/filedetails/?id=1234")
+
+    def test_nexusmods_mod_page_links_drop_tab_query(self) -> None:
+        page = ModPageLink(
+            name="NexusMods",
+            url="https://www.nexusmods.com/skyrimspecialedition/mods/1?Tab=files&version=1",
+        )
+
+        self.assertEqual(page.url, "https://www.nexusmods.com/skyrimspecialedition/mods/1?version=1")
+
     def test_recognises_known_mod_page_providers(self) -> None:
         cases = {
             "https://modrinth.com/mod/example": KnownModPageProvider.MODRINTH,

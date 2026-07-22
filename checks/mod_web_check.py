@@ -242,6 +242,7 @@ from web_dash.types import (
     _ModWebNotificationTrayItem,
     _ModWebTabActionSpec,
 )
+from web_dash.user_settings import ModWebAppearanceSettings, ModWebUserSettings, ModWebUserSettingsStore
 
 if TYPE_CHECKING:
     from _manager import App_Manager
@@ -1815,6 +1816,8 @@ class ModWebTests(unittest.TestCase):
                     alive_text="Erin: Alive",
                     down_text="Erin: Down",
                     presence_stream_url=None,
+                    presence_health_url="/mod-web/health",
+                    portal_node_latencies_url="/mod-web/portal-node-latencies",
                     pending_class_name="badge-down",
                     healthy_class_name="badge-healthy",
                     unhealthy_class_name="badge-down",
@@ -1832,6 +1835,8 @@ class ModWebTests(unittest.TestCase):
         self.assertIn('"down_text":"Yuki: Down"', script)
         self.assertIn('"presence_stream_url":"/api/node/presence/stream"', script)
         self.assertIn('"presence_stream_url":null', script)
+        self.assertIn('"presence_health_url":"/mod-web/health"', script)
+        self.assertIn('"portal_node_latencies_url":"/mod-web/portal-node-latencies"', script)
         self.assertIn('"show_latency":true', script)
         self.assertIn('"show_latency":false', script)
         self.assertIn('"tooltip_mode":"discord"', script)
@@ -1851,7 +1856,8 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("${spec.node_label}: ${latencyTextValue}", script)
         self.assertIn("textElement.textContent = text;", script)
         self.assertNotIn("_mod_web_latency_probe", script)
-        self.assertNotIn("fetch(", script)
+        self.assertIn("fetch(spec.presence_health_url", script)
+        self.assertIn("fetch(spec.portal_node_latencies_url", script)
         self.assertIn("bootstrapProbeCount = 4", script)
         self.assertIn("bootstrapProbeDelayMs = 850", script)
         self.assertIn("summariseLatencyMeasurements", script)
@@ -4071,7 +4077,9 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(links[0].label, "Portal")
         self.assertEqual(links[0].api_base_url, config.LOCAL_NODE_API_BASE_URL)
         self.assertEqual(links[0].latency_probe_url, f"{config.LOCAL_NODE_API_BASE_URL}/ping")
-        self.assertEqual(links[0].presence_stream_url, "/api/node/presence/stream")
+        self.assertIsNone(links[0].presence_stream_url)
+        self.assertEqual(links[0].presence_health_url, "/mod-web/health")
+        self.assertEqual(links[0].portal_node_latencies_url, "/mod-web/portal-node-latencies")
 
     def test_portal_node_links_prefer_dev_cluster_env_over_stale_snapshots(self) -> None:
         stale_yuki_snapshot = config.BotMetadataSnapshot(
@@ -6043,7 +6051,7 @@ class ModWebTests(unittest.TestCase):
         subscribe_updates = Mock(return_value=lambda: None)
 
         with (
-            patch.object(ModWebService, "_apply_theme"),
+            patch.object(ModWebService, "_apply_theme_for_user"),
             patch.object(ModWebService, "_render_user_header"),
             patch.object(
                 ModWebService,
@@ -14672,7 +14680,7 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(ModWebService._hero_card_style(None), "")
 
     def test_hex_color_to_rgba_rejects_invalid_hex_values(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Expected #rrggbb color"):
+        with self.assertRaisesRegex(ValueError, "Expected #rrggbb colour"):
             ModWebService._hex_color_to_rgba("22C55E", alpha=0.18)
 
     def test_page_tabs_use_capability_order_for_mod_pages(self) -> None:
@@ -16318,11 +16326,35 @@ class ModWebTests(unittest.TestCase):
 
         service = HiddenTabService()
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
-        model = self._overview_model_with_config_and_chat()
+        overview_model = self._overview_model_with_config_and_chat()
+        model = ModWebPageModel(
+            node_name=overview_model.node_name,
+            app_name=overview_model.app_name,
+            app_friendly=overview_model.app_friendly,
+            app_color_hex=overview_model.app_color_hex,
+            supports_configs=overview_model.supports_configs,
+            config_read_level=overview_model.config_read_level,
+            config_write_level=overview_model.config_write_level,
+            supports_save_uploads=overview_model.supports_save_uploads,
+            supports_save_rename=overview_model.supports_save_rename,
+            save_write_level=overview_model.save_write_level,
+            configs=overview_model.configs,
+            saves=overview_model.saves,
+            app_stats=overview_model.app_stats,
+            app_start_blocked=overview_model.app_start_blocked,
+            settings=overview_model.settings,
+            console_actions=overview_model.console_actions,
+            supports_chat=overview_model.supports_chat,
+            chat_url=overview_model.chat_url,
+            mods=self._mod_list(),
+            download_all_url="/mods/download",
+            download_enabled_url="/mods/download?enabled_only=true",
+            mod_download_urls={},
+        )
 
         tabs = service._page_tabs(model)
 
-        self.assertEqual([tab.tab_id for tab in tabs], ["configs", "chat", "map"])
+        self.assertEqual([tab.tab_id for tab in tabs], ["mods", "configs", "chat", "map"])
         map_tab = tabs[-1]
         self.assertEqual(
             service._page_section_badges(model=model, user=user, tab=map_tab),
@@ -17555,6 +17587,13 @@ class ModWebTests(unittest.TestCase):
                 self.text = text
                 self.on_click: Callable[[object | None], None] | None = None
 
+        class FakeInput(FakeContainer):
+            def __init__(self, value: object) -> None:
+                self.value = value
+
+            def set_value(self, value: object) -> None:
+                self.value = value
+
         class FakeUi:
             def __init__(self) -> None:
                 self.menu_items: list[FakeButton] = []
@@ -17590,6 +17629,10 @@ class ModWebTests(unittest.TestCase):
             def label(self, text: str) -> FakeContainer:
                 del text
                 return FakeContainer()
+
+            def input(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                return FakeInput(kwargs.get("value"))
 
             def button(self, text: str = "", **kwargs: object) -> FakeButton:
                 del text, kwargs
@@ -17632,6 +17675,255 @@ class ModWebTests(unittest.TestCase):
             raise AssertionError("Aliases menu item is missing a click handler.")
         aliases_item.on_click(None)
         self.assertEqual(ui.navigated_to, ["/aliases"])
+
+    def test_user_settings_panel_saves_and_resets_appearance_colours(self) -> None:
+        class FakeContainer:
+            def __init__(self) -> None:
+                self.style_value: str | None = None
+                self.class_value: str | None = None
+                self.props_value: str | None = None
+
+            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeContainer":
+                del replace
+                self.class_value = value
+                return self
+
+            def props(self, value: str) -> "FakeContainer":
+                self.props_value = value
+                return self
+
+            def style(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+            ) -> "FakeContainer":
+                del add, remove
+                self.style_value = value
+                return self
+
+            def __enter__(self) -> "FakeContainer":
+                return self
+
+            def __exit__(
+                self,
+                exc_type: type[BaseException] | None,
+                exc: BaseException | None,
+                traceback: object | None,
+            ) -> bool:
+                del exc_type, exc, traceback
+                return False
+
+        class FakeDialog(FakeContainer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.opened = False
+
+            def open(self) -> None:
+                self.opened = True
+
+            def close(self) -> None:
+                return None
+
+        class FakeButton(FakeContainer):
+            def __init__(self, text: str, on_click: Callable[[object | None], object] | None) -> None:
+                super().__init__()
+                self.text = text
+                self.on_click = on_click
+
+        class FakeInput(FakeContainer):
+            def __init__(self, value: object) -> None:
+                super().__init__()
+                self.value = value
+
+            def set_value(self, value: object) -> None:
+                self.value = value
+
+        class FakeUi:
+            def __init__(self) -> None:
+                self.dialogs: list[FakeDialog] = []
+                self.inputs: list[FakeInput] = []
+                self.buttons: list[FakeButton] = []
+                self.javascript_calls: list[str] = []
+                self.notifications: list[tuple[str, str | None]] = []
+
+            def dialog(self) -> FakeDialog:
+                dialog = FakeDialog()
+                self.dialogs.append(dialog)
+                return dialog
+
+            def card(self) -> FakeContainer:
+                return FakeContainer()
+
+            def column(self) -> FakeContainer:
+                return FakeContainer()
+
+            def row(self) -> FakeContainer:
+                return FakeContainer()
+
+            def element(self, tag: str) -> FakeContainer:
+                del tag
+                return FakeContainer()
+
+            def label(self, text: str) -> FakeContainer:
+                del text
+                return FakeContainer()
+
+            def input(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                control = FakeInput(kwargs.get("value"))
+                self.inputs.append(control)
+                return control
+
+            def button(self, text: str = "", **kwargs: object) -> FakeButton:
+                button = FakeButton(text, cast(Callable[[object | None], object] | None, kwargs.get("on_click")))
+                self.buttons.append(button)
+                return button
+
+            def notify(self, message: str, *, type: str | None = None) -> None:
+                self.notifications.append((message, type))
+
+            def run_javascript(self, code: str, *, timeout: float = 1.0) -> None:
+                del timeout
+                self.javascript_calls.append(code)
+
+        with TemporaryDirectory() as tmp:
+            store = ModWebUserSettingsStore(Path(tmp) / "user_settings.json")
+            existing_settings = ModWebUserSettings(
+                appearance=ModWebAppearanceSettings(primary_color_hex="#22c55e")
+            )
+            with patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.LOCAL):
+                store.set(user_id=42, settings=existing_settings)
+                service = ModWebService()
+                service._backend = ModWebDashboardBackend(user_settings=store)
+                ui = FakeUi()
+                user = ModWebUser(discord_id=42, username="sudo", global_name="Finch", avatar_hash=None)
+
+                with patch.object(service, "_web_display_name", return_value="Finch"):
+                    service._build_user_settings_panel(ui=cast(ModWebUi, cast(object, ui)), user=user)()
+
+                self.assertTrue(ui.dialogs[0].opened)
+                self.assertEqual(
+                    [control.value for control in ui.inputs],
+                    ["#22C55E", "#6B7280", "#F59E0B", "#DC2626", "#22C55E"],
+                )
+                ui.inputs[0].value = "#336699"
+                ui.inputs[1].value = "#16a34a"
+                ui.inputs[2].value = "#facc15"
+                ui.inputs[3].value = "#ef4444"
+                ui.inputs[4].value = "#0ea5e9"
+
+                save_button = next(button for button in ui.buttons if button.text == "Save")
+                save_click = save_button.on_click
+                self.assertIsNotNone(save_click)
+                assert save_click is not None
+                save_click(None)
+
+                saved_appearance = store.get(user_id=42).appearance
+                self.assertEqual(saved_appearance.primary_color_hex, "#336699")
+                self.assertEqual(saved_appearance.positive_color_hex, "#16A34A")
+                self.assertEqual(saved_appearance.warning_color_hex, "#FACC15")
+                self.assertEqual(saved_appearance.negative_color_hex, "#EF4444")
+                self.assertEqual(saved_appearance.info_color_hex, "#0EA5E9")
+                self.assertIn("#336699", ui.javascript_calls[-1])
+                self.assertIn("--mod-accent-dark", ui.javascript_calls[-1])
+                self.assertIn("--mod-accent-panel", ui.javascript_calls[-1])
+                self.assertIn("--mod-accent-surface", ui.javascript_calls[-1])
+                self.assertIn("--q-primary", ui.javascript_calls[-1])
+                self.assertIn("--q-positive", ui.javascript_calls[-1])
+                self.assertIn("--q-warning", ui.javascript_calls[-1])
+                self.assertIn("--q-negative", ui.javascript_calls[-1])
+                self.assertIn("--q-info", ui.javascript_calls[-1])
+                self.assertIn("target.style.setProperty(name, value)", ui.javascript_calls[-1])
+                self.assertIn(("Saved appearance colours.", "positive"), ui.notifications)
+
+                reset_button = next(button for button in ui.buttons if button.text == "Reset")
+                reset_click = reset_button.on_click
+                self.assertIsNotNone(reset_click)
+                assert reset_click is not None
+                reset_click(None)
+
+                reset_appearance = store.get(user_id=42).appearance
+                self.assertIsNone(reset_appearance.primary_color_hex)
+                self.assertIsNone(reset_appearance.positive_color_hex)
+                self.assertIsNone(reset_appearance.warning_color_hex)
+                self.assertIsNone(reset_appearance.negative_color_hex)
+                self.assertIsNone(reset_appearance.info_color_hex)
+                self.assertEqual(
+                    [control.value for control in ui.inputs],
+                    ["#8B5CF6", "#6B7280", "#F59E0B", "#DC2626", "#8B5CF6"],
+                )
+                self.assertIn("null", ui.javascript_calls[-1])
+                self.assertIn('"--q-primary"', ui.javascript_calls[-1])
+                self.assertIn('"--mod-accent-dark"', ui.javascript_calls[-1])
+                self.assertIn('"--mod-accent-panel"', ui.javascript_calls[-1])
+                self.assertIn('"--mod-accent-surface"', ui.javascript_calls[-1])
+                self.assertIn('"--q-positive"', ui.javascript_calls[-1])
+                self.assertIn('"--q-warning"', ui.javascript_calls[-1])
+                self.assertIn('"--q-negative"', ui.javascript_calls[-1])
+                self.assertIn('"--q-info"', ui.javascript_calls[-1])
+                self.assertIn("const targets = [root, document.body].filter(Boolean);", ui.javascript_calls[-1])
+                self.assertIn("target.style.removeProperty(name)", ui.javascript_calls[-1])
+
+    def test_user_appearance_palette_sets_initial_variables_inline(self) -> None:
+        style_html = ModWebService._user_appearance_style_html(
+            ModWebAppearanceSettings(primary_color_hex="#22c55e")
+        )
+
+        self.assertIn('id="mod-web-user-accent-style"', style_html)
+        self.assertIn("--mod-accent: #22C55E", style_html)
+        self.assertIn('"--q-primary": "#22C55E"', style_html)
+        self.assertIn("target.style.setProperty(name, value)", style_html)
+
+    def test_user_appearance_palette_overrides_nicegui_colours(self) -> None:
+        class FakeUi:
+            def __init__(self) -> None:
+                self.color_calls: list[dict[str, str]] = []
+                self.head_html: list[str] = []
+
+            def colors(self, **kwargs: str) -> None:
+                self.color_calls.append(dict(kwargs))
+
+            def add_head_html(self, html: str) -> None:
+                self.head_html.append(html)
+
+        with TemporaryDirectory() as tmp:
+            store = ModWebUserSettingsStore(Path(tmp) / "user_settings.json")
+            store.set(
+                user_id=42,
+                settings=ModWebUserSettings(
+                    appearance=ModWebAppearanceSettings(
+                        primary_color_hex="#22c55e",
+                        positive_color_hex="#16a34a",
+                        warning_color_hex="#facc15",
+                        negative_color_hex="#ef4444",
+                        info_color_hex="#0ea5e9",
+                    )
+                ),
+            )
+            service = ModWebService()
+            service._backend = ModWebDashboardBackend(user_settings=store)
+            ui = FakeUi()
+            user = ModWebUser(discord_id=42, username="sudo", global_name="Finch", avatar_hash=None)
+
+            service._apply_user_appearance_palette(ui=cast(ModWebUi, cast(object, ui)), user=user)
+
+        self.assertEqual(
+            ui.color_calls,
+            [
+                {
+                    "primary": "#22C55E",
+                    "secondary": "#52525b",
+                    "accent": "#22C55E",
+                    "positive": "#16A34A",
+                    "negative": "#EF4444",
+                    "info": "#0EA5E9",
+                    "warning": "#FACC15",
+                }
+            ],
+        )
+        self.assertEqual(len(ui.head_html), 1)
 
     def test_alias_target_label_does_not_duplicate_unknown_discord_id(self) -> None:
         cache = object.__new__(config.Name_Cache)

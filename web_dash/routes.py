@@ -13,7 +13,14 @@ from mod_web_theme import MOD_WEB_THEME_STYLESHEET
 from mod_web_toasts import MOD_WEB_TOAST_JAVASCRIPT
 
 from .assets import CacheableTextAsset, cacheable_text_asset
-from .constants import _MOD_WEB_PAGE_PATH, _PORTAL_HEALTH_PATH, _SAME_ORIGIN_NODE_PROXY_BASE, log, traffic_log
+from .constants import (
+    _MOD_WEB_PAGE_PATH,
+    _PORTAL_HEALTH_PATH,
+    _PORTAL_NODE_LATENCIES_PATH,
+    _SAME_ORIGIN_NODE_PROXY_BASE,
+    log,
+    traffic_log,
+)
 from .nicegui_protocols import ModWebFastApiApp, ModWebNotificationType, ModWebRouteUi
 from .runtime_imports import (
     Access_Control,
@@ -289,6 +296,15 @@ class ModWebRoutesMixin(ModWebServiceSupport):
                 media_type="application/json",
                 headers={"Cache-Control": "no-store"},
             )
+
+        @nicegui_app.get(_PORTAL_NODE_LATENCIES_PATH)
+        async def _portal_node_latencies() -> dict[str, object]:
+            if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
+                raise _http_exception(404, "Portal node latency measurements are only available on Portal.")
+            return {
+                "node": config.MOD_WEB_SERVER.node_name,
+                "latencies": await self._node_api.portal_node_latencies_async(),
+            }
 
         @nicegui_app.get("/mod-web/assets/toasts.js")
         async def _toast_javascript(request: Request) -> StarletteResponse:

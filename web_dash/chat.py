@@ -611,7 +611,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             self._render_error_page(ui=ui, title="Chat unavailable", detail=str(xcp), app_name=app_name)
             return
 
-        self._apply_theme(ui=ui)
+        self._apply_theme_for_user(ui=ui, user=user)
 
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_user_header(ui=ui, user=user)

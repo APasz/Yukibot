@@ -112,6 +112,18 @@ class ModWebUi(Protocol):
 
     def download(self, src: object, filename: str | None = None, media_type: str = "") -> None: ...
 
+    def colors(
+        self,
+        *,
+        primary: str,
+        secondary: str,
+        accent: str,
+        positive: str,
+        negative: str,
+        info: str,
+        warning: str,
+    ) -> None: ...
+
     def add_head_html(self, html: str) -> None: ...
 
     def run_javascript(self, code: str, *, timeout: float = 1.0) -> object: ...

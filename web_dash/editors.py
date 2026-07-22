@@ -3360,7 +3360,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
     @staticmethod
     def _hex_color_to_rgba(color_hex: str, *, alpha: float) -> str:
         if len(color_hex) != 7 or not color_hex.startswith("#"):
-            raise ValueError(f"Expected #rrggbb color, got {color_hex!r}.")
+            raise ValueError(f"Expected #rrggbb colour, got {color_hex!r}.")
         if alpha < 0 or alpha > 1:
             raise ValueError(f"Alpha must be between 0 and 1, got {alpha!r}.")
         try:
@@ -3368,7 +3368,7 @@ class ModWebEditorsMixin(ModWebServiceSupport):
             green = int(color_hex[3:5], 16)
             blue = int(color_hex[5:7], 16)
         except ValueError as xcp:
-            raise ValueError(f"Expected #rrggbb color, got {color_hex!r}.") from xcp
+            raise ValueError(f"Expected #rrggbb colour, got {color_hex!r}.") from xcp
         return f"rgba({red}, {green}, {blue}, {alpha:.2f})"
 
     @staticmethod

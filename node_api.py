@@ -6898,7 +6898,7 @@ class NodeApiService:
         if color is None:
             return None
         if color < 0 or color > 0xFFFFFF:
-            raise ValueError(f"App color must be between 0x000000 and 0xFFFFFF, got {color!r}.")
+            raise ValueError(f"App colour must be between 0x000000 and 0xFFFFFF, got {color!r}.")
         return f"#{color:06X}"
 
     @staticmethod
@@ -8337,7 +8337,7 @@ class NodeApiService:
                             "type": "node_latencies",
                             "node": self.node_name,
                             "sample_id": sample_id,
-                            "latencies": await self._portal_node_latencies_async(),
+                            "latencies": await self.portal_node_latencies_async(),
                         }
                     )
                     continue
@@ -8362,7 +8362,7 @@ class NodeApiService:
             return None
         return round(latency_seconds * 1000)
 
-    async def _portal_node_latencies_async(self) -> dict[str, int | None]:
+    async def portal_node_latencies_async(self) -> dict[str, int | None]:
         if config.ACTIVE_BOT_PROFILE.name is not config.BotProfileName.PORTAL:
             return {}
         targets = self._portal_node_latency_targets()

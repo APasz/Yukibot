@@ -1846,7 +1846,7 @@ class DC_Relay(metaclass=Singleton):
                 user = await self.reso.user(discord_user_id, guild_snowflake, silent=True)
             except Exception as xcp:
                 log.debug(
-                    "Chat author role color lookup failed: user=%s guild=%s error=%s",
+                    "Chat author role colour lookup failed: user=%s guild=%s error=%s",
                     discord_user_id,
                     int(guild_snowflake),
                     xcp,

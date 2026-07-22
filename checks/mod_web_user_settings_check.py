@@ -25,6 +25,10 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
                 appearance=ModWebAppearanceSettings(
                     color_scheme=ModWebColorScheme.DARK,
                     primary_color_hex="#22c55e",
+                    positive_color_hex="#16a34a",
+                    warning_color_hex="#facc15",
+                    negative_color_hex="#ef4444",
+                    info_color_hex="#0ea5e9",
                 ),
                 web_chat=ModWebChatSettings(use_24_hour_time=False),
             )
@@ -40,6 +44,10 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
         self.assertEqual(restored, settings)
         self.assertEqual(payload["version"], 1)
         self.assertEqual(payload["users"]["42"]["appearance"]["primary_color_hex"], "#22C55E")
+        self.assertEqual(payload["users"]["42"]["appearance"]["positive_color_hex"], "#16A34A")
+        self.assertEqual(payload["users"]["42"]["appearance"]["warning_color_hex"], "#FACC15")
+        self.assertEqual(payload["users"]["42"]["appearance"]["negative_color_hex"], "#EF4444")
+        self.assertEqual(payload["users"]["42"]["appearance"]["info_color_hex"], "#0EA5E9")
 
     def test_store_rejects_invalid_user_ids_and_payloads(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -55,7 +63,7 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
 
     def test_appearance_settings_reject_invalid_primary_colour(self) -> None:
         with self.assertRaisesRegex(ValueError, "six-digit"):
-            ModWebAppearanceSettings(primary_color_hex="#1234")
+            ModWebAppearanceSettings(warning_color_hex="#1234")
 
     def test_remote_store_uses_atomic_single_user_mutation(self) -> None:
         settings = ModWebUserSettings(web_chat=ModWebChatSettings(use_24_hour_time=False))

@@ -32,8 +32,11 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("--mod-purple: #8b5cf6", css)
         self.assertIn("--mod-accent: #8b5cf6", css)
         self.assertIn("--mod-red: #dc2626", css)
+        self.assertIn("--mod-negative: var(--mod-red)", css)
+        self.assertIn("--mod-info: #8b5cf6", css)
+        self.assertIn("--mod-positive: #6b7280", css)
         self.assertIn("--mod-warning: #f59e0b", css)
-        self.assertIn("--mod-warning-text: #fde68a", css)
+        self.assertIn("--mod-warning-text: color-mix", css)
         self.assertNotIn("radial-gradient(circle at 14% -8%", css)
         self.assertIn("--mod-motion-medium: 260ms", css)
         self.assertIn("--mod-motion-tab-accent: 320ms", css)
@@ -253,7 +256,8 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertRegex(
             css,
             r"(?s)\.mod-section-tabs \.q-tab::after \{.*?right: 0;.*?left: 0;.*?"
-            r"linear-gradient\(90deg, #7c3aed 0%, #c4b5fd 50%, #7c3aed 100%\);.*?"
+            r"linear-gradient\(90deg, var\(--mod-accent\) 0%, var\(--mod-accent-text\) 50%, "
+            r"var\(--mod-accent\) 100%\);.*?"
             r"transform: scaleX\(0\);.*?"
             r"transform-origin: center;.*?"
             r"transition: transform var\(--mod-motion-tab-accent\)",
@@ -493,6 +497,10 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-bulk-metadata-type-checkbox", css)
         self.assertIn(".mod-app-details-section", css)
         self.assertIn(".mod-app-details-field", css)
+        self.assertIn(".mod-user-appearance-grid", css)
+        self.assertIn("repeat(auto-fit, minmax(min(17rem, 100%), 1fr))", css)
+        self.assertIn(".mod-user-accent-input .q-field__control", css)
+        self.assertNotIn(".mod-user-accent-swatch", css)
         self.assertIn(".mod-page-editor-controls", css)
         self.assertIn(".mod-page-url-invalid", css)
         self.assertIn(".mod-mod-page-link", css)
@@ -558,7 +566,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-toolbar-status-button", css)
         self.assertRegex(
             css,
-            r"(?s)\.mod-toolbar-status-button \.q-btn__content \{.*?color: #f5f3ff !important;",
+            r"(?s)\.mod-toolbar-status-button \.q-btn__content \{.*?color: var\(--mod-accent-text-strong\) !important;",
         )
         self.assertIn(".mod-setting-control-surface", css)
         self.assertIn(".mod-setting-field-secondary", css)
@@ -678,9 +686,9 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("border-radius: 0;", css)
         self.assertIn("cursor: pointer;", css)
         self.assertIn("backdrop-filter: blur(12px);", css)
-        self.assertIn("linear-gradient(135deg, rgba(220, 38, 38, 0.13), transparent 58%)", css)
+        self.assertIn("linear-gradient(135deg, var(--mod-negative-glow), transparent 58%)", css)
         self.assertIn("font-size: 0.72rem;", css)
-        self.assertIn("filter: drop-shadow(0 12px 24px rgba(220, 38, 38, 0.24));", css)
+        self.assertIn("filter: drop-shadow(0 12px 24px var(--mod-negative-glow));", css)
         self.assertIn("width: min(52rem, calc(100vw - 1.5rem)) !important;", css)
         self.assertIn("width: min(44rem, calc(100vw - 1.5rem)) !important;", css)
         self.assertIn("min-height: 11.5rem !important;", css)
@@ -708,7 +716,7 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("@keyframes mod-setting-secret-shift-a", css)
         self.assertIn("@keyframes mod-setting-secret-shift-b", css)
         self.assertIn("border-radius: 0 !important", css)
-        self.assertIn("background: var(--mod-purple-dark)", css)
+        self.assertIn("background: var(--mod-accent-dark)", css)
         self.assertNotIn(".mod-setting-meta-corner", css)
         self.assertNotIn("var(--mod-purple-dark), var(--mod-red-dark)", css)
         self.assertNotIn("<script", css.casefold())
@@ -767,6 +775,37 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("::-webkit-inner-spin-button", css)
         self.assertIn("::-webkit-outer-spin-button", css)
         self.assertIn("-webkit-text-fill-color: #f4f4f5 !important;", css)
+
+    def test_accent_chrome_uses_derived_accent_variables(self) -> None:
+        stylesheet = MOD_WEB_THEME_STYLESHEET
+
+        self.assertIn("--mod-accent-dark: color-mix", stylesheet)
+        self.assertIn("--mod-accent-text: color-mix", stylesheet)
+        self.assertIn("--mod-accent-border: color-mix", stylesheet)
+        self.assertIn(".text-primary,\n                .text-accent", stylesheet)
+        self.assertIn(".text-negative", stylesheet)
+        self.assertIn(".q-btn.bg-primary,\n                .q-btn.bg-accent", stylesheet)
+        self.assertIn(".q-btn.bg-negative", stylesheet)
+        self.assertIn(".q-btn.mod-list-button.secondary", stylesheet)
+        self.assertIn("var(--mod-accent-dark) !important;", stylesheet)
+        self.assertIn(
+            ".mod-badge.purple { background: var(--mod-accent-dark)",
+            stylesheet,
+        )
+        self.assertIn("background: var(--mod-accent-dark) !important;", stylesheet)
+        for forbidden_literal in (
+            "rgba(139, 92, 246",
+            "rgba(124, 58, 237",
+            "rgba(196, 181, 253",
+            "rgba(221, 214, 254",
+            "rgba(237, 233, 254",
+            "rgba(167, 139, 250",
+            "rgba(216, 180, 254",
+            "var(--mod-purple)",
+            "var(--mod-purple-dark)",
+        ):
+            with self.subTest(forbidden_literal=forbidden_literal):
+                self.assertNotIn(forbidden_literal, stylesheet)
 
     def test_apply_theme_uses_palette_and_head_css(self) -> None:
         ui = _FakeUi()

@@ -27,7 +27,8 @@ from .constants import (
     _REMOTE_NODE_REQUEST_TIMEOUT_SECONDS,
     _REMOTE_NODE_STREAM_CHUNK_SIZE_BYTES,
     _REMOTE_NODE_TOKEN_TTL_SECONDS,
-    _SAME_ORIGIN_NODE_API_BASE,
+    _PORTAL_HEALTH_PATH,
+    _PORTAL_NODE_LATENCIES_PATH,
     _SAME_ORIGIN_NODE_PROXY_BASE,
     _TITLE_STATS_REFRESH_INTERVAL_SECONDS,
     log,
@@ -402,7 +403,6 @@ class ModWebModelsMixin(ModWebServiceSupport):
             if is_portal
             else self._absolute_node_api_base_url(config.MOD_WEB_SERVER.node_api_base_url)
         )
-        browser_api_base_url = _SAME_ORIGIN_NODE_API_BASE if is_portal else api_base_url
         return ModWebNodeLink(
             node_name=node_name,
             label=self._current_node_label(),
@@ -411,7 +411,11 @@ class ModWebModelsMixin(ModWebServiceSupport):
             api_url=f"{_SAME_ORIGIN_NODE_PROXY_BASE}/{quote(node_name, safe='')}/apps",
             is_current=True,
             latency_probe_url=self._node_api.ping_url(base_url=api_base_url),
-            presence_stream_url=self._node_api.presence_stream_url(base_url=browser_api_base_url),
+            presence_stream_url=(
+                None if is_portal else self._node_api.presence_stream_url(base_url=api_base_url)
+            ),
+            presence_health_url=_PORTAL_HEALTH_PATH if is_portal else None,
+            portal_node_latencies_url=_PORTAL_NODE_LATENCIES_PATH if is_portal else None,
         )
 
     @staticmethod

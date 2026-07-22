@@ -430,7 +430,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
         request: Request,
         show_api_actions: bool,
     ) -> None:
-        self._apply_theme(ui=ui)
+        self._apply_theme_for_user(ui=ui, user=user)
         ModWebUiHelpersMixin._render_skip_link(ui=ui)
         simulated_down_node_names: tuple[str, ...] = self._simulated_down_node_names(request)
         simulated_down_keys = {node_name.casefold() for node_name in simulated_down_node_names}
@@ -1385,7 +1385,7 @@ class ModWebHomeMixin(ModWebServiceSupport):
             Callable[[], None],
         ],
     ) -> None:
-        self._apply_theme(ui=ui)
+        self._apply_theme_for_user(ui=ui, user=user)
         current_app_entries = initial_app_entries
         current_system_summary = initial_system_summary
         current_history = self._append_node_system_history(
@@ -3053,6 +3053,10 @@ class ModWebHomeMixin(ModWebServiceSupport):
             alive_text=f"{section.node.label}: Alive",
             down_text=f"{section.node.label}: Down",
             presence_stream_url=section.node.presence_stream_url if section.error is None else None,
+            presence_health_url=section.node.presence_health_url if section.error is None else None,
+            portal_node_latencies_url=(
+                section.node.portal_node_latencies_url if section.error is None else None
+            ),
             pending_class_name=ModWebUiHelpersMixin._badge_class_name(
                 tone=self._node_status_badge_tone(section),
                 extra_classes=extra_classes,

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi.exceptions import RequestValidationError
 from hikari import Snowflake
 
 from _async_utils import run_blocking
+from mod_web_theme import DEFAULT_MOD_WEB_THEME
 from relay_notices import (
     AppLifecycleNotice,
     AppLifecycleState,
@@ -60,6 +61,7 @@ from .runtime_imports import (
     Iterable,
     Label,
     LiteralString,
+    Mapping,
     ModWebSessionPersistence,
     ModWebUser,
     Path,
@@ -71,12 +73,14 @@ from .runtime_imports import (
     cast,
     config,
     inspect,
+    json,
     lru_cache,
     requests,
     urlencode,
 )
 from .service_base import ModWebServiceSupport
 from .ui_helpers import ModWebUiHelpersMixin
+from .user_settings import ModWebAppearanceSettings, ModWebUserSettings
 from .types import (
     ModWebNodeStatus,
     ModWebNotificationTrayItemKind,
@@ -102,6 +106,50 @@ _USER_HEADER_TRAY_CARD_HEIGHT_REM = 4.35
 _USER_HEADER_SURFACE_ASPECT_RATIO = "4 / 1"
 _USER_HEADER_STACK_WIDTH_REM = 10.5
 _USER_HEADER_ICON_BUTTON_CLASSES = "mod-list-button secondary grow basis-0 min-h-[2.2rem] min-w-0 px-3 py-2"
+_USER_ACCENT_STYLE_ELEMENT_ID = "mod-web-user-accent-style"
+_UserAppearanceColorKey = Literal[
+    "primary_color_hex",
+    "positive_color_hex",
+    "warning_color_hex",
+    "negative_color_hex",
+    "info_color_hex",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _UserAppearanceColorSpec:
+    key: _UserAppearanceColorKey
+    label: str
+    css_variables: tuple[str, ...]
+
+
+_USER_APPEARANCE_COLOR_SPECS: tuple[_UserAppearanceColorSpec, ...] = (
+    _UserAppearanceColorSpec(
+        key="primary_color_hex",
+        label="Accent colour",
+        css_variables=("--mod-accent", "--q-primary", "--q-accent"),
+    ),
+    _UserAppearanceColorSpec(
+        key="positive_color_hex",
+        label="Positive colour",
+        css_variables=("--mod-positive", "--q-positive"),
+    ),
+    _UserAppearanceColorSpec(
+        key="warning_color_hex",
+        label="Warning colour",
+        css_variables=("--mod-warning", "--q-warning"),
+    ),
+    _UserAppearanceColorSpec(
+        key="negative_color_hex",
+        label="Error colour",
+        css_variables=("--mod-red", "--mod-negative", "--q-negative"),
+    ),
+    _UserAppearanceColorSpec(
+        key="info_color_hex",
+        label="Info colour",
+        css_variables=("--mod-info", "--q-info"),
+    ),
+)
 _LOGIN_ADMINISTRATOR_LEVELS: tuple[Power_Level, ...] = (
     Power_Level.root,
     Power_Level.sudo,
@@ -617,6 +665,9 @@ class ModWebStatusMixin(ModWebServiceSupport):
                                             presence_stream_url=(
                                                 None if status.is_simulated_down else status.node.presence_stream_url
                                             ),
+                                            presence_health_url=(
+                                                None if status.is_simulated_down else status.node.presence_health_url
+                                            ),
                                             pending_class_name=self._badge_class_name(
                                                 tone=self._login_node_status_badge_tone(status),
                                                 extra_classes="mod-node-status-badge",
@@ -996,7 +1047,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
 
     def _render_forbidden_page(self, *, ui: ModWebUi, user: ModWebUser, required_level: Power_Level) -> None:
         current_level: Power_Level = self._acl.level_of(user.discord_id) if self._acl is not None else Power_Level.guest
-        self._apply_theme(ui=ui)
+        self._apply_theme_for_user(ui=ui, user=user)
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_user_header(ui=ui, user=user)
             self._render_status_page_panel(
@@ -1110,7 +1161,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
         return user_id
 
     async def _render_alias_page(self, *, ui: ModWebUi, user: ModWebUser, request: Request) -> None:
-        self._apply_theme(ui=ui)
+        self._apply_theme_for_user(ui=ui, user=user)
         ModWebUiHelpersMixin._render_skip_link(ui=ui)
         selected_user_id: int | None = None
         raw_selected_user_id = request.query_params.get("user")
@@ -1671,8 +1722,281 @@ class ModWebStatusMixin(ModWebServiceSupport):
             f"{_USER_HEADER_ICON_BUTTON_CLASSES} mod-user-menu-button"
         )
 
+    def _apply_theme_for_user(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+        self._apply_theme(ui=ui)
+        self._apply_user_appearance_palette(ui=ui, user=user)
+
+    def _apply_user_appearance_palette(self, *, ui: ModWebUi, user: ModWebUser) -> None:
+        settings = self._backend.user_settings_for(user_id=user.discord_id)
+        colors = self._resolved_user_appearance_colors(settings.appearance)
+        ui.colors(
+            primary=colors["primary_color_hex"],
+            secondary=DEFAULT_MOD_WEB_THEME.palette.nicegui.secondary,
+            accent=colors["primary_color_hex"],
+            positive=colors["positive_color_hex"],
+            negative=colors["negative_color_hex"],
+            info=colors["info_color_hex"],
+            warning=colors["warning_color_hex"],
+        )
+        ui.add_head_html(self._user_appearance_style_html(settings.appearance))
+
+    @staticmethod
+    def _default_user_accent_color_hex() -> str:
+        return DEFAULT_MOD_WEB_THEME.palette.purple.upper()
+
+    @staticmethod
+    def _default_user_positive_color_hex() -> str:
+        return DEFAULT_MOD_WEB_THEME.palette.nicegui.positive.upper()
+
+    @staticmethod
+    def _default_user_warning_color_hex() -> str:
+        return DEFAULT_MOD_WEB_THEME.palette.warning.upper()
+
+    @staticmethod
+    def _default_user_negative_color_hex() -> str:
+        return DEFAULT_MOD_WEB_THEME.palette.red.upper()
+
+    @classmethod
+    def _default_user_appearance_colors(cls) -> dict[_UserAppearanceColorKey, str]:
+        accent = cls._default_user_accent_color_hex()
+        return {
+            "primary_color_hex": accent,
+            "positive_color_hex": cls._default_user_positive_color_hex(),
+            "warning_color_hex": cls._default_user_warning_color_hex(),
+            "negative_color_hex": cls._default_user_negative_color_hex(),
+            "info_color_hex": accent,
+        }
+
+    @classmethod
+    def _resolved_user_appearance_colors(
+        cls,
+        appearance: ModWebAppearanceSettings,
+    ) -> dict[_UserAppearanceColorKey, str]:
+        defaults = cls._default_user_appearance_colors()
+        accent = appearance.primary_color_hex or defaults["primary_color_hex"]
+        return {
+            "primary_color_hex": accent,
+            "positive_color_hex": appearance.positive_color_hex or defaults["positive_color_hex"],
+            "warning_color_hex": appearance.warning_color_hex or defaults["warning_color_hex"],
+            "negative_color_hex": appearance.negative_color_hex or defaults["negative_color_hex"],
+            "info_color_hex": appearance.info_color_hex or accent,
+        }
+
+    @staticmethod
+    def _appearance_color_rgb(color_hex: str) -> tuple[int, int, int]:
+        normalized = ModWebAppearanceSettings(primary_color_hex=color_hex).primary_color_hex
+        if normalized is None:
+            raise ValueError("Appearance colour is required.")
+        return (
+            int(normalized[1:3], 16),
+            int(normalized[3:5], 16),
+            int(normalized[5:7], 16),
+        )
+
+    @classmethod
+    def _appearance_color_mix(cls, color_hex: str, *, color_weight: float, other_hex: str) -> str:
+        red, green, blue = cls._appearance_color_rgb(color_hex)
+        other_red, other_green, other_blue = cls._appearance_color_rgb(other_hex)
+        mixed = (
+            round((red * color_weight) + (other_red * (1.0 - color_weight))),
+            round((green * color_weight) + (other_green * (1.0 - color_weight))),
+            round((blue * color_weight) + (other_blue * (1.0 - color_weight))),
+        )
+        return f"#{mixed[0]:02X}{mixed[1]:02X}{mixed[2]:02X}"
+
+    @classmethod
+    def _appearance_color_alpha(cls, color_hex: str, alpha: float) -> str:
+        red, green, blue = cls._appearance_color_rgb(color_hex)
+        return f"rgba({red}, {green}, {blue}, {alpha:.2f})"
+
+    @classmethod
+    def _user_appearance_derived_css_variables(
+        cls,
+        *,
+        prefix: str,
+        color_hex: str,
+        dark_weight: float,
+        surface_weight: float,
+        surface_base_hex: str = "#050507",
+        text_weight: float = 0.22,
+    ) -> dict[str, str]:
+        return {
+            f"--mod-{prefix}-dark": cls._appearance_color_mix(
+                color_hex,
+                color_weight=dark_weight,
+                other_hex="#050507",
+            ),
+            f"--mod-{prefix}-surface": cls._appearance_color_mix(
+                color_hex,
+                color_weight=surface_weight,
+                other_hex=surface_base_hex,
+            ),
+            f"--mod-{prefix}-text": cls._appearance_color_mix(
+                color_hex,
+                color_weight=text_weight,
+                other_hex="#FFFFFF",
+            ),
+            f"--mod-{prefix}-border": cls._appearance_color_alpha(color_hex, 0.58),
+            f"--mod-{prefix}-border-strong": cls._appearance_color_alpha(color_hex, 0.74),
+            f"--mod-{prefix}-glow": cls._appearance_color_alpha(color_hex, 0.24),
+        }
+
+    @classmethod
+    def _user_appearance_css_variables(
+        cls,
+        appearance: ModWebAppearanceSettings,
+    ) -> dict[str, str]:
+        colors_by_key = cls._resolved_user_appearance_colors(appearance)
+        variables: dict[str, str] = {}
+        for spec in _USER_APPEARANCE_COLOR_SPECS:
+            color_hex = colors_by_key[spec.key]
+            for variable_name in spec.css_variables:
+                variables[variable_name] = color_hex
+        accent_color_hex = colors_by_key["primary_color_hex"]
+        variables.update(
+            cls._user_appearance_derived_css_variables(
+                prefix="accent",
+                color_hex=accent_color_hex,
+                dark_weight=0.38,
+                surface_weight=0.22,
+                text_weight=0.36,
+            )
+        )
+        variables["--mod-accent-panel"] = cls._appearance_color_mix(
+            accent_color_hex,
+            color_weight=0.16,
+            other_hex="#111118",
+        )
+        variables["--mod-accent-text-strong"] = cls._appearance_color_mix(
+            accent_color_hex,
+            color_weight=0.18,
+            other_hex="#FFFFFF",
+        )
+        variables["--mod-accent-faint"] = cls._appearance_color_alpha(accent_color_hex, 0.12)
+        variables["--mod-accent-wash"] = cls._appearance_color_alpha(accent_color_hex, 0.08)
+        variables.update(
+            cls._user_appearance_derived_css_variables(
+                prefix="info",
+                color_hex=colors_by_key["info_color_hex"],
+                dark_weight=0.38,
+                surface_weight=0.22,
+            )
+        )
+        variables.update(
+            cls._user_appearance_derived_css_variables(
+                prefix="positive",
+                color_hex=colors_by_key["positive_color_hex"],
+                dark_weight=0.38,
+                surface_weight=0.22,
+            )
+        )
+        variables.update(
+            cls._user_appearance_derived_css_variables(
+                prefix="negative",
+                color_hex=colors_by_key["negative_color_hex"],
+                dark_weight=0.42,
+                surface_weight=0.22,
+            )
+        )
+        variables["--mod-red-dark"] = variables["--mod-negative-dark"]
+        variables.update(
+            cls._user_appearance_derived_css_variables(
+                prefix="warning",
+                color_hex=colors_by_key["warning_color_hex"],
+                dark_weight=0.30,
+                surface_weight=0.18,
+                text_weight=0.28,
+            )
+        )
+        return variables
+
+    @classmethod
+    def _user_appearance_style_html(cls, appearance: ModWebAppearanceSettings) -> str:
+        variables = cls._user_appearance_css_variables(appearance)
+        declarations = " ".join(
+            f"{variable_name}: {color_hex};"
+            for variable_name, color_hex in sorted(variables.items())
+        )
+        encoded_variables = json.dumps(variables)
+        return (
+            f'<style id="{_USER_ACCENT_STYLE_ELEMENT_ID}">:root {{ {declarations} }}</style>'
+            "<script>(() => {"
+            f"const variables = {encoded_variables};"
+            "const root = document.documentElement;"
+            f"{cls._appearance_css_variable_assignment_javascript()}"
+            "})()</script>"
+        )
+
+    @staticmethod
+    def _appearance_css_variable_assignment_javascript() -> str:
+        return (
+            "const targets = [root, document.body].filter(Boolean);"
+            "for (const target of targets) {"
+            "for (const [name, value] of Object.entries(variables)) { target.style.setProperty(name, value); }"
+            "}"
+        )
+
+    @classmethod
+    def _user_appearance_javascript(cls, variables: dict[str, str] | None) -> str:
+        encoded_variables = json.dumps(variables)
+        encoded_style_id = json.dumps(_USER_ACCENT_STYLE_ELEMENT_ID)
+        variable_names = tuple(sorted(cls._user_appearance_css_variables(ModWebAppearanceSettings()).keys()))
+        encoded_variable_names = json.dumps(variable_names)
+        return (
+            "(() => {"
+            f"const variables = {encoded_variables};"
+            f"const styleId = {encoded_style_id};"
+            f"const variableNames = {encoded_variable_names};"
+            "const root = document.documentElement;"
+            "let style = document.getElementById(styleId);"
+            "if (variables && typeof variables === 'object') {"
+            "const declarations = Object.entries(variables)"
+            ".map(([name, value]) => `${name}: ${value};`).join(' ');"
+            "const css = `:root { ${declarations} }`;"
+            "if (!style) {"
+            "style = document.createElement('style');"
+            "style.id = styleId;"
+            "document.head.appendChild(style);"
+            "}"
+            "style.textContent = css;"
+            f"{cls._appearance_css_variable_assignment_javascript()}"
+            "} else {"
+            "if (style) { style.remove(); }"
+            "const targets = [root, document.body].filter(Boolean);"
+            "for (const target of targets) {"
+            "for (const name of variableNames) { target.style.removeProperty(name); }"
+            "}"
+            "}"
+            "})()"
+        )
+
+    @classmethod
+    def _normalized_user_appearance_color_hex(cls, color_hex: str) -> str:
+        return ModWebAppearanceSettings(primary_color_hex=color_hex).primary_color_hex or cls._default_user_accent_color_hex()
+
+    @staticmethod
+    def _user_settings_with_appearance_colors(
+        *,
+        settings: ModWebUserSettings,
+        colors_by_key: Mapping[_UserAppearanceColorKey, str | None],
+    ) -> ModWebUserSettings:
+        return ModWebUserSettings(
+            appearance=ModWebAppearanceSettings(
+                color_scheme=settings.appearance.color_scheme,
+                primary_color_hex=colors_by_key["primary_color_hex"],
+                positive_color_hex=colors_by_key["positive_color_hex"],
+                warning_color_hex=colors_by_key["warning_color_hex"],
+                negative_color_hex=colors_by_key["negative_color_hex"],
+                info_color_hex=colors_by_key["info_color_hex"],
+            ),
+            web_chat=settings.web_chat,
+        )
+
     def _build_user_settings_panel(self, *, ui: ModWebUi, user: ModWebUser) -> Callable[[], None]:
         def _show_user_settings_panel() -> None:
+            current_settings = self._backend.user_settings_for(user_id=user.discord_id)
+            current_colors = self._resolved_user_appearance_colors(current_settings.appearance)
+
             with ui.dialog() as settings_dialog:
                 with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
                     with ui.column().classes("w-full gap-4 mod-app-details-layout"):
@@ -1680,9 +2004,100 @@ class ModWebStatusMixin(ModWebServiceSupport):
                             ui.label(f"{self._web_display_name(user)} Settings").classes(
                                 "text-xl font-black mod-title-small"
                             )
-                        with ui.column().classes("mod-app-details-section gap-2"):
-                            ui.label("Coming soon").classes("mod-stat-label")
+                        with ui.column().classes("mod-app-details-section mod-user-appearance-section gap-2"):
+                            ui.label("Appearance").classes("mod-stat-label")
+                            color_inputs: dict[_UserAppearanceColorKey, ModWebValueContainer] = {}
+                            with ui.element("div").classes("mod-user-appearance-grid"):
+                                for spec in _USER_APPEARANCE_COLOR_SPECS:
+                                    color_inputs[spec.key] = (
+                                        ui.input(
+                                            spec.label,
+                                            value=current_colors[spec.key],
+                                        )
+                                        .props("filled square dense hide-bottom-space color=accent type=color")
+                                        .classes(
+                                            "mod-app-details-field mod-user-accent-input w-full min-w-0"
+                                        )
+                                    )
+
+                            def _capture_color_values() -> dict[_UserAppearanceColorKey, str]:
+                                return {
+                                    spec.key: self._normalized_user_appearance_color_hex(_value_as_text(color_inputs[spec.key]))
+                                    for spec in _USER_APPEARANCE_COLOR_SPECS
+                                }
+
+                            def _apply_color_values_to_controls(colors: dict[_UserAppearanceColorKey, str]) -> None:
+                                for spec in _USER_APPEARANCE_COLOR_SPECS:
+                                    set_value = getattr(color_inputs[spec.key], "set_value", None)
+                                    if callable(set_value):
+                                        set_value(colors[spec.key])
+
+                            def _save_appearance_colors(_: object | None = None) -> None:
+                                nonlocal current_settings
+                                try:
+                                    next_colors = _capture_color_values()
+                                    next_settings = self._user_settings_with_appearance_colors(
+                                        settings=current_settings,
+                                        colors_by_key=dict(next_colors),
+                                    )
+                                    changed = self._backend.save_user_settings(
+                                        user_id=user.discord_id,
+                                        settings=next_settings,
+                                    )
+                                except ValueError as xcp:
+                                    ui.notify(str(xcp), type="negative")
+                                    return
+                                except Exception as xcp:
+                                    log.warning("User settings update failed: user=%s error=%s", user.discord_id, xcp)
+                                    ui.notify(f"Settings update failed: {xcp}", type="negative")
+                                    return
+
+                                current_settings = next_settings
+                                css_variables = self._user_appearance_css_variables(next_settings.appearance)
+                                try:
+                                    ui.run_javascript(self._user_appearance_javascript(css_variables), timeout=0.5)
+                                except Exception:
+                                    pass
+                                _apply_color_values_to_controls(
+                                    self._resolved_user_appearance_colors(next_settings.appearance)
+                                )
+                                ui.notify(
+                                    "Saved appearance colours." if changed else "Appearance colours are unchanged.",
+                                    type="positive",
+                                )
+
+                            def _reset_appearance_colors(_: object | None = None) -> None:
+                                nonlocal current_settings
+                                try:
+                                    reset_colors: dict[_UserAppearanceColorKey, str | None] = {
+                                        spec.key: None for spec in _USER_APPEARANCE_COLOR_SPECS
+                                    }
+                                    next_settings = self._user_settings_with_appearance_colors(
+                                        settings=current_settings,
+                                        colors_by_key=reset_colors,
+                                    )
+                                    changed = self._backend.save_user_settings(
+                                        user_id=user.discord_id,
+                                        settings=next_settings,
+                                    )
+                                except Exception as xcp:
+                                    log.warning("User settings reset failed: user=%s error=%s", user.discord_id, xcp)
+                                    ui.notify(f"Settings reset failed: {xcp}", type="negative")
+                                    return
+
+                                current_settings = next_settings
+                                _apply_color_values_to_controls(self._resolved_user_appearance_colors(next_settings.appearance))
+                                try:
+                                    ui.run_javascript(self._user_appearance_javascript(None), timeout=0.5)
+                                except Exception:
+                                    pass
+                                ui.notify(
+                                    "Reset appearance colours." if changed else "Appearance colours are already default.",
+                                    type="positive",
+                                )
                         with ui.row().classes("w-full justify-end mod-app-details-actions"):
+                            ui.button("Reset", on_click=_reset_appearance_colors).classes("mod-list-button secondary")
+                            ui.button("Save", on_click=_save_appearance_colors).classes("mod-list-button")
                             ui.button("Close", on_click=settings_dialog.close).classes("mod-list-button secondary")
                 settings_dialog.open()
 
@@ -1796,7 +2211,7 @@ class ModWebStatusMixin(ModWebServiceSupport):
     @staticmethod
     def _notification_tray_progress_track_style(item: _ModWebNotificationTrayItem) -> str:
         app_border_color = item.app_color_hex or "#000000"
-        return f"height: 0.9rem; background: #42106c; border-top: 1px solid {app_border_color};"
+        return f"height: 0.9rem; background: var(--mod-accent-dark); border-top: 1px solid {app_border_color};"
 
     @staticmethod
     def _user_header_surface_style() -> str:
@@ -1845,11 +2260,11 @@ class ModWebStatusMixin(ModWebServiceSupport):
         if item.kind is ModWebNotificationTrayItemKind.UPLOAD:
             return (
                 f"position: absolute; top: 0; right: 0; height: 100%; width: {width_percent:.2f}%;"
-                " background: linear-gradient(270deg, #7c3aed, #4c1d95);"
+                " background: linear-gradient(270deg, var(--mod-accent), var(--mod-accent-dark));"
             )
         return (
             f"position: absolute; top: 0; left: 0; height: 100%; width: {width_percent:.2f}%;"
-            " background: linear-gradient(90deg, #7c3aed, #4c1d95);"
+            " background: linear-gradient(90deg, var(--mod-accent), var(--mod-accent-dark));"
         )
 
     def _user_can_use_fake_chat_preview(self, user: ModWebUser) -> bool:
