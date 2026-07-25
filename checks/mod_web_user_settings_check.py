@@ -11,6 +11,7 @@ from web_dash.user_settings import (
     ModWebAppearanceSettings,
     ModWebChatSettings,
     ModWebColorScheme,
+    ModWebTimestampSettings,
     ModWebUserSettings,
     ModWebUserSettingsStore,
 )
@@ -31,6 +32,12 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
                     info_color_hex="#0ea5e9",
                 ),
                 web_chat=ModWebChatSettings(use_24_hour_time=False),
+                timestamp=ModWebTimestampSettings(
+                    timezone_name="Australia/Melbourne",
+                    format_template="<t:{}:F>",
+                    rounding_unit="MI",
+                ),
+                country=config.Country.AUSTRALIA,
             )
 
             with patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.LOCAL):
@@ -48,6 +55,12 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
         self.assertEqual(payload["users"]["42"]["appearance"]["warning_color_hex"], "#FACC15")
         self.assertEqual(payload["users"]["42"]["appearance"]["negative_color_hex"], "#EF4444")
         self.assertEqual(payload["users"]["42"]["appearance"]["info_color_hex"], "#0EA5E9")
+        self.assertEqual(payload["users"]["42"]["timestamp"], {
+            "timezone_name": "Australia/Melbourne",
+            "format_template": "<t:{}:F>",
+            "rounding_unit": "MI",
+        })
+        self.assertEqual(payload["users"]["42"]["country"], "AU")
 
     def test_store_rejects_invalid_user_ids_and_payloads(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -64,6 +77,32 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
     def test_appearance_settings_reject_invalid_primary_colour(self) -> None:
         with self.assertRaisesRegex(ValueError, "six-digit"):
             ModWebAppearanceSettings(warning_color_hex="#1234")
+
+    def test_timestamp_settings_reject_invalid_preferences(self) -> None:
+        with self.assertRaisesRegex(ValueError, "timezone"):
+            ModWebTimestampSettings(timezone_name="Not/A/Timezone")
+        with self.assertRaisesRegex(ValueError, "format"):
+            ModWebTimestampSettings(format_template="not a Discord timestamp")
+        with self.assertRaisesRegex(ValueError, "rounding"):
+            ModWebTimestampSettings(rounding_unit="quarter")
+
+    def test_timestamp_settings_normalise_timezone_aliases(self) -> None:
+        self.assertEqual(ModWebTimestampSettings().timezone_name, "UTC")
+        self.assertEqual(
+            ModWebTimestampSettings.model_validate({"timezone_name": None}).timezone_name,
+            "UTC",
+        )
+        self.assertEqual(
+            ModWebTimestampSettings(timezone_name="Melbourne").timezone_name,
+            "Australia/Melbourne",
+        )
+        self.assertEqual(ModWebTimestampSettings(timezone_name="+10").timezone_name, "UTC+10:00")
+
+    def test_legacy_united_kingdom_country_code_is_migrated_to_iso(self) -> None:
+        settings = ModWebUserSettings.model_validate({"country": "UK"})
+
+        self.assertIs(settings.country, config.Country.UNITED_KINGDOM)
+        self.assertEqual(settings.model_dump(mode="json")["country"], "GB")
 
     def test_remote_store_uses_atomic_single_user_mutation(self) -> None:
         settings = ModWebUserSettings(web_chat=ModWebChatSettings(use_24_hour_time=False))

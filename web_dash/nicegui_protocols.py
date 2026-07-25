@@ -91,6 +91,16 @@ class ModWebValueContainer(Protocol):
     def value(self) -> object: ...
 
 
+class ModWebValueSetter(ModWebValueContainer, Protocol):
+    _props: MutableMapping[str, object]
+
+    def set_value(self, value: object) -> None: ...
+
+    def props(self, *args: object, **kwargs: object) -> "ModWebValueSetter": ...
+
+    def classes(self, *args: object, **kwargs: object) -> "ModWebValueSetter": ...
+
+
 class ModWebEventArgumentsContainer(Protocol):
     @property
     def args(self) -> object: ...
@@ -149,6 +159,10 @@ class ModWebUi(Protocol):
     def element(self, tag: str = "div", *args: object, **kwargs: object) -> "Element": ...
 
     def input(self, *args: object, **kwargs: object) -> "Input": ...
+
+    def date(self, *args: object, **kwargs: object) -> ModWebValueSetter: ...
+
+    def time(self, *args: object, **kwargs: object) -> ModWebValueSetter: ...
 
     def textarea(self, *args: object, **kwargs: object) -> "Textarea": ...
 
@@ -259,6 +273,7 @@ __all__: tuple[str, ...] = (
     "ModWebRunnerUi",
     "ModWebUi",
     "ModWebValueContainer",
+    "ModWebValueSetter",
     "RefreshableFunction",
     "RefreshableParams",
     "RefreshableReturn",

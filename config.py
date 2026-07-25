@@ -8,7 +8,8 @@ import sys
 import warnings
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from functools import cache
 from logging import Logger
 from pathlib import Path
@@ -292,24 +293,310 @@ class ID_Platforms(enum.StrEnum):
 class Currency(enum.StrEnum):
     AUD = enum.auto()
     CHF = enum.auto()
+    DKK = enum.auto()
     EUR = enum.auto()
     GBP = enum.auto()
     HUF = enum.auto()
+    JPY = enum.auto()
+    NOK = enum.auto()
+    SEK = enum.auto()
     USD = enum.auto()
+
+    @property
+    def symbol(self) -> str:
+        match self:
+            case Currency.AUD:
+                return "A$"
+            case Currency.CHF:
+                return "CHF"
+            case Currency.DKK | Currency.NOK | Currency.SEK:
+                return "kr"
+            case Currency.EUR:
+                return "€"
+            case Currency.GBP:
+                return "£"
+            case Currency.HUF:
+                return "Ft"
+            case Currency.JPY:
+                return "¥"
+            case Currency.USD:
+                return "$"
+
+
+class Country(enum.StrEnum):
+    AUSTRALIA = "AU"
+    BELGIUM = "BE"
+    DENMARK = "DK"
+    FINLAND = "FI"
+    FRANCE = "FR"
+    GERMANY = "DE"
+    HUNGARY = "HU"
+    IRELAND = "IE"
+    JAPAN = "JP"
+    NETHERLANDS = "NL"
+    NORWAY = "NO"
+    SWEDEN = "SE"
+    SWITZERLAND = "CH"
+    UNITED_KINGDOM = "GB"
+    UNITED_STATES = "US"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Country | None":
+        """Accept the legacy United Kingdom code while persisting ISO 3166-1 values."""
+        if value == "UK":
+            return cls.UNITED_KINGDOM
+        return None
+
+    @property
+    def display_name(self) -> str:
+        match self:
+            case Country.AUSTRALIA:
+                return "Australia"
+            case Country.BELGIUM:
+                return "Belgium"
+            case Country.DENMARK:
+                return "Denmark"
+            case Country.FINLAND:
+                return "Finland"
+            case Country.FRANCE:
+                return "France"
+            case Country.GERMANY:
+                return "Germany"
+            case Country.HUNGARY:
+                return "Hungary"
+            case Country.IRELAND:
+                return "Ireland"
+            case Country.JAPAN:
+                return "Japan"
+            case Country.NETHERLANDS:
+                return "Netherlands"
+            case Country.NORWAY:
+                return "Norway"
+            case Country.SWEDEN:
+                return "Sweden"
+            case Country.SWITZERLAND:
+                return "Switzerland"
+            case Country.UNITED_KINGDOM:
+                return "United Kingdom"
+            case Country.UNITED_STATES:
+                return "United States"
+
+
+class StandardDrinkDefinitionKind(enum.StrEnum):
+    OFFICIAL = "official"
+    RANGE = "range"
+    ESTIMATE = "estimate"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class CountryBeverageDefault:
+    """A recognisable local drink used to seed the standard-drink calculator."""
+
+    volume_millilitres: Decimal
+    alcohol_by_volume_percent: Decimal
+
+    def __post_init__(self) -> None:
+        if self.volume_millilitres <= 0:
+            raise ValueError("Default beverage volume must be positive.")
+        if not 0 < self.alcohol_by_volume_percent <= 100:
+            raise ValueError("Default beverage ABV must be between 0 and 100.")
+
+
+@dataclass(frozen=True, slots=True)
+class StandardDrinkDefinition:
+    """A national standard-drink definition with its provenance and precision."""
+
+    unit: str
+    country: Country
+    kind: StandardDrinkDefinitionKind
+    minimum_grams: Decimal | None
+    maximum_grams: Decimal | None
+    source_name: str
+    source_url: str
+    source_checked_on: date
+
+    def __post_init__(self) -> None:
+        if not self.unit.isascii() or not self.unit.isupper():
+            raise ValueError("Standard-drink units must be uppercase ASCII codes.")
+        if not self.source_name.strip() or not self.source_url.startswith("https://"):
+            raise ValueError("Standard-drink definitions require a named HTTPS source.")
+        if self.kind is StandardDrinkDefinitionKind.UNAVAILABLE:
+            if self.minimum_grams is not None or self.maximum_grams is not None:
+                raise ValueError("Unavailable standard-drink definitions cannot specify grams.")
+            return
+        if self.minimum_grams is None or self.maximum_grams is None:
+            raise ValueError("Available standard-drink definitions require gram bounds.")
+        if self.minimum_grams <= 0 or self.maximum_grams < self.minimum_grams:
+            raise ValueError("Standard-drink gram bounds must be positive and ordered.")
+        if self.kind is StandardDrinkDefinitionKind.RANGE:
+            if self.minimum_grams == self.maximum_grams:
+                raise ValueError("Range standard-drink definitions require different gram bounds.")
+        elif self.minimum_grams != self.maximum_grams:
+            raise ValueError("Non-range standard-drink definitions require one gram value.")
+
+    @property
+    def is_convertible(self) -> bool:
+        return self.kind is not StandardDrinkDefinitionKind.UNAVAILABLE
+
+    @property
+    def has_exact_grams(self) -> bool:
+        return self.minimum_grams is not None and self.minimum_grams == self.maximum_grams
+
+
+_STANDARD_DRINK_SOURCE_CHECKED_ON = date(2026, 7, 25)
+_WHO_STANDARD_DRINK_SOURCE_NAME = "WHO Global Health Observatory"
+_WHO_STANDARD_DRINK_SOURCE_URL = (
+    "https://apps.who.int/gho/athena/data/GHO/SA_0000001768.html?ead=&filter=%3BCOUNTRY%3A%2A%3BREGION%3AEUR&profile=ztable"
+)
+
+
+def _standard_drink_definition(
+    *,
+    unit: str,
+    country: Country,
+    kind: StandardDrinkDefinitionKind,
+    grams: str | None,
+    maximum_grams: str | None = None,
+    source_name: str = _WHO_STANDARD_DRINK_SOURCE_NAME,
+    source_url: str = _WHO_STANDARD_DRINK_SOURCE_URL,
+) -> StandardDrinkDefinition:
+    minimum = None if grams is None else Decimal(grams)
+    maximum = minimum if maximum_grams is None else Decimal(maximum_grams)
+    return StandardDrinkDefinition(
+        unit=unit,
+        country=country,
+        kind=kind,
+        minimum_grams=minimum,
+        maximum_grams=maximum,
+        source_name=source_name,
+        source_url=source_url,
+        source_checked_on=_STANDARD_DRINK_SOURCE_CHECKED_ON,
+    )
+
+
+STANDARD_DRINK_DEFINITIONS: tuple[StandardDrinkDefinition, ...] = (
+    _standard_drink_definition(
+        unit="AU",
+        country=Country.AUSTRALIA,
+        kind=StandardDrinkDefinitionKind.OFFICIAL,
+        grams="10",
+        source_name="Australian Government standard drinks guide",
+        source_url="https://www.health.gov.au/topics/alcohol/about-alcohol/standard-drinks-guide",
+    ),
+    _standard_drink_definition(unit="UK", country=Country.UNITED_KINGDOM, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="8"),
+    _standard_drink_definition(
+        unit="CH", country=Country.SWITZERLAND, kind=StandardDrinkDefinitionKind.RANGE, grams="10", maximum_grams="12"
+    ),
+    _standard_drink_definition(unit="FI", country=Country.FINLAND, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="12"),
+    _standard_drink_definition(unit="HU", country=Country.HUNGARY, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="10"),
+    _standard_drink_definition(
+        unit="US",
+        country=Country.UNITED_STATES,
+        kind=StandardDrinkDefinitionKind.OFFICIAL,
+        grams="14",
+        source_name="National Institute on Alcohol Abuse and Alcoholism",
+        source_url="https://www.niaaa.nih.gov/alcohols-effects-health/what-standard-drink",
+    ),
+    _standard_drink_definition(unit="BE", country=Country.BELGIUM, kind=StandardDrinkDefinitionKind.UNAVAILABLE, grams=None),
+    _standard_drink_definition(unit="DK", country=Country.DENMARK, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="12"),
+    _standard_drink_definition(unit="FR", country=Country.FRANCE, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="10"),
+    _standard_drink_definition(unit="DE", country=Country.GERMANY, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="15"),
+    _standard_drink_definition(unit="IE", country=Country.IRELAND, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="10"),
+    _standard_drink_definition(
+        unit="JP",
+        country=Country.JAPAN,
+        kind=StandardDrinkDefinitionKind.ESTIMATE,
+        grams="19.75",
+        source_name="What Is Moderate Drinking? Defining Drinks and Drinking Levels",
+        source_url="https://pmc.ncbi.nlm.nih.gov/articles/PMC6761695/",
+    ),
+    _standard_drink_definition(unit="NL", country=Country.NETHERLANDS, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="10"),
+    _standard_drink_definition(
+        unit="NO", country=Country.NORWAY, kind=StandardDrinkDefinitionKind.RANGE, grams="12", maximum_grams="14"
+    ),
+    _standard_drink_definition(unit="SE", country=Country.SWEDEN, kind=StandardDrinkDefinitionKind.OFFICIAL, grams="12"),
+)
+STANDARD_DRINK_DEFINITIONS_BY_UNIT: dict[str, StandardDrinkDefinition] = {
+    definition.unit: definition for definition in STANDARD_DRINK_DEFINITIONS
+}
+if len(STANDARD_DRINK_DEFINITIONS_BY_UNIT) != len(STANDARD_DRINK_DEFINITIONS):
+    raise ValueError("Standard-drink units must be unique.")
+
+
+_FALLBACK_COUNTRY_BEVERAGE_DEFAULT = CountryBeverageDefault(
+    volume_millilitres=Decimal("375"),
+    alcohol_by_volume_percent=Decimal("4.8"),
+)
+COUNTRY_BEVERAGE_DEFAULTS: dict[Country, CountryBeverageDefault] = {
+    Country.AUSTRALIA: CountryBeverageDefault(Decimal("375"), Decimal("4.9")),
+    Country.UNITED_KINGDOM: CountryBeverageDefault(Decimal("568"), Decimal("4.0")),
+    Country.SWITZERLAND: CountryBeverageDefault(Decimal("330"), Decimal("4.8")),
+    Country.FINLAND: CountryBeverageDefault(Decimal("330"), Decimal("5.5")),
+    Country.HUNGARY: CountryBeverageDefault(Decimal("40"), Decimal("40")),
+    Country.UNITED_STATES: CountryBeverageDefault(Decimal("355"), Decimal("5.0")),
+    Country.DENMARK: CountryBeverageDefault(Decimal("330"), Decimal("4.6")),
+    Country.FRANCE: CountryBeverageDefault(Decimal("160"), Decimal("5.6")),
+    Country.GERMANY: CountryBeverageDefault(Decimal("500"), Decimal("4.9")),
+    Country.IRELAND: CountryBeverageDefault(Decimal("568"), Decimal("4.2")),
+    Country.JAPAN: CountryBeverageDefault(Decimal("350"), Decimal("5.0")),
+    Country.NETHERLANDS: CountryBeverageDefault(Decimal("330"), Decimal("5.0")),
+    Country.NORWAY: CountryBeverageDefault(Decimal("40"), Decimal("41.5")),
+    Country.SWEDEN: CountryBeverageDefault(Decimal("40"), Decimal("40")),
+}
+
+
+def country_beverage_default(country: Country | None) -> CountryBeverageDefault:
+    """Return the configured local beverage preset, or the neutral calculator fallback."""
+    if country is None:
+        return _FALLBACK_COUNTRY_BEVERAGE_DEFAULT
+    return COUNTRY_BEVERAGE_DEFAULTS.get(country, _FALLBACK_COUNTRY_BEVERAGE_DEFAULT)
 
 
 SUPPORTED_CURRENCY: dict[Currency, set[str]] = {
     Currency.AUD: {"A$", "$A", "AU$", "$AU", "AUD$", "$AUD", "AUD"},
     Currency.CHF: {"CHF", "SFR", "FR"},
+    Currency.DKK: {"DKK"},
     Currency.EUR: {"€", "EURO", "EUR"},
     Currency.GBP: {"£", "GBP"},
     Currency.HUF: {"Ft", "HUF"},
+    Currency.JPY: {"¥", "JPY", "YEN"},
+    Currency.NOK: {"NOK"},
+    Currency.SEK: {"SEK"},
     Currency.USD: {"US$", "$US", "$USD", "USD$", "$", "USD"},
 }
 
-STD_DRINK_GRAMS: dict[str, int] = {"AU": 10, "UK": 8, "CH": 12, "FI": 12, "HU": 17, "US": 14}
+STANDARD_DRINK_COUNTRIES: dict[str, Country] = {
+    definition.unit: definition.country for definition in STANDARD_DRINK_DEFINITIONS
+}
+CURRENCY_COUNTRIES: dict[Country, Currency] = {
+    Country.AUSTRALIA: Currency.AUD,
+    Country.BELGIUM: Currency.EUR,
+    Country.DENMARK: Currency.DKK,
+    Country.FINLAND: Currency.EUR,
+    Country.FRANCE: Currency.EUR,
+    Country.GERMANY: Currency.EUR,
+    Country.HUNGARY: Currency.HUF,
+    Country.IRELAND: Currency.EUR,
+    Country.JAPAN: Currency.JPY,
+    Country.NETHERLANDS: Currency.EUR,
+    Country.NORWAY: Currency.NOK,
+    Country.SWEDEN: Currency.SEK,
+    Country.SWITZERLAND: Currency.CHF,
+    Country.UNITED_KINGDOM: Currency.GBP,
+    Country.UNITED_STATES: Currency.USD,
+}
+
+
+def supported_conversion_countries() -> tuple[Country, ...]:
+    """Return countries with a configured standard-drink or currency conversion."""
+    countries = set(STANDARD_DRINK_COUNTRIES.values()) | set(CURRENCY_COUNTRIES)
+    return tuple(sorted(countries, key=lambda country: country.display_name))
+
+
 PUBLIC_IP_SOURCE_URL: str = "https://api.ipify.org"
 EXCHANGE_RATE_ADDR: str = "https://api.exchangerate.host/convert"
+CURRENCY_RATE_SNAPSHOT: Path = Path("currency_rates.json")
 FILE_USERS: Path = Path("users.json")
 DISCORD_NAMES: Path = Path("discord_names.json")
 USER_SETTINGS: Path = Path("user_settings.json")

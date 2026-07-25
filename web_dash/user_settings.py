@@ -10,6 +10,7 @@ from re import Pattern
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from _utils import Utilities
 import config
 
 _SETTINGS_SCHEMA_VERSION = 1
@@ -52,11 +53,50 @@ class ModWebAppearanceSettings(BaseModel):
 
 
 class ModWebChatSettings(BaseModel):
-    """Stored web-chat choices. They are not applied until the chat UI supports them."""
+    """Stored web-chat and timestamp display choices."""
 
     use_24_hour_time: bool = True
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class ModWebTimestampSettings(BaseModel):
+    """Saved time preferences and Discord-timestamp defaults for the dashboard."""
+
+    timezone_name: str = "UTC"
+    format_template: str = "<t:{}:s>"
+    rounding_unit: str = "S"
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("timezone_name", mode="before")
+    @classmethod
+    def _validate_timezone_name(cls, value: object) -> str:
+        if value is None:
+            return "UTC"
+        if not isinstance(value, str):
+            raise ValueError("Timestamp timezone must be a supported IANA name or UTC offset.")
+        normalized = value.strip()
+        if not normalized:
+            return "UTC"
+        normalised_timezone = Utilities.normalise_timezone_name(normalized)
+        if normalised_timezone is None:
+            raise ValueError("Timestamp timezone must be a supported IANA name or UTC offset.")
+        return normalised_timezone
+
+    @field_validator("format_template")
+    @classmethod
+    def _validate_format_template(cls, value: str) -> str:
+        if value not in dict(Utilities.DISCORD_TIMESTAMP_FORMATS).values():
+            raise ValueError("Timestamp format must be a supported Discord timestamp format.")
+        return value
+
+    @field_validator("rounding_unit")
+    @classmethod
+    def _validate_rounding_unit(cls, value: str) -> str:
+        if value not in Utilities.TIMESTAMP_ROUNDING_UNITS:
+            raise ValueError("Timestamp rounding must be a supported unit.")
+        return value
 
 
 class ModWebUserSettings(BaseModel):
@@ -64,8 +104,17 @@ class ModWebUserSettings(BaseModel):
 
     appearance: ModWebAppearanceSettings = ModWebAppearanceSettings()
     web_chat: ModWebChatSettings = ModWebChatSettings()
+    timestamp: ModWebTimestampSettings = ModWebTimestampSettings()
+    country: config.Country | None = None
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("country")
+    @classmethod
+    def _validate_country(cls, value: config.Country | None) -> config.Country | None:
+        if value is not None and value not in config.supported_conversion_countries():
+            raise ValueError("Country must support a configured conversion.")
+        return value
 
 
 class ModWebUserSettingsStore:
@@ -178,6 +227,7 @@ __all__ = (
     "ModWebAppearanceSettings",
     "ModWebChatSettings",
     "ModWebColorScheme",
+    "ModWebTimestampSettings",
     "ModWebUserSettings",
     "ModWebUserSettingsStore",
 )

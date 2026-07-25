@@ -4984,6 +4984,58 @@ class ModWebTheme:
                 .mod-app-details-field {{
                     width: 100%;
                 }}
+                .mod-standard-drink-table,
+                .mod-currency-table {{
+                    background: transparent !important;
+                }}
+                .mod-standard-drink-table .q-table__container,
+                .mod-currency-table .q-table__container,
+                .mod-standard-drink-table .q-table__middle,
+                .mod-currency-table .q-table__middle,
+                .mod-standard-drink-table .q-table,
+                .mod-currency-table .q-table {{
+                    background: transparent !important;
+                    color: var(--mod-text) !important;
+                }}
+                .mod-standard-drink-table .q-table thead tr,
+                .mod-currency-table .q-table thead tr,
+                .mod-standard-drink-table .q-table th,
+                .mod-currency-table .q-table th {{
+                    background: rgba(39, 39, 49, 0.7) !important;
+                    color: var(--mod-muted) !important;
+                    font-size: 0.68rem !important;
+                    font-weight: 900 !important;
+                    letter-spacing: 0.07em;
+                    text-transform: uppercase;
+                }}
+                .mod-standard-drink-table .q-table tbody tr,
+                .mod-currency-table .q-table tbody tr,
+                .mod-standard-drink-table .q-table td,
+                .mod-currency-table .q-table td {{
+                    background: transparent !important;
+                    color: var(--mod-text) !important;
+                    font-size: 0.78rem !important;
+                    font-weight: 600 !important;
+                }}
+                .mod-standard-drink-table .q-table tbody tr:not(:last-child) > td,
+                .mod-currency-table .q-table tbody tr:not(:last-child) > td {{
+                    border-bottom-color: rgba(82, 82, 91, 0.28) !important;
+                }}
+                .mod-standard-drink-table .q-table tbody tr:hover > td,
+                .mod-currency-table .q-table tbody tr:hover > td {{
+                    background: var(--mod-accent-faint) !important;
+                }}
+                .mod-standard-drink-table .q-table th:first-child,
+                .mod-currency-table .q-table th:first-child,
+                .mod-standard-drink-table .q-table td:first-child,
+                .mod-currency-table .q-table td:first-child {{
+                    text-align: left !important;
+                }}
+                .mod-standard-drink-divider {{
+                    width: 100%;
+                    height: 1px;
+                    background: rgba(113, 113, 122, 0.42);
+                }}
                 .mod-user-appearance-section {{
                     gap: 0.65rem;
                     padding: 0.85rem 0.95rem;
@@ -5072,6 +5124,126 @@ class ModWebTheme:
                 .mod-app-details-field .q-field__input {{
                     font-size: 0.9rem !important;
                     font-weight: 850 !important;
+                }}
+                .mod-timestamp-mode-panels,
+                .mod-timestamp-mode-panels .q-panel,
+                .mod-timestamp-mode-panels .q-panel-parent {{
+                    overflow: visible !important;
+                }}
+                .mod-app-details-field.mod-timestamp-input .q-field__control,
+                .mod-app-details-field.mod-timestamp-input .q-field__marginal {{
+                    height: 3.35rem !important;
+                    min-height: 3.35rem !important;
+                }}
+                .mod-app-details-field.mod-timestamp-input .q-field__label {{
+                    top: 0.42rem !important;
+                }}
+                .mod-app-details-field.mod-timestamp-input .q-field__native,
+                .mod-app-details-field.mod-timestamp-input .q-field__input {{
+                    padding-top: 1.32rem !important;
+                    padding-bottom: 0.28rem !important;
+                    line-height: 1.15 !important;
+                }}
+                .mod-app-details-field.mod-timestamp-input .q-field__append {{
+                    align-self: flex-end;
+                    height: 2rem !important;
+                    min-height: 2rem !important;
+                    padding-bottom: 0.12rem;
+                }}
+                .mod-timestamp-format-option {{
+                    min-height: 2.2rem !important;
+                    padding: 0.4rem 0.7rem !important;
+                    color: var(--mod-text) !important;
+                    font-size: 0.76rem !important;
+                    font-weight: 850 !important;
+                    letter-spacing: 0.02em;
+                }}
+                .mod-timestamp-format-pattern {{
+                    min-width: 12rem;
+                    color: var(--mod-muted) !important;
+                    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+                    font-size: 0.68rem !important;
+                    font-weight: 750 !important;
+                    letter-spacing: 0.02em;
+                    text-align: right;
+                }}
+                .mod-timestamp-picker-dialog-card {{
+                    width: min(42rem, calc(100vw - 1.5rem)) !important;
+                }}
+                .mod-timestamp-picker-workspace {{
+                    display: grid;
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                    align-items: start;
+                    gap: 0.75rem;
+                    width: 100%;
+                }}
+                .mod-timestamp-picker-date,
+                .mod-timestamp-picker-time {{
+                    width: 100%;
+                    min-width: 0;
+                    border: 1px solid rgba(82, 82, 91, 0.82) !important;
+                    border-radius: 0 !important;
+                    background: rgba(8, 8, 10, 0.96) !important;
+                    box-shadow:
+                        inset 0 1px 0 rgba(255, 255, 255, 0.04),
+                        0 10px 26px rgba(0, 0, 0, 0.2) !important;
+                    color: var(--mod-text) !important;
+                }}
+                .mod-timestamp-picker-dialog-card :is(.q-date__header, .q-time__header) {{
+                    border-radius: 0 !important;
+                    border-bottom: 1px solid var(--mod-accent-faint);
+                    background:
+                        linear-gradient(135deg, var(--mod-accent-panel), rgba(17, 15, 26, 0.98)) !important;
+                    color: var(--mod-text) !important;
+                }}
+                .mod-timestamp-picker-dialog-card :is(.q-date__header-subtitle, .q-date__header-title-label) {{
+                    color: inherit !important;
+                }}
+                .mod-timestamp-picker-dialog-card :is(.q-date__view, .q-time__container, .q-time__content) {{
+                    background: transparent !important;
+                    color: var(--mod-text) !important;
+                }}
+                .mod-timestamp-picker-dialog-card :is(.q-date, .q-time) .q-btn {{
+                    border-radius: 0 !important;
+                    color: var(--mod-text) !important;
+                }}
+                .mod-timestamp-picker-dialog-card .q-date__calendar-weekdays > div {{
+                    color: var(--mod-muted) !important;
+                    font-size: 0.67rem !important;
+                    font-weight: 800 !important;
+                    letter-spacing: 0.03em;
+                }}
+                .mod-timestamp-picker-dialog-card .q-date__calendar-item--out .q-btn {{
+                    color: rgba(161, 161, 170, 0.4) !important;
+                }}
+                .mod-timestamp-picker-dialog-card .q-date__today .q-btn {{
+                    box-shadow: inset 0 0 0 1px var(--mod-accent-border-strong);
+                }}
+                .mod-timestamp-picker-dialog-card :is(.q-date, .q-time) .bg-primary {{
+                    background: var(--mod-accent) !important;
+                    color: #ffffff !important;
+                }}
+                .mod-timestamp-picker-dialog-card .q-time__clock {{
+                    background: rgba(39, 39, 49, 0.72) !important;
+                    box-shadow: inset 0 0 0 1px rgba(113, 113, 122, 0.52);
+                }}
+                .mod-timestamp-picker-dialog-card .q-time__clock-position {{
+                    color: var(--mod-text) !important;
+                }}
+                .mod-timestamp-picker-dialog-card .q-time__clock-position--active,
+                .mod-timestamp-picker-dialog-card :is(.q-time__clock-pointer, .q-time__clock-pointer::before) {{
+                    background: var(--mod-accent) !important;
+                    color: #ffffff !important;
+                }}
+                @media (max-width: 42rem) {{
+                    .mod-timestamp-picker-workspace {{
+                        grid-template-columns: minmax(0, 1fr);
+                        justify-items: center;
+                    }}
+                    .mod-timestamp-picker-date,
+                    .mod-timestamp-picker-time {{
+                        max-width: 19rem;
+                    }}
                 }}
                 .mod-mod-override-field .q-field__control {{
                     border-color: rgba(113, 113, 122, 0.92) !important;
@@ -5880,6 +6052,38 @@ class ModWebTheme:
                 .mod-chat-entry-menu .q-list {{
                     padding: 0.26rem 0;
                 }}
+                .mod-timezone-options {{
+                    max-height: min(16rem, calc(100vh - 12rem));
+                    overflow-x: hidden;
+                    overflow-y: auto;
+                    overscroll-behavior: contain;
+                }}
+                .mod-timestamp-dialog-card {{
+                    overflow: visible !important;
+                }}
+                .mod-app-details-dialog-card:has(.mod-timezone-picker),
+                .q-dialog__inner:has(.mod-timezone-picker) {{
+                    overflow: visible !important;
+                }}
+                .mod-timezone-picker {{
+                    position: relative;
+                    z-index: 1;
+                }}
+                .mod-timezone-menu {{
+                    position: absolute !important;
+                    top: calc(100% + 0.25rem);
+                    right: 0;
+                    left: auto;
+                    z-index: 20;
+                    width: 100%;
+                    max-width: none;
+                    border: 0 !important;
+                    background: rgba(9, 9, 12, 0.98) !important;
+                    box-shadow:
+                        0 14px 34px rgba(0, 0, 0, 0.38),
+                        inset 0 1px 0 rgba(255, 255, 255, 0.03),
+                        inset 0 -1px 0 var(--mod-accent-faint) !important;
+                }}
                 .mod-chat-entry-menu-item {{
                     min-height: 0 !important;
                     padding: 0.48rem 0.74rem !important;
@@ -5889,6 +6093,52 @@ class ModWebTheme:
                     letter-spacing: 0.03em;
                     text-transform: uppercase;
                     transition: background 120ms ease, color 120ms ease;
+                }}
+                .mod-timezone-option .q-btn__content {{
+                    width: 100%;
+                    align-items: flex-start;
+                    flex-direction: column;
+                    gap: 0.12rem;
+                    white-space: normal;
+                }}
+                .mod-timezone-option {{
+                    min-height: 2.16rem !important;
+                    padding: 0.42rem 0.62rem !important;
+                    color: #ffffff !important;
+                    text-align: left;
+                    transition: background 120ms ease, color 120ms ease;
+                }}
+                .mod-timezone-option-summary {{
+                    align-items: baseline;
+                    column-gap: 0.7rem;
+                    color: inherit;
+                    font-size: 0.8rem !important;
+                    font-weight: 800 !important;
+                    letter-spacing: 0.03em;
+                    line-height: 1.1 !important;
+                }}
+                .mod-timezone-option-code {{
+                    flex: 0 0 4.5rem;
+                    text-align: left;
+                }}
+                .mod-timezone-option-offset {{
+                    flex: 0 0 auto;
+                    text-align: left;
+                }}
+                .mod-timezone-option-location {{
+                    color: rgba(228, 225, 231, 0.7) !important;
+                    font-size: 0.67rem !important;
+                    font-weight: 700 !important;
+                    letter-spacing: 0.01em;
+                    line-height: 1.15 !important;
+                    text-align: left;
+                    text-transform: none;
+                }}
+                .mod-timezone-option:hover,
+                .mod-timezone-option.q-manual-focusable--focused,
+                .mod-timezone-option[aria-selected="true"] {{
+                    background: rgba(63, 63, 70, 0.24) !important;
+                    color: #ffffff !important;
                 }}
                 .mod-chat-entry-menu-item:hover,
                 .mod-chat-entry-menu-item.q-manual-focusable--focused,

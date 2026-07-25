@@ -3,6 +3,7 @@ discord_names.json
 test*
 users.json
 user_settings.json
+currency_rates.json
 apps.json
 data/*
 

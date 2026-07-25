@@ -4,8 +4,11 @@ import asyncio
 import base64
 import json
 import unittest
+from collections.abc import Awaitable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -93,6 +96,7 @@ from chat_hub import (
     ChatRoomUpdate,
 )
 from config import BotConfiguration, BotMetadataSnapshot, ModWebServerConfig
+from currency_conversion import CurrencyConversionBatch, CurrencyRateProvider
 from font_assets import FontAssetEntry, font_assets
 from mod_web_auth import ModWebUser
 from node_api import (
@@ -5810,6 +5814,10 @@ class ModWebTests(unittest.TestCase):
             def update(self) -> None:
                 return None
 
+            def set_visibility(self, visible: bool) -> None:
+                del visible
+                return None
+
         class FakeTooltip:
             def __enter__(self) -> "FakeTooltip":
                 return self
@@ -8281,6 +8289,23 @@ class ModWebTests(unittest.TestCase):
                 self.style_value = value
                 return self
 
+            def clear(self) -> None:
+                return None
+
+            def set_visibility(self, visible: bool) -> None:
+                del visible
+                return None
+
+            def on(
+                self,
+                event: str,
+                handler: object | None = None,
+                *,
+                js_handler: str | None = None,
+            ) -> "FakeContainer":
+                del event, handler, js_handler
+                return self
+
             def __enter__(self) -> "FakeContainer":
                 return self
 
@@ -10520,6 +10545,12 @@ class ModWebTests(unittest.TestCase):
             def set_visibility(self, visible: bool) -> None:
                 self.visible = visible
 
+            def clear(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
             def __enter__(self) -> "FakeContainer":
                 return self
 
@@ -10636,6 +10667,10 @@ class ModWebTests(unittest.TestCase):
 
             def set_value(self, value: object) -> None:
                 self.value = value
+
+            def add_slot(self, name: str, template: str | None = None) -> "FakeInput":
+                del name, template
+                return self
 
         class FakeUpload:
             def __init__(self) -> None:
@@ -17041,8 +17076,15 @@ class ModWebTests(unittest.TestCase):
 
     def test_render_global_app_toolbar_exposes_details_dialog_for_sudo_users(self) -> None:
         class FakeContainer:
-            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeContainer":
-                del value, replace
+            def classes(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+                replace: str | None = None,
+            ) -> "FakeContainer":
+                del value, add, remove, replace
                 return self
 
             def style(self, value: str) -> "FakeContainer":
@@ -17538,12 +17580,28 @@ class ModWebTests(unittest.TestCase):
 
     def test_render_user_header_menu_branch_includes_alias_item(self) -> None:
         class FakeContainer:
-            def classes(self, value: str | None = None, *, replace: str | None = None) -> "FakeContainer":
-                del value, replace
+            def __init__(self) -> None:
+                self.text: str | None = None
+                self.rows: list[dict[str, str]] = []
+                self.visible: bool | None = None
+                self.props_value: str | None = None
+
+            def clear(self) -> None:
+                return None
+
+            def classes(
+                self,
+                value: str | None = None,
+                *,
+                add: str | None = None,
+                remove: str | None = None,
+                replace: str | None = None,
+            ) -> "FakeContainer":
+                del value, add, remove, replace
                 return self
 
             def props(self, value: str) -> "FakeContainer":
-                del value
+                self.props_value = value
                 return self
 
             def style(
@@ -17559,6 +17617,21 @@ class ModWebTests(unittest.TestCase):
             def on(self, event: str, handler: object | None = None, *, js_handler: str | None = None) -> "FakeContainer":
                 del event, handler, js_handler
                 return self
+
+            def set_text(self, text: str) -> None:
+                self.text = text
+
+            def update(self) -> None:
+                return None
+
+            def open(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+            def set_visibility(self, visible: bool) -> None:
+                self.visible = visible
 
             def __enter__(self) -> "FakeContainer":
                 return self
@@ -17587,17 +17660,55 @@ class ModWebTests(unittest.TestCase):
                 self.text = text
                 self.on_click: Callable[[object | None], None] | None = None
 
+            def set_enabled(self, enabled: bool) -> None:
+                del enabled
+                return None
+
         class FakeInput(FakeContainer):
             def __init__(self, value: object) -> None:
+                super().__init__()
+                self.id = 1
                 self.value = value
+                self._props: dict[str, object] = {}
+                self.handlers: dict[str, Callable[[object | None], None]] = {}
 
             def set_value(self, value: object) -> None:
                 self.value = value
 
+            def add_slot(self, name: str, template: str | None = None) -> "FakeInput":
+                del name, template
+                return self
+
+            def on(
+                self,
+                event: str,
+                handler: object | None = None,
+                *,
+                js_handler: str | None = None,
+            ) -> "FakeInput":
+                del js_handler
+                if handler is None:
+                    return self
+                self.handlers[event] = cast(Callable[[object | None], None], handler)
+                return self
+
+            def trigger(self, event: str, value: object) -> None:
+                self.value = value
+                self.handlers[event](SimpleNamespace(args=value))
+
         class FakeUi:
             def __init__(self) -> None:
                 self.menu_items: list[FakeButton] = []
+                self.buttons: list[FakeButton] = []
                 self.dialogs: list[FakeDialog] = []
+                self.inputs: list[FakeInput] = []
+                self.selects: list[FakeInput] = []
+                self.tables: list[FakeContainer] = []
+                self.labels: list[FakeContainer] = []
+                self.columns: list[FakeContainer] = []
+                self.date_inputs: list[FakeInput] = []
+                self.time_inputs: list[FakeInput] = []
+                self.timers: list[Callable[[], object]] = []
                 self.navigated_to: list[str] = []
                 self.navigate = SimpleNamespace(reload=lambda: None, to=self.navigated_to.append)
 
@@ -17605,7 +17716,9 @@ class ModWebTests(unittest.TestCase):
                 return FakeContainer()
 
             def column(self) -> FakeContainer:
-                return FakeContainer()
+                column = FakeContainer()
+                self.columns.append(column)
+                return column
 
             def card(self) -> FakeContainer:
                 return FakeContainer()
@@ -17618,6 +17731,11 @@ class ModWebTests(unittest.TestCase):
             def menu(self) -> FakeContainer:
                 return FakeContainer()
 
+            def timer(self, interval: float, callback: Callable[[], object], *, once: bool) -> FakeContainer:
+                del interval, once
+                self.timers.append(callback)
+                return FakeContainer()
+
             def element(self, tag: str) -> FakeContainer:
                 del tag
                 return FakeContainer()
@@ -17627,16 +17745,63 @@ class ModWebTests(unittest.TestCase):
                 return FakeContainer()
 
             def label(self, text: str) -> FakeContainer:
-                del text
-                return FakeContainer()
+                label = FakeContainer()
+                label.text = text
+                self.labels.append(label)
+                return label
 
             def input(self, *args: object, **kwargs: object) -> FakeInput:
                 del args
-                return FakeInput(kwargs.get("value"))
+                input_control = FakeInput(kwargs.get("value"))
+                self.inputs.append(input_control)
+                return input_control
+
+            def date(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                date_input = FakeInput(kwargs.get("value"))
+                self.date_inputs.append(date_input)
+                return date_input
+
+            def time(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                time_input = FakeInput(kwargs.get("value"))
+                self.time_inputs.append(time_input)
+                return time_input
+
+            def select(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                select_control = FakeInput(kwargs.get("value"))
+                self.selects.append(select_control)
+                return select_control
+
+            def table(self, *args: object, **kwargs: object) -> FakeContainer:
+                del args
+                table = FakeContainer()
+                table.rows = cast(list[dict[str, str]], kwargs["rows"])
+                self.tables.append(table)
+                return table
+
+            def tabs(self, *args: object, **kwargs: object) -> FakeContainer:
+                del args, kwargs
+                return FakeContainer()
+
+            def tab(self, *args: object, **kwargs: object) -> FakeContainer:
+                del args, kwargs
+                return FakeContainer()
+
+            def tab_panels(self, *args: object, **kwargs: object) -> FakeContainer:
+                del args, kwargs
+                return FakeContainer()
+
+            def tab_panel(self, *args: object, **kwargs: object) -> FakeContainer:
+                del args, kwargs
+                return FakeContainer()
 
             def button(self, text: str = "", **kwargs: object) -> FakeButton:
-                del text, kwargs
-                return FakeButton("")
+                button = FakeButton(text)
+                button.on_click = cast(Callable[[object | None], None] | None, kwargs.get("on_click"))
+                self.buttons.append(button)
+                return button
 
             def menu_item(self, text: str, **kwargs: object) -> FakeButton:
                 item = FakeButton(text)
@@ -17662,7 +17827,17 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(
             [item.text for item in ui.menu_items],
-            ["Sim Upload", "Sim Download", "Clear Transfers", "Settings", "Aliases", "Log out"],
+            [
+                "Sim Upload",
+                "Sim Download",
+                "Clear Transfers",
+                "Settings",
+                "Standard drinks",
+                "Currency",
+                "Time",
+                "Aliases",
+                "Log out",
+            ],
         )
         settings_item = next(item for item in ui.menu_items if item.text == "Settings")
         if settings_item.on_click is None:
@@ -17670,6 +17845,132 @@ class ModWebTests(unittest.TestCase):
         with patch.object(service, "_web_display_name", return_value="Finch"):
             settings_item.on_click(None)
         self.assertTrue(ui.dialogs[0].opened)
+        standard_drinks_item = next(item for item in ui.menu_items if item.text == "Standard drinks")
+        if standard_drinks_item.on_click is None:
+            raise AssertionError("Standard drinks menu item is missing a click handler.")
+        standard_drinks_item.on_click(None)
+        self.assertTrue(ui.dialogs[1].opened)
+        unavailable_definition_row = next(row for row in ui.tables[0].rows if row["basis"] == "Unavailable")
+        self.assertEqual(unavailable_definition_row["grams"], "")
+        self.assertEqual(unavailable_definition_row["amount"], "")
+        standard_amount_input = ui.inputs[-3]
+        volume_input = ui.inputs[-2]
+        standard_amount_input.trigger("update:model-value", "1+1")
+        self.assertEqual(ui.tables[0].rows[0]["amount"], "2")
+        volume_input.trigger("update:model-value", "250x2")
+        self.assertEqual(standard_amount_input.value, "1.89")
+        self.assertEqual(ui.tables[0].rows[0]["amount"], "1.89")
+        add_drink_button = next(button for button in ui.buttons if button.text == "Add drink")
+        if add_drink_button.on_click is None:
+            raise AssertionError("Add drink button is missing a click handler.")
+        add_drink_button.on_click(None)
+        second_volume_input = ui.inputs[-2]
+        second_abv_input = ui.inputs[-1]
+        second_volume_input.trigger("update:model-value", "250")
+        second_abv_input.trigger("update:model-value", "4")
+        self.assertEqual(standard_amount_input.value, "2.68")
+        self.assertEqual(ui.tables[0].rows[0]["amount"], "2.68")
+        currency_item = next(item for item in ui.menu_items if item.text == "Currency")
+        if currency_item.on_click is None:
+            raise AssertionError("Currency menu item is missing a click handler.")
+        with patch(
+            "web_dash.status.CurrencyConverter.cached_ecb_conversion_batch",
+            return_value=CurrencyConversionBatch(
+                amounts={currency: Decimal("1") for currency in config.SUPPORTED_CURRENCY},
+                provider=CurrencyRateProvider.ECB,
+                as_of=date(2026, 7, 17),
+                age=timedelta(days=7),
+            ),
+        ):
+            currency_item.on_click(None)
+        self.assertTrue(ui.dialogs[2].opened)
+        self.assertTrue(ui.columns[-1].visible)
+        with patch(
+            "web_dash.status.CurrencyConverter.convert_all_with_ecb_metadata",
+            new=AsyncMock(
+                return_value=CurrencyConversionBatch(
+                    amounts={currency: Decimal("1.5") for currency in config.SUPPORTED_CURRENCY},
+                    provider=CurrencyRateProvider.ECB,
+                    as_of=date(2026, 7, 24),
+                    age=timedelta(),
+                )
+            ),
+        ):
+            async def _run_currency_timer() -> None:
+                task = cast(Awaitable[None], ui.timers[-1]())
+                await task
+
+            asyncio.run(_run_currency_timer())
+        self.assertIn("ECB rates as of 24 Jul", [label.text for label in ui.labels])
+        self.assertEqual(ui.tables[-1].rows[0], {"symbol": "A$", "currency": "AUD", "amount": "1.500"})
+        self.assertFalse(ui.columns[-1].visible)
+        live_fallback_button = next(button for button in ui.buttons if button.text == "Live fallback")
+        if live_fallback_button.on_click is None:
+            raise AssertionError("INDEV live fallback button is missing a click handler.")
+        live_fallback_button.on_click(None)
+        self.assertTrue(ui.columns[-1].visible)
+        currency_amount_input = ui.inputs[-1]
+        currency_amount_input.value = "2"
+        with patch(
+            "web_dash.status.CurrencyConverter.convert_all_with_ecb_metadata",
+            new=AsyncMock(
+                return_value=CurrencyConversionBatch(
+                    amounts={currency: Decimal("3") for currency in config.SUPPORTED_CURRENCY},
+                    provider=CurrencyRateProvider.ECB,
+                    as_of=date(2026, 7, 24),
+                    age=timedelta(),
+                )
+            ),
+        ):
+            async def _run_amount_update() -> None:
+                amount_handler = cast(
+                    Callable[[object | None], Awaitable[None]],
+                    currency_amount_input.handlers["update:model-value"],
+                )
+                await amount_handler(SimpleNamespace(args="2"))
+
+            asyncio.run(_run_amount_update())
+        self.assertEqual(ui.tables[-1].rows[0], {"symbol": "A$", "currency": "AUD", "amount": "3.000"})
+        currency_source_input = ui.selects[-2]
+        source_conversion = AsyncMock(
+            return_value=CurrencyConversionBatch(
+                amounts={currency: Decimal("4") for currency in config.SUPPORTED_CURRENCY},
+                provider=CurrencyRateProvider.ECB,
+                as_of=date(2026, 7, 24),
+                age=timedelta(),
+            )
+        )
+        with patch("web_dash.status.CurrencyConverter.convert_all_with_ecb_metadata", new=source_conversion):
+            async def _run_source_update() -> None:
+                source_handler = cast(
+                    Callable[[object | None], Awaitable[None]],
+                    currency_source_input.handlers["update:model-value"],
+                )
+                await source_handler(SimpleNamespace(args={"value": 4, "label": "GBP"}))
+
+            asyncio.run(_run_source_update())
+        source_conversion.assert_awaited_once_with(amount=Decimal("2"), src=config.Currency.GBP)
+        time_item = next(item for item in ui.menu_items if item.text == "Time")
+        if time_item.on_click is None:
+            raise AssertionError("Time menu item is missing a click handler.")
+        time_item.on_click(None)
+        self.assertTrue(ui.dialogs[3].opened)
+        self.assertTrue({"Now", "Tomorrow 9:00", "+1 hour", "+1 day", "+1 week", "Close"}.issubset(
+            {button.text for button in ui.buttons}
+        ))
+        self.assertEqual(ui.time_inputs[-1]._props["format24h"], True)
+        time_input = ui.inputs[-4]
+        timezone_input = ui.inputs[-3]
+        time_result_input = ui.inputs[-1]
+        time_input.trigger("update:value", "0")
+        self.assertEqual(time_result_input.value, "<t:0:s>")
+        time_input.trigger("update:value", "1970-01-01T00:00")
+        self.assertEqual(time_result_input.value, "<t:0:s>")
+        timezone_input.trigger("update:value", "mel")
+        self.assertIn(
+            "Australia/Melbourne · Victoria",
+            [label.text for label in ui.labels],
+        )
         aliases_item = next(item for item in ui.menu_items if item.text == "Aliases")
         if aliases_item.on_click is None:
             raise AssertionError("Aliases menu item is missing a click handler.")
@@ -17701,6 +18002,23 @@ class ModWebTests(unittest.TestCase):
             ) -> "FakeContainer":
                 del add, remove
                 self.style_value = value
+                return self
+
+            def clear(self) -> None:
+                return None
+
+            def set_visibility(self, visible: bool) -> None:
+                del visible
+                return None
+
+            def on(
+                self,
+                event: str,
+                handler: object | None = None,
+                *,
+                js_handler: str | None = None,
+            ) -> "FakeContainer":
+                del event, handler, js_handler
                 return self
 
             def __enter__(self) -> "FakeContainer":
@@ -17740,10 +18058,20 @@ class ModWebTests(unittest.TestCase):
             def set_value(self, value: object) -> None:
                 self.value = value
 
+            def add_slot(self, name: str, template: str | None = None) -> "FakeInput":
+                del name, template
+                return self
+
+        class FakeSelect(FakeInput):
+            def __init__(self, value: object, options: object) -> None:
+                super().__init__(value)
+                self.options = options
+
         class FakeUi:
             def __init__(self) -> None:
                 self.dialogs: list[FakeDialog] = []
                 self.inputs: list[FakeInput] = []
+                self.selects: list[FakeSelect] = []
                 self.buttons: list[FakeButton] = []
                 self.javascript_calls: list[str] = []
                 self.notifications: list[tuple[str, str | None]] = []
@@ -17776,6 +18104,12 @@ class ModWebTests(unittest.TestCase):
                 self.inputs.append(control)
                 return control
 
+            def select(self, options: object, *, value: object, label: str, **kwargs: object) -> FakeSelect:
+                del label, kwargs
+                control = FakeSelect(value, options)
+                self.selects.append(control)
+                return control
+
             def button(self, text: str = "", **kwargs: object) -> FakeButton:
                 button = FakeButton(text, cast(Callable[[object | None], object] | None, kwargs.get("on_click")))
                 self.buttons.append(button)
@@ -17791,7 +18125,8 @@ class ModWebTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             store = ModWebUserSettingsStore(Path(tmp) / "user_settings.json")
             existing_settings = ModWebUserSettings(
-                appearance=ModWebAppearanceSettings(primary_color_hex="#22c55e")
+                appearance=ModWebAppearanceSettings(primary_color_hex="#22c55e"),
+                country=config.Country.AUSTRALIA,
             )
             with patch.object(config, "DATA_AUTHORITY_MODE", config.DataAuthorityMode.LOCAL):
                 store.set(user_id=42, settings=existing_settings)
@@ -17805,14 +18140,45 @@ class ModWebTests(unittest.TestCase):
 
                 self.assertTrue(ui.dialogs[0].opened)
                 self.assertEqual(
-                    [control.value for control in ui.inputs],
+                    [control.value for control in ui.inputs[:5]],
                     ["#22C55E", "#6B7280", "#F59E0B", "#DC2626", "#22C55E"],
+                )
+                self.assertEqual(ui.selects[0].value, "AU")
+                self.assertEqual(ui.inputs[5].value, "UTC")
+                self.assertEqual(ui.selects[1].value, "24")
+                self.assertEqual(
+                    ui.selects[0].props_value,
+                    "filled square dense clearable hide-bottom-space color=accent options-dark "
+                    "popup-content-class=mod-setting-menu",
+                )
+                self.assertEqual(
+                    ui.selects[0].options,
+                    {
+                        "AU": "Australia",
+                        "BE": "Belgium",
+                        "DK": "Denmark",
+                        "FI": "Finland",
+                        "FR": "France",
+                        "DE": "Germany",
+                        "HU": "Hungary",
+                        "IE": "Ireland",
+                        "JP": "Japan",
+                        "NL": "Netherlands",
+                        "NO": "Norway",
+                        "CH": "Switzerland",
+                        "SE": "Sweden",
+                        "GB": "United Kingdom",
+                        "US": "United States",
+                    },
                 )
                 ui.inputs[0].value = "#336699"
                 ui.inputs[1].value = "#16a34a"
                 ui.inputs[2].value = "#facc15"
                 ui.inputs[3].value = "#ef4444"
                 ui.inputs[4].value = "#0ea5e9"
+                ui.selects[0].value = "US"
+                ui.inputs[5].value = "Australia/Melbourne"
+                ui.selects[1].value = "12"
 
                 save_button = next(button for button in ui.buttons if button.text == "Save")
                 save_click = save_button.on_click
@@ -17826,6 +18192,9 @@ class ModWebTests(unittest.TestCase):
                 self.assertEqual(saved_appearance.warning_color_hex, "#FACC15")
                 self.assertEqual(saved_appearance.negative_color_hex, "#EF4444")
                 self.assertEqual(saved_appearance.info_color_hex, "#0EA5E9")
+                self.assertEqual(store.get(user_id=42).country, config.Country.UNITED_STATES)
+                self.assertEqual(store.get(user_id=42).timestamp.timezone_name, "Australia/Melbourne")
+                self.assertFalse(store.get(user_id=42).web_chat.use_24_hour_time)
                 self.assertIn("#336699", ui.javascript_calls[-1])
                 self.assertIn("--mod-accent-dark", ui.javascript_calls[-1])
                 self.assertIn("--mod-accent-panel", ui.javascript_calls[-1])
@@ -17836,7 +18205,7 @@ class ModWebTests(unittest.TestCase):
                 self.assertIn("--q-negative", ui.javascript_calls[-1])
                 self.assertIn("--q-info", ui.javascript_calls[-1])
                 self.assertIn("target.style.setProperty(name, value)", ui.javascript_calls[-1])
-                self.assertIn(("Saved appearance colours.", "positive"), ui.notifications)
+                self.assertIn(("Saved settings.", "positive"), ui.notifications)
 
                 reset_button = next(button for button in ui.buttons if button.text == "Reset")
                 reset_click = reset_button.on_click
@@ -17850,10 +18219,15 @@ class ModWebTests(unittest.TestCase):
                 self.assertIsNone(reset_appearance.warning_color_hex)
                 self.assertIsNone(reset_appearance.negative_color_hex)
                 self.assertIsNone(reset_appearance.info_color_hex)
+                self.assertIsNone(store.get(user_id=42).country)
+                self.assertEqual(store.get(user_id=42).timestamp.timezone_name, "UTC")
+                self.assertTrue(store.get(user_id=42).web_chat.use_24_hour_time)
                 self.assertEqual(
-                    [control.value for control in ui.inputs],
+                    [control.value for control in ui.inputs[:5]],
                     ["#8B5CF6", "#6B7280", "#F59E0B", "#DC2626", "#8B5CF6"],
                 )
+                self.assertEqual(ui.inputs[5].value, "UTC")
+                self.assertEqual(ui.selects[1].value, "24")
                 self.assertIn("null", ui.javascript_calls[-1])
                 self.assertIn('"--q-primary"', ui.javascript_calls[-1])
                 self.assertIn('"--mod-accent-dark"', ui.javascript_calls[-1])

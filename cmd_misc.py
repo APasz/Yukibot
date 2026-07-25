@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import logging
@@ -10,7 +9,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from time import time
@@ -22,6 +21,8 @@ import lightbulb
 
 import _errors
 import config
+from currency_conversion import CurrencyConverter
+from standard_drinks import format_standard_drink_range, standard_drink_conversion, standard_drink_units
 from _async_utils import run_blocking
 from _discord import Distils
 from _security import Access_Control
@@ -166,192 +167,15 @@ class CMD_MiscCurrency(
         default=None,
     )
 
-    _quote_cache: dict[tuple[config.Currency, config.Currency], tuple[Decimal, float]] = {}
-    "(src,dst): (quote, time) "
-
-    @classmethod
-    async def convert(cls, amount: Decimal, src: config.Currency, dst: config.Currency) -> Decimal | None:
-        if not config.EXR_TOK:
-            raise ValueError("EXG_TOKEN must be set to use currency conversion")
-
-        now = time()
-        key = (src, dst)
-
-        cached = cls._quote_cache.get(key)
-        threshold = 4 * 24 * 60 * 60
-        if cached:
-            age = now - cached[1]
-            if age < threshold:
-                return amount * cached[0]
-            else:
-                del cls._quote_cache[key]
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                params = {
-                    "amount": str(amount),  # ensure serialisable
-                    "from": src.name,
-                    "to": dst.name,
-                    "access_key": config.EXR_TOK,
-                }
-                async with session.get(config.EXCHANGE_RATE_ADDR, params=params) as resp:
-                    data = await resp.json()
-
-            if not data.get("success"):
-                err = data.get("error", {})
-                log.warning(f"Currency API failed: code={err.get('code')} | type={err.get('type')}")
-                return None
-
-            rate = None
-            if isinstance(data.get("info"), dict):
-                r = data["info"].get("rate")
-                if r is None:
-                    r = data["info"].get("quote")
-                if r is not None:
-                    rate = Decimal(str(r))
-
-            if "result" in data and data["result"] is not None:
-                result = Decimal(str(data["result"]))
-                if rate is None and amount != 0:
-                    rate = result / amount
-            elif rate is not None:
-                result = amount * rate
-            else:
-                log.warning("Currency API: neither info.rate/quote nor result found")
-                return None
-
-            if rate is not None:
-                cls._quote_cache[key] = (rate, now)
-            return result
-
-        except Exception as xcp:
-            log.exception(f"Currency.convert failed: {xcp}")
-            return None
-
-    @staticmethod
-    def _parse_decimal(num_str: str) -> Decimal | None:
-        if not num_str:
-            return None
-
-        digits = "".join(ch for ch in num_str if ch.isdigit() or ch in ".,")
-        if not digits:
-            return None
-
-        if "." in digits and "," in digits:
-            digits = digits.replace(",", "")
-        elif "," in digits:
-            digits = digits.replace(".", "").replace(",", ".")
-        else:
-            pass
-
-        try:
-            return Decimal(digits)
-        except InvalidOperation:
-            return None
-
-    _PERCENT_EXPR = re.compile(
-        r"""
-        ^\s*
-        (?P<base>[0-9][0-9.,]*)
-        \s*(?P<op>[+-])\s*
-        (?P<pct>[0-9][0-9.,]*)
-        \s*%
-        \s*$
-        """,
-        re.VERBOSE,
-    )
-    _SIMPLE_EXPR = re.compile(
-        r"""
-        ^\s*
-        (?P<a>[0-9][0-9.,]*)
-        \s*(?P<op>[+-])\s*
-        (?P<b>[0-9][0-9.,]*)
-        \s*$
-        """,
-        re.VERBOSE,
-    )
-
-    @classmethod
-    def _parse_amount(cls, expr: str) -> tuple[Decimal | None, str | None]:
-        """
-        Parse either:
-        - plain number: '480', '10.5', '1,234.56'
-        - percent expression: '480-12%', '480 + 10%', '480-12.5%'
-        - simple arithmetic: '480-12', '480 + 12'
-
-        Returns: (amount, expression_string or None)
-        """
-        if not expr:
-            return None, None
-
-        expr = expr.strip()
-
-        match = cls._PERCENT_EXPR.match(expr)
-        if match:
-            base = cls._parse_decimal(match.group("base"))
-            pct = cls._parse_decimal(match.group("pct"))
-            if base is None or pct is None:
-                return None, None
-
-            frac = pct / Decimal("100")
-            if match.group("op") == "+":
-                amount = base * (Decimal("1") + frac)
-            else:
-                amount = base * (Decimal("1") - frac)
-
-            expr_str = f"{match.group('base')}{match.group('op')}{match.group('pct')}%"
-            return amount, expr_str
-
-        simple = cls._SIMPLE_EXPR.match(expr)
-        if simple:
-            a = cls._parse_decimal(simple.group("a"))
-            b = cls._parse_decimal(simple.group("b"))
-            if a is None or b is None:
-                return None, None
-
-            if simple.group("op") == "+":
-                amount = a + b
-            else:
-                amount = a - b
-
-            expr_str = f"{simple.group('a')}{simple.group('op')}{simple.group('b')}"
-            return amount, expr_str
-
-        cleaned = expr.replace(" ", "").replace("_", "")
-        for ch in "+-%":
-            cleaned = cleaned.replace(ch, "")
-
-        amount = cls._parse_decimal(cleaned)
-        if amount is None:
-            return None, None
-
-        return amount, None
-
-    @classmethod
-    def number(cls, string: str) -> tuple[Decimal | None, str | None, str | None]:
-        s = string.strip()
-
-        letters = "".join(ch for ch in s if ch.isalpha())
-        token = letters.upper() if letters else None
-
-        expr_for_parse = re.sub(r"[A-Za-z]", " ", s)
-
-        amount, expr_str = cls._parse_amount(expr_for_parse)
-        if amount is None:
-            return None, token, None
-
-        if token:
-            print(f" Number: {amount=} | {token=!r} | expr={expr_str!r}")
-        return amount, token, expr_str
-
     @lightbulb.invoke
     async def invoke(self, ctx: lightbulb.Context, acl: Access_Control):
         await acl.perm_check(ctx.user.id, acl.LvL.guest)
         await ctx.defer()
-        log.info(f"Misc.Currency: {ctx.user.display_name} | Cache={self._quote_cache}")
+        log.info("Misc.Currency: %s", ctx.user.display_name)
 
-        amount, token, expr_str = self.number(self.value)
-        if not amount:
+        token = "".join(character for character in self.value.strip() if character.isalpha()).upper()
+        parsed_amount = CurrencyConverter.parse_amount(re.sub(r"[A-Za-z]", " ", self.value))
+        if parsed_amount is None or parsed_amount.amount == 0:
             raise _errors.Missing("Number")
         if not token:
             raise _errors.Unparseable(f"Input: {self.value}")
@@ -364,25 +188,18 @@ class CMD_MiscCurrency(
 
         conversions = {}
         for target in targets:
-            result = await self.convert(amount, src, target)
-
-            if result is None:
-                log.warning(f"Retrying conversion {src}->{target} after failure")
-                await asyncio.sleep(1.5)
-                result = await self.convert(amount, src, target)
-
+            result = await CurrencyConverter.convert(parsed_amount.amount, src, target)
             conversions[target] = result
-            await asyncio.sleep(0.3)
 
         def _fmt(v: Decimal | None) -> str:
             return f"{v:,.3f}" if isinstance(v, (Decimal, float, int)) else "**error**"
 
         lines = [f"{t.name}: {_fmt(v)}" for t, v in conversions.items()]
 
-        if expr_str:
-            header = f"**{amount:,.3f} {src.name.upper()}** ({expr_str}) converts to:\n"
+        if parsed_amount.expression:
+            header = f"**{parsed_amount.amount:,.3f} {src.name.upper()}** ({parsed_amount.expression}) converts to:\n"
         else:
-            header = f"**{amount:,.3f} {src.name.upper()}** converts to:\n"
+            header = f"**{parsed_amount.amount:,.3f} {src.name.upper()}** converts to:\n"
 
         await ctx.respond(header + "\n".join(sorted(lines, key=str.upper)))
 
@@ -397,12 +214,12 @@ class CMD_STDDrink(
     from_unit = lightbulb.string(
         "from",
         "unit to convert from",
-        choices=lightbulb.utils.to_choices([str(s) for s in config.STD_DRINK_GRAMS.keys()]),
+        choices=lightbulb.utils.to_choices(standard_drink_units(include_unavailable=False)),
     )
     to_unit = lightbulb.string(
         "to",
         "unit to convert to",
-        choices=lightbulb.utils.to_choices([str(s) for s in config.STD_DRINK_GRAMS.keys()]),
+        choices=lightbulb.utils.to_choices(standard_drink_units(include_unavailable=False)),
     )
 
     @lightbulb.invoke
@@ -410,14 +227,12 @@ class CMD_STDDrink(
         await acl.perm_check(ctx.user.id, acl.LvL.guest)
         log.info(f"Misc.STDDrink; value={self.value} {self.from_unit} > {self.to_unit}: {ctx.user.display_name}")
 
-        try:
-            from_grams = config.STD_DRINK_GRAMS[self.from_unit]
-            to_grams = config.STD_DRINK_GRAMS[self.to_unit]
-        except KeyError as e:
-            raise ValueError(f"Unknown unit: {e.args[0]}")
-
-        grams = self.value * from_grams
-        result = round(grams / to_grams, 2)
+        conversion = standard_drink_conversion(
+            amount=self.value,
+            from_unit=self.from_unit,
+            to_unit=self.to_unit,
+        )
+        result = format_standard_drink_range(conversion.converted_amount)
 
         await ctx.respond(f"{self.from_unit} {self.value} converts to {self.to_unit} {result}")
 
@@ -1141,19 +956,8 @@ class CMD_TimeFormat(
     name="time",
     description="Generate a timestamp label",
 ):
-    formats = {
-        "Short Time": "<t:{}:t>",
-        "Long Time": "<t:{}:T>",
-        "Short Date": "<t:{}:d>",
-        "Long Date": "<t:{}:D>",
-        "Long Date / Short Time": "<t:{}:f>",
-        "Full Date / Short Time": "<t:{}:F>",
-        "Short Date / Short Time": "<t:{}:s>",
-        "Short Date / Medium Time": "<t:{}:S>",
-        "Relative Time": "<t:{}:R>",
-    }
-    # Y=year, MO=month, W=week, D=day, H=hour, MI=minute, S=second
-    rounds = ["Y", "MO", "W", "D", "H", "MI", "S"]
+    formats = dict(Utilities.DISCORD_TIMESTAMP_FORMATS)
+    rounds = Utilities.TIMESTAMP_ROUNDING_UNITS
 
     time = lightbulb.string(
         "time",
@@ -1180,73 +984,6 @@ class CMD_TimeFormat(
         default="S",
     )
 
-    @staticmethod
-    def _start_of_next_month(dt):
-        first = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        # jump to next month by going to day 28 and adding 4 days
-        nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
-        return first, nxt
-
-    @staticmethod
-    def _start_of_next_year(dt):
-        first = dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        nxt = first.replace(year=first.year + 1)
-        return first, nxt
-
-    @classmethod
-    def _round_wallclock(cls, dt: datetime, unit: str) -> datetime:
-        """Round aware dt to nearest unit in its own timezone."""
-        # Work in the local tz for human-wallclock rounding, then return with same tzinfo.
-        tz = dt.tzinfo or timezone.utc
-        local = dt.astimezone(tz)
-
-        if unit == "S":
-            # nearest second
-            if local.microsecond >= 500_000:
-                local = local + timedelta(seconds=1)
-            return local.replace(microsecond=0)
-
-        if unit == "MI":
-            base = local.replace(second=0, microsecond=0)
-            if local.second >= 30:
-                base += timedelta(minutes=1)
-            return base
-
-        if unit == "H":
-            base = local.replace(minute=0, second=0, microsecond=0)
-            # nearest hour
-            if (local.minute, local.second, local.microsecond) >= (30, 0, 0):
-                base += timedelta(hours=1)
-            return base
-
-        if unit == "D":
-            base = local.replace(hour=0, minute=0, second=0, microsecond=0)
-            # nearest day (noon cutoff)
-            if (local.hour, local.minute, local.second, local.microsecond) >= (12, 0, 0, 0):
-                base += timedelta(days=1)
-            return base
-
-        if unit == "W":
-            # ISO week: Monday=0
-            dow = local.weekday()
-            start = (local - timedelta(days=dow)).replace(hour=0, minute=0, second=0, microsecond=0)
-            next_start = start + timedelta(days=7)
-            mid = start + timedelta(days=3, hours=12)  # halfway point
-            return next_start if local >= mid else start
-
-        if unit == "MO":
-            start, next_start = cls._start_of_next_month(local)
-            mid = start + (next_start - start) / 2
-            return next_start if local >= mid else start
-
-        if unit == "Y":
-            start, next_start = cls._start_of_next_year(local)
-            mid = start + (next_start - start) / 2
-            return next_start if local >= mid else start
-
-        # fallback: no rounding
-        return local
-
     @lightbulb.invoke
     async def invoke(self, ctx: lightbulb.Context, acl: Access_Control, utils: Utilities):
         await acl.perm_check(ctx.user.id, acl.LvL.guest)
@@ -1268,7 +1005,7 @@ class CMD_TimeFormat(
         if ts is None:
             raise ValueError("Unknown time input")
 
-        rounded = self._round_wallclock(ts, self.rounding)
+        rounded = utils.round_wallclock(ts, self.rounding)
         rounded_utc = rounded.astimezone(timezone.utc)
         epoch = int(rounded_utc.timestamp())
         txt = self.output.format(epoch)

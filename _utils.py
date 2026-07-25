@@ -4,11 +4,13 @@ import logging
 import math
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
+from functools import cache
 from pathlib import Path
 from typing import Any, overload
 from urllib.parse import quote
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
+from zoneinfo import TZPATH, ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 from dateutil.relativedelta import relativedelta
 
@@ -72,10 +74,53 @@ def format_player_capacity(player_capacity: int | None) -> str | None:
     return str(player_capacity)
 
 
+@dataclass(frozen=True, slots=True)
+class TimezoneSelectionOption:
+    """One timezone choice rendered by the timestamp picker."""
+
+    value: str
+    timezone_code: str
+    offset_text: str
+    location_text: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TimezoneSelectionCatalogueEntry:
+    """Static timezone metadata used to build a current picker option."""
+
+    value: str
+    location_text: str | None
+    location_search_text: str
+    country_codes: frozenset[str]
+
+
 class Utilities:
     "Collection of various functions that do little things"
 
     MAGNITUDES = "BKMGTPEZY"
+    DISCORD_TIMESTAMP_FORMATS: tuple[tuple[str, str], ...] = (
+        ("Short Time", "<t:{}:t>"),
+        ("Long Time", "<t:{}:T>"),
+        ("Short Date", "<t:{}:d>"),
+        ("Long Date", "<t:{}:D>"),
+        ("Long Date / Short Time", "<t:{}:f>"),
+        ("Full Date / Short Time", "<t:{}:F>"),
+        ("Short Date / Short Time", "<t:{}:s>"),
+        ("Short Date / Medium Time", "<t:{}:S>"),
+        ("Relative Time", "<t:{}:R>"),
+    )
+    DISCORD_TIMESTAMP_STYLE_REPRESENTATIONS: dict[str, str] = {
+        "t": "HH:MM",
+        "T": "HH:MM:SS",
+        "d": "DD/MM/YYYY",
+        "D": "Mon DD YYYY",
+        "f": "Mon DD YYYY HH:MM",
+        "F": "Day Mon DD YYYY HH:MM",
+        "s": "YYYY-MM-DD HH:MM",
+        "S": "YYYY-MM-DD HH:MM:SS",
+        "R": "in 2 hours",
+    }
+    TIMESTAMP_ROUNDING_UNITS: tuple[str, ...] = ("Y", "MO", "W", "D", "H", "MI", "S")
     _TZ_OFFSET_RE = re.compile(r"^(?:(?:UTC|GMT)\s*)?(?P<sign>[+-])(?P<h>\d{1,2})(?::?(?P<m>\d{2}))?$", re.IGNORECASE)
     _CLOCK_RE = re.compile(
         r"^(?P<h>\d{1,2}):(?P<m>\d{2})(?::(?P<s>\d{2}))?(?P<tz>Z|[+-]\d{1,2}:?\d{2})?$",
@@ -217,9 +262,43 @@ class Utilities:
         if not s_raw:
             return None
 
-        # Absolute forms are checked first to avoid clashing with relative syntax.
+        # Exact forms are checked first to avoid clashing with relative syntax.
+        if exact := cls.parse_exact_time(s_raw, tz=tz):
+            return exact
+
+        return cls.parse_relative_time(s_raw, tz=tz)
+
+    @classmethod
+    def parse_exact_time(cls, value: str, tz: tzinfo = timezone.utc) -> datetime | None:
+        """Parse an epoch or an absolute date/time, excluding relative durations."""
+        if not isinstance(value, str):
+            raise ValueError(f"value must be of type str not: {type(value)}")  # pyright: ignore[reportUnreachable]
+
+        s_raw = value.strip()
+        if not s_raw:
+            return None
+
         if absolute := cls.parse_absolute_time(s_raw, tz=tz):
             return absolute
+
+        normalized = s_raw.replace(",", "").replace("_", "")
+        if normalized.lstrip("+-").isnumeric():
+            try:
+                return datetime.fromtimestamp(int(normalized), tz=tz)
+            except (OverflowError, OSError, ValueError):
+                return None
+
+        return None
+
+    @classmethod
+    def parse_relative_time(cls, value: str, tz: tzinfo = timezone.utc) -> datetime | None:
+        """Parse a duration relative to now, excluding epoch and absolute inputs."""
+        if not isinstance(value, str):
+            raise ValueError(f"value must be of type str not: {type(value)}")  # pyright: ignore[reportUnreachable]
+
+        s_raw = value.strip()
+        if not s_raw:
+            return None
 
         # allow visual separators in any form
         string = s_raw.replace(",", "").replace("_", "")
@@ -234,9 +313,6 @@ class Utilities:
             string = string[1:]
 
         now = datetime.now(tz)
-
-        if string.isnumeric():
-            return datetime.fromtimestamp(int(string), tz=tz)
 
         # 2) Colon durations (no letters)
         if ":" in string and not re.search(r"[a-zA-Z]", string):
@@ -314,6 +390,47 @@ class Utilities:
         )
         return dt + td
 
+    @staticmethod
+    def _start_of_next_month(dt: datetime) -> tuple[datetime, datetime]:
+        first = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        next_month = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return first, next_month
+
+    @staticmethod
+    def _start_of_next_year(dt: datetime) -> tuple[datetime, datetime]:
+        first = dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        return first, first.replace(year=first.year + 1)
+
+    @classmethod
+    def round_wallclock(cls, dt: datetime, unit: str) -> datetime:
+        """Round an aware datetime to the nearest unit in its own timezone."""
+        if unit not in cls.TIMESTAMP_ROUNDING_UNITS:
+            raise ValueError(f"Unknown timestamp rounding unit: {unit}")
+        timezone_info = dt.tzinfo or timezone.utc
+        local = dt.astimezone(timezone_info)
+
+        if unit == "S":
+            if local.microsecond >= 500_000:
+                local += timedelta(seconds=1)
+            return local.replace(microsecond=0)
+        if unit == "MI":
+            rounded = local.replace(second=0, microsecond=0)
+            return rounded + timedelta(minutes=1) if local.second >= 30 else rounded
+        if unit == "H":
+            rounded = local.replace(minute=0, second=0, microsecond=0)
+            return rounded + timedelta(hours=1) if (local.minute, local.second, local.microsecond) >= (30, 0, 0) else rounded
+        if unit == "D":
+            rounded = local.replace(hour=0, minute=0, second=0, microsecond=0)
+            return rounded + timedelta(days=1) if (local.hour, local.minute, local.second, local.microsecond) >= (12, 0, 0, 0) else rounded
+        if unit == "W":
+            start = (local - timedelta(days=local.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            return start + timedelta(days=7) if local >= start + timedelta(days=3, hours=12) else start
+        if unit == "MO":
+            start, next_month = cls._start_of_next_month(local)
+            return next_month if local >= start + (next_month - start) / 2 else start
+        start, next_year = cls._start_of_next_year(local)
+        return next_year if local >= start + (next_year - start) / 2 else start
+
     @classmethod
     def parse_timezone(cls, value: str) -> tzinfo | None:
         if not isinstance(value, str):
@@ -352,7 +469,7 @@ class Utilities:
         # Try exact IANA zone.
         try:
             return ZoneInfo(raw)
-        except ZoneInfoNotFoundError:
+        except (ValueError, ZoneInfoNotFoundError):
             pass
 
         # If a city-like token was provided (e.g. "Melbourne"), match zone suffix.
@@ -366,6 +483,206 @@ class Utilities:
                     return None
 
         return None
+
+    @staticmethod
+    def _timezone_offset_label(total_minutes: int) -> str:
+        sign = "+" if total_minutes >= 0 else "-"
+        hours, minutes = divmod(abs(total_minutes), 60)
+        return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+    @classmethod
+    @cache
+    def _timezone_selection_catalog(cls) -> tuple[_TimezoneSelectionCatalogueEntry, ...]:
+        zone_records: dict[str, tuple[frozenset[str], str]] = {}
+        for timezone_path in TZPATH:
+            zone_tab_path = Path(timezone_path) / "zone.tab"
+            if not zone_tab_path.is_file():
+                continue
+            for raw_line in zone_tab_path.read_text(encoding="utf-8").splitlines():
+                if not raw_line or raw_line.startswith("#"):
+                    continue
+                fields = raw_line.split("\t", maxsplit=3)
+                if len(fields) < 3:
+                    continue
+                zone_name = fields[2]
+                if zone_name not in cls._IANA_ZONES:
+                    continue
+                country_codes = frozenset(fields[0].split(","))
+                location_description = fields[3] if len(fields) == 4 else ""
+                zone_records.setdefault(zone_name, (country_codes, location_description))
+            break
+        if not zone_records:
+            zone_records = {zone_name: (frozenset(), "") for zone_name in cls._IANA_ZONES}
+
+        entries: list[_TimezoneSelectionCatalogueEntry] = [
+            _TimezoneSelectionCatalogueEntry(
+                value="UTC",
+                location_text=None,
+                location_search_text="",
+                country_codes=frozenset(),
+            )
+        ]
+        for total_minutes in range(-(12 * 60), (14 * 60) + 1, 15):
+            if total_minutes == 0:
+                continue
+            value = cls._timezone_offset_label(total_minutes)
+            entries.append(
+                _TimezoneSelectionCatalogueEntry(
+                    value=value,
+                    location_text=None,
+                    location_search_text="",
+                    country_codes=frozenset(),
+                )
+        )
+        for zone_name, (country_codes, location_description) in sorted(zone_records.items()):
+            location_text = f"{zone_name}{f' · {location_description}' if location_description else ''}"
+            entries.append(
+                _TimezoneSelectionCatalogueEntry(
+                    value=zone_name,
+                    location_text=location_text,
+                    location_search_text=" ".join(
+                        (zone_name.rsplit("/", maxsplit=1)[-1].replace("_", " "), location_description)
+                    ).casefold(),
+                    country_codes=country_codes,
+                )
+            )
+        return tuple(entries)
+
+    @staticmethod
+    def _supported_timezone_country_codes() -> frozenset[str]:
+        return frozenset(country.value for country in config.supported_conversion_countries())
+
+    @classmethod
+    def _timezone_selection_option(
+        cls,
+        *,
+        entry: _TimezoneSelectionCatalogueEntry,
+        now: datetime,
+    ) -> TimezoneSelectionOption | None:
+        if entry.value == "UTC":
+            return TimezoneSelectionOption(
+                value="UTC",
+                timezone_code="UTC",
+                offset_text="Universal",
+                location_text=None,
+            )
+        if entry.value.startswith("UTC"):
+            return TimezoneSelectionOption(
+                value=entry.value,
+                timezone_code=entry.value,
+                offset_text="Fixed offset",
+                location_text=None,
+            )
+        try:
+            zone = ZoneInfo(entry.value)
+        except (ValueError, ZoneInfoNotFoundError):
+            return None
+        current_time = now.astimezone(zone)
+        offset = current_time.utcoffset() or timedelta()
+        return TimezoneSelectionOption(
+            value=entry.value,
+            timezone_code=current_time.tzname() or entry.value,
+            offset_text=cls._timezone_offset_label(int(offset.total_seconds() // 60)).removeprefix("UTC"),
+            location_text=entry.location_text,
+        )
+
+    @classmethod
+    def timezone_selection_options(cls, query: str | None = None) -> tuple[TimezoneSelectionOption, ...]:
+        """Return unique, context-sensitive timezone choices for the timestamp picker."""
+        normalized_query = "" if query is None else query.strip().casefold()
+        entries = cls._timezone_selection_catalog()
+        if not normalized_query:
+            supported_country_codes = cls._supported_timezone_country_codes()
+            candidate_entries = (
+                entry
+                for entry in entries
+                if entry.value == "UTC" or entry.country_codes.intersection(supported_country_codes)
+            )
+        else:
+            candidate_entries = entries
+        now = datetime.now(timezone.utc)
+        option_entries = tuple(
+            (entry, option)
+            for entry in candidate_entries
+            if (option := cls._timezone_selection_option(entry=entry, now=now)) is not None
+        )
+        if not normalized_query:
+            matches = tuple(option for _, option in option_entries)
+        elif normalized_query.isalpha() and len(normalized_query) < 3:
+            matches = tuple(
+                option
+                for _, option in option_entries
+                if option.timezone_code.casefold().startswith(normalized_query)
+            )
+        elif normalized_query.isalpha():
+            matches = tuple(
+                option
+                for entry, option in option_entries
+                if normalized_query in option.timezone_code.casefold()
+                or normalized_query in entry.value.casefold()
+                or normalized_query in entry.location_search_text
+            )
+        else:
+            parsed_timezone = cls.parse_timezone(normalized_query)
+            offset = None if parsed_timezone is None else parsed_timezone.utcoffset(None)
+            if offset is None:
+                matches = tuple(
+                    option
+                    for entry, option in option_entries
+                    if normalized_query in entry.value.casefold()
+                    or normalized_query in option.timezone_code.casefold()
+                )
+            else:
+                offset_value = cls._timezone_offset_label(int(offset.total_seconds() // 60))
+                matches = tuple(option for _, option in option_entries if option.value == offset_value)
+        include_locations = normalized_query.isalpha() and len(normalized_query) >= 3
+        if include_locations:
+            return matches
+        deduplicated: dict[tuple[str, str], TimezoneSelectionOption] = {}
+        preferred_timezone_names = frozenset(cls._TZ_ALIASES.values())
+        for entry in matches:
+            key = (entry.timezone_code, entry.offset_text)
+            option = TimezoneSelectionOption(
+                value=entry.value,
+                timezone_code=entry.timezone_code,
+                offset_text=entry.offset_text,
+                location_text=None,
+            )
+            existing = deduplicated.get(key)
+            if existing is None or (
+                entry.value in preferred_timezone_names and existing.value not in preferred_timezone_names
+            ):
+                deduplicated[key] = option
+        return tuple(deduplicated.values())
+
+    @classmethod
+    def normalise_timezone_name(cls, value: str) -> str | None:
+        """Validate a timezone input and return its preferred display/catalogue key."""
+        raw = value.strip()
+        parsed_timezone = cls.parse_timezone(raw)
+        if parsed_timezone is None:
+            return None
+        if raw.upper() in {"UTC", "Z", "GMT"}:
+            return "UTC"
+        offset = parsed_timezone.utcoffset(None)
+        if offset is not None:
+            total_minutes = int(offset.total_seconds() // 60)
+            return "UTC" if total_minutes == 0 else cls._timezone_offset_label(total_minutes)
+        normalized_raw = raw.casefold()
+        catalogue = cls._timezone_selection_catalog()
+        exact_match = next((entry.value for entry in catalogue if entry.value.casefold() == normalized_raw), None)
+        if exact_match is not None:
+            return exact_match
+        city_token = re.sub(r"[\s\-]+", "_", raw).casefold()
+        city_match = next(
+            (
+                entry.value
+                for entry in catalogue
+                if entry.value.rsplit("/", maxsplit=1)[-1].casefold() == city_token
+            ),
+            None,
+        )
+        return city_match or raw
 
     @classmethod
     def _parse_clock_token(
