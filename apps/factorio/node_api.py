@@ -235,9 +235,6 @@ class NodeModDependencyEntry:
         return self.parent_mod_ids
 
 
-NodeModPortalDependencyEntry: TypeAlias = NodeModDependencyEntry
-
-
 @dataclass(frozen=True, slots=True)
 class NodeModDependencyResolutionResult:
     app_name: str

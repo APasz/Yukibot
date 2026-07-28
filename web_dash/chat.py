@@ -537,7 +537,11 @@ class ModWebChatMixin(ModWebServiceSupport):
             chat_changed=chat_changed,
             runtime_changed=runtime_changed,
             snapshot=event.snapshot,
-            app_stats=event.app_stats if include_runtime_updates else None,
+            app_stats=(
+                cast(NodeAppRuntimeSummary | None, event.app_stats)
+                if include_runtime_updates
+                else None
+            ),
             events=event.events,
         )
 

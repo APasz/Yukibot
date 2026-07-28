@@ -20,7 +20,6 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
-import hikari
 import psutil
 import requests
 from fastapi import (
@@ -111,7 +110,6 @@ from apps._console import (
     ConsoleAction,
     ConsoleActionParameter,
     ConsoleActionResult,
-    ConsoleResponseSource,
     execute_console_action,
 )
 from apps._launcher_metadata import (
@@ -123,10 +121,7 @@ from apps._launcher_metadata import (
     resolve_launcher_metadata_resolution,
 )
 from apps._mod import Mod, Mod_Manager
-from apps._node_api import (
-    JsonValue,
-    NodeModUploadSource,
-)
+from apps._node_api import NodeModUploadSource
 from apps._node_api import (
     optional_int as _optional_int,
 )
@@ -144,9 +139,6 @@ from apps._node_api import (
 )
 from apps._node_api import (
     required_string as _required_string,
-)
-from apps._node_api import (
-    required_text as _required_text,
 )
 from apps._node_api import (
     string_tuple as _string_tuple,
@@ -167,27 +159,18 @@ from apps.factorio.node_api import (
     NodeFactorioMapExchangeImportRequest,
     NodeFactorioMapExchangeString,
     NodeFactorioModSettings,
-    NodeModDependencyEntry,
     NodeModDependencyResolutionResult,
-    NodeModPortalDependencyEntry,
     NodeModPortalInstallRequest,
-    NodeModPortalResolveResult,
-    NodeModPortalVersionEntry,
     NodeModPortalVersionList,
     NodeModUpdateCheckResult,
     NodeModUpdateDependency,
-    NodeModUpdateDependencyAction,
     NodeModUpdateRequest,
-    NodeModUpdateStatus,
 )
 from apps.factorio.node_api import (
     build_factorio_generation_state as _build_factorio_generation_state,
 )
 from apps.factorio.node_api import (
     build_factorio_mod_settings_download_response as _build_factorio_mod_settings_download_response,
-)
-from apps.factorio.node_api import (
-    import_factorio_map_exchange_string as _import_factorio_map_exchange_string,
 )
 from apps.factorio.node_api import (
     build_factorio_mod_settings_state as _build_factorio_mod_settings_state,
@@ -217,6 +200,9 @@ from apps.factorio.node_api import (
     factorio_vanilla_mods_by_id as _factorio_vanilla_mods,
 )
 from apps.factorio.node_api import (
+    import_factorio_map_exchange_string as _import_factorio_map_exchange_string,
+)
+from apps.factorio.node_api import (
     install_mod_from_link as _install_factorio_mod_from_link,
 )
 from apps.factorio.node_api import (
@@ -226,21 +212,19 @@ from apps.factorio.node_api import (
     list_mod_link_versions as _list_factorio_mod_link_versions,
 )
 from apps.factorio.node_api import (
-    write_factorio_generation_settings as _write_factorio_generation_settings,
-)
-from apps.factorio.node_api import (
     resolve_mod_link_dependencies as _resolve_factorio_mod_link_dependencies,
 )
 from apps.factorio.node_api import (
     update_mod as _update_factorio_mod,
+)
+from apps.factorio.node_api import (
+    write_factorio_generation_settings as _write_factorio_generation_settings,
 )
 from apps.minecraft import (
     Minecraft,
     MinecraftRecipeMutation,
 )
 from apps.minecraft.node_api import (
-    NodeMinecraftItemRegistryState,
-    NodeMinecraftRecipeBookState,
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationRequest,
     NodeMinecraftRecipeMutationResult,
@@ -267,6 +251,12 @@ from apps.minecraft.pack_export import (
     discover_client_pack_kubejs_scripts,
     export_minecraft_pack,
 )
+from apps.satisfactory.node_api import (
+    NodeBlueprintEntry,
+    NodeBlueprintFileEntry,
+    NodeBlueprintList,
+    NodeBlueprintMutationResult,
+)
 from apps.sevendays import SevenDays
 from apps.sevendays.node_api import (
     NodeSevenDaysSandboxOptionsState,
@@ -276,7 +266,7 @@ from apps.sevendays.node_api import (
 )
 from chat_hub import ChatEndpoint, ChatEndpointId, ChatEndpointKind, ChatEvent, ChatHub, ChatRoomUpdate
 from font_assets import font_assets
-from maintenance import MAX_RESTART_INTERVAL_MINUTES, MIN_RESTART_INTERVAL_MINUTES, MaintenanceService
+from maintenance import MaintenanceService
 from map_annotations import (
     AppMapAnnotationStore,
     MapAnnotationDraft,
@@ -287,9 +277,82 @@ from map_annotations import (
 )
 from map_cache import AppMapJsonCacheStore, MapJsonCacheEntry
 from mod_web_auth import ModWebAuthService, ModWebUser
+from node_api_chat import (
+    NodeChatEndpointSummary,
+    NodeChatRoomSnapshot,
+    NodeChatStreamEvent,
+    NodeChatStreamEventKind,
+    NodeWebChatRequest,
+)
+from node_api_console import (
+    NodeConsoleActionEntry,
+    NodeConsoleActionExecuteRequest,
+    NodeConsoleActionExecutionResult,
+    NodeConsoleActionList,
+    NodeConsoleActionParameter,
+    NodeConsoleStdoutSnapshot,
+    NodeConsoleStdoutStreamEvent,
+    NodeConsoleStdoutStreamEventKind,
+)
+from node_api_core_routes import register_core_routes
+from node_api_files import (
+    NodeConfigContent,
+    NodeConfigEntry,
+    NodeConfigList,
+    NodeConfigWriteRequest,
+    NodeSaveEntry,
+    NodeSaveList,
+    NodeSaveMutationResult,
+    NodeSaveRenameRequest,
+    NodeSaveRootEntry,
+)
+from node_api_node_routes import register_node_management_routes
+from node_api_relay import (
+    NodeRelayTTSRequest as _NodeRelayTTSRequest,
+)
+from node_api_relay import (
+    NodeRelayTTSResult as _NodeRelayTTSResult,
+)
+from node_api_relay import (
+    RelayTTSQueue,
+)
+from node_api_settings import (
+    NodeSettingChoice,
+    NodeSettingEntry,
+    NodeSettingList,
+    NodeSettingMutationResult,
+    NodeSettingsActionResult,
+    NodeSettingWriteRequest,
+)
+from node_api_system import (
+    SYSTEM_ACTION_LABELS as _NODE_SYSTEM_ACTION_LABELS,
+)
+from node_api_system import (
+    SYSTEM_HISTORY_INTERVAL_SECONDS as _NODE_SYSTEM_HISTORY_INTERVAL_SECONDS,
+)
+from node_api_system import (
+    SYSTEM_HISTORY_RETENTION_SECONDS as _NODE_SYSTEM_HISTORY_RETENTION_SECONDS,
+)
+from node_api_system import (
+    NodeRestartRecord,
+    NodeRestartScheduleEntry,
+    NodeRestartScheduleState,
+    NodeRestartState,
+    NodeSystemAction,
+    NodeSystemActionHandler,
+    NodeSystemActionResult,
+    NodeSystemCapabilities,
+    NodeSystemDiskSummary,
+    NodeSystemHistory,
+    NodeSystemLogCatalog,
+    NodeSystemLogEntry,
+    NodeSystemLogTail,
+    NodeSystemSample,
+    NodeSystemSummary,
+)
+from node_api_system_routes import register_system_routes
 from node_auth import NodeAccessGrant, NodeApiScope, NodeTokenError, issue_node_token, verify_node_token
 from restart_state import (
-    RestartKind,
     read_process_restart_record,
     read_voice_restart_record,
 )
@@ -301,7 +364,6 @@ if TYPE_CHECKING:
 _NODE_API_PREFIX = "/api/node"
 _NODE_TOKEN_TTL_SECONDS = 15 * 60
 _NODE_RESTART_DELAY_SECONDS = 0.25
-_RELAY_TTS_FORWARD_TTL_SECONDS = 60
 _APP_PLAYER_COUNT_TIMEOUT_SECONDS = 1.5
 _PORTAL_NODE_LATENCY_TIMEOUT_SECONDS = 4.0
 _APP_FOOTPRINT_CACHE_TTL_SECONDS = 60.0
@@ -315,11 +377,7 @@ _BULK_METADATA_DISCOVERY_CACHE_TTL_SECONDS = 60.0 * 60.0
 _BULK_METADATA_DISCOVERY_CACHE_MAX_ENTRIES = 64
 _LOCAL_APP_RUNTIME_SUBSCRIPTION_INTERVAL_SECONDS = 0.75
 _LOCAL_NODE_STATE_SUBSCRIPTION_INTERVAL_SECONDS = 2.0
-_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS = 10.0
-_NODE_SYSTEM_HISTORY_RETENTION_SECONDS = 60 * 60
-_NODE_SYSTEM_HISTORY_MAX_SAMPLES = (
-    _NODE_SYSTEM_HISTORY_RETENTION_SECONDS // int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS)
-)
+_NODE_SYSTEM_HISTORY_MAX_SAMPLES = _NODE_SYSTEM_HISTORY_RETENTION_SECONDS // int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS)
 _NODE_SYSTEM_LOG_MAX_LINES = 500
 _LOCAL_CONSOLE_STDOUT_STREAM_INTERVAL_SECONDS = 0.5
 _NODE_CHAT_HISTORY_LIMIT = 100
@@ -359,17 +417,6 @@ _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
 log = logging.getLogger(__name__)
 traffic_log = logging.getLogger(config.LOGGER_TRAFFIC)
 
-# Keep moved DTO imports visible from node_api during this staged refactor.
-_NODE_API_COMPAT_EXPORTS: tuple[type[object], ...] = (
-    NodeMinecraftItemRegistryState,
-    NodeMinecraftRecipeBookState,
-    NodeModDependencyEntry,
-    NodeModPortalDependencyEntry,
-    NodeModPortalResolveResult,
-    NodeModPortalVersionEntry,
-    NodeModUpdateDependencyAction,
-    NodeModUpdateStatus,
-)
 
 def _is_executor_shutdown_error(error: BaseException) -> bool:
     return isinstance(error, RuntimeError) and "cannot schedule new futures after shutdown" in str(error)
@@ -408,18 +455,6 @@ def _app_transition_state(
         return NodeAppTransitionState(value)
     except ValueError as xcp:
         raise ValueError(f"{key} is invalid.") from xcp
-
-
-class RelayTTSQueue(Protocol):
-    async def queue_relay_message(
-        self,
-        guild_id: hikari.Snowflakeish,
-        channel_id: hikari.Snowflakeish,
-        message_id: hikari.Snowflakeish,
-        text: str,
-        *,
-        user_id: hikari.Snowflakeish | None,
-    ) -> tuple[str, int]: ...
 
 
 class WebChatRelayPublisher(Protocol):
@@ -464,9 +499,7 @@ class NodeAppResourcePointSummary:
             cpu_points_startup=_required_int(payload, "cpu_points_startup"),
             ram_points_running=_required_int(payload, "ram_points_running"),
             ram_points_startup=_required_int(payload, "ram_points_startup"),
-            startup_defined=_required_bool(payload, "startup_defined")
-            if "startup_defined" in payload
-            else False,
+            startup_defined=_required_bool(payload, "startup_defined") if "startup_defined" in payload else False,
         )
 
     def to_mapping(self) -> dict[str, object]:
@@ -683,18 +716,15 @@ class NodeAppEntry:
         if not isinstance(client_pack_content_dirty, bool):
             raise ValueError("Node app entry client_pack_content_dirty is invalid.")
         if not isinstance(raw_client_pack_releases, list | tuple) or any(
-            not isinstance(release_payload, Mapping)
-            for release_payload in raw_client_pack_releases
+            not isinstance(release_payload, Mapping) for release_payload in raw_client_pack_releases
         ):
             raise ValueError("Node app entry client_pack_releases is invalid.")
         if not isinstance(raw_client_pack_kubejs_scripts, list | tuple) or any(
-            not isinstance(script_payload, Mapping)
-            for script_payload in raw_client_pack_kubejs_scripts
+            not isinstance(script_payload, Mapping) for script_payload in raw_client_pack_kubejs_scripts
         ):
             raise ValueError("Node app entry client_pack_kubejs_scripts is invalid.")
         client_pack_kubejs_scripts = tuple(
-            ClientPackKubeJsScript.model_validate(script_payload)
-            for script_payload in raw_client_pack_kubejs_scripts
+            ClientPackKubeJsScript.model_validate(script_payload) for script_payload in raw_client_pack_kubejs_scripts
         )
         if raw_client_pack_metadata is not None and not isinstance(raw_client_pack_metadata, Mapping):
             raise ValueError("Node app entry client_pack_metadata is invalid.")
@@ -704,8 +734,7 @@ class NodeAppEntry:
             else None
         )
         if not isinstance(raw_client_pack_file_previews, list | tuple) or any(
-            not isinstance(preview_payload, Mapping)
-            for preview_payload in raw_client_pack_file_previews
+            not isinstance(preview_payload, Mapping) for preview_payload in raw_client_pack_file_previews
         ):
             raise ValueError("Node app entry client_pack_file_previews is invalid.")
         if not isinstance(client_pack_automated_changelog, str):
@@ -715,12 +744,10 @@ class NodeAppEntry:
             for preview_payload in raw_client_pack_file_previews
         )
         client_pack_releases = tuple(
-            ClientPackRelease.model_validate(release_payload)
-            for release_payload in raw_client_pack_releases
+            ClientPackRelease.model_validate(release_payload) for release_payload in raw_client_pack_releases
         )
         if not client_pack_releases and (
-            client_pack_published_version is not None
-            and client_pack_published_changelog is not None
+            client_pack_published_version is not None and client_pack_published_changelog is not None
         ):
             client_pack_releases = (
                 ClientPackRelease(
@@ -884,20 +911,14 @@ class NodeAppEntry:
             "client_pack_published_version": self.client_pack_published_version,
             "client_pack_next_version": self.client_pack_next_version,
             "client_pack_published_changelog": self.client_pack_published_changelog,
-            "client_pack_releases": [
-                release.model_dump(mode="json") for release in self.client_pack_releases
-            ],
+            "client_pack_releases": [release.model_dump(mode="json") for release in self.client_pack_releases],
             "client_pack_kubejs_scripts": [
                 script.model_dump(mode="json") for script in self.client_pack_kubejs_scripts
             ],
             "client_pack_metadata": (
-                self.client_pack_metadata.model_dump(mode="json")
-                if self.client_pack_metadata is not None
-                else None
+                self.client_pack_metadata.model_dump(mode="json") if self.client_pack_metadata is not None else None
             ),
-            "client_pack_file_previews": [
-                preview.to_mapping() for preview in self.client_pack_file_previews
-            ],
+            "client_pack_file_previews": [preview.to_mapping() for preview in self.client_pack_file_previews],
             "client_pack_automated_changelog": self.client_pack_automated_changelog,
             "runtime_fault": self.runtime_fault.to_mapping() if self.runtime_fault is not None else None,
             "update_info": self.update_info.to_mapping() if self.update_info is not None else None,
@@ -1118,8 +1139,7 @@ class NodeModEntry:
             description=_optional_string(payload, "description"),
             notes=_optional_string(payload, "notes"),
             mod_pages=tuple(
-                ModPageLink.model_validate(page)
-                for page in cast(list[object] | tuple[object, ...], raw_mod_pages)
+                ModPageLink.model_validate(page) for page in cast(list[object] | tuple[object, ...], raw_mod_pages)
             ),
             metadata_overrides=(
                 ModMetadataOverrides()
@@ -2119,9 +2139,7 @@ class NodeStateStreamEvent:
     def from_mapping(cls, payload: Mapping[str, object]) -> "NodeStateStreamEvent":
         raw_entries = payload.get("app_entries")
         raw_system_summary = payload.get("system_summary")
-        if raw_entries is not None and (
-            not isinstance(raw_entries, Sequence) or isinstance(raw_entries, (str, bytes))
-        ):
+        if raw_entries is not None and (not isinstance(raw_entries, Sequence) or isinstance(raw_entries, (str, bytes))):
             raise ValueError("Node state stream event app entries are invalid.")
         if raw_system_summary is not None and not isinstance(raw_system_summary, Mapping):
             raise ValueError("Node state stream event system summary is invalid.")
@@ -2227,577 +2245,6 @@ class _CachedBulkMetadataDiscovery:
 
 
 @dataclass(frozen=True, slots=True)
-class NodeSystemDiskSummary:
-    mountpoint: str
-    label: str
-    percent: int
-    free_bytes: int
-    total_bytes: int
-
-    def __post_init__(self) -> None:
-        if not self.mountpoint.strip() or not self.label.strip():
-            raise ValueError("System disk mountpoint and label must not be blank.")
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemDiskSummary:
-        return cls(
-            mountpoint=_required_string(payload, "mountpoint"),
-            label=_required_string(payload, "label"),
-            percent=_required_int(payload, "percent"),
-            free_bytes=_required_int(payload, "free_bytes"),
-            total_bytes=_required_int(payload, "total_bytes"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "mountpoint": self.mountpoint,
-            "label": self.label,
-            "percent": self.percent,
-            "free_bytes": self.free_bytes,
-            "total_bytes": self.total_bytes,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSystemSummary:
-    cpu_percent: int | None
-    ram_percent: int | None
-    ram_used_bytes: int | None
-    ram_total_bytes: int | None
-    storage_percent: int | None
-    storage_free_bytes: int | None
-    storage_total_bytes: int | None
-    cpu_per_core_percent: tuple[int, ...] = ()
-    disks: tuple[NodeSystemDiskSummary, ...] = ()
-    bot_uptime_seconds: int | None = None
-    uptime_seconds: int | None = None
-    cpu_points_available: int | None = None
-    cpu_points_capacity: int | None = None
-    ram_points_available: int | None = None
-    ram_points_capacity: int | None = None
-    running_names: tuple[str, ...] = ()
-    running_app_ids: tuple[str, ...] = ()
-    running_app_scopes: tuple[str, ...] = ()
-    start_blocked_app_ids: tuple[str, ...] = ()
-    captured_at_epoch_seconds: int | None = None
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemSummary:
-        raw_cpu_per_core = payload.get("cpu_per_core_percent", ())
-        if not isinstance(raw_cpu_per_core, Sequence) or isinstance(raw_cpu_per_core, (str, bytes)):
-            raise ValueError("cpu_per_core_percent is invalid.")
-        cpu_per_core_percent: list[int] = []
-        for raw_percent in raw_cpu_per_core:
-            if isinstance(raw_percent, bool) or not isinstance(raw_percent, int):
-                raise ValueError("cpu_per_core_percent is invalid.")
-            cpu_per_core_percent.append(raw_percent)
-        raw_disks = payload.get("disks", ())
-        if not isinstance(raw_disks, Sequence) or isinstance(raw_disks, (str, bytes)):
-            raise ValueError("disks is invalid.")
-        disks: list[NodeSystemDiskSummary] = []
-        for raw_disk in raw_disks:
-            if not isinstance(raw_disk, Mapping):
-                raise ValueError("disks is invalid.")
-            disks.append(NodeSystemDiskSummary.from_mapping(raw_disk))
-        raw_running_names = payload.get("running_names", ())
-        if not isinstance(raw_running_names, Sequence) or isinstance(raw_running_names, (str, bytes)):
-            raise ValueError("running_names is invalid.")
-        running_names: list[str] = []
-        for raw_name in raw_running_names:
-            if not isinstance(raw_name, str) or not raw_name:
-                raise ValueError("running_names is invalid.")
-            running_names.append(raw_name)
-        raw_running_app_ids = payload.get("running_app_ids", ())
-        if not isinstance(raw_running_app_ids, Sequence) or isinstance(raw_running_app_ids, (str, bytes)):
-            raise ValueError("running_app_ids is invalid.")
-        running_app_ids: list[str] = []
-        for raw_app_id in raw_running_app_ids:
-            if not isinstance(raw_app_id, str) or not raw_app_id:
-                raise ValueError("running_app_ids is invalid.")
-            running_app_ids.append(raw_app_id)
-        raw_running_app_scopes = payload.get("running_app_scopes", ())
-        if not isinstance(raw_running_app_scopes, Sequence) or isinstance(raw_running_app_scopes, (str, bytes)):
-            raise ValueError("running_app_scopes is invalid.")
-        running_app_scopes: list[str] = []
-        for raw_scope in raw_running_app_scopes:
-            if not isinstance(raw_scope, str) or not raw_scope:
-                raise ValueError("running_app_scopes is invalid.")
-            running_app_scopes.append(raw_scope)
-        raw_start_blocked_app_ids = payload.get("start_blocked_app_ids", ())
-        if not isinstance(raw_start_blocked_app_ids, Sequence) or isinstance(raw_start_blocked_app_ids, (str, bytes)):
-            raise ValueError("start_blocked_app_ids is invalid.")
-        start_blocked_app_ids: list[str] = []
-        for raw_app_id in raw_start_blocked_app_ids:
-            if not isinstance(raw_app_id, str) or not raw_app_id:
-                raise ValueError("start_blocked_app_ids is invalid.")
-            start_blocked_app_ids.append(raw_app_id)
-        return cls(
-            cpu_percent=_optional_int(payload, "cpu_percent"),
-            ram_percent=_optional_int(payload, "ram_percent"),
-            ram_used_bytes=_optional_int(payload, "ram_used_bytes"),
-            ram_total_bytes=_optional_int(payload, "ram_total_bytes"),
-            storage_percent=_optional_int(payload, "storage_percent"),
-            storage_free_bytes=_optional_int(payload, "storage_free_bytes"),
-            storage_total_bytes=_optional_int(payload, "storage_total_bytes"),
-            cpu_per_core_percent=tuple(cpu_per_core_percent),
-            disks=tuple(disks),
-            bot_uptime_seconds=_optional_int(payload, "bot_uptime_seconds"),
-            uptime_seconds=_optional_int(payload, "uptime_seconds"),
-            cpu_points_available=_optional_int(payload, "cpu_points_available"),
-            cpu_points_capacity=_optional_int(payload, "cpu_points_capacity"),
-            ram_points_available=_optional_int(payload, "ram_points_available"),
-            ram_points_capacity=_optional_int(payload, "ram_points_capacity"),
-            running_names=tuple(running_names),
-            running_app_ids=tuple(running_app_ids),
-            running_app_scopes=tuple(running_app_scopes),
-            start_blocked_app_ids=tuple(start_blocked_app_ids),
-            captured_at_epoch_seconds=_optional_int(payload, "captured_at_epoch_seconds"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "cpu_percent": self.cpu_percent,
-            "ram_percent": self.ram_percent,
-            "ram_used_bytes": self.ram_used_bytes,
-            "ram_total_bytes": self.ram_total_bytes,
-            "storage_percent": self.storage_percent,
-            "storage_free_bytes": self.storage_free_bytes,
-            "storage_total_bytes": self.storage_total_bytes,
-            "cpu_per_core_percent": list(self.cpu_per_core_percent),
-            "disks": [disk.to_mapping() for disk in self.disks],
-            "bot_uptime_seconds": self.bot_uptime_seconds,
-            "uptime_seconds": self.uptime_seconds,
-            "cpu_points_available": self.cpu_points_available,
-            "cpu_points_capacity": self.cpu_points_capacity,
-            "ram_points_available": self.ram_points_available,
-            "ram_points_capacity": self.ram_points_capacity,
-            "running_names": list(self.running_names),
-            "running_app_ids": list(self.running_app_ids),
-            "running_app_scopes": list(self.running_app_scopes),
-            "start_blocked_app_ids": list(self.start_blocked_app_ids),
-            "captured_at_epoch_seconds": self.captured_at_epoch_seconds,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSystemSample:
-    captured_at_epoch_seconds: int
-    cpu_percent: int | None
-    ram_percent: int | None
-    storage_percent: int | None
-
-    @classmethod
-    def from_summary(cls, summary: NodeSystemSummary) -> NodeSystemSample:
-        captured_at = summary.captured_at_epoch_seconds
-        if captured_at is None:
-            raise ValueError("System summary capture time is required for history samples.")
-        return cls(
-            captured_at_epoch_seconds=captured_at,
-            cpu_percent=summary.cpu_percent,
-            ram_percent=summary.ram_percent,
-            storage_percent=summary.storage_percent,
-        )
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemSample:
-        captured_at = _required_int(payload, "captured_at_epoch_seconds")
-        if captured_at < 0:
-            raise ValueError("System sample capture time must not be negative.")
-        return cls(
-            captured_at_epoch_seconds=captured_at,
-            cpu_percent=_optional_int(payload, "cpu_percent"),
-            ram_percent=_optional_int(payload, "ram_percent"),
-            storage_percent=_optional_int(payload, "storage_percent"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "captured_at_epoch_seconds": self.captured_at_epoch_seconds,
-            "cpu_percent": self.cpu_percent,
-            "ram_percent": self.ram_percent,
-            "storage_percent": self.storage_percent,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSystemHistory:
-    retention_seconds: int
-    sample_interval_seconds: int
-    samples: tuple[NodeSystemSample, ...]
-
-    def __post_init__(self) -> None:
-        if self.retention_seconds <= 0 or self.sample_interval_seconds <= 0:
-            raise ValueError("System history timing values must be positive.")
-        timestamps = tuple(sample.captured_at_epoch_seconds for sample in self.samples)
-        if timestamps != tuple(sorted(timestamps)):
-            raise ValueError("System history samples must be chronological.")
-
-    @classmethod
-    def empty(cls) -> NodeSystemHistory:
-        return cls(
-            retention_seconds=_NODE_SYSTEM_HISTORY_RETENTION_SECONDS,
-            sample_interval_seconds=int(_NODE_SYSTEM_HISTORY_INTERVAL_SECONDS),
-            samples=(),
-        )
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemHistory:
-        raw_samples = payload.get("samples")
-        if not isinstance(raw_samples, Sequence) or isinstance(raw_samples, (str, bytes)):
-            raise ValueError("System history samples are invalid.")
-        samples: list[NodeSystemSample] = []
-        for raw_sample in raw_samples:
-            if not isinstance(raw_sample, Mapping):
-                raise ValueError("System history sample is invalid.")
-            samples.append(NodeSystemSample.from_mapping(raw_sample))
-        return cls(
-            retention_seconds=_required_int(payload, "retention_seconds"),
-            sample_interval_seconds=_required_int(payload, "sample_interval_seconds"),
-            samples=tuple(samples),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "retention_seconds": self.retention_seconds,
-            "sample_interval_seconds": self.sample_interval_seconds,
-            "samples": [sample.to_mapping() for sample in self.samples],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSystemLogEntry:
-    relative_path: str
-    size_bytes: int
-    modified_at_epoch_seconds: int
-
-    def __post_init__(self) -> None:
-        path = PurePosixPath(self.relative_path)
-        if (
-            not self.relative_path.strip()
-            or path.is_absolute()
-            or any(part in {"", ".", ".."} for part in path.parts)
-        ):
-            raise ValueError("System log path is invalid.")
-        if self.size_bytes < 0:
-            raise ValueError("System log size must not be negative.")
-        if self.modified_at_epoch_seconds < 0:
-            raise ValueError("System log modification time must not be negative.")
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemLogEntry:
-        return cls(
-            relative_path=_required_string(payload, "relative_path"),
-            size_bytes=_required_int(payload, "size_bytes"),
-            modified_at_epoch_seconds=_required_int(payload, "modified_at_epoch_seconds"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "relative_path": self.relative_path,
-            "size_bytes": self.size_bytes,
-            "modified_at_epoch_seconds": self.modified_at_epoch_seconds,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSystemLogCatalog:
-    node: str
-    entries: tuple[NodeSystemLogEntry, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemLogCatalog:
-        raw_entries = payload.get("entries")
-        if not isinstance(raw_entries, Sequence) or isinstance(raw_entries, (str, bytes)):
-            raise ValueError("System log entries are invalid.")
-        entries: list[NodeSystemLogEntry] = []
-        for raw_entry in raw_entries:
-            if not isinstance(raw_entry, Mapping):
-                raise ValueError("System log entry is invalid.")
-            entries.append(NodeSystemLogEntry.from_mapping(raw_entry))
-        return cls(node=_required_string(payload, "node"), entries=tuple(entries))
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "node": self.node,
-            "entries": [entry.to_mapping() for entry in self.entries],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSystemLogTail:
-    node: str
-    entry: NodeSystemLogEntry
-    lines: tuple[str, ...]
-    truncated: bool
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemLogTail:
-        raw_entry = payload.get("entry")
-        if not isinstance(raw_entry, Mapping):
-            raise ValueError("System log tail entry is invalid.")
-        raw_lines = payload.get("lines")
-        if not isinstance(raw_lines, Sequence) or isinstance(raw_lines, (str, bytes)):
-            raise ValueError("System log tail lines are invalid.")
-        lines: list[str] = []
-        for raw_line in raw_lines:
-            if not isinstance(raw_line, str):
-                raise ValueError("System log tail line is invalid.")
-            lines.append(raw_line)
-        truncated = payload.get("truncated")
-        if not isinstance(truncated, bool):
-            raise ValueError("System log tail truncation is invalid.")
-        return cls(
-            node=_required_string(payload, "node"),
-            entry=NodeSystemLogEntry.from_mapping(raw_entry),
-            lines=tuple(lines),
-            truncated=truncated,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "node": self.node,
-            "entry": self.entry.to_mapping(),
-            "lines": list(self.lines),
-            "truncated": self.truncated,
-        }
-
-
-class NodeSystemAction(StrEnum):
-    RESTART_PROCESS = "restart_process"
-    REBOOT_HOST = "reboot_host"
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSystemCapabilities:
-    actions: tuple[NodeSystemAction, ...]
-    supports_app_auto_restart: bool = False
-    supports_silent_restart: bool = False
-
-    def __post_init__(self) -> None:
-        if not self.actions:
-            raise ValueError("Node system capabilities require at least one action.")
-        if len(set(self.actions)) != len(self.actions):
-            raise ValueError("Node system capabilities must not contain duplicate actions.")
-
-    def supports(self, action: NodeSystemAction) -> bool:
-        return action in self.actions
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemCapabilities:
-        raw_actions = payload.get("actions")
-        if not isinstance(raw_actions, Sequence) or isinstance(raw_actions, (str, bytes)):
-            raise ValueError("Node system capabilities actions are invalid.")
-        actions: list[NodeSystemAction] = []
-        for raw_action in raw_actions:
-            if not isinstance(raw_action, str):
-                raise ValueError("Node system capability action is invalid.")
-            try:
-                actions.append(NodeSystemAction(raw_action))
-            except ValueError as xcp:
-                raise ValueError("Node system capability action is invalid.") from xcp
-        raw_supports_app_auto_restart = payload.get("supports_app_auto_restart", False)
-        raw_supports_silent_restart = payload.get("supports_silent_restart", False)
-        if not isinstance(raw_supports_app_auto_restart, bool):
-            raise ValueError("Node system app auto-restart capability is invalid.")
-        if not isinstance(raw_supports_silent_restart, bool):
-            raise ValueError("Node system silent restart capability is invalid.")
-        return cls(
-            actions=tuple(actions),
-            supports_app_auto_restart=raw_supports_app_auto_restart,
-            supports_silent_restart=raw_supports_silent_restart,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "actions": [action.value for action in self.actions],
-            "supports_app_auto_restart": self.supports_app_auto_restart,
-            "supports_silent_restart": self.supports_silent_restart,
-        }
-
-
-type NodeSystemActionHandler = Callable[[NodeSystemAction, bool, bool], None]
-
-
-_NODE_SYSTEM_ACTION_LABELS: dict[NodeSystemAction, str] = {
-    NodeSystemAction.RESTART_PROCESS: "process restart",
-    NodeSystemAction.REBOOT_HOST: "host reboot",
-}
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSystemActionResult:
-    node: str
-    action: NodeSystemAction
-    message: str
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSystemActionResult:
-        raw_action = _required_string(payload, "action")
-        try:
-            action = NodeSystemAction(raw_action)
-        except ValueError as xcp:
-            raise ValueError("Node system action result action is invalid.") from xcp
-        return cls(
-            node=_required_string(payload, "node"),
-            action=action,
-            message=_required_string(payload, "message"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "node": self.node,
-            "action": self.action.value,
-            "message": self.message,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeRestartRecord:
-    timestamp: int
-    kind: RestartKind
-
-    def __post_init__(self) -> None:
-        if self.timestamp <= 0:
-            raise ValueError("Node restart record timestamp must be positive Unix seconds.")
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeRestartRecord:
-        raw_kind = _required_string(payload, "kind")
-        try:
-            kind = RestartKind(raw_kind)
-        except ValueError as xcp:
-            raise ValueError("Node restart record kind is invalid.") from xcp
-        return cls(timestamp=_required_int(payload, "timestamp"), kind=kind)
-
-    def to_mapping(self) -> dict[str, object]:
-        return {"timestamp": self.timestamp, "kind": self.kind.value}
-
-
-@dataclass(frozen=True, slots=True)
-class NodeRestartState:
-    node: str
-    process: NodeRestartRecord
-    voice: NodeRestartRecord | None = None
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeRestartState:
-        raw_process = payload.get("process")
-        if not isinstance(raw_process, Mapping):
-            raise ValueError("Node process restart record is invalid.")
-        raw_voice = payload.get("voice")
-        if raw_voice is not None and not isinstance(raw_voice, Mapping):
-            raise ValueError("Node voice restart record is invalid.")
-        return cls(
-            node=_required_string(payload, "node"),
-            process=NodeRestartRecord.from_mapping(raw_process),
-            voice=None if raw_voice is None else NodeRestartRecord.from_mapping(raw_voice),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "node": self.node,
-            "process": self.process.to_mapping(),
-            "voice": None if self.voice is None else self.voice.to_mapping(),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeRestartScheduleEntry:
-    target: RestartTarget
-    enabled: bool
-    interval_minutes: int
-    anchor_timestamp: int | None
-    last_triggered_timestamp: int | None
-    next_restart_timestamp: int | None
-    skipped_through_timestamp: int | None
-
-    def __post_init__(self) -> None:
-        if not MIN_RESTART_INTERVAL_MINUTES <= self.interval_minutes <= MAX_RESTART_INTERVAL_MINUTES:
-            raise ValueError("Node restart schedule interval is invalid.")
-        if self.enabled and (self.anchor_timestamp is None or self.next_restart_timestamp is None):
-            raise ValueError("Enabled node restart schedules require anchor and next-restart timestamps.")
-        if not self.enabled and self.next_restart_timestamp is not None:
-            raise ValueError("Disabled node restart schedules cannot have a next-restart timestamp.")
-        for field_name, value in (
-            ("anchor_timestamp", self.anchor_timestamp),
-            ("last_triggered_timestamp", self.last_triggered_timestamp),
-            ("next_restart_timestamp", self.next_restart_timestamp),
-            ("skipped_through_timestamp", self.skipped_through_timestamp),
-        ):
-            if value is not None and value <= 0:
-                raise ValueError(f"Node restart schedule {field_name} must be positive Unix seconds.")
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeRestartScheduleEntry:
-        raw_target = _required_string(payload, "target")
-        try:
-            target = RestartTarget(raw_target)
-        except ValueError as xcp:
-            raise ValueError("Node restart schedule target is invalid.") from xcp
-        raw_anchor_timestamp = payload.get("anchor_timestamp")
-        raw_last_triggered_timestamp = payload.get("last_triggered_timestamp")
-        raw_next_restart_timestamp = payload.get("next_restart_timestamp")
-        raw_skipped_through_timestamp = payload.get("skipped_through_timestamp")
-        if isinstance(raw_anchor_timestamp, bool) or (
-            raw_anchor_timestamp is not None and not isinstance(raw_anchor_timestamp, int)
-        ):
-            raise ValueError("Node restart schedule anchor timestamp is invalid.")
-        if isinstance(raw_last_triggered_timestamp, bool) or (
-            raw_last_triggered_timestamp is not None and not isinstance(raw_last_triggered_timestamp, int)
-        ):
-            raise ValueError("Node restart schedule last triggered timestamp is invalid.")
-        if isinstance(raw_next_restart_timestamp, bool) or (
-            raw_next_restart_timestamp is not None and not isinstance(raw_next_restart_timestamp, int)
-        ):
-            raise ValueError("Node restart schedule next restart timestamp is invalid.")
-        if isinstance(raw_skipped_through_timestamp, bool) or (
-            raw_skipped_through_timestamp is not None and not isinstance(raw_skipped_through_timestamp, int)
-        ):
-            raise ValueError("Node restart schedule skipped-through timestamp is invalid.")
-        return cls(
-            target=target,
-            enabled=_required_bool(payload, "enabled"),
-            interval_minutes=_required_int(payload, "interval_minutes"),
-            anchor_timestamp=raw_anchor_timestamp,
-            last_triggered_timestamp=raw_last_triggered_timestamp,
-            next_restart_timestamp=raw_next_restart_timestamp,
-            skipped_through_timestamp=raw_skipped_through_timestamp,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "target": self.target.value,
-            "enabled": self.enabled,
-            "interval_minutes": self.interval_minutes,
-            "anchor_timestamp": self.anchor_timestamp,
-            "last_triggered_timestamp": self.last_triggered_timestamp,
-            "next_restart_timestamp": self.next_restart_timestamp,
-            "skipped_through_timestamp": self.skipped_through_timestamp,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeRestartScheduleState:
-    node: str
-    schedules: tuple[NodeRestartScheduleEntry, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeRestartScheduleState:
-        raw_schedules = payload.get("schedules")
-        if not isinstance(raw_schedules, Sequence) or isinstance(raw_schedules, (str, bytes)):
-            raise ValueError("Node restart schedules are invalid.")
-        schedules: list[NodeRestartScheduleEntry] = []
-        for raw_schedule in raw_schedules:
-            if not isinstance(raw_schedule, Mapping):
-                raise ValueError("Node restart schedule is invalid.")
-            schedules.append(NodeRestartScheduleEntry.from_mapping(raw_schedule))
-        return cls(node=_required_string(payload, "node"), schedules=tuple(schedules))
-
-    def to_mapping(self) -> dict[str, object]:
-        return {"node": self.node, "schedules": [schedule.to_mapping() for schedule in self.schedules]}
-
-
-@dataclass(frozen=True, slots=True)
 class NodeModList:
     app_name: str
     app_friendly: str
@@ -2846,1137 +2293,6 @@ class NodeModList:
 
 
 @dataclass(frozen=True, slots=True)
-class NodeConfigEntry:
-    id: str
-    label: str
-    relative_path: str
-    root_id: str
-    root_label: str
-    kind: str
-    read_power_level: Power_Level
-    size_bytes: int
-    size_text: str
-    modified_at: str
-    write_power_level: Power_Level = _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigEntry:
-        return cls(
-            id=_required_string(payload, "id"),
-            label=_required_string(payload, "label"),
-            relative_path=_required_string(payload, "relative_path"),
-            root_id=_required_string(payload, "root_id"),
-            root_label=_required_string(payload, "root_label"),
-            kind=_required_string(payload, "kind"),
-            read_power_level=_power_level(payload, "read_power_level", default=_DEFAULT_REMOTE_CONFIG_READ_LEVEL),
-            write_power_level=_power_level(payload, "write_power_level", default=_DEFAULT_REMOTE_CONFIG_WRITE_LEVEL),
-            size_bytes=_required_int(payload, "size_bytes"),
-            size_text=_required_string(payload, "size_text"),
-            modified_at=_required_string(payload, "modified_at"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "id": self.id,
-            "label": self.label,
-            "relative_path": self.relative_path,
-            "root_id": self.root_id,
-            "root_label": self.root_label,
-            "kind": self.kind,
-            "read_power_level": self.read_power_level.name,
-            "write_power_level": self.write_power_level.name,
-            "size_bytes": self.size_bytes,
-            "size_text": self.size_text,
-            "modified_at": self.modified_at,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeConfigList:
-    app_name: str
-    app_friendly: str
-    node: str
-    configs: tuple[NodeConfigEntry, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigList:
-        app_name = _required_string(payload, "app_name")
-        app_friendly = _required_string(payload, "app_friendly")
-        node = _required_string(payload, "node")
-        raw_configs = payload.get("configs")
-        if not isinstance(raw_configs, Sequence) or isinstance(raw_configs, (str, bytes)):
-            raise ValueError("Node config list configs are invalid.")
-        configs: list[NodeConfigEntry] = []
-        for raw_config in raw_configs:
-            if not isinstance(raw_config, Mapping):
-                raise ValueError("Node config list contains an invalid config entry.")
-            configs.append(NodeConfigEntry.from_mapping(raw_config))
-        return cls(app_name=app_name, app_friendly=app_friendly, node=node, configs=tuple(configs))
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "configs": [entry.to_mapping() for entry in self.configs],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeConfigContent:
-    app_name: str
-    app_friendly: str
-    node: str
-    config: NodeConfigEntry
-    content: str
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeConfigContent:
-        raw_config = payload.get("config")
-        if not isinstance(raw_config, Mapping):
-            raise ValueError("Node config content metadata is invalid.")
-        content = payload.get("content")
-        if not isinstance(content, str):
-            raise ValueError("Node config content is invalid.")
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            config=NodeConfigEntry.from_mapping(raw_config),
-            content=content,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "config": self.config.to_mapping(),
-            "content": self.content,
-        }
-
-
-class NodeConfigWriteRequest(BaseModel):
-    content: str
-
-    model_config = ConfigDict(str_strip_whitespace=False)
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSaveRootEntry:
-    id: str
-    label: str
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeSaveRootEntry":
-        return cls(
-            id=_required_string(payload, "id"),
-            label=_required_string(payload, "label"),
-        )
-
-    def to_mapping(self) -> dict[str, str]:
-        return {
-            "id": self.id,
-            "label": self.label,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSaveEntry:
-    id: str
-    label: str
-    relative_path: str
-    root_id: str
-    root_label: str
-    kind: str
-    size_bytes: int
-    size_text: str
-    modified_at: str
-    can_delete: bool = False
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSaveEntry:
-        raw_can_delete = payload.get("can_delete", False)
-        if not isinstance(raw_can_delete, bool):
-            raise ValueError("Node save entry can_delete is invalid.")
-        return cls(
-            id=_required_string(payload, "id"),
-            label=_required_string(payload, "label"),
-            relative_path=_required_string(payload, "relative_path"),
-            root_id=_required_string(payload, "root_id"),
-            root_label=_required_string(payload, "root_label"),
-            kind=_required_string(payload, "kind"),
-            size_bytes=_required_int(payload, "size_bytes"),
-            size_text=_required_string(payload, "size_text"),
-            modified_at=_required_string(payload, "modified_at"),
-            can_delete=raw_can_delete,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "id": self.id,
-            "label": self.label,
-            "relative_path": self.relative_path,
-            "root_id": self.root_id,
-            "root_label": self.root_label,
-            "kind": self.kind,
-            "size_bytes": self.size_bytes,
-            "size_text": self.size_text,
-            "modified_at": self.modified_at,
-            "can_delete": self.can_delete,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSaveList:
-    app_name: str
-    app_friendly: str
-    node: str
-    roots: tuple[NodeSaveRootEntry, ...]
-    saves: tuple[NodeSaveEntry, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSaveList:
-        app_name = _required_string(payload, "app_name")
-        app_friendly = _required_string(payload, "app_friendly")
-        node = _required_string(payload, "node")
-        raw_roots = payload.get("roots", ())
-        if not isinstance(raw_roots, Sequence) or isinstance(raw_roots, (str, bytes)):
-            raise ValueError("Node save list roots are invalid.")
-        roots: list[NodeSaveRootEntry] = []
-        for raw_root in raw_roots:
-            if not isinstance(raw_root, Mapping):
-                raise ValueError("Node save list contains an invalid root entry.")
-            roots.append(NodeSaveRootEntry.from_mapping(raw_root))
-        raw_saves = payload.get("saves")
-        if not isinstance(raw_saves, Sequence) or isinstance(raw_saves, (str, bytes)):
-            raise ValueError("Node save list saves are invalid.")
-        saves: list[NodeSaveEntry] = []
-        for raw_save in raw_saves:
-            if not isinstance(raw_save, Mapping):
-                raise ValueError("Node save list contains an invalid save entry.")
-            saves.append(NodeSaveEntry.from_mapping(raw_save))
-        return cls(app_name=app_name, app_friendly=app_friendly, node=node, roots=tuple(roots), saves=tuple(saves))
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "roots": [root.to_mapping() for root in self.roots],
-            "saves": [entry.to_mapping() for entry in self.saves],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSaveMutationResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    message: str
-    save: NodeSaveEntry
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeSaveMutationResult":
-        raw_save = payload.get("save")
-        if not isinstance(raw_save, Mapping):
-            raise ValueError("Node save mutation result save is invalid.")
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
-            save=NodeSaveEntry.from_mapping(raw_save),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "message": self.message,
-            "save": self.save.to_mapping(),
-        }
-
-
-class NodeSaveRenameRequest(BaseModel):
-    new_name: str
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-
-@dataclass(frozen=True, slots=True)
-class NodeBlueprintFileEntry:
-    id: str
-    label: str
-    relative_path: str
-    size_bytes: int
-    size_text: str
-    modified_at: str
-    uploaded_by_display_name: str | None
-    can_delete: bool
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintFileEntry":
-        uploaded_by_display_name = _optional_string(payload, "uploaded_by_display_name")
-        return cls(
-            id=_required_string(payload, "id"),
-            label=_required_string(payload, "label"),
-            relative_path=_required_string(payload, "relative_path"),
-            size_bytes=_required_int(payload, "size_bytes"),
-            size_text=_required_string(payload, "size_text"),
-            modified_at=_required_string(payload, "modified_at"),
-            uploaded_by_display_name=uploaded_by_display_name,
-            can_delete=_required_bool(payload, "can_delete"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "id": self.id,
-            "label": self.label,
-            "relative_path": self.relative_path,
-            "size_bytes": self.size_bytes,
-            "size_text": self.size_text,
-            "modified_at": self.modified_at,
-            "uploaded_by_display_name": self.uploaded_by_display_name,
-            "can_delete": self.can_delete,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeBlueprintEntry:
-    id: str
-    label: str
-    session_name: str
-    relative_path: str
-    size_bytes: int
-    size_text: str
-    modified_at: str
-    uploaded_by_display_name: str | None
-    can_delete: bool
-    config_file: NodeBlueprintFileEntry | None = None
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintEntry":
-        uploaded_by_display_name = _optional_string(payload, "uploaded_by_display_name")
-        raw_config_file = payload.get("config_file")
-        if raw_config_file is not None and not isinstance(raw_config_file, Mapping):
-            raise ValueError("Node blueprint entry config_file is invalid.")
-        return cls(
-            id=_required_string(payload, "id"),
-            label=_required_string(payload, "label"),
-            session_name=_required_string(payload, "session_name"),
-            relative_path=_required_string(payload, "relative_path"),
-            size_bytes=_required_int(payload, "size_bytes"),
-            size_text=_required_string(payload, "size_text"),
-            modified_at=_required_string(payload, "modified_at"),
-            uploaded_by_display_name=uploaded_by_display_name,
-            can_delete=_required_bool(payload, "can_delete"),
-            config_file=NodeBlueprintFileEntry.from_mapping(raw_config_file) if raw_config_file is not None else None,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "id": self.id,
-            "label": self.label,
-            "session_name": self.session_name,
-            "relative_path": self.relative_path,
-            "size_bytes": self.size_bytes,
-            "size_text": self.size_text,
-            "modified_at": self.modified_at,
-            "uploaded_by_display_name": self.uploaded_by_display_name,
-            "can_delete": self.can_delete,
-            "config_file": self.config_file.to_mapping() if self.config_file is not None else None,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeBlueprintList:
-    app_name: str
-    app_friendly: str
-    node: str
-    blueprints: tuple[NodeBlueprintEntry, ...]
-    default_session_name: str | None = None
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintList":
-        app_name = _required_string(payload, "app_name")
-        app_friendly = _required_string(payload, "app_friendly")
-        node = _required_string(payload, "node")
-        default_session_name = _optional_string(payload, "default_session_name")
-        raw_blueprints = payload.get("blueprints")
-        if not isinstance(raw_blueprints, Sequence) or isinstance(raw_blueprints, (str, bytes)):
-            raise ValueError("Node blueprint list blueprints are invalid.")
-        blueprints: list[NodeBlueprintEntry] = []
-        for raw_blueprint in raw_blueprints:
-            if not isinstance(raw_blueprint, Mapping):
-                raise ValueError("Node blueprint list contains an invalid blueprint entry.")
-            blueprints.append(NodeBlueprintEntry.from_mapping(raw_blueprint))
-        return cls(
-            app_name=app_name,
-            app_friendly=app_friendly,
-            node=node,
-            blueprints=tuple(blueprints),
-            default_session_name=default_session_name,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "blueprints": [entry.to_mapping() for entry in self.blueprints],
-            "default_session_name": self.default_session_name,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeBlueprintMutationResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    message: str
-    blueprint: NodeBlueprintEntry
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeBlueprintMutationResult":
-        raw_blueprint = payload.get("blueprint")
-        if not isinstance(raw_blueprint, Mapping):
-            raise ValueError("Node blueprint mutation result blueprint is invalid.")
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
-            blueprint=NodeBlueprintEntry.from_mapping(raw_blueprint),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "message": self.message,
-            "blueprint": self.blueprint.to_mapping(),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSettingChoice:
-    label: str
-    raw_value: str
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSettingChoice:
-        return cls(
-            label=_required_string(payload, "label"),
-            raw_value=_required_string(payload, "raw_value"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "label": self.label,
-            "raw_value": self.raw_value,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSettingEntry:
-    key: str
-    label: str
-    type_name: str
-    permission_level: str
-    permission_level_name: str
-    default_text: str
-    description: str | None
-    paragraph: bool
-    is_sensitive: bool
-    value_text: str
-    revealed_value_text: str
-    current_input_value: str
-    has_pending_value: bool
-    can_edit: bool
-    value_is_hidden: bool
-    can_reveal_hidden_text: bool
-    allows_text_input: bool
-    allows_blank_input: bool
-    strict_choice: bool
-    choices: tuple[NodeSettingChoice, ...]
-    recent_inputs: tuple[str, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSettingEntry:
-        raw_choices = payload.get("choices")
-        if not isinstance(raw_choices, Sequence) or isinstance(raw_choices, (str, bytes)):
-            raise ValueError("Node setting entry choices are invalid.")
-        choices: list[NodeSettingChoice] = []
-        for raw_choice in raw_choices:
-            if not isinstance(raw_choice, Mapping):
-                raise ValueError("Node setting entry contained an invalid choice.")
-            choices.append(NodeSettingChoice.from_mapping(raw_choice))
-
-        raw_recent_inputs = payload.get("recent_inputs")
-        if not isinstance(raw_recent_inputs, Sequence) or isinstance(raw_recent_inputs, (str, bytes)):
-            raise ValueError("Node setting entry recent inputs are invalid.")
-        recent_inputs: list[str] = []
-        for raw_recent_input in raw_recent_inputs:
-            if not isinstance(raw_recent_input, str):
-                raise ValueError("Node setting entry contained an invalid recent input.")
-            recent_inputs.append(raw_recent_input)
-
-        permission_level = _required_string(payload, "permission_level")
-        permission_level_name = payload.get("permission_level_name")
-        if not isinstance(permission_level_name, str) or not permission_level_name:
-            parsed_permission_level = Access_Control.parse_level(permission_level)
-            permission_level_name = (
-                parsed_permission_level.name if parsed_permission_level is not None else permission_level
-            )
-        has_pending_value = payload.get("has_pending_value", False)
-        if not isinstance(has_pending_value, bool):
-            raise ValueError("Node setting entry has_pending_value is invalid.")
-
-        return cls(
-            key=_required_string(payload, "key"),
-            label=_required_string(payload, "label"),
-            type_name=_required_string(payload, "type_name"),
-            permission_level=permission_level,
-            permission_level_name=permission_level_name,
-            default_text=_required_text(payload, "default_text"),
-            description=_optional_string(payload, "description"),
-            paragraph=_required_bool(payload, "paragraph"),
-            is_sensitive=_required_bool(payload, "is_sensitive"),
-            value_text=_required_text(payload, "value_text"),
-            revealed_value_text=_required_text(payload, "revealed_value_text"),
-            current_input_value=_required_text(payload, "current_input_value"),
-            has_pending_value=has_pending_value,
-            can_edit=_required_bool(payload, "can_edit"),
-            value_is_hidden=_required_bool(payload, "value_is_hidden"),
-            can_reveal_hidden_text=_required_bool(payload, "can_reveal_hidden_text"),
-            allows_text_input=_required_bool(payload, "allows_text_input"),
-            allows_blank_input=_required_bool(payload, "allows_blank_input"),
-            strict_choice=_required_bool(payload, "strict_choice"),
-            choices=tuple(choices),
-            recent_inputs=tuple(recent_inputs),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "key": self.key,
-            "label": self.label,
-            "type_name": self.type_name,
-            "permission_level": self.permission_level,
-            "permission_level_name": self.permission_level_name,
-            "default_text": self.default_text,
-            "description": self.description,
-            "paragraph": self.paragraph,
-            "is_sensitive": self.is_sensitive,
-            "value_text": self.value_text,
-            "revealed_value_text": self.revealed_value_text,
-            "current_input_value": self.current_input_value,
-            "has_pending_value": self.has_pending_value,
-            "can_edit": self.can_edit,
-            "value_is_hidden": self.value_is_hidden,
-            "can_reveal_hidden_text": self.can_reveal_hidden_text,
-            "allows_text_input": self.allows_text_input,
-            "allows_blank_input": self.allows_blank_input,
-            "strict_choice": self.strict_choice,
-            "choices": [choice.to_mapping() for choice in self.choices],
-            "recent_inputs": list(self.recent_inputs),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSettingList:
-    app_name: str
-    app_friendly: str
-    node: str
-    editable_count: int
-    restricted_count: int
-    has_pending_changes: bool
-    pending_change_count: int
-    required_save_level_name: str
-    required_reload_level_name: str
-    settings: tuple[NodeSettingEntry, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSettingList:
-        raw_settings = payload.get("settings")
-        if not isinstance(raw_settings, Sequence) or isinstance(raw_settings, (str, bytes)):
-            raise ValueError("Node setting list settings are invalid.")
-        settings: list[NodeSettingEntry] = []
-        for raw_setting in raw_settings:
-            if not isinstance(raw_setting, Mapping):
-                raise ValueError("Node setting list contained an invalid setting entry.")
-            settings.append(NodeSettingEntry.from_mapping(raw_setting))
-        has_pending_changes = payload.get("has_pending_changes", False)
-        if not isinstance(has_pending_changes, bool):
-            raise ValueError("Node setting list has_pending_changes is invalid.")
-        pending_change_count = payload.get("pending_change_count", 0)
-        if isinstance(pending_change_count, bool) or not isinstance(pending_change_count, int):
-            raise ValueError("Node setting list pending_change_count is invalid.")
-        required_save_level_name = payload.get("required_save_level_name", Power_Level.user.name)
-        if not isinstance(required_save_level_name, str) or not required_save_level_name:
-            raise ValueError("Node setting list required_save_level_name is invalid.")
-        required_reload_level_name = payload.get("required_reload_level_name", Power_Level.user.name)
-        if not isinstance(required_reload_level_name, str) or not required_reload_level_name:
-            raise ValueError("Node setting list required_reload_level_name is invalid.")
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            editable_count=_required_int(payload, "editable_count"),
-            restricted_count=_required_int(payload, "restricted_count"),
-            has_pending_changes=has_pending_changes,
-            pending_change_count=pending_change_count,
-            required_save_level_name=required_save_level_name,
-            required_reload_level_name=required_reload_level_name,
-            settings=tuple(settings),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "editable_count": self.editable_count,
-            "restricted_count": self.restricted_count,
-            "has_pending_changes": self.has_pending_changes,
-            "pending_change_count": self.pending_change_count,
-            "required_save_level_name": self.required_save_level_name,
-            "required_reload_level_name": self.required_reload_level_name,
-            "settings": [setting.to_mapping() for setting in self.settings],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSettingMutationResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    setting_key: str
-    message: str
-    setting: NodeSettingEntry
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSettingMutationResult:
-        raw_setting = payload.get("setting")
-        if not isinstance(raw_setting, Mapping):
-            raise ValueError("Node setting mutation result setting is invalid.")
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            setting_key=_required_string(payload, "setting_key"),
-            message=_required_string(payload, "message"),
-            setting=NodeSettingEntry.from_mapping(raw_setting),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "setting_key": self.setting_key,
-            "message": self.message,
-            "setting": self.setting.to_mapping(),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeSettingsActionResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    message: str
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> NodeSettingsActionResult:
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            message=_required_string(payload, "message"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "message": self.message,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeConsoleActionParameter:
-    key: str
-    label: str
-    value_type_name: str
-    description: str | None
-    max_length: int
-    multiline: bool
-    strict_choice: bool
-    allows_text_input: bool
-    choices: tuple[NodeSettingChoice, ...]
-    recent_inputs: tuple[str, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleActionParameter":
-        raw_choices = payload.get("choices")
-        raw_recent_inputs = payload.get("recent_inputs")
-        if not isinstance(raw_choices, Sequence) or isinstance(raw_choices, (str, bytes)):
-            raise ValueError("Node console action parameter choices are invalid.")
-        if not isinstance(raw_recent_inputs, Sequence) or isinstance(raw_recent_inputs, (str, bytes)):
-            raise ValueError("Node console action parameter recent_inputs are invalid.")
-        choices: list[NodeSettingChoice] = []
-        for raw_choice in raw_choices:
-            if not isinstance(raw_choice, Mapping):
-                raise ValueError("Node console action parameter contains an invalid choice.")
-            choices.append(NodeSettingChoice.from_mapping(raw_choice))
-        recent_inputs: list[str] = []
-        for raw_recent_input in raw_recent_inputs:
-            if not isinstance(raw_recent_input, str):
-                raise ValueError("Node console action parameter contains an invalid recent input.")
-            recent_inputs.append(raw_recent_input)
-        return cls(
-            key=_required_string(payload, "key"),
-            label=_required_string(payload, "label"),
-            value_type_name=_required_string(payload, "value_type_name"),
-            description=_optional_string(payload, "description"),
-            max_length=_required_int(payload, "max_length"),
-            multiline=_required_bool(payload, "multiline"),
-            strict_choice=_required_bool(payload, "strict_choice"),
-            allows_text_input=_required_bool(payload, "allows_text_input"),
-            choices=tuple(choices),
-            recent_inputs=tuple(recent_inputs),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "key": self.key,
-            "label": self.label,
-            "value_type_name": self.value_type_name,
-            "description": self.description,
-            "max_length": self.max_length,
-            "multiline": self.multiline,
-            "strict_choice": self.strict_choice,
-            "allows_text_input": self.allows_text_input,
-            "choices": [choice.to_mapping() for choice in self.choices],
-            "recent_inputs": list(self.recent_inputs),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeConsoleActionEntry:
-    key: str
-    label: str
-    description: str
-    power_level_name: str
-    power_level_label: str
-    requires_running: bool
-    can_run: bool
-    parameter: NodeConsoleActionParameter | None
-    runtime_running: bool | None = None
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleActionEntry":
-        raw_parameter = payload.get("parameter")
-        if raw_parameter is not None and not isinstance(raw_parameter, Mapping):
-            raise ValueError("Node console action entry parameter is invalid.")
-        raw_runtime_running = payload.get("runtime_running")
-        if raw_runtime_running is not None and not isinstance(raw_runtime_running, bool):
-            raise ValueError("Node console action entry runtime_running is invalid.")
-        return cls(
-            key=_required_string(payload, "key"),
-            label=_required_string(payload, "label"),
-            description=_required_string(payload, "description"),
-            power_level_name=_required_string(payload, "power_level_name"),
-            power_level_label=_required_string(payload, "power_level_label"),
-            requires_running=_required_bool(payload, "requires_running"),
-            can_run=_required_bool(payload, "can_run"),
-            parameter=(
-                NodeConsoleActionParameter.from_mapping(raw_parameter)
-                if raw_parameter is not None
-                else None
-            ),
-            runtime_running=raw_runtime_running,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "key": self.key,
-            "label": self.label,
-            "description": self.description,
-            "power_level_name": self.power_level_name,
-            "power_level_label": self.power_level_label,
-            "requires_running": self.requires_running,
-            "can_run": self.can_run,
-            "parameter": self.parameter.to_mapping() if self.parameter is not None else None,
-            "runtime_running": self.runtime_running,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeConsoleActionList:
-    app_name: str
-    app_friendly: str
-    node: str
-    actions: tuple[NodeConsoleActionEntry, ...]
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleActionList":
-        raw_actions = payload.get("actions")
-        if not isinstance(raw_actions, Sequence) or isinstance(raw_actions, (str, bytes)):
-            raise ValueError("Node console action list actions are invalid.")
-        actions: list[NodeConsoleActionEntry] = []
-        for raw_action in raw_actions:
-            if not isinstance(raw_action, Mapping):
-                raise ValueError("Node console action list contains an invalid action.")
-            actions.append(NodeConsoleActionEntry.from_mapping(raw_action))
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            actions=tuple(actions),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "actions": [action.to_mapping() for action in self.actions],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeConsoleStdoutSnapshot:
-    app_name: str
-    app_friendly: str
-    node: str
-    lines: tuple[str, ...]
-    truncated: bool
-    running: bool
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleStdoutSnapshot":
-        raw_lines = payload.get("lines")
-        if not isinstance(raw_lines, Sequence) or isinstance(raw_lines, (str, bytes)):
-            raise ValueError("Node console stdout snapshot lines are invalid.")
-        lines: list[str] = []
-        for raw_line in raw_lines:
-            if not isinstance(raw_line, str):
-                raise ValueError("Node console stdout snapshot contains an invalid line.")
-            lines.append(raw_line)
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            lines=tuple(lines),
-            truncated=_required_bool(payload, "truncated"),
-            running=_required_bool(payload, "running"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "lines": list(self.lines),
-            "truncated": self.truncated,
-            "running": self.running,
-        }
-
-
-class NodeConsoleStdoutStreamEventKind(StrEnum):
-    INITIAL = "initial"
-    APPEND = "append"
-    RESET = "reset"
-
-
-@dataclass(frozen=True, slots=True)
-class NodeConsoleStdoutStreamEvent:
-    kind: NodeConsoleStdoutStreamEventKind
-    app_name: str
-    snapshot: NodeConsoleStdoutSnapshot | None = None
-    appended_lines: tuple[str, ...] = ()
-    truncated: bool = False
-    running: bool = False
-
-    def __post_init__(self) -> None:
-        if not self.app_name.strip():
-            raise ValueError("Console stdout stream app name must not be empty.")
-        if self.kind in {NodeConsoleStdoutStreamEventKind.INITIAL, NodeConsoleStdoutStreamEventKind.RESET}:
-            if self.snapshot is None or self.snapshot.app_name.casefold() != self.app_name.casefold():
-                raise ValueError("Console stdout stream snapshots are invalid.")
-            if self.appended_lines:
-                raise ValueError("Console stdout snapshot events cannot append lines.")
-        elif self.snapshot is not None:
-            raise ValueError("Console stdout append events cannot contain snapshots.")
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleStdoutStreamEvent":
-        try:
-            kind = NodeConsoleStdoutStreamEventKind(_required_string(payload, "kind"))
-        except ValueError as xcp:
-            raise ValueError("Console stdout stream event kind is invalid.") from xcp
-        raw_snapshot = payload.get("snapshot")
-        if raw_snapshot is not None and not isinstance(raw_snapshot, Mapping):
-            raise ValueError("Console stdout stream snapshot is invalid.")
-        raw_appended_lines = payload.get("appended_lines", ())
-        if not isinstance(raw_appended_lines, Sequence) or isinstance(raw_appended_lines, (str, bytes)):
-            raise ValueError("Console stdout appended lines are invalid.")
-        appended_lines = tuple(raw_appended_lines)
-        if any(not isinstance(line, str) for line in appended_lines):
-            raise ValueError("Console stdout appended lines are invalid.")
-        return cls(
-            kind=kind,
-            app_name=_required_string(payload, "app_name"),
-            snapshot=NodeConsoleStdoutSnapshot.from_mapping(raw_snapshot) if raw_snapshot is not None else None,
-            appended_lines=cast(tuple[str, ...], appended_lines),
-            truncated=_required_bool(payload, "truncated"),
-            running=_required_bool(payload, "running"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "kind": self.kind.value,
-            "app_name": self.app_name,
-            "snapshot": self.snapshot.to_mapping() if self.snapshot is not None else None,
-            "appended_lines": list(self.appended_lines),
-            "truncated": self.truncated,
-            "running": self.running,
-        }
-
-    def apply(
-        self,
-        previous: NodeConsoleStdoutSnapshot | None,
-        *,
-        max_lines: int,
-    ) -> NodeConsoleStdoutSnapshot:
-        if max_lines <= 0:
-            raise ValueError("Console stdout stream max lines must be positive.")
-        if self.snapshot is not None:
-            return self.snapshot
-        if previous is None:
-            raise ValueError("Console stdout append event requires an initial snapshot.")
-        lines = (*previous.lines, *self.appended_lines)
-        return NodeConsoleStdoutSnapshot(
-            app_name=previous.app_name,
-            app_friendly=previous.app_friendly,
-            node=previous.node,
-            lines=tuple(lines[-max_lines:]),
-            truncated=self.truncated,
-            running=self.running,
-        )
-
-
-class NodeConsoleActionExecuteRequest(BaseModel):
-    value: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class NodeConsoleActionExecutionResult:
-    app_name: str
-    app_friendly: str
-    node: str
-    action_key: str
-    summary: str
-    success: bool
-    text: str | None
-    source: ConsoleResponseSource
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeConsoleActionExecutionResult":
-        raw_source = _required_string(payload, "source")
-        try:
-            source = ConsoleResponseSource(raw_source)
-        except ValueError as xcp:
-            raise ValueError("Node console action execution result source is invalid.") from xcp
-        return cls(
-            app_name=_required_string(payload, "app_name"),
-            app_friendly=_required_string(payload, "app_friendly"),
-            node=_required_string(payload, "node"),
-            action_key=_required_string(payload, "action_key"),
-            summary=_required_string(payload, "summary"),
-            success=_required_bool(payload, "success"),
-            text=_optional_string(payload, "text"),
-            source=source,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "app_name": self.app_name,
-            "app_friendly": self.app_friendly,
-            "node": self.node,
-            "action_key": self.action_key,
-            "summary": self.summary,
-            "success": self.success,
-            "text": self.text,
-            "source": self.source.value,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class NodeChatEndpointSummary:
-    label: str
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeChatEndpointSummary":
-        return cls(label=_required_string(payload, "label"))
-
-    def to_mapping(self) -> dict[str, object]:
-        return {"label": self.label}
-
-
-@dataclass(frozen=True, slots=True)
-class NodeChatRoomSnapshot:
-    room_id: str
-    endpoint_count: int
-    events: tuple[ChatEvent, ...]
-    endpoint_summaries: tuple[NodeChatEndpointSummary, ...] = ()
-    revision: int = 0
-
-    def __post_init__(self) -> None:
-        if self.revision < 0:
-            raise ValueError("Chat room snapshot revision must not be negative.")
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeChatRoomSnapshot":
-        raw_events = payload.get("events")
-        if not isinstance(raw_events, Sequence) or isinstance(raw_events, (str, bytes)):
-            raise ValueError("events are invalid.")
-        events: list[ChatEvent] = []
-        for raw_event in raw_events:
-            if not isinstance(raw_event, Mapping):
-                raise ValueError("events are invalid.")
-            events.append(ChatEvent.from_mapping(raw_event))
-        raw_endpoint_summaries = payload.get("endpoint_summaries", ())
-        if not isinstance(raw_endpoint_summaries, Sequence) or isinstance(raw_endpoint_summaries, (str, bytes)):
-            raise ValueError("endpoint_summaries are invalid.")
-        endpoint_summaries: list[NodeChatEndpointSummary] = []
-        for raw_summary in raw_endpoint_summaries:
-            if not isinstance(raw_summary, Mapping):
-                raise ValueError("endpoint_summaries are invalid.")
-            endpoint_summaries.append(NodeChatEndpointSummary.from_mapping(raw_summary))
-        return cls(
-            room_id=_required_string(payload, "room_id"),
-            endpoint_count=_required_int(payload, "endpoint_count"),
-            endpoint_summaries=tuple(endpoint_summaries),
-            events=tuple(events),
-            revision=_optional_int(payload, "revision") or 0,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "room_id": self.room_id,
-            "endpoint_count": self.endpoint_count,
-            "endpoint_summaries": [summary.to_mapping() for summary in self.endpoint_summaries],
-            "events": [event.to_mapping() for event in self.events],
-            "revision": self.revision,
-        }
-
-
-class NodeChatStreamEventKind(StrEnum):
-    INITIAL = "initial"
-    CHAT_CHANGED = "chat_changed"
-    RUNTIME_CHANGED = "runtime_changed"
-
-
-@dataclass(frozen=True, slots=True)
-class NodeChatStreamEvent:
-    kind: NodeChatStreamEventKind
-    room_id: str
-    snapshot: NodeChatRoomSnapshot | None = None
-    app_stats: NodeAppRuntimeSummary | None = None
-    events: tuple[ChatEvent, ...] = ()
-    revision: int = 0
-
-    def __post_init__(self) -> None:
-        if not self.room_id.strip():
-            raise ValueError("Node chat stream event room id is invalid.")
-        if self.snapshot is not None and self.snapshot.room_id.casefold() != self.room_id.casefold():
-            raise ValueError("Node chat stream event snapshot room id is invalid.")
-        if any(event.room_id.casefold() != self.room_id.casefold() for event in self.events):
-            raise ValueError("Node chat stream event delta room id is invalid.")
-        if self.revision < 0:
-            raise ValueError("Node chat stream event revision must not be negative.")
-
-    @classmethod
-    def from_mapping(cls, payload: Mapping[str, object]) -> "NodeChatStreamEvent":
-        raw_kind = _required_string(payload, "kind")
-        try:
-            kind = NodeChatStreamEventKind(raw_kind)
-        except ValueError as xcp:
-            raise ValueError("Node chat stream event kind is invalid.") from xcp
-        raw_snapshot = payload.get("snapshot")
-        raw_app_stats = payload.get("app_stats")
-        raw_events = payload.get("events", ())
-        if raw_snapshot is not None and not isinstance(raw_snapshot, Mapping):
-            raise ValueError("Node chat stream event snapshot is invalid.")
-        if raw_app_stats is not None and not isinstance(raw_app_stats, Mapping):
-            raise ValueError("Node chat stream event app_stats are invalid.")
-        if not isinstance(raw_events, Sequence) or isinstance(raw_events, (str, bytes)):
-            raise ValueError("Node chat stream event deltas are invalid.")
-        events: list[ChatEvent] = []
-        for raw_event in raw_events:
-            if not isinstance(raw_event, Mapping):
-                raise ValueError("Node chat stream event delta is invalid.")
-            events.append(ChatEvent.from_mapping(raw_event))
-        return cls(
-            kind=kind,
-            room_id=_required_string(payload, "room_id"),
-            snapshot=NodeChatRoomSnapshot.from_mapping(raw_snapshot) if raw_snapshot is not None else None,
-            app_stats=NodeAppRuntimeSummary.from_mapping(raw_app_stats) if raw_app_stats is not None else None,
-            events=tuple(events),
-            revision=_optional_int(payload, "revision") or 0,
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "kind": self.kind.value,
-            "room_id": self.room_id,
-            "snapshot": self.snapshot.to_mapping() if self.snapshot is not None else None,
-            "app_stats": self.app_stats.to_mapping() if self.app_stats is not None else None,
-            "events": [event.to_mapping() for event in self.events],
-            "revision": self.revision,
-        }
-
-
-class NodeSettingWriteRequest(BaseModel):
-    value: str
-
-    model_config = ConfigDict(str_strip_whitespace=False)
-
-
-class NodeWebChatRequest(BaseModel):
-    session_id: str
-    author_display_name: str
-    content: str
-    reply_to_event_id: str | None = None
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    @field_validator("session_id", "author_display_name", "content")
-    @classmethod
-    def _validate_required_text(cls, value: str) -> str:
-        text = str(value).strip()
-        if not text:
-            raise ValueError("web chat fields must not be empty.")
-        return text
-
-    @field_validator("reply_to_event_id")
-    @classmethod
-    def _validate_optional_reply_to_event_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        text = str(value).strip()
-        if not text:
-            raise ValueError("reply_to_event_id must not be empty.")
-        return text
-
-
-@dataclass(frozen=True, slots=True)
 class NodeDownloadRequest:
     enabled_only: bool = False
     mod_name: str | None = None
@@ -4012,194 +2328,6 @@ class NodeDownloadFile:
 class NodeModDownloadForm:
     action_url: str
     access_token: str | None
-
-
-class NodeRelayTTSRequest(BaseModel):
-    guild_id: int
-    channel_id: int
-    message_id: int
-    text: str
-    user_id: int | None = None
-    source_app: str
-    player_name: str
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    @field_validator("guild_id", "channel_id", "message_id", "user_id", mode="before")
-    @classmethod
-    def _validate_optional_snowflake_int(cls, value: object) -> int | None:
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            raise TypeError("relay TTS snowflake fields must not be booleans.")
-        if not isinstance(value, (int, str, hikari.Snowflake)):
-            raise TypeError("relay TTS snowflake fields must be Discord snowflakes.")
-        return int(hikari.Snowflake(value))
-
-    @field_validator("text", "source_app", "player_name")
-    @classmethod
-    def _validate_required_text(cls, value: str) -> str:
-        text = str(value).strip()
-        if not text:
-            raise ValueError("relay TTS fields must not be empty.")
-        return text
-
-
-@dataclass(frozen=True, slots=True)
-class NodeRelayTTSResult:
-    queued: bool
-    spoken: str | None = None
-    queue_size: int | None = None
-    reason: str | None = None
-
-    def to_mapping(self) -> dict[str, object]:
-        return {
-            "queued": self.queued,
-            "spoken": self.spoken,
-            "queue_size": self.queue_size,
-            "reason": self.reason,
-        }
-
-
-class RemoteRelayTTSForwarder:
-    _BOT_CONFIGURATION_PATH = Path("configuration.json")
-    _TARGET_PROFILE = config.BotProfileName.YUKI
-
-    def __init__(self) -> None:
-        self._bot_configuration_path = self._BOT_CONFIGURATION_PATH
-
-    def voice_target(self, guild_id: hikari.Snowflakeish) -> config.VoiceTargetConfig | None:
-        del guild_id
-        return None
-
-    async def queue_relay_message(
-        self,
-        guild_id: hikari.Snowflakeish,
-        channel_id: hikari.Snowflakeish,
-        message_id: hikari.Snowflakeish,
-        text: str,
-        *,
-        user_id: hikari.Snowflakeish | None,
-    ) -> tuple[str, int]:
-        return await self.queue_discord_relay_message(
-            guild_id,
-            channel_id,
-            message_id,
-            text,
-            user_id=user_id,
-            source_app=config.MOD_WEB_SERVER.node_name,
-            player_name=str(user_id) if user_id is not None else "unlinked",
-        )
-
-    async def queue_discord_relay_message(
-        self,
-        guild_id: hikari.Snowflakeish,
-        channel_id: hikari.Snowflakeish,
-        message_id: hikari.Snowflakeish,
-        text: str,
-        *,
-        user_id: hikari.Snowflakeish | None,
-        source_app: str,
-        player_name: str,
-    ) -> tuple[str, int]:
-        secret = config.MOD_WEB_SERVER.token_secret
-        if secret is None:
-            raise RuntimeError("Node relay TTS token secret is not configured.")
-
-        target_snapshot = self._resolve_target_snapshot()
-        mod_web = target_snapshot.features.mod_web
-        if mod_web is None:
-            raise RuntimeError("Target voice node does not expose a node API endpoint.")
-
-        payload = NodeRelayTTSRequest(
-            guild_id=int(hikari.Snowflake(guild_id)),
-            channel_id=int(hikari.Snowflake(channel_id)),
-            message_id=int(hikari.Snowflake(message_id)),
-            text=text,
-            user_id=int(hikari.Snowflake(user_id)) if user_id is not None else None,
-            source_app=source_app,
-            player_name=player_name,
-        )
-        token = issue_node_token(
-            secret=secret,
-            grant=NodeAccessGrant(
-                subject=f"relay-tts:{config.MOD_WEB_SERVER.node_name}",
-                node=mod_web.node_name,
-                app=None,
-                scopes=frozenset({NodeApiScope.RELAY_TTS}),
-                expires_at=int(time.time()) + _RELAY_TTS_FORWARD_TTL_SECONDS,
-            ),
-        )
-        response = await run_blocking(
-            self._post_relay_tts,
-            mod_web.node_api_base_url.rstrip("/") + "/relay/tts",
-            token,
-            cast(Mapping[str, JsonValue], payload.model_dump(mode="json")),
-        )
-        queued = bool(response.get("queued"))
-        if not queued:
-            reason = str(response.get("reason") or "Relay TTS request was not queued.")
-            raise RuntimeError(reason)
-        spoken = response.get("spoken")
-        queue_size = response.get("queue_size")
-        if not isinstance(spoken, str) or not isinstance(queue_size, int):
-            raise RuntimeError("Relay TTS response from target node was invalid.")
-        return spoken, queue_size
-
-    def _resolve_target_snapshot(self) -> config.BotMetadataSnapshot:
-        registry = self._load_known_bot_registry()
-        for snapshot in registry.values():
-            if snapshot.profile.bot_profile is self._TARGET_PROFILE:
-                return snapshot
-        raise RuntimeError(f"No known bot metadata entry exists for target profile {self._TARGET_PROFILE.value!r}.")
-
-    def _load_known_bot_registry(self) -> dict[str, config.BotMetadataSnapshot]:
-        snapshots: dict[str, config.BotMetadataSnapshot] = {}
-        if self._bot_configuration_path.exists():
-            try:
-                bot_config = config.load_bot_configuration(self._bot_configuration_path)
-            except (OSError, ValueError) as xcp:
-                log.warning("Relay TTS target lookup failed to read %s: %s", self._bot_configuration_path, xcp)
-            else:
-                snapshots.update(bot_config.known_bots)
-
-        if config.DATA_AUTHORITY_MODE is config.DataAuthorityMode.REMOTE:
-            cache_path = config.authority_cache_path(AuthorityResource.BOTS)
-            if cache_path.exists():
-                try:
-                    raw = read_json_object(cache_path)
-                    snapshots.update(
-                        {
-                            bot_id: config.BotMetadataSnapshot.model_validate(snapshot)
-                            for bot_id, snapshot in raw.items()
-                        }
-                    )
-                except (OSError, ValueError, TypeError) as xcp:
-                    log.warning("Relay TTS target lookup failed to read bot registry cache %s: %s", cache_path, xcp)
-
-        return snapshots
-
-    @staticmethod
-    def _post_relay_tts(url: str, token: str, payload: Mapping[str, JsonValue]) -> dict[str, object]:
-        try:
-            response = requests.post(
-                url,
-                json=payload,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=5,
-            )
-        except requests.RequestException as xcp:
-            raise RuntimeError(f"Relay TTS request failed: {type(xcp).__name__}: {xcp}") from xcp
-        try:
-            body = response.json()
-        except ValueError:
-            body = {}
-        if response.status_code >= 400:
-            detail = body.get("detail") if isinstance(body, dict) else response.text
-            raise RuntimeError(f"Relay TTS request rejected by target node: {detail}")
-        if not isinstance(body, dict):
-            raise RuntimeError("Relay TTS response from target node was not a JSON object.")
-        return body
 
 
 _BulkMetadataOperationResult = TypeVar("_BulkMetadataOperationResult")
@@ -4447,323 +2575,29 @@ class NodeApiService:
             allow_headers=("Authorization",),
         )
 
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps")
-        async def _list_apps(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API apps request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
-            return {"node": self.node_name, "apps": [entry.to_mapping() for entry in await self.list_apps()]}
+        register_core_routes(
+            nicegui_app,
+            service=self,
+            api_prefix=_NODE_API_PREFIX,
+            traffic_log=traffic_log,
+        )
 
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}")
-        async def _app_summary(
-            app_name: str,
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            traffic_log.info("Node API app summary request: node=%s app=%s", self.node_name, app_name)
-            self._require_access(
-                request,
-                access_token,
-                app_name=app_name,
-                scopes=(NodeApiScope.APPS_READ,),
-            )
-            app = self._resolve_app(app_name)
-            return (await self.build_live_app_entry(app)).to_mapping()
+        register_system_routes(
+            nicegui_app,
+            service=self,
+            api_prefix=_NODE_API_PREFIX,
+            max_log_lines=_NODE_SYSTEM_LOG_MAX_LINES,
+            http_exception=_http_exception,
+            traffic_log=traffic_log,
+        )
 
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/ping")
-        async def _ping() -> Response:
-            return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-        @nicegui_app.websocket(f"{_NODE_API_PREFIX}/presence/stream")
-        async def _presence_stream(websocket: WebSocket) -> None:
-            traffic_log.info("Node API presence stream request: node=%s", self.node_name)
-            await self._serve_presence_stream(websocket=websocket)
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/system")
-        async def _system_summary(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API system summary request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
-            return self.build_system_summary().to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/history")
-        async def _system_history(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API system history request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.APPS_READ,))
-            return self.build_system_history().to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/logs")
-        async def _system_logs(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API system log catalog request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            return self.build_system_log_catalog().to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/logs/{{log_path:path}}")
-        async def _system_log_tail(
-            log_path: str,
-            request: Request,
-            access_token: str | None = None,
-            max_lines: int = 200,
-        ) -> dict[str, object]:
-            traffic_log.info("Node API system log tail request: node=%s log=%s", self.node_name, log_path)
-            if max_lines < 1 or max_lines > _NODE_SYSTEM_LOG_MAX_LINES:
-                raise _http_exception(
-                    400,
-                    f"System log line limit must be between 1 and {_NODE_SYSTEM_LOG_MAX_LINES}.",
-                )
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            return self.build_system_log_tail(log_path=log_path, max_lines=max_lines).to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/capabilities")
-        async def _system_capabilities(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API system capabilities request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            return self.system_capabilities().to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/restart-state")
-        async def _restart_state(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API restart state request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            return self.read_restart_state().to_mapping()
-
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/system/actions")
-        async def _system_action(
-            payload: dict[str, object],
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            traffic_log.info("Node API system action request: node=%s", self.node_name)
-            grant = self._require_access(
-                request,
-                access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_OPERATE,),
-            )
-            actor_user_id = self._request_actor_user_id(
-                request=request,
-                access_token=access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_OPERATE,),
-                verified_grant=grant,
-            )
-            raw_action = payload.get("action")
-            if not isinstance(raw_action, str):
-                raise _http_exception(400, "Node system action is invalid.")
-            try:
-                action = NodeSystemAction(raw_action)
-            except ValueError as xcp:
-                raise _http_exception(400, "Unknown node system action.") from xcp
-            auto_restart_running_apps = payload.get("auto_restart_running_apps", True)
-            if not isinstance(auto_restart_running_apps, bool):
-                raise _http_exception(400, "Node system action auto-restart option must be boolean.")
-            silent = payload.get("silent", False)
-            if not isinstance(silent, bool):
-                raise _http_exception(400, "Node system action silent option must be boolean.")
-            result = await self.schedule_system_action(
-                action=action,
-                auto_restart_running_apps=auto_restart_running_apps,
-                silent=silent,
-                actor_user_id=actor_user_id,
-            )
-            return result.to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/system/restart-schedules")
-        async def _restart_schedules(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API restart schedule request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            return self.read_restart_schedules().to_mapping()
-
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/system/restart-schedules")
-        async def _update_restart_schedule(
-            payload: dict[str, object],
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            traffic_log.info("Node API restart schedule update request: node=%s", self.node_name)
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            actor_user_id = self._request_actor_user_id(
-                request=request,
-                access_token=access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_OPERATE,),
-                verified_grant=grant,
-            )
-            raw_target = payload.get("target")
-            if not isinstance(raw_target, str):
-                raise _http_exception(400, "Restart schedule target is invalid.")
-            try:
-                target = RestartTarget(raw_target)
-            except ValueError as xcp:
-                raise _http_exception(400, "Unknown restart schedule target.") from xcp
-            raw_interval = payload.get("interval_minutes")
-            if isinstance(raw_interval, bool) or (raw_interval is not None and not isinstance(raw_interval, int)):
-                raise _http_exception(400, "Restart schedule interval is invalid.")
-            raw_anchor_timestamp = payload.get("anchor_timestamp")
-            if isinstance(raw_anchor_timestamp, bool) or (
-                raw_anchor_timestamp is not None and not isinstance(raw_anchor_timestamp, int)
-            ):
-                raise _http_exception(400, "Restart schedule anchor timestamp is invalid.")
-            result = await self.update_restart_schedule(
-                target=target,
-                interval_minutes=raw_interval,
-                anchor_timestamp=raw_anchor_timestamp,
-                actor_user_id=actor_user_id,
-            )
-            return result.to_mapping()
-
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/system/restart-schedules/{{target_name}}/skip")
-        async def _skip_restart_schedule(
-            target_name: str,
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            traffic_log.info(
-                "Node API restart schedule skip request: node=%s target=%s",
-                self.node_name,
-                target_name,
-            )
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            actor_user_id = self._request_actor_user_id(
-                request=request,
-                access_token=access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_OPERATE,),
-                verified_grant=grant,
-            )
-            try:
-                target = RestartTarget(target_name)
-            except ValueError as xcp:
-                raise _http_exception(400, "Unknown restart schedule target.") from xcp
-            return (await self.skip_restart_schedule(target=target, actor_user_id=actor_user_id)).to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/node-capacity")
-        async def _node_capacity(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API node capacity request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
-            return self.read_node_capacity().model_dump(mode="json")
-
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/node-capacity")
-        async def _update_node_capacity(
-            payload: dict[str, object],
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            traffic_log.info("Node API node capacity update request: node=%s", self.node_name)
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
-            actor_user_id = self._request_actor_user_id(
-                request=request,
-                access_token=access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
-                verified_grant=grant,
-            )
-            capacity = config.NodeCapacityProfile.model_validate(payload)
-            result = await self.mutate_node_capacity(capacity=capacity, actor_user_id=actor_user_id)
-            return result.to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/node-disk-settings")
-        async def _node_disk_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API node disk settings request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
-            return self.read_node_disk_settings().to_mapping()
-
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/node-disk-settings")
-        async def _update_node_disk_settings(
-            payload: dict[str, object],
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            traffic_log.info("Node API node disk settings update request: node=%s", self.node_name)
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
-            actor_user_id = self._request_actor_user_id(
-                request=request,
-                access_token=access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
-                verified_grant=grant,
-            )
-            preferences = config.PersistedDiskPreferences.model_validate(payload)
-            try:
-                result = await self.mutate_node_disk_settings(
-                    preferences=preferences,
-                    actor_user_id=actor_user_id,
-                )
-            except ValueError as xcp:
-                raise _http_exception(400, str(xcp)) from xcp
-            return result.to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/node-font-sources")
-        async def _node_font_sources(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API node font sources request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            return self.read_node_font_sources().model_dump(mode="json")
-
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/node-font-sources")
-        async def _update_node_font_sources(
-            payload: dict[str, object],
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            traffic_log.info("Node API node font sources update request: node=%s", self.node_name)
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_OPERATE,))
-            actor_user_id = self._request_actor_user_id(
-                request=request,
-                access_token=access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_OPERATE,),
-                verified_grant=grant,
-            )
-            settings = config.NodeFontSourceSettings.model_validate(payload)
-            result = await self.mutate_node_font_sources(settings=settings, actor_user_id=actor_user_id)
-            return result.to_mapping()
-
-        @nicegui_app.get(f"{_NODE_API_PREFIX}/discord-settings")
-        async def _discord_settings(request: Request, access_token: str | None = None) -> dict[str, object]:
-            traffic_log.info("Node API Discord settings request: node=%s", self.node_name)
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
-            return self.read_discord_settings().model_dump(mode="json")
-
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/discord-settings")
-        async def _update_discord_settings(
-            payload: dict[str, object],
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            traffic_log.info("Node API Discord settings update request: node=%s", self.node_name)
-            grant = self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.NODE_MANAGE,))
-            actor_user_id = self._request_actor_user_id(
-                request=request,
-                access_token=access_token,
-                app_name=None,
-                scopes=(NodeApiScope.NODE_MANAGE,),
-                verified_grant=grant,
-            )
-            settings = config.DiscordSettings.model_validate(payload)
-            result = await self.mutate_discord_settings(settings=settings, actor_user_id=actor_user_id)
-            return result.to_mapping()
-
-        @nicegui_app.websocket(f"{_NODE_API_PREFIX}/state/stream")
-        async def _node_state_stream(
-            websocket: WebSocket,
-            access_token: str | None = None,
-        ) -> None:
-            traffic_log.info("Node API node state stream request: node=%s", self.node_name)
-            self._require_websocket_token_access(
-                websocket=websocket,
-                access_token=access_token,
-                app_name=None,
-                scopes=(NodeApiScope.APPS_READ,),
-            )
-            await self._serve_node_state_stream(websocket=websocket)
-
-        @nicegui_app.post(f"{_NODE_API_PREFIX}/relay/tts")
-        async def _queue_relay_tts(
-            payload: dict[str, object],
-            request: Request,
-            access_token: str | None = None,
-        ) -> dict[str, object]:
-            self._require_access(request, access_token, app_name=None, scopes=(NodeApiScope.RELAY_TTS,))
-            relay_request = NodeRelayTTSRequest.model_validate(payload)
-            result = await self.queue_relay_tts(relay_request)
-            return result.to_mapping()
+        register_node_management_routes(
+            nicegui_app,
+            service=self,
+            api_prefix=_NODE_API_PREFIX,
+            http_exception=_http_exception,
+            traffic_log=traffic_log,
+        )
 
         @nicegui_app.get(f"{_NODE_API_PREFIX}/apps/{{app_name}}/chat")
         async def _chat_snapshot(
@@ -7335,7 +5169,7 @@ class NodeApiService:
             reply_to_event_id=chat_request.reply_to_event_id,
         )
 
-    async def queue_relay_tts(self, relay_request: NodeRelayTTSRequest) -> NodeRelayTTSResult:
+    async def queue_relay_tts(self, relay_request: _NodeRelayTTSRequest) -> _NodeRelayTTSResult:
         if self._relay_tts_service is None:
             log.warning(
                 "Node API relay TTS unavailable: node=%s source_app=%s player=%s",
@@ -7365,7 +5199,7 @@ class NodeApiService:
                 relay_request.message_id,
                 reason,
             )
-            return NodeRelayTTSResult(queued=False, reason=reason)
+            return _NodeRelayTTSResult(queued=False, reason=reason)
 
         traffic_log.info(
             "Node API relay TTS queued: node=%s source_app=%s player=%s guild=%s channel=%s message_id=%s queue_size=%s",
@@ -7377,7 +5211,7 @@ class NodeApiService:
             relay_request.message_id,
             queue_size,
         )
-        return NodeRelayTTSResult(queued=True, spoken=spoken, queue_size=queue_size)
+        return _NodeRelayTTSResult(queued=True, spoken=spoken, queue_size=queue_size)
 
     async def build_mod_list(self, app: App) -> NodeModList:
         inventory, app_stats = await asyncio.gather(

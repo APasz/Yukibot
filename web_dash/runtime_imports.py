@@ -103,7 +103,6 @@ from apps.factorio.node_api import (
     NodeFactorioModSettings,
     NodeModDependencyEntry,
     NodeModDependencyResolutionResult,
-    NodeModPortalDependencyEntry,
     NodeModPortalResolveResult,
     NodeModPortalVersionEntry,
     NodeModPortalVersionList,
@@ -118,6 +117,12 @@ from apps.minecraft.node_api import (
     NodeMinecraftRecipeWorkspaceState,
 )
 from apps.minecraft.pack_export import PackFormat, PackPurpose
+from apps.satisfactory.node_api import (
+    NodeBlueprintEntry,
+    NodeBlueprintFileEntry,
+    NodeBlueprintList,
+    NodeBlueprintMutationResult,
+)
 from apps.sevendays.node_api import NodeSevenDaysSandboxOptionsState
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
@@ -149,24 +154,11 @@ from node_api import (
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
-    NodeBlueprintEntry,
-    NodeBlueprintFileEntry,
-    NodeBlueprintList,
-    NodeBlueprintMutationResult,
     NodeBulkLauncherMetadataApplyResult,
     NodeCapacityMutationResult,
     NodeChatRoomSnapshot,
     NodeChatStreamEvent,
     NodeChatStreamEventKind,
-    NodeConfigContent,
-    NodeConfigEntry,
-    NodeConfigList,
-    NodeConsoleActionEntry,
-    NodeConsoleActionExecutionResult,
-    NodeConsoleActionList,
-    NodeConsoleActionParameter,
-    NodeConsoleStdoutSnapshot,
-    NodeConsoleStdoutStreamEvent,
     NodeDiskEntry,
     NodeDiskManagementState,
     NodeDiskSettingsMutationResult,
@@ -178,20 +170,41 @@ from node_api import (
     NodeModSummary,
     NodeModUploadBatchResult,
     NodeModUploadResult,
-    NodeRestartRecord,
-    NodeRestartScheduleEntry,
-    NodeRestartScheduleState,
-    NodeRestartState,
+    NodeStateStreamEvent,
+    NodeStateTopic,
+    required_app_mutation_level,
+    required_app_mutation_scope,
+    required_mod_mutation_level,
+)
+from node_api_console import (
+    NodeConsoleActionEntry,
+    NodeConsoleActionExecutionResult,
+    NodeConsoleActionList,
+    NodeConsoleActionParameter,
+    NodeConsoleStdoutSnapshot,
+    NodeConsoleStdoutStreamEvent,
+)
+from node_api_files import (
+    NodeConfigContent,
+    NodeConfigEntry,
+    NodeConfigList,
     NodeSaveEntry,
     NodeSaveList,
     NodeSaveMutationResult,
+)
+from node_api_settings import (
     NodeSettingChoice,
     NodeSettingEntry,
     NodeSettingList,
     NodeSettingMutationResult,
     NodeSettingsActionResult,
-    NodeStateStreamEvent,
-    NodeStateTopic,
+)
+from node_api_relay import RelayTTSQueue
+from node_api_system import (
+    NodeRestartRecord,
+    NodeRestartScheduleEntry,
+    NodeRestartScheduleState,
+    NodeRestartState,
     NodeSystemAction,
     NodeSystemActionHandler,
     NodeSystemActionResult,
@@ -203,10 +216,6 @@ from node_api import (
     NodeSystemLogTail,
     NodeSystemSample,
     NodeSystemSummary,
-    RelayTTSQueue,
-    required_app_mutation_level,
-    required_app_mutation_scope,
-    required_mod_mutation_level,
 )
 from node_auth import NodeAccessGrant, NodeApiScope, issue_node_token
 from restart_targets import RestartTarget
@@ -340,7 +349,6 @@ __all__: tuple[str, ...] = (
     "NodeModDependencyResolutionResult",
     "NodeModMutationAction",
     "NodeModMutationResult",
-    "NodeModPortalDependencyEntry",
     "NodeModPortalResolveResult",
     "NodeModPortalVersionEntry",
     "NodeModPortalVersionList",

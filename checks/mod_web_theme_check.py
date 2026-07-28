@@ -820,6 +820,25 @@ class ModWebThemeTests(unittest.TestCase):
             with self.subTest(forbidden_literal=forbidden_literal):
                 self.assertNotIn(forbidden_literal, stylesheet)
 
+    def test_interactive_control_content_uses_a_contrast_foreground(self) -> None:
+        stylesheet = MOD_WEB_THEME_STYLESHEET
+
+        self.assertIn("--mod-control-foreground: #ffffff;", stylesheet)
+        self.assertRegex(
+            stylesheet,
+            r"(?s)\.mod-factorio-save \{.*?--mod-control-foreground: #112a16;.*?"
+            r"background: #57bd5d !important;",
+        )
+        self.assertRegex(
+            stylesheet,
+            r"(?s):is\(\.q-btn, \.q-tab, \.mod-system-native-tab\) \{.*?"
+            r"color: var\(--mod-control-foreground\) !important;",
+        )
+        self.assertIn(
+            ":is(.q-btn, .q-tab) :is(.q-btn__content, .q-tab__content),",
+            stylesheet,
+        )
+
     def test_apply_theme_uses_palette_and_head_css(self) -> None:
         ui = _FakeUi()
 

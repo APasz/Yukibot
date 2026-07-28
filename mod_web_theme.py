@@ -138,6 +138,7 @@ class ModWebTheme:
                     --mod-warning-border-strong: color-mix(in srgb, var(--mod-warning) 74%, transparent);
                     --mod-warning-glow: color-mix(in srgb, var(--mod-warning) 24%, transparent);
                     --mod-panel: {palette.panel};
+                    --mod-control-foreground: #ffffff;
                     --mod-scrollbar-thumb: rgba(161, 161, 170, 0.34);
                     --mod-scrollbar-thumb-hover: rgba(161, 161, 170, 0.52);
                     --mod-motion-fast: 120ms;
@@ -7019,6 +7020,7 @@ class ModWebTheme:
                     resize: vertical !important;
                 }}
                 .mod-factorio-save {{
+                    --mod-control-foreground: #112a16;
                     min-width: min(15rem, 100%);
                     justify-content: center;
                     color: #112a16 !important;
@@ -7062,6 +7064,17 @@ class ModWebTheme:
                         animation-iteration-count: 1 !important;
                         transition-duration: 0.01ms !important;
                     }}
+                }}
+                /* Quasar can give a control's icon a semantic text colour independently of its label. */
+                :is(.q-btn, .q-tab, .mod-system-native-tab) {{
+                    color: var(--mod-control-foreground) !important;
+                }}
+                :is(.q-btn, .q-tab) :is(.q-btn__content, .q-tab__content),
+                :is(.q-btn, .q-tab, .mod-system-native-tab) :is(.q-icon, .material-icons) {{
+                    color: var(--mod-control-foreground) !important;
+                }}
+                :is(.q-btn, .q-tab, .mod-system-native-tab) svg {{
+                    fill: currentColor !important;
                 }}
             </style>
             """

@@ -99,9 +99,13 @@ from config import BotConfiguration, BotMetadataSnapshot, ModWebServerConfig
 from currency_conversion import CurrencyConversionBatch, CurrencyRateProvider
 from font_assets import FontAssetEntry, font_assets
 from mod_web_auth import ModWebUser
+from apps._console import ConsoleResponseSource
+from apps.minecraft.node_api import (
+    NodeMinecraftItemRegistryState,
+    NodeMinecraftRecipeBookState,
+)
 from node_api import (
     ClientPackFilePreview,
-    ConsoleResponseSource,
     NodeAppActivityProviderEntry,
     NodeAppEntry,
     NodeAppMutationAction,
@@ -124,8 +128,6 @@ from node_api import (
     NodeConsoleActionParameter,
     NodeDiskEntry,
     NodeDiskManagementState,
-    NodeMinecraftItemRegistryState,
-    NodeMinecraftRecipeBookState,
     NodeMinecraftRecipeMutationAction,
     NodeMinecraftRecipeMutationResult,
     NodeMinecraftRecipeWorkspaceState,

@@ -44,7 +44,8 @@ from cmd_voice import VoiceAdminEditorService, VoiceSettingsEditorService, Voice
 from config import Activity_Provider, Name_Cache, NodeCapacityProfile
 from font_assets import font_assets
 from maintenance import MaintenanceService
-from node_api import NodeSystemAction, RemoteRelayTTSForwarder
+from node_api import NodeSystemAction
+from node_api_relay import RemoteRelayTTSForwarder
 from node_api_http import NodeApiHttpService
 from online import Online_Tracker
 from relay_notices import (

@@ -92,6 +92,12 @@ from apps.factorio import (
     FactorioModPortalReleaseOption,
     FactorioModPortalResolution,
 )
+from apps.factorio.node_api import (
+    NodeModPortalResolveResult,
+    NodeModPortalVersionEntry,
+    NodeModUpdateDependencyAction,
+    NodeModUpdateStatus,
+)
 from apps.minecraft import (
     Minecraft,
     MinecraftItemRegistrySnapshot,
@@ -151,19 +157,14 @@ from node_api import (
     NodeModMutationResult,
     NodeModPageResolveRequest,
     NodeModPortalInstallRequest,
-    NodeModPortalResolveResult,
-    NodeModPortalVersionEntry,
     NodeModPortalVersionList,
     NodeModPropertiesUpdateRequest,
     NodeModUpdateCheckResult,
     NodeModUpdateDependency,
-    NodeModUpdateDependencyAction,
     NodeModUpdateRequest,
-    NodeModUpdateStatus,
     NodeModUploadBatchResult,
     NodeModUploadResult,
     NodeModUploadSource,
-    NodeRelayTTSRequest,
     NodeRestartRecord,
     NodeRestartScheduleState,
     NodeRestartState,
@@ -181,11 +182,11 @@ from node_api import (
     NodeSystemSample,
     NodeSystemSummary,
     NodeWebChatRequest,
-    RemoteRelayTTSForwarder,
     required_app_mutation_level,
     required_app_mutation_scope,
     required_mod_mutation_level,
 )
+from node_api_relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
 from node_auth import NodeAccessGrant, NodeApiScope, verify_node_token
 from restart_state import RestartKind, RestartRecord
 from restart_targets import RestartTarget
@@ -1420,6 +1421,11 @@ class NodeApiTests(unittest.TestCase):
         self.assertIs(hints["request"], Request)
         self.assertIn("/api/node/ping", handlers)
         self.assertIn("/api/node/presence/stream", handlers)
+        self.assertIn("/api/node/system/restart-schedules", handlers)
+        self.assertIn("/api/node/node-capacity", handlers)
+        self.assertIn("/api/node/node-disk-settings", handlers)
+        self.assertIn("/api/node/node-font-sources", handlers)
+        self.assertIn("/api/node/discord-settings", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
 
     def test_node_api_allows_authorized_cross_origin_uploads(self) -> None:
