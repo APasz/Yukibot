@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 
 from pydantic import BaseModel
 from pydantic.config import ConfigDict
@@ -15,6 +16,14 @@ from apps._node_api import (
 
 _DEFAULT_REMOTE_CONFIG_READ_LEVEL = Power_Level.sudo
 _DEFAULT_REMOTE_CONFIG_WRITE_LEVEL = Power_Level.root
+
+
+class NodeSaveUploadTransport(StrEnum):
+    """The transport used to submit an app save upload."""
+
+    DIRECT = "direct"
+    RELAY = "relay"
+
 
 @dataclass(frozen=True, slots=True)
 class NodeConfigEntry:
@@ -274,4 +283,3 @@ class NodeSaveRenameRequest(BaseModel):
     new_name: str
 
     model_config = ConfigDict(str_strip_whitespace=True)
-
