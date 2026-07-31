@@ -45,6 +45,18 @@ from standard_drinks import (
     standard_drink_equivalents,
     standard_drink_units,
 )
+from unit_conversion import (
+    UnitCategory,
+    UnitConversion,
+    UnitDefinition,
+    convert_unit_category,
+    display_units_for_category,
+    format_unit_amount,
+    parse_unit_amount,
+    unit_categories,
+    unit_definition,
+    units_for_category,
+)
 
 from . import avatars as mod_web_avatars
 from .constants import (
@@ -264,6 +276,9 @@ __all__ = (
     'StarletteResponse',
     'TYPE_CHECKING',
     'Utilities',
+    'UnitCategory',
+    'UnitConversion',
+    'UnitDefinition',
     'WebChatRelayPublisher',
     '_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS',
     '_AliasDraft',
@@ -301,6 +316,8 @@ __all__ = (
     'beverage_standard_drink_estimate',
     'cast',
     'config',
+    'convert_unit_category',
+    'display_units_for_category',
     'dataclass',
     'date',
     'datetime',
@@ -308,12 +325,14 @@ __all__ = (
     'format_standard_drink_definition',
     'format_standard_drink_number',
     'format_standard_drink_range',
+    'format_unit_amount',
     'inspect',
     'json',
     'log',
     'lru_cache',
     'mod_web_avatars',
     'parse_standard_drink_expression',
+    'parse_unit_amount',
     'render_notice_text',
     'requests',
     'run_blocking',
@@ -324,5 +343,8 @@ __all__ = (
     'timedelta',
     'timezone',
     'tzinfo',
+    'unit_categories',
+    'unit_definition',
+    'units_for_category',
     'urlencode',
 )

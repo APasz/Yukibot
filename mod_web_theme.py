@@ -4976,22 +4976,28 @@ class ModWebTheme:
                     width: 100%;
                 }}
                 .mod-standard-drink-table,
-                .mod-currency-table {{
+                .mod-currency-table,
+                .mod-unit-conversion-table {{
                     background: transparent !important;
                 }}
                 .mod-standard-drink-table .q-table__container,
                 .mod-currency-table .q-table__container,
+                .mod-unit-conversion-table .q-table__container,
                 .mod-standard-drink-table .q-table__middle,
                 .mod-currency-table .q-table__middle,
+                .mod-unit-conversion-table .q-table__middle,
                 .mod-standard-drink-table .q-table,
-                .mod-currency-table .q-table {{
+                .mod-currency-table .q-table,
+                .mod-unit-conversion-table .q-table {{
                     background: transparent !important;
                     color: var(--mod-text) !important;
                 }}
                 .mod-standard-drink-table .q-table thead tr,
                 .mod-currency-table .q-table thead tr,
+                .mod-unit-conversion-table .q-table thead tr,
                 .mod-standard-drink-table .q-table th,
-                .mod-currency-table .q-table th {{
+                .mod-currency-table .q-table th,
+                .mod-unit-conversion-table .q-table th {{
                     background: rgba(39, 39, 49, 0.7) !important;
                     color: var(--mod-muted) !important;
                     font-size: 0.68rem !important;
@@ -5001,31 +5007,112 @@ class ModWebTheme:
                 }}
                 .mod-standard-drink-table .q-table tbody tr,
                 .mod-currency-table .q-table tbody tr,
+                .mod-unit-conversion-table .q-table tbody tr,
                 .mod-standard-drink-table .q-table td,
-                .mod-currency-table .q-table td {{
+                .mod-currency-table .q-table td,
+                .mod-unit-conversion-table .q-table td {{
                     background: transparent !important;
                     color: var(--mod-text) !important;
                     font-size: 0.78rem !important;
                     font-weight: 600 !important;
                 }}
                 .mod-standard-drink-table .q-table tbody tr:not(:last-child) > td,
-                .mod-currency-table .q-table tbody tr:not(:last-child) > td {{
+                .mod-currency-table .q-table tbody tr:not(:last-child) > td,
+                .mod-unit-conversion-table .q-table tbody tr:not(:last-child) > td {{
                     border-bottom-color: rgba(82, 82, 91, 0.28) !important;
                 }}
                 .mod-standard-drink-table .q-table tbody tr:hover > td,
-                .mod-currency-table .q-table tbody tr:hover > td {{
+                .mod-currency-table .q-table tbody tr:hover > td,
+                .mod-unit-conversion-table .q-table tbody tr:hover > td {{
                     background: var(--mod-accent-faint) !important;
                 }}
                 .mod-standard-drink-table .q-table th:first-child,
                 .mod-currency-table .q-table th:first-child,
+                .mod-unit-conversion-table .q-table th:first-child,
                 .mod-standard-drink-table .q-table td:first-child,
-                .mod-currency-table .q-table td:first-child {{
+                .mod-currency-table .q-table td:first-child,
+                .mod-unit-conversion-table .q-table td:first-child {{
                     text-align: left !important;
+                }}
+                .mod-unit-conversion-table .q-table {{
+                    table-layout: fixed;
+                    width: 100%;
+                }}
+                .mod-unit-conversion-table .q-table th:nth-child(1),
+                .mod-unit-conversion-table .q-table td:nth-child(1) {{
+                    width: 46%;
+                }}
+                .mod-unit-conversion-table .q-table th:nth-child(2),
+                .mod-unit-conversion-table .q-table td:nth-child(2) {{
+                    width: 24%;
+                }}
+                .mod-unit-conversion-table .q-table th:nth-child(3),
+                .mod-unit-conversion-table .q-table td:nth-child(3) {{
+                    width: 30%;
+                }}
+                .mod-unit-conversion-filter-heading {{
+                    padding: 0 !important;
+                }}
+                .mod-unit-conversion-filter-heading .q-field {{
+                    min-height: 2.2rem;
+                    padding: 0 0.7rem;
+                }}
+                .mod-unit-conversion-filter-heading .q-field__control,
+                .mod-unit-conversion-filter-heading .q-field__native {{
+                    min-height: 2.2rem !important;
+                    height: 2.2rem !important;
+                }}
+                .mod-unit-conversion-filter-heading .q-field__native {{
+                    color: var(--mod-muted) !important;
+                    font-size: 0.68rem !important;
+                    font-weight: 900 !important;
+                    letter-spacing: 0.07em;
+                    text-transform: uppercase;
+                }}
+                .mod-unit-conversion-filter-heading .q-field__native::placeholder {{
+                    color: var(--mod-muted) !important;
+                    opacity: 0.72;
+                }}
+                .mod-unit-conversion-filter-heading:focus-within {{
+                    background: var(--mod-accent-faint) !important;
+                    box-shadow: inset 0 -2px 0 var(--mod-accent);
+                }}
+                .mod-unit-conversion-system {{
+                    min-width: 8.5rem;
+                    color: var(--mod-muted) !important;
+                    font-size: 0.68rem !important;
+                    font-weight: 800 !important;
+                    letter-spacing: 0.03em;
+                    text-align: right;
+                }}
+                .mod-unit-conversion-amount-heading {{
+                    min-width: 0;
+                    padding: 0 0.7rem;
+                    text-align: right !important;
+                }}
+                .mod-unit-conversion-source {{
+                    min-width: 0;
+                    overflow: hidden;
+                    color: var(--mod-text) !important;
+                    font-size: 0.72rem !important;
+                    font-weight: 850 !important;
+                    letter-spacing: 0.03em;
+                    text-overflow: ellipsis;
+                    text-transform: none;
+                    white-space: nowrap;
                 }}
                 .mod-standard-drink-divider {{
                     width: 100%;
                     height: 1px;
                     background: rgba(113, 113, 122, 0.42);
+                }}
+                .mod-unit-conversion-option {{
+                    min-height: 2.2rem !important;
+                    padding: 0.4rem 0.7rem !important;
+                    color: var(--mod-text) !important;
+                    font-size: 0.76rem !important;
+                    font-weight: 850 !important;
+                    letter-spacing: 0.02em;
                 }}
                 .mod-user-appearance-section {{
                     gap: 0.65rem;

@@ -17674,6 +17674,7 @@ class ModWebTests(unittest.TestCase):
                 self.rows: list[dict[str, str]] = []
                 self.visible: bool | None = None
                 self.props_value: str | None = None
+                self.handlers: dict[str, Callable[[object | None], object]] = {}
 
             def clear(self) -> None:
                 return None
@@ -17704,7 +17705,13 @@ class ModWebTests(unittest.TestCase):
                 return self
 
             def on(self, event: str, handler: object | None = None, *, js_handler: str | None = None) -> "FakeContainer":
-                del event, handler, js_handler
+                del js_handler
+                if handler is not None:
+                    self.handlers[event] = cast(Callable[[object | None], object], handler)
+                return self
+
+            def add_slot(self, name: str, template: str | None = None) -> "FakeContainer":
+                del name, template
                 return self
 
             def set_text(self, text: str) -> None:
@@ -17748,6 +17755,7 @@ class ModWebTests(unittest.TestCase):
             def __init__(self, text: str) -> None:
                 self.text = text
                 self.on_click: Callable[[object | None], None] | None = None
+                self.handlers: dict[str, Callable[[object | None], object]] = {}
 
             def set_enabled(self, enabled: bool) -> None:
                 del enabled
@@ -17758,10 +17766,15 @@ class ModWebTests(unittest.TestCase):
                 super().__init__()
                 self.id = 1
                 self.value = value
+                self.options: dict[str, str] = {}
                 self._props: dict[str, object] = {}
                 self.handlers: dict[str, Callable[[object | None], None]] = {}
 
             def set_value(self, value: object) -> None:
+                self.value = value
+
+            def set_options(self, options: dict[str, str], *, value: str | None = None) -> None:
+                self.options = options
                 self.value = value
 
             def add_slot(self, name: str, template: str | None = None) -> "FakeInput":
@@ -17863,10 +17876,15 @@ class ModWebTests(unittest.TestCase):
                 self.selects.append(select_control)
                 return select_control
 
+            def checkbox(self, *args: object, **kwargs: object) -> FakeInput:
+                del args
+                return FakeInput(kwargs.get("value", False))
+
             def table(self, *args: object, **kwargs: object) -> FakeContainer:
                 del args
                 table = FakeContainer()
                 table.rows = cast(list[dict[str, str]], kwargs["rows"])
+                table.columns = cast(list[dict[str, str]], kwargs["columns"])
                 self.tables.append(table)
                 return table
 
@@ -17924,6 +17942,7 @@ class ModWebTests(unittest.TestCase):
                 "Standard drinks",
                 "Currency",
                 "Discord Time",
+                "Unit converter",
                 "Aliases",
                 "About",
                 "Log out",
@@ -18061,6 +18080,33 @@ class ModWebTests(unittest.TestCase):
             "Australia/Melbourne · Victoria",
             [label.text for label in ui.labels],
         )
+        unit_converter_item = next(item for item in ui.menu_items if item.text == "Unit converter")
+        if unit_converter_item.on_click is None:
+            raise AssertionError("Unit converter menu item is missing a click handler.")
+        unit_converter_item.on_click(None)
+        self.assertTrue(ui.dialogs[-1].opened)
+        self.assertEqual(ui.tables[-1].columns[2]["summary"], "1 m · Metre")
+        self.assertEqual(ui.tables[-1].rows[0]["unit"], "Centimetre (cm)")
+        metre_row = next(row for row in ui.tables[-1].rows if row["unit"] == "Metre (m)")
+        self.assertEqual(metre_row, {"unit": "Metre (m)", "system": "SI", "amount": "1 m"})
+        unit_amount_input = ui.inputs[-1]
+        unit_amount_input.trigger("update:model-value", "2.5")
+        self.assertEqual(ui.tables[-1].columns[2]["summary"], "2.5 m · Metre")
+        metre_row = next(row for row in ui.tables[-1].rows if row["unit"] == "Metre (m)")
+        self.assertEqual(metre_row["amount"], "2.5 m")
+        ui.tables[-1].handlers["unit-filter"](SimpleNamespace(args="kilometre"))
+        self.assertEqual(
+            ui.tables[-1].rows,
+            [{"unit": "Kilometre (km)", "system": "SI", "amount": "0.0025 km"}],
+        )
+        ui.tables[-1].handlers["unit-filter"](SimpleNamespace(args=""))
+        ui.tables[-1].handlers["system-filter"](SimpleNamespace(args="US customary"))
+        self.assertTrue(ui.tables[-1].rows)
+        self.assertEqual({row["system"] for row in ui.tables[-1].rows}, {"US customary"})
+        ui.tables[-1].handlers["system-filter"](SimpleNamespace(args=""))
+        unit_category_input = ui.selects[-2]
+        unit_category_input.trigger("update:model-value", {"value": "volume", "label": "Volume"})
+        self.assertEqual(ui.tables[-1].rows[1], {"unit": "Litre (L)", "system": "SI", "amount": "0.0025 L"})
         aliases_item = next(item for item in ui.menu_items if item.text == "Aliases")
         if aliases_item.on_click is None:
             raise AssertionError("Aliases menu item is missing a click handler.")
