@@ -325,6 +325,17 @@ class ModWebChatMixin(ModWebServiceSupport):
         async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
             return await self._node_api.build_live_app_runtime_summary(app)
 
+        publish_fake_event: Callable[[ChatEvent], Awaitable[ChatEvent]] | None = None
+        if self._chat_relay is not None:
+            chat_relay = self._chat_relay
+
+            async def _publish_fake_event(event: ChatEvent) -> ChatEvent:
+                if event.room_id.casefold() != app.name.casefold():
+                    raise ValueError("Synthetic chat event room does not match the selected app.")
+                return await chat_relay.publish_chat_event(event=event)
+
+            publish_fake_event = _publish_fake_event
+
         return _ModWebChatSurfaceConfig(
             panel=self._local_chat_panel_config(
                 room_id=app.name,
@@ -339,6 +350,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             app_stats=initial_app_stats,
             hero_badges=(_ModWebBadgeSpec(text=app.chat_relay_support.display_value, tone="purple"),),
             refresh_app_stats=_refresh_app_stats if include_runtime_updates else None,
+            publish_fake_event=publish_fake_event,
             popout_url=self.app_chat_path(app.name),
             map_url=app.public_map_url,
         )
@@ -383,6 +395,14 @@ class ModWebChatMixin(ModWebServiceSupport):
         async def _refresh_app_stats() -> NodeAppRuntimeSummary | None:
             return await self._remote_app_runtime_summary_async(node, app_name, user)
 
+        async def _publish_fake_event(event: ChatEvent) -> ChatEvent:
+            return await self._remote_publish_chat_injection_async(
+                node=node,
+                app_name=resolved_app_entry.name,
+                user=user,
+                event=event,
+            )
+
         return _ModWebChatSurfaceConfig(
             panel=panel,
             node_name=node.node_name,
@@ -391,6 +411,7 @@ class ModWebChatMixin(ModWebServiceSupport):
             app_stats=initial_app_stats,
             hero_badges=(_ModWebBadgeSpec(text=initial_app_stats.relay_support.display_value, tone="grey"),),
             refresh_app_stats=_refresh_app_stats if include_runtime_updates else None,
+            publish_fake_event=_publish_fake_event,
             popout_url=self.node_app_chat_path(node.node_name, resolved_app_entry.name),
             map_url=resolved_app_entry.map_url,
         )
@@ -582,6 +603,25 @@ class ModWebChatMixin(ModWebServiceSupport):
                 "content": request.content,
                 "reply_to_event_id": request.reply_to_event_id,
             },
+        )
+        return ChatEvent.from_mapping(payload)
+
+    async def _remote_publish_chat_injection_async(
+        self,
+        *,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+        event: ChatEvent,
+    ) -> ChatEvent:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/chat/inject",
+            scopes=(NodeApiScope.CHAT_INJECT,),
+            user=user,
+            method="POST",
+            json_payload={"event": event.to_mapping()},
         )
         return ChatEvent.from_mapping(payload)
 

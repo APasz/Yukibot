@@ -16,6 +16,7 @@ class NodeApiScope(StrEnum):
     MAP_WRITE = "map:write"
     CHAT_READ = "chat:read"
     CHAT_WRITE = "chat:write"
+    CHAT_INJECT = "chat:inject"
     MODS_READ = "mods:read"
     MODS_DOWNLOAD = "mods:download"
     MODS_WRITE = "mods:write"

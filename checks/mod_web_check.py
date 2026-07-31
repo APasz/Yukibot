@@ -7,7 +7,7 @@ import unittest
 from collections.abc import Awaitable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -57,6 +57,7 @@ from apps._config import (
     ModType,
     is_client_pack_candidate,
 )
+from apps._console import ConsoleResponseSource
 from apps._updater import (
     AppUpdateBranchState,
     AppUpdateInfo,
@@ -78,6 +79,10 @@ from apps.minecraft import (
     MinecraftShapedRecipe,
     MinecraftShapelessRecipe,
 )
+from apps.minecraft.node_api import (
+    NodeMinecraftItemRegistryState,
+    NodeMinecraftRecipeBookState,
+)
 from apps.minecraft.pack_export import PackFormat, PackPurpose
 from chat_hub import (
     DEFAULT_CHAT_AUTHOR_COLOR_HEX,
@@ -97,13 +102,9 @@ from chat_hub import (
 )
 from config import BotConfiguration, BotMetadataSnapshot, ModWebServerConfig
 from currency_conversion import CurrencyConversionBatch, CurrencyRateProvider
+from deployment_metadata import DeploymentMetadata
 from font_assets import FontAssetEntry, font_assets
 from mod_web_auth import ModWebUser
-from apps._console import ConsoleResponseSource
-from apps.minecraft.node_api import (
-    NodeMinecraftItemRegistryState,
-    NodeMinecraftRecipeBookState,
-)
 from node_api import (
     ClientPackFilePreview,
     NodeAppActivityProviderEntry,
@@ -369,12 +370,15 @@ class _FakeCleanupTimer:
 
 
 class _FakeTabbedSectionContainer:
-    class_value: str | None = None
-    added_style: str | None = None
-    removed_style: str | None = None
+    def __init__(self, class_values: list[str]) -> None:
+        self._class_values = class_values
+        self.class_value: str | None = None
+        self.added_style: str | None = None
+        self.removed_style: str | None = None
 
     def classes(self, value: str) -> "_FakeTabbedSectionContainer":
         self.class_value = value
+        self._class_values.append(value)
         return self
 
     def props(self, value: str) -> "_FakeTabbedSectionContainer":
@@ -405,28 +409,29 @@ class _FakeTabbedSectionContainer:
 class _FakeTabbedSectionUi:
     def __init__(self, *, client: object | None = None) -> None:
         self.context = SimpleNamespace(client=client) if client is not None else None
+        self.class_values: list[str] = []
         self.tab_change_handler: Callable[[object], object] | None = None
         self.navigate = SimpleNamespace(to=Mock())
         self.javascript_calls: list[str] = []
 
     def column(self) -> _FakeTabbedSectionContainer:
-        return _FakeTabbedSectionContainer()
+        return _FakeTabbedSectionContainer(self.class_values)
 
     def row(self) -> _FakeTabbedSectionContainer:
-        return _FakeTabbedSectionContainer()
+        return _FakeTabbedSectionContainer(self.class_values)
 
     def element(self, tag: str) -> _FakeTabbedSectionContainer:
         del tag
-        return _FakeTabbedSectionContainer()
+        return _FakeTabbedSectionContainer(self.class_values)
 
     def label(self, text: str) -> _FakeTabbedSectionContainer:
         del text
-        return _FakeTabbedSectionContainer()
+        return _FakeTabbedSectionContainer(self.class_values)
 
     def tabs(self, *, value: str, on_change: object) -> _FakeTabbedSectionContainer:
         del value
         self.tab_change_handler = cast(Callable[[object], object], on_change)
-        return _FakeTabbedSectionContainer()
+        return _FakeTabbedSectionContainer(self.class_values)
 
     def tab(self, tab_id: str, *, label: str, icon: str | None = None) -> object:
         del tab_id, label, icon
@@ -434,11 +439,11 @@ class _FakeTabbedSectionUi:
 
     def tab_panels(self, tabs: object, *, value: str, animated: bool) -> _FakeTabbedSectionContainer:
         del tabs, value, animated
-        return _FakeTabbedSectionContainer()
+        return _FakeTabbedSectionContainer(self.class_values)
 
     def tab_panel(self, tab: object) -> _FakeTabbedSectionContainer:
         del tab
-        return _FakeTabbedSectionContainer()
+        return _FakeTabbedSectionContainer(self.class_values)
 
     def run_javascript(self, script: str, *, timeout: float = 1.0) -> None:
         del timeout
@@ -3524,6 +3529,22 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual(badge, _ModWebBadgeSpec(text="Installed matches configured target", tone="black"))
 
+    def test_update_section_badges_exclude_app_id_repeated_in_the_installed_card(self) -> None:
+        service = ModWebService()
+        update_info = AppUpdateInfo(
+            provider_kind=AppUpdateProviderKind.STEAMCMD,
+            provider_label="SteamCMD",
+            selected_branch_id="public",
+            selected_branch_label="Stable",
+            branches=(AppUpdateBranchState(branch_id="public", label="Stable", selected=True),),
+            app_id=427520,
+        )
+        model = replace(self._overview_model_with_config_and_chat(), update_info=update_info)
+
+        badges = service._update_section_badges(model)
+
+        self.assertEqual(badges, (_ModWebBadgeSpec(text="Stable", tone="black"),))
+
     def test_update_install_alignment_badge_reports_branch_drift(self) -> None:
         update_info = AppUpdateInfo(
             provider_kind=AppUpdateProviderKind.STEAMCMD,
@@ -6458,75 +6479,6 @@ class ModWebTests(unittest.TestCase):
         self.assertTrue(service._user_can_use_fake_chat_preview(root_user))
         self.assertFalse(service._user_can_use_fake_chat_preview(normal_user))
 
-    def test_fake_chat_preview_app_options_include_managed_apps_and_bound_rooms_in_friendly_order(self) -> None:
-        service = ModWebService()
-        service.set_manager(
-            _manager_stub(
-                apps={
-                    "zeta": SimpleNamespace(name="zeta", friendly="Zeta", supports_chat_relay=False),
-                    "alpha": SimpleNamespace(name="alpha", friendly="Alpha", supports_chat_relay=True),
-                    "beta": SimpleNamespace(name="beta", friendly="beta", supports_chat_relay=True),
-                }
-            )
-        )
-
-        with patch.object(ChatHub(), "bound_room_ids", return_value=("guest_lobby",)):
-            options = service._fake_chat_preview_app_options()
-
-        self.assertEqual(
-            options,
-            {
-                "Alpha (alpha)": "alpha",
-                "beta (beta)": "beta",
-                "guest_lobby": "guest_lobby",
-                "Zeta (zeta)": "zeta",
-            },
-        )
-
-    def test_fake_chat_preview_send_target_options_prefer_bound_rooms(self) -> None:
-        service = ModWebService()
-        service.set_manager(
-            _manager_stub(
-                apps={
-                    "alpha": SimpleNamespace(name="alpha", friendly="Alpha", supports_chat_relay=True),
-                    "zeta": SimpleNamespace(name="zeta", friendly="Zeta", supports_chat_relay=False),
-                }
-            )
-        )
-
-        with patch.object(ChatHub(), "bound_room_ids", return_value=("alpha", "guest_lobby")):
-            options = service._fake_chat_preview_send_target_options()
-
-        self.assertEqual(
-            options,
-            {
-                "Alpha (alpha)": "alpha",
-                "guest_lobby": "guest_lobby",
-            },
-        )
-
-    def test_fake_chat_preview_send_target_options_fall_back_to_all_managed_apps_when_none_relay(self) -> None:
-        service = ModWebService()
-        service.set_manager(
-            _manager_stub(
-                apps={
-                    "zeta": SimpleNamespace(name="zeta", friendly="Zeta", supports_chat_relay=False),
-                    "alpha": SimpleNamespace(name="alpha", friendly="Alpha", supports_chat_relay=False),
-                }
-            )
-        )
-
-        with patch.object(ChatHub(), "bound_room_ids", return_value=()):
-            options = service._fake_chat_preview_send_target_options()
-
-        self.assertEqual(
-            options,
-            {
-                "Alpha (alpha)": "alpha",
-                "Zeta (zeta)": "zeta",
-            },
-        )
-
     def test_build_fake_chat_preview_event_creates_join_notice_event(self) -> None:
         service = ModWebService()
         state = _ModWebFakeChatPreviewState(
@@ -6603,6 +6555,25 @@ class ModWebTests(unittest.TestCase):
         self.assertEqual(event.room_id, "factorio_lab")
         self.assertEqual(event.source, ChatEndpointId.app("factorio_lab"))
         self.assertEqual(event.content, "Yoko joined factorio_lab")
+
+    def test_build_fake_chat_preview_event_normalises_room_ids(self) -> None:
+        service = ModWebService()
+        state = _ModWebFakeChatPreviewState(
+            app_name="  minecraft_alpha  ",
+            source_kind=ChatEndpointKind.APP,
+            author_kind=ChatAuthorKind.GAME_PLAYER,
+            author_name="Yoko",
+        )
+
+        preview_event = service._build_fake_chat_preview_event(state)
+        target_event = service._build_fake_chat_preview_event_for_room(state, room_id="  factorio_lab  ")
+
+        self.assertEqual(preview_event.room_id, "minecraft_alpha")
+        self.assertEqual(preview_event.source, ChatEndpointId.app("minecraft_alpha"))
+        self.assertEqual(target_event.room_id, "factorio_lab")
+        self.assertEqual(target_event.source, ChatEndpointId.app("factorio_lab"))
+        with self.assertRaisesRegex(ValueError, "room id must not be empty"):
+            service._build_fake_chat_preview_event_for_room(state, room_id=" \t ")
 
     def test_build_fake_chat_preview_event_creates_advancement_notice_event(self) -> None:
         service = ModWebService()
@@ -6719,6 +6690,32 @@ class ModWebTests(unittest.TestCase):
         self.assertIs(event.notice.stage, MaintenanceStage.WARNING)
         self.assertEqual(event.notice.lead_minutes, 30)
         self.assertEqual(event.notice.summary_lines, ("Drain players first",))
+
+    def test_fake_chat_preview_mode_help_text_covers_every_mode(self) -> None:
+        for mode in _ModWebFakeChatMessageMode:
+            with self.subTest(mode=mode):
+                self.assertTrue(ModWebService._fake_chat_preview_mode_help_text(mode))
+
+    def test_fake_chat_preview_rejects_invalid_app_embed_colour(self) -> None:
+        service = ModWebService()
+        service.set_manager(
+            _manager_stub(
+                apps={
+                    "factorio_lab": SimpleNamespace(
+                        name="factorio_lab",
+                        friendly="Factorio Lab",
+                        manage_embed_color=True,
+                    )
+                }
+            )
+        )
+        state = _ModWebFakeChatPreviewState(
+            app_name="factorio_lab",
+            message_mode=_ModWebFakeChatMessageMode.EMBED,
+        )
+
+        with self.assertRaisesRegex(ValueError, "app colour is invalid"):
+            service._build_fake_chat_preview_event(state)
 
     def test_fake_chat_select_props_use_dark_popup_menu_class(self) -> None:
         self.assertEqual(
@@ -6991,6 +6988,30 @@ class ModWebTests(unittest.TestCase):
         self.assertIn("rgba(167, 139, 250", page_config.icon_markup or "")
         self.assertEqual([action.label for action in page_config.actions], ["GitHub", "Home"])
         self.assertTrue(page_config.actions[0].new_tab)
+
+    def test_about_deployment_text_shows_version_build_and_deployment_time(self) -> None:
+        metadata = DeploymentMetadata(
+            revision="abcdef1234567890",
+            deployed_at=datetime(2026, 7, 31, 4, 30, tzinfo=timezone.utc),
+            target_name="portal",
+            version="v2026.07.31.1",
+        )
+        with (
+            patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", metadata),
+            patch.object(config, "MOD_WEB_BUILD_SHA", metadata.revision),
+        ):
+            deployment_text = ModWebService._about_deployment_text()
+
+        self.assertEqual(deployment_text, "v2026.07.31.1 · Build abcdef1 · deployed 31 Jul 2026, 04:30 UTC")
+
+    def test_about_deployment_text_uses_legacy_build_fallback(self) -> None:
+        with (
+            patch.object(config, "MOD_WEB_DEPLOYMENT_METADATA", None),
+            patch.object(config, "MOD_WEB_BUILD_SHA", "abcdef1234567890"),
+        ):
+            deployment_text = ModWebService._about_deployment_text()
+
+        self.assertEqual(deployment_text, "Build abcdef1")
 
     def test_about_supported_apps_follow_configured_app_scopes(self) -> None:
         self.assertEqual(
@@ -8395,7 +8416,10 @@ class ModWebTests(unittest.TestCase):
             patch.object(ModWebService, "_badge_link") as render_badge_link,
             patch.object(ModWebService, "_render_chat_panel") as render_chat_panel,
         ):
-            service._render_chat_page_card(ui=cast(ModWebUi, cast(object, ui)), chat_surface=chat_surface)
+            service._render_chat_page_card(
+                ui=cast(ModWebUi, cast(object, ui)),
+                chat_surface=chat_surface,
+            )
 
         render_app_node_badge.assert_called_once()
         render_chat_endpoint_badge.assert_called_once()
@@ -8597,31 +8621,31 @@ class ModWebTests(unittest.TestCase):
             ),
         )
 
-    def test_section_badge_rows_stagger_badges_from_the_right(self) -> None:
-        badges = (
-            _ModWebBadgeSpec(text="6 mods", tone="black"),
-            _ModWebBadgeSpec(text="2 blocked", tone="warn"),
-            _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
-            _ModWebBadgeSpec(text="2 coremods", tone="red"),
+    def test_save_section_badges_exclude_capabilities_shown_by_the_editor(self) -> None:
+        service = ModWebService()
+        model = replace(
+            self._overview_model_with_config_and_chat(),
+            saves=self._save_list(),
+            supports_save_uploads=True,
+            supports_save_rename=True,
         )
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
 
-        rows = ModWebService._section_badge_rows(badges)
+        with patch.object(service, "_user_has_level", return_value=True):
+            badges = service._save_section_badges(model=model, user=user)
 
-        self.assertEqual(
-            rows,
-            (
-                (
-                    _ModWebBadgeSpec(text="6 mods", tone="black"),
-                    _ModWebBadgeSpec(text="4 downloadable", tone="purple"),
-                ),
-                (
-                    _ModWebBadgeSpec(text="2 blocked", tone="warn"),
-                    _ModWebBadgeSpec(text="2 coremods", tone="red"),
-                ),
-            ),
-        )
+        self.assertEqual(badges, (_ModWebBadgeSpec(text="0 saves", tone="grey"),))
 
-    def test_settings_section_badges_prioritise_editable_summary_on_the_top_row(self) -> None:
+    def test_blueprint_section_badges_exclude_the_upload_action(self) -> None:
+        service = ModWebService()
+        model = replace(self._overview_model_with_config_and_chat(), blueprints=self._blueprint_list())
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        badges = service._blueprint_section_badges(model=model, user=user)
+
+        self.assertEqual(badges, (_ModWebBadgeSpec(text="1 blueprints", tone="black"),))
+
+    def test_settings_section_badges_summarise_editability(self) -> None:
         service = ModWebService()
         model = ModWebOverviewPageModel(
             node_name="yuki",
@@ -8688,20 +8712,6 @@ class ModWebTests(unittest.TestCase):
                 _ModWebBadgeSpec(text="1 restricted", tone="warn"),
             ),
         )
-        self.assertEqual(
-            service._section_badge_rows(badges),
-            (
-                (
-                    _ModWebBadgeSpec(text="2 settings", tone="black"),
-                    _ModWebBadgeSpec(text="1 editable", tone="purple"),
-                ),
-                (
-                    _ModWebBadgeSpec(text="1 drafts", tone="grey"),
-                    _ModWebBadgeSpec(text="1 restricted", tone="warn"),
-                ),
-            ),
-        )
-
     def test_remote_chat_stream_signal_maps_event_kinds(self) -> None:
         snapshot = NodeChatRoomSnapshot(
             room_id="minecraft_alpha",
@@ -14842,6 +14852,32 @@ class ModWebTests(unittest.TestCase):
             ["mods", "configs", "settings", "saves", "recipes", "console"],
         )
         self.assertFalse(recipes_tab.show_on_app_card)
+        self.assertEqual(
+            service._page_section_badges(
+                model=model,
+                user=ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None),
+                tab=recipes_tab,
+            ),
+            (_ModWebBadgeSpec(text="1 addons", tone="grey"),),
+        )
+
+    def test_page_tabs_for_user_include_properties_only_when_authorised(self) -> None:
+        service = ModWebService()
+        model = self._overview_model_with_config_and_chat()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+
+        with patch.object(service, "_user_has_level", return_value=True):
+            authorised_tabs = service._page_tabs_for_user(model=model, user=user)
+        with patch.object(service, "_user_has_level", return_value=False):
+            unauthorised_tabs = service._page_tabs_for_user(model=model, user=user)
+
+        self.assertEqual([tab.tab_id for tab in authorised_tabs], ["configs", "chat", "properties"])
+        properties_tab = authorised_tabs[-1]
+        self.assertEqual(properties_tab.label, "Properties")
+        self.assertEqual(properties_tab.icon, "tune")
+        self.assertFalse(properties_tab.show_on_app_card)
+        self.assertEqual(properties_tab.render_handler_name, "_render_app_properties_section")
+        self.assertEqual([tab.tab_id for tab in unauthorised_tabs], ["configs", "chat"])
 
     def test_page_tabs_omit_minecraft_recipes_without_enabled_kubejs(self) -> None:
         service = ModWebService()
@@ -14933,6 +14969,14 @@ class ModWebTests(unittest.TestCase):
 
         self.assertEqual([tab.tab_id for tab in tabs], ["mods", "sandbox", "console"])
         self.assertFalse(sandbox_tab.show_on_app_card)
+        self.assertEqual(
+            service._page_section_badges(
+                model=model,
+                user=ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None),
+                tab=sandbox_tab,
+            ),
+            (),
+        )
 
     def test_page_tabs_include_sevendays_sandbox_for_supported_version_without_dataset(self) -> None:
         service = ModWebService()
@@ -15965,6 +16009,16 @@ class ModWebTests(unittest.TestCase):
         tabs = service._page_tabs(model)
 
         self.assertEqual([tab.tab_id for tab in tabs], ["map", "console"])
+        map_tab = tabs[0]
+        self.assertIsNone(map_tab.badge_handler_name)
+        self.assertEqual(
+            service._page_section_badges(
+                model=model,
+                user=ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None),
+                tab=map_tab,
+            ),
+            (),
+        )
 
     def test_map_client_assets_are_vendored_locally(self) -> None:
         assets_html = ModWebService._map_client_assets_html()
@@ -16416,7 +16470,8 @@ class ModWebTests(unittest.TestCase):
         service = ModWebService()
         user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
         model = self._overview_model_with_config_and_chat()
-        chat_surface = self._chat_surface_with_map()
+        publish_fake_event = AsyncMock()
+        chat_surface = replace(self._chat_surface_with_map(), publish_fake_event=publish_fake_event)
         ui = _FakeTabbedSectionUi()
         tabs = service._page_tabs(model)
         load_tab = AsyncMock(return_value=ModWebAppTabLoadResult(model=model))
@@ -16429,6 +16484,8 @@ class ModWebTests(unittest.TestCase):
             ) as render_chat_endpoint_badge,
             patch.object(ModWebService, "_badge_link") as render_badge_link,
             patch.object(ModWebService, "_action_link") as render_action_link,
+            patch.object(ModWebService, "_user_has_level", return_value=True),
+            patch.object(ModWebService, "_render_fake_chat_preview_control") as render_fake_chat_preview_control,
             patch.object(ModWebService, "_render_page_section", return_value=None) as render_page_section,
         ):
             result = service._render_tabbed_page_sections(
@@ -16455,10 +16512,56 @@ class ModWebTests(unittest.TestCase):
             new_tab=True,
         )
         render_action_link.assert_called_once()
+        render_fake_chat_preview_control.assert_called_once_with(
+            ui=ui,
+            user=user,
+            app_name="minecraft_alpha",
+            app_friendly="Minecraft Alpha",
+            publish_event=publish_fake_event,
+        )
         self.assertEqual(render_page_section.call_count, 2)
         load_tab.assert_awaited_once_with("configs")
         ui.navigate.to.assert_not_called()
         self.assertTrue(any("history.replaceState" in script for script in ui.javascript_calls))
+        self.assertIn(
+            "mod-section-chrome-badge-row items-center justify-start gap-2 flex-wrap",
+            ui.class_values,
+        )
+        self.assertIn(
+            "mod-section-chrome w-full items-start justify-start gap-3 flex-wrap",
+            ui.class_values,
+        )
+
+    def test_render_tabbed_page_sections_renders_properties_without_remote_load(self) -> None:
+        service = ModWebService()
+        user = ModWebUser(discord_id=42, username="tester", global_name=None, avatar_hash=None)
+        model = self._overview_model_with_config_and_chat()
+        ui = _FakeTabbedSectionUi()
+        tabs = (*service._page_tabs(model), service._app_properties_tab_definition())
+        load_tab = AsyncMock(return_value=ModWebAppTabLoadResult(model=model))
+
+        with (
+            patch.object(ModWebService, "_page_section_badges", return_value=()),
+            patch.object(ModWebService, "_page_tab_actions", return_value=()),
+            patch.object(ModWebService, "_render_page_section", return_value=None) as render_page_section,
+        ):
+            service._render_tabbed_page_sections(
+                ui=cast(ModWebUi, cast(object, ui)),
+                model=model,
+                user=user,
+                current_url="/mod-web/apps/minecraft_alpha?tab=configs",
+                tabs=tabs,
+                chat_surface=None,
+                load_tab=load_tab,
+            )
+
+            self.assertIsNotNone(ui.tab_change_handler)
+            assert ui.tab_change_handler is not None
+            asyncio.run(cast(Any, ui.tab_change_handler)(SimpleNamespace(value="properties")))
+
+        load_tab.assert_not_awaited()
+        self.assertEqual(render_page_section.call_count, 2)
+        ui.navigate.to.assert_not_called()
 
     def test_render_tabbed_page_sections_skips_failed_lazy_tab_fallback_after_client_delete(self) -> None:
         service = ModWebService()
@@ -17076,7 +17179,7 @@ class ModWebTests(unittest.TestCase):
             "Minecraft Alpha started.",
         )
 
-    def test_render_global_app_toolbar_exposes_details_dialog_for_sudo_users(self) -> None:
+    def test_render_app_properties_section_for_sudo_users(self) -> None:
         class FakeContainer:
             def classes(
                 self,
@@ -17104,13 +17207,6 @@ class ModWebTests(unittest.TestCase):
             ) -> bool:
                 del exc_type, exc, traceback
                 return False
-
-        class FakeDialog(FakeContainer):
-            def open(self) -> None:
-                return None
-
-            def close(self) -> None:
-                return None
 
         class FakeButton:
             def __init__(self, text: str, on_click: Callable[[], object] | None = None) -> None:
@@ -17181,9 +17277,6 @@ class ModWebTests(unittest.TestCase):
 
             def card(self) -> FakeContainer:
                 return FakeContainer()
-
-            def dialog(self) -> FakeDialog:
-                return FakeDialog()
 
             def button(self, text: str = "", **kwargs: object) -> FakeButton:
                 button = FakeButton(text, cast(Callable[[], object] | None, kwargs.get("on_click")))
@@ -17266,19 +17359,13 @@ class ModWebTests(unittest.TestCase):
         user = ModWebUser(discord_id=42, username="sudo", global_name=None, avatar_hash=None)
 
         with patch.object(service, "_user_has_level", return_value=True):
-            service._render_global_app_toolbar(
+            service._render_app_properties_section(
                 ui=cast(ModWebUi, cast(object, ui)),
                 model=model,
                 user=user,
-                refresh_async_runtime_model=None,
+                tab=service._app_properties_tab_definition(),
             )
 
-        self.assertIn("Properties", [button.text for button in ui.buttons])
-        self.assertEqual(ui.inputs, [])
-        properties_button = next(button for button in ui.buttons if button.text == "Properties")
-        self.assertIsNotNone(properties_button.on_click)
-        assert properties_button.on_click is not None
-        properties_button.on_click()
         self.assertIn("Disable", [button.text for button in ui.buttons])
         self.assertEqual(
             [control.value for control in ui.inputs],
@@ -17836,8 +17923,9 @@ class ModWebTests(unittest.TestCase):
                 "Settings",
                 "Standard drinks",
                 "Currency",
-                "Time",
+                "Discord Time",
                 "Aliases",
+                "About",
                 "Log out",
             ],
         )
@@ -17952,7 +18040,7 @@ class ModWebTests(unittest.TestCase):
 
             asyncio.run(_run_source_update())
         source_conversion.assert_awaited_once_with(amount=Decimal("2"), src=config.Currency.GBP)
-        time_item = next(item for item in ui.menu_items if item.text == "Time")
+        time_item = next(item for item in ui.menu_items if item.text == "Discord Time")
         if time_item.on_click is None:
             raise AssertionError("Time menu item is missing a click handler.")
         time_item.on_click(None)
@@ -17977,7 +18065,11 @@ class ModWebTests(unittest.TestCase):
         if aliases_item.on_click is None:
             raise AssertionError("Aliases menu item is missing a click handler.")
         aliases_item.on_click(None)
-        self.assertEqual(ui.navigated_to, ["/aliases"])
+        about_item = next(item for item in ui.menu_items if item.text == "About")
+        if about_item.on_click is None:
+            raise AssertionError("About menu item is missing a click handler.")
+        about_item.on_click(None)
+        self.assertEqual(ui.navigated_to, ["/aliases", "/auth/about"])
 
     def test_user_settings_panel_saves_and_resets_appearance_colours(self) -> None:
         class FakeContainer:
@@ -18074,6 +18166,7 @@ class ModWebTests(unittest.TestCase):
                 self.dialogs: list[FakeDialog] = []
                 self.inputs: list[FakeInput] = []
                 self.selects: list[FakeSelect] = []
+                self.checkboxes: list[FakeInput] = []
                 self.buttons: list[FakeButton] = []
                 self.javascript_calls: list[str] = []
                 self.notifications: list[tuple[str, str | None]] = []
@@ -18112,6 +18205,12 @@ class ModWebTests(unittest.TestCase):
                 self.selects.append(control)
                 return control
 
+            def checkbox(self, text: str, *, value: bool, **kwargs: object) -> FakeInput:
+                del text, kwargs
+                control = FakeInput(value)
+                self.checkboxes.append(control)
+                return control
+
             def button(self, text: str = "", **kwargs: object) -> FakeButton:
                 button = FakeButton(text, cast(Callable[[object | None], object] | None, kwargs.get("on_click")))
                 self.buttons.append(button)
@@ -18148,6 +18247,7 @@ class ModWebTests(unittest.TestCase):
                 self.assertEqual(ui.selects[0].value, "AU")
                 self.assertEqual(ui.inputs[5].value, "UTC")
                 self.assertEqual(ui.selects[1].value, "24")
+                self.assertTrue(ui.checkboxes[0].value)
                 self.assertEqual(
                     ui.selects[0].props_value,
                     "filled square dense clearable hide-bottom-space color=accent options-dark "
@@ -18181,6 +18281,7 @@ class ModWebTests(unittest.TestCase):
                 ui.selects[0].value = "US"
                 ui.inputs[5].value = "Australia/Melbourne"
                 ui.selects[1].value = "12"
+                ui.checkboxes[0].value = False
 
                 save_button = next(button for button in ui.buttons if button.text == "Save")
                 save_click = save_button.on_click
@@ -18197,6 +18298,7 @@ class ModWebTests(unittest.TestCase):
                 self.assertEqual(store.get(user_id=42).country, config.Country.UNITED_STATES)
                 self.assertEqual(store.get(user_id=42).timestamp.timezone_name, "Australia/Melbourne")
                 self.assertFalse(store.get(user_id=42).web_chat.use_24_hour_time)
+                self.assertFalse(store.get(user_id=42).appearance.tooltip_above_on_touch_device)
                 self.assertIn("#336699", ui.javascript_calls[-1])
                 self.assertIn("--mod-accent-dark", ui.javascript_calls[-1])
                 self.assertIn("--mod-accent-panel", ui.javascript_calls[-1])
@@ -18207,6 +18309,7 @@ class ModWebTests(unittest.TestCase):
                 self.assertIn("--q-negative", ui.javascript_calls[-1])
                 self.assertIn("--q-info", ui.javascript_calls[-1])
                 self.assertIn("target.style.setProperty(name, value)", ui.javascript_calls[-1])
+                self.assertIn("const enabled = false", ui.javascript_calls[-1])
                 self.assertIn(("Saved settings.", "positive"), ui.notifications)
 
                 reset_button = next(button for button in ui.buttons if button.text == "Reset")
@@ -18224,12 +18327,14 @@ class ModWebTests(unittest.TestCase):
                 self.assertIsNone(store.get(user_id=42).country)
                 self.assertEqual(store.get(user_id=42).timestamp.timezone_name, "UTC")
                 self.assertTrue(store.get(user_id=42).web_chat.use_24_hour_time)
+                self.assertTrue(store.get(user_id=42).appearance.tooltip_above_on_touch_device)
                 self.assertEqual(
                     [control.value for control in ui.inputs[:5]],
                     ["#8B5CF6", "#6B7280", "#F59E0B", "#DC2626", "#8B5CF6"],
                 )
                 self.assertEqual(ui.inputs[5].value, "UTC")
                 self.assertEqual(ui.selects[1].value, "24")
+                self.assertTrue(ui.checkboxes[0].value)
                 self.assertIn("null", ui.javascript_calls[-1])
                 self.assertIn('"--q-primary"', ui.javascript_calls[-1])
                 self.assertIn('"--mod-accent-dark"', ui.javascript_calls[-1])
@@ -18241,6 +18346,7 @@ class ModWebTests(unittest.TestCase):
                 self.assertIn('"--q-info"', ui.javascript_calls[-1])
                 self.assertIn("const targets = [root, document.body].filter(Boolean);", ui.javascript_calls[-1])
                 self.assertIn("target.style.removeProperty(name)", ui.javascript_calls[-1])
+                self.assertIn("const enabled = true", ui.javascript_calls[-1])
 
     def test_user_appearance_palette_sets_initial_variables_inline(self) -> None:
         style_html = ModWebService._user_appearance_style_html(
@@ -18252,17 +18358,36 @@ class ModWebTests(unittest.TestCase):
         self.assertIn('"--q-primary": "#22C55E"', style_html)
         self.assertIn("target.style.setProperty(name, value)", style_html)
 
+    def test_touch_tooltip_placement_uses_browser_touch_capabilities(self) -> None:
+        javascript = ModWebService._user_tooltip_placement_javascript(True)
+
+        self.assertIn("navigator.maxTouchPoints", javascript)
+        self.assertIn("(any-pointer: coarse)", javascript)
+        self.assertIn("element?.tag !== 'q-tooltip'", javascript)
+        self.assertIn("'anchor', 'top middle'", javascript)
+        self.assertIn("'self', 'bottom middle'", javascript)
+        self.assertIn("'hide-delay', tapHideDelayMilliseconds", javascript)
+        self.assertIn("target.addEventListener('pointerup'", javascript)
+        self.assertIn("event.pointerType !== 'touch'", javascript)
+        self.assertIn("const tapHideDelayMilliseconds = 2000", javascript)
+        self.assertIn("mounted_app.$watch", javascript)
+
     def test_user_appearance_palette_overrides_nicegui_colours(self) -> None:
         class FakeUi:
             def __init__(self) -> None:
                 self.color_calls: list[dict[str, str]] = []
                 self.head_html: list[str] = []
+                self.javascript_calls: list[str] = []
 
             def colors(self, **kwargs: str) -> None:
                 self.color_calls.append(dict(kwargs))
 
             def add_head_html(self, html: str) -> None:
                 self.head_html.append(html)
+
+            def run_javascript(self, code: str, *, timeout: float = 1.0) -> None:
+                del timeout
+                self.javascript_calls.append(code)
 
         with TemporaryDirectory() as tmp:
             store = ModWebUserSettingsStore(Path(tmp) / "user_settings.json")
@@ -18300,6 +18425,7 @@ class ModWebTests(unittest.TestCase):
             ],
         )
         self.assertEqual(len(ui.head_html), 1)
+        self.assertIn("const enabled = true", ui.javascript_calls[0])
 
     def test_alias_target_label_does_not_duplicate_unknown_discord_id(self) -> None:
         cache = object.__new__(config.Name_Cache)

@@ -239,13 +239,9 @@ class ModWebAppPageMinecraftMixin(ModWebServiceSupport):
             return ()
         enabled_mod_names: tuple[str, ...] = tuple(mod.name for mod in model.mods.mods if mod.enabled)
         addon_labels: tuple[str, ...] = self._kubejs_recipe_addon_labels(enabled_mod_names)
-        badges: list[_ModWebBadgeSpec] = [
-            _ModWebBadgeSpec(text="KubeJS", tone="purple"),
-            _ModWebBadgeSpec(text="Managed script", tone="black"),
-        ]
-        if addon_labels:
-            badges.append(_ModWebBadgeSpec(text=f"{len(addon_labels)} addons", tone="grey"))
-        return tuple(badges)
+        if not addon_labels:
+            return ()
+        return (_ModWebBadgeSpec(text=f"{len(addon_labels)} addons", tone="grey"),)
 
     def _render_minecraft_recipes_section(
         self,

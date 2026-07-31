@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -14,18 +15,17 @@ import time
 from _io import BytesIO
 from argparse import ArgumentParser, Namespace
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from subprocess import CompletedProcess
 from typing import Final
 
+from deployment_metadata import DEPLOYMENT_METADATA_RELATIVE_PATH, DeploymentMetadata
 from restart_state import PENDING_PROCESS_RESTART_KIND_PATH, RestartKind, is_process_restart_kind
-from restart_targets import PORTAL_SYSTEMD_UNIT
 
 REPO_ROOT: Path = Path(__file__).resolve().parent
-PLACEHOLDER_USER = "your-ssh-user"
-PLACEHOLDER_PASSWORD = "replace-me"
-PLACEHOLDER_REMOTE_ROOT: PurePosixPath = PurePosixPath("/path/to/Yukibot")
+DEFAULT_TARGETS_FILE: Final[Path] = REPO_ROOT / "rupdater.targets.json"
 SSH_CONNECTION_TIMEOUT_SECONDS = 5
 SSH_CONTROL_PERSIST_SECONDS = 30
 RESTART_INTERVAL_SECONDS: Final[int] = 5
@@ -62,7 +62,7 @@ class RemoteTarget:
     name: TargetName
     host: str
     user: str
-    password: str
+    password: str | None
     remote_root: PurePosixPath
     restart_command: str | None = None
 
@@ -71,12 +71,14 @@ class RemoteTarget:
         return f"{self.user}@{self.host}"
 
     def validate(self) -> None:
-        if self.user == PLACEHOLDER_USER:
-            raise ValueError(f"{self.name.value} user is still the placeholder value")
-        if self.password == PLACEHOLDER_PASSWORD:
-            raise ValueError(f"{self.name.value} password is still the placeholder value")
-        if self.remote_root == PLACEHOLDER_REMOTE_ROOT:
-            raise ValueError(f"{self.name.value} remote_root is still the placeholder value")
+        if not self.host.strip():
+            raise ValueError(f"{self.name.value} host must not be blank")
+        if not self.user.strip():
+            raise ValueError(f"{self.name.value} user must not be blank")
+        if not self.remote_root.is_absolute() or self.remote_root == PurePosixPath("/"):
+            raise ValueError(f"{self.name.value} remote_root must be a non-root absolute path")
+        if self.restart_command is not None and not self.restart_command.strip():
+            raise ValueError(f"{self.name.value} restart_command must not be blank when configured")
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,37 +93,9 @@ class SyncPlan:
     delete_files: tuple[Path, ...]
 
 
-REMOTE_TARGETS: dict[TargetName, RemoteTarget] = {
-    TargetName.PORTAL: RemoteTarget(
-        name=TargetName.PORTAL,
-        host="wakusei.apasz.com",
-        user="debian",
-        password="scheme-python-dingo",
-        remote_root=PurePosixPath("/home/debian/yukiportal"),
-        restart_command=f"/usr/bin/sudo /usr/bin/systemctl restart {PORTAL_SYSTEMD_UNIT}",
-    ),
-    TargetName.WAKUSEI: RemoteTarget(
-        name=TargetName.WAKUSEI,
-        host="wakusei.apasz.com",
-        user="debian",
-        password="scheme-python-dingo",
-        remote_root=PurePosixPath("/home/debian/yukibot2"),
-        restart_command="/usr/bin/sudo /usr/bin/systemctl restart yukibot.service",
-    ),
-    TargetName.KOUSEI: RemoteTarget(
-        name=TargetName.KOUSEI,
-        host="kousei.apasz.com",
-        user="debian",
-        password="scheme-python-taiga",
-        remote_root=PurePosixPath("/home/debian/erinbot"),
-        restart_command="/usr/bin/sudo /usr/bin/systemctl restart erinbot.service",
-    ),
-}
-
-
 def parse_args() -> argparse.Namespace:
     parser: ArgumentParser = argparse.ArgumentParser(
-        description="Copy tracked Python files from this repo to one or more remote Yukibot hosts.",
+        description="Synchronise Yukibot source files to one or more remote hosts.",
     )
     parser.add_argument(
         "targets",
@@ -150,7 +124,95 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Sync all tracked Python files instead of only changed local Python files.",
     )
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="Commit local changes, deploy that revision, record its metadata, and restart each selected target.",
+    )
+    parser.add_argument(
+        "--targets-file",
+        type=Path,
+        default=DEFAULT_TARGETS_FILE,
+        help="Ignored JSON file containing remote target settings (default: rupdater.targets.json).",
+    )
     return parser.parse_args()
+
+
+def _target_file_path(path: Path) -> Path:
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _json_object(*, value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise ValueError(f"{label} must be a JSON object.")
+    return {key: item for key, item in value.items() if isinstance(key, str)}
+
+
+def _required_target_text(*, settings: dict[str, object], target_name: TargetName, field: str) -> str:
+    value: object = settings.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Target {target_name.value!r} requires a non-blank {field!r} string.")
+    return value.strip()
+
+
+def _optional_target_text(*, settings: dict[str, object], target_name: TargetName, field: str) -> str | None:
+    value: object = settings.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Target {target_name.value!r} {field!r} must be a string or null.")
+    stripped_value: str = value.strip()
+    return stripped_value or None
+
+
+def remote_targets_from_json(*, raw: object) -> dict[TargetName, RemoteTarget]:
+    payload: dict[str, object] = _json_object(value=raw, label="Target configuration")
+    raw_targets: object = payload.get("targets")
+    target_settings_by_name: dict[str, object] = _json_object(value=raw_targets, label="Target configuration targets")
+    expected_target_names: set[str] = {target_name.value for target_name in TargetName}
+    configured_target_names: set[str] = set(target_settings_by_name)
+    unknown_target_names: set[str] = configured_target_names - expected_target_names
+    missing_target_names: set[str] = expected_target_names - configured_target_names
+    if unknown_target_names or missing_target_names:
+        details: list[str] = []
+        if missing_target_names:
+            details.append(f"missing: {', '.join(sorted(missing_target_names))}")
+        if unknown_target_names:
+            details.append(f"unknown: {', '.join(sorted(unknown_target_names))}")
+        raise ValueError(f"Target configuration must define exactly the supported targets ({'; '.join(details)}).")
+
+    targets: dict[TargetName, RemoteTarget] = {}
+    for target_name in TargetName:
+        settings: dict[str, object] = _json_object(
+            value=target_settings_by_name[target_name.value],
+            label=f"Target {target_name.value!r}",
+        )
+        target = RemoteTarget(
+            name=target_name,
+            host=_required_target_text(settings=settings, target_name=target_name, field="host"),
+            user=_required_target_text(settings=settings, target_name=target_name, field="user"),
+            password=_optional_target_text(settings=settings, target_name=target_name, field="password"),
+            remote_root=PurePosixPath(
+                _required_target_text(settings=settings, target_name=target_name, field="remote_root")
+            ),
+            restart_command=_required_target_text(settings=settings, target_name=target_name, field="restart_command"),
+        )
+        target.validate()
+        targets[target_name] = target
+    return targets
+
+
+def load_remote_targets(*, target_file: Path) -> dict[TargetName, RemoteTarget]:
+    resolved_path: Path = _target_file_path(target_file)
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"Updater target configuration does not exist: {resolved_path}")
+    if os.name != "nt" and resolved_path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise PermissionError(f"Updater target configuration must be owner-only (chmod 600): {resolved_path}")
+    try:
+        raw: object = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as xcp:
+        raise ValueError(f"Updater target configuration must contain valid JSON: {resolved_path}") from xcp
+    return remote_targets_from_json(raw=raw)
 
 
 def require_program(name: str) -> None:
@@ -176,10 +238,28 @@ def tracked_python_files() -> list[Path]:
     return parse_tracked_python_files(result.stdout)
 
 
-def planned_sync_files(python_files: list[Path]) -> list[Path]:
+def parse_tracked_project_files(stdout: str) -> list[Path]:
+    files: list[Path] = [Path(line) for line in stdout.splitlines() if line]
+    if not files:
+        raise RuntimeError("git ls-files returned no tracked project files")
+    return files
+
+
+def tracked_project_files() -> list[Path]:
+    result: CompletedProcess[str] = subprocess.run(
+        ["git", "ls-files"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return parse_tracked_project_files(result.stdout)
+
+
+def planned_sync_files(source_files: list[Path]) -> list[Path]:
     files: list[Path] = []
     seen: set[Path] = set()
-    for path in [*python_files, *ALWAYS_SYNCED_FILES]:
+    for path in [*source_files, *ALWAYS_SYNCED_FILES]:
         if path in seen:
             continue
         local_path: Path = REPO_ROOT / path
@@ -251,6 +331,10 @@ def tracked_python_sync_plan() -> SyncPlan:
     return SyncPlan(write_files=tuple[Path, ...](tracked_python_files()), delete_files=())
 
 
+def tracked_project_sync_plan() -> SyncPlan:
+    return SyncPlan(write_files=tuple[Path, ...](tracked_project_files()), delete_files=())
+
+
 def select_sync_plan(*, sync_all_tracked: bool) -> SyncPlan:
     if sync_all_tracked:
         return tracked_python_sync_plan()
@@ -312,6 +396,94 @@ def run_checked(
     )
 
 
+def run_captured(command: list[str], *, password: str | None) -> str:
+    env: dict[str, str] = os.environ.copy()
+    if password is not None:
+        env["SSHPASS"] = password
+    print(shlex.join(command))
+    result: CompletedProcess[str] = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return result.stdout
+
+
+def working_tree_status() -> str:
+    result: CompletedProcess[str] = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def prompt_release_message() -> str:
+    try:
+        message: str = input("Release commit message: ").strip()
+    except EOFError as xcp:
+        raise RuntimeError("A release commit message is required, but standard input is unavailable.") from xcp
+    if not message:
+        raise ValueError("A release commit message is required.")
+    return message
+
+
+def commit_release_changes(*, message: str) -> bool:
+    """Stage and commit every non-ignored local change for a release deployment."""
+    if not message.strip():
+        raise ValueError("Release commit messages must not be blank.")
+    if not working_tree_status():
+        return False
+    run_checked(["git", "add", "--all"], password=None)
+    run_checked(["git", "commit", "-m", message], password=None)
+    if working_tree_status():
+        raise RuntimeError("Release commit completed but the working tree is still not clean.")
+    return True
+
+
+def release_revision() -> str:
+    result: CompletedProcess[str] = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def release_version() -> str | None:
+    result: CompletedProcess[str] = subprocess.run(
+        ["git", "tag", "--points-at", "HEAD", "--sort=-version:refname"],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    versions: list[str] = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return versions[0] if versions else None
+
+
+def build_deployment_metadata(
+    *,
+    target_name: TargetName,
+    source_files: tuple[Path, ...],
+    now: datetime | None = None,
+) -> DeploymentMetadata:
+    return DeploymentMetadata(
+        revision=release_revision(),
+        deployed_at=now or datetime.now(timezone.utc),
+        target_name=target_name.value,
+        version=release_version(),
+        source_paths=tuple(PurePosixPath(path.as_posix()) for path in source_files),
+    )
+
+
 def remote_file_path(target: RemoteTarget, relative_path: Path) -> PurePosixPath:
     return target.remote_root / PurePosixPath(relative_path.as_posix())
 
@@ -320,12 +492,8 @@ def ssh_control_path(target: RemoteTarget, run_token: str) -> Path:
     return Path(tempfile.gettempdir()) / f"yukibot-{target.name.value}-{run_token}.ssh"
 
 
-def ssh_connection_options(control_path: Path) -> list[str]:
-    return [
-        "-o",
-        "PreferredAuthentications=password",
-        "-o",
-        "PubkeyAuthentication=no",
+def ssh_connection_options(*, control_path: Path, use_password: bool) -> list[str]:
+    options: list[str] = [
         "-o",
         "StrictHostKeyChecking=accept-new",
         "-o",
@@ -337,20 +505,24 @@ def ssh_connection_options(control_path: Path) -> list[str]:
         "-o",
         f"ControlPath={control_path.as_posix()}",
     ]
+    if use_password:
+        options[:0] = ["-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no"]
+    return options
 
 
 def open_ssh_master(target: RemoteTarget, control_path: Path) -> None:
+    command: list[str] = [
+        "ssh",
+        "-M",
+        "-N",
+        "-f",
+        *ssh_connection_options(control_path=control_path, use_password=target.password is not None),
+        target.ssh_destination,
+    ]
+    if target.password is not None:
+        command[:0] = ["sshpass", "-e"]
     run_checked(
-        [
-            "sshpass",
-            "-e",
-            "ssh",
-            "-M",
-            "-N",
-            "-f",
-            *ssh_connection_options(control_path),
-            target.ssh_destination,
-        ],
+        command,
         password=target.password,
     )
 
@@ -435,12 +607,12 @@ def build_remote_extract_command(target: RemoteTarget) -> str:
     return f"{REMOTE_MKDIR_PATH} -p -- {remote_root} && {REMOTE_TAR_PATH} -xf - -C {remote_root}"
 
 
-def sync_python_files(session: RemoteSession, files: list[Path]) -> None:
+def sync_files(session: RemoteSession, files: list[Path]) -> None:
     archive_bytes: bytes = build_sync_archive(files)
     run_checked(
         [
             "ssh",
-            *ssh_connection_options(session.control_path),
+            *ssh_connection_options(control_path=session.control_path, use_password=False),
             session.target.ssh_destination,
             build_remote_shell_command(build_remote_extract_command(session.target)),
         ],
@@ -456,7 +628,7 @@ def delete_remote_files(session: RemoteSession, files: list[Path]) -> None:
     run_checked(
         [
             "ssh",
-            *ssh_connection_options(session.control_path),
+            *ssh_connection_options(control_path=session.control_path, use_password=False),
             session.target.ssh_destination,
             build_remote_shell_command(f"{REMOTE_RM_PATH} -f -- {quoted_paths}"),
         ],
@@ -512,7 +684,19 @@ def run_remote_project_command(session: RemoteSession, command: str) -> None:
     run_checked(
         [
             "ssh",
-            *ssh_connection_options(session.control_path),
+            *ssh_connection_options(control_path=session.control_path, use_password=False),
+            session.target.ssh_destination,
+            build_remote_shell_command(build_remote_project_command(session.target, command)),
+        ],
+        password=None,
+    )
+
+
+def run_remote_project_command_captured(session: RemoteSession, command: str) -> str:
+    return run_captured(
+        [
+            "ssh",
+            *ssh_connection_options(control_path=session.control_path, use_password=False),
             session.target.ssh_destination,
             build_remote_shell_command(build_remote_project_command(session.target, command)),
         ],
@@ -524,7 +708,7 @@ def require_remote_program(session: RemoteSession, program_name: str) -> None:
     run_checked(
         [
             "ssh",
-            *ssh_connection_options(session.control_path),
+            *ssh_connection_options(control_path=session.control_path, use_password=False),
             session.target.ssh_destination,
             build_remote_shell_command(build_remote_program_check_command(program_name)),
         ],
@@ -536,7 +720,7 @@ def require_remote_command_path(session: RemoteSession, command_path: str) -> No
     run_checked(
         [
             "ssh",
-            *ssh_connection_options(session.control_path),
+            *ssh_connection_options(control_path=session.control_path, use_password=False),
             session.target.ssh_destination,
             build_remote_shell_command(build_remote_command_path_check_command(command_path)),
         ],
@@ -546,6 +730,41 @@ def require_remote_command_path(session: RemoteSession, command_path: str) -> No
 
 def sync_remote_dependencies(session: RemoteSession) -> None:
     run_remote_project_command(session, REMOTE_UV_SYNC_COMMAND)
+
+
+def build_deployment_metadata_write_command(metadata: DeploymentMetadata) -> str:
+    metadata_path: str = shlex.quote(DEPLOYMENT_METADATA_RELATIVE_PATH.as_posix())
+    metadata_directory: str = shlex.quote(DEPLOYMENT_METADATA_RELATIVE_PATH.parent.as_posix())
+    return (
+        f"{REMOTE_MKDIR_PATH} -p -- {metadata_directory} && "
+        f"printf '%s\\n' {shlex.quote(metadata.to_json())} > {metadata_path}"
+    )
+
+
+def write_deployment_metadata(session: RemoteSession, metadata: DeploymentMetadata) -> None:
+    run_remote_project_command(session, build_deployment_metadata_write_command(metadata))
+
+
+def build_deployment_metadata_read_command() -> str:
+    metadata_path: str = shlex.quote(DEPLOYMENT_METADATA_RELATIVE_PATH.as_posix())
+    return f"if [ -f {metadata_path} ]; then {REMOTE_CAT_PATH} -- {metadata_path}; fi"
+
+
+def read_deployment_metadata(session: RemoteSession) -> DeploymentMetadata | None:
+    raw_metadata: str = run_remote_project_command_captured(session, build_deployment_metadata_read_command())
+    if not raw_metadata.strip():
+        return None
+    metadata = DeploymentMetadata.from_json(raw_metadata)
+    if metadata.target_name != session.target.name.value:
+        raise ValueError(
+            f"Remote deployment metadata target {metadata.target_name!r} does not match {session.target.name.value!r}."
+        )
+    return metadata
+
+
+def stale_deployment_files(*, previous: DeploymentMetadata, current: DeploymentMetadata) -> list[Path]:
+    current_paths: set[PurePosixPath] = set(current.source_paths)
+    return [Path(path.as_posix()) for path in previous.source_paths if path not in current_paths]
 
 
 def print_check_plan(target: RemoteTarget, files: list[Path], delete_files: list[Path]) -> None:
@@ -574,7 +793,7 @@ def restart_remote(session: RemoteSession) -> None:
     run_checked(
         [
             "ssh",
-            *ssh_connection_options(session.control_path),
+            *ssh_connection_options(control_path=session.control_path, use_password=False),
             session.target.ssh_destination,
             build_remote_shell_command(
                 build_remote_project_command(session.target, build_remote_restart_command(session.target))
@@ -600,8 +819,9 @@ def ordered_restart_targets(targets: list[RemoteTarget]) -> list[RemoteTarget]:
     return sorted(targets, key=lambda target: priority[target.name])
 
 
-def configured_targets(target_names: list[str]) -> list[RemoteTarget]:
-    targets: list[RemoteTarget] = [REMOTE_TARGETS[TargetName(name)] for name in target_names]
+def configured_targets(*, target_names: list[str], target_file: Path) -> list[RemoteTarget]:
+    targets_by_name: dict[TargetName, RemoteTarget] = load_remote_targets(target_file=target_file)
+    targets: list[RemoteTarget] = [targets_by_name[TargetName(name)] for name in target_names]
     for target in targets:
         target.validate()
     return targets
@@ -611,10 +831,28 @@ def main() -> int:
     args: Namespace = parse_args()
     require_program("git")
 
-    sync_plan: SyncPlan = select_sync_plan(sync_all_tracked=args.all_tracked)
+    targets: list[RemoteTarget] = configured_targets(target_names=args.targets, target_file=args.targets_file)
+    release_metadata_by_target: dict[TargetName, DeploymentMetadata] | None = None
+    if args.release:
+        if args.check or args.dry:
+            raise ValueError("--release cannot be combined with --check or --dry.")
+        if not args.restart:
+            raise ValueError("--release requires --restart so recorded deployment metadata matches running code.")
+        if working_tree_status():
+            release_message: str = prompt_release_message()
+            commit_release_changes(message=release_message)
+        sync_plan = tracked_project_sync_plan()
+    else:
+        sync_plan = select_sync_plan(sync_all_tracked=args.all_tracked)
     files: list[Path] = planned_sync_files(list[Path](sync_plan.write_files))
-    targets: list[RemoteTarget] = configured_targets(args.targets)
-    print(f"Preparing to sync {len(files)} files")
+    if args.release:
+        release_metadata_by_target = {
+            target.name: build_deployment_metadata(target_name=target.name, source_files=tuple(files))
+            for target in targets
+        }
+        print(f"Preparing release {release_metadata_by_target[targets[0].name].revision[:7]} to sync {len(files)} files")
+    if not args.release:
+        print(f"Preparing to sync {len(files)} files")
 
     if args.dry:
         report_path: Path = write_dry_run_report(targets, sync_plan, files)
@@ -626,7 +864,8 @@ def main() -> int:
             print_check_plan(target, files, list[Path](sync_plan.delete_files))
         return 0
 
-    require_program("sshpass")
+    if any(target.password is not None for target in targets):
+        require_program("sshpass")
     require_program("ssh")
 
     run_token: str = f"{os.getpid()}-{time.time_ns():x}"
@@ -639,10 +878,22 @@ def main() -> int:
             sessions_by_name[target.name] = session
             require_remote_command_path(session, REMOTE_TAR_PATH)
             require_remote_program(session, "uv")
-            delete_remote_files(session, list[Path](sync_plan.delete_files))
-            sync_python_files(session, files)
+            delete_files: list[Path] = list[Path](sync_plan.delete_files)
+            if release_metadata_by_target is not None:
+                previous_metadata: DeploymentMetadata | None = read_deployment_metadata(session)
+                if previous_metadata is not None:
+                    delete_files.extend(
+                        stale_deployment_files(
+                            previous=previous_metadata,
+                            current=release_metadata_by_target[target.name],
+                        )
+                    )
+            delete_remote_files(session, delete_files)
+            sync_files(session, files)
             sync_remote_dependencies(session)
-            print_synced_files(target, files, list[Path](sync_plan.delete_files))
+            if release_metadata_by_target is not None:
+                write_deployment_metadata(session, release_metadata_by_target[target.name])
+            print_synced_files(target, files, delete_files)
 
         if args.restart:
             for target in ordered_restart_targets(targets):

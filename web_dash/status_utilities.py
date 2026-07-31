@@ -21,11 +21,11 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
         def _open_alias_page() -> None:
             ui.navigate.to("/aliases")
 
+        def _open_about_page() -> None:
+            ui.navigate.to("/auth/about")
+
         open_discord_settings = (
             self._build_discord_settings_panel(ui=ui, user=user) if self._user_can_manage_discord_settings(user) else None
-        )
-        open_fake_chat_preview = (
-            self._build_fake_chat_preview_panel(ui=ui) if self._user_can_use_fake_chat_preview(user) else None
         )
 
         def _simulate(kind: ModWebNotificationTrayItemKind) -> None:
@@ -68,12 +68,11 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
         action_specs.append(("Settings", open_user_settings))
         action_specs.append(("Standard drinks", open_standard_drinks))
         action_specs.append(("Currency", open_currency_converter))
-        action_specs.append(("Time", open_time_formatter))
+        action_specs.append(("Discord Time", open_time_formatter))
         action_specs.append(("Aliases", _open_alias_page))
+        action_specs.append(("About", _open_about_page))
         if open_discord_settings is not None:
             action_specs.append(("Discord", open_discord_settings))
-        if open_fake_chat_preview is not None:
-            action_specs.append(("Fake Chat", open_fake_chat_preview))
         action_specs.append(("Log out", lambda: ui.navigate.to("/auth/logout")))
 
         menu_factory = getattr(ui, "menu", None)
@@ -220,6 +219,22 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
                                     if callable(set_value):
                                         set_value(colors[spec.key])
 
+                            tooltip_above_on_touch_input = ui.checkbox(
+                                "Tooltip above on touch device",
+                                value=current_settings.appearance.tooltip_above_on_touch_device,
+                            ).props("dense color=accent").classes("mod-app-details-field")
+
+                            def _capture_tooltip_above_on_touch_device() -> bool:
+                                value = tooltip_above_on_touch_input.value
+                                if not isinstance(value, bool):
+                                    raise ValueError("Tooltip placement must be enabled or disabled.")
+                                return value
+
+                            def _apply_tooltip_placement_to_control(settings: ModWebUserSettings) -> None:
+                                tooltip_above_on_touch_input.set_value(
+                                    settings.appearance.tooltip_above_on_touch_device
+                                )
+
                         with ui.column().classes("mod-app-details-section gap-2"):
                             ui.label("Location").classes("mod-stat-label")
                             country_input = (
@@ -295,6 +310,7 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
                                         appearance=self._user_appearance_with_colors(
                                             appearance=current_settings.appearance,
                                             colors_by_key=next_colors,
+                                            tooltip_above_on_touch_device=_capture_tooltip_above_on_touch_device(),
                                         ),
                                         web_chat=ModWebChatSettings(
                                             use_24_hour_time=_capture_use_24_hour_time()
@@ -321,7 +337,13 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
                                 current_settings = next_settings
                                 css_variables = self._user_appearance_css_variables(next_settings.appearance)
                                 try:
-                                    ui.run_javascript(self._user_appearance_javascript(css_variables), timeout=0.5)
+                                    ui.run_javascript(
+                                        self._user_appearance_javascript(css_variables)
+                                        + self._user_tooltip_placement_javascript(
+                                            next_settings.appearance.tooltip_above_on_touch_device
+                                        ),
+                                        timeout=0.5,
+                                    )
                                 except Exception:
                                     pass
                                 _apply_color_values_to_controls(
@@ -329,6 +351,7 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
                                 )
                                 _apply_country_to_control(next_settings.country)
                                 _apply_time_preferences_to_controls(next_settings)
+                                _apply_tooltip_placement_to_control(next_settings)
                                 ui.notify(
                                     "Saved settings." if changed else "Settings are unchanged.",
                                     type="positive",
@@ -344,6 +367,7 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
                                         appearance=self._user_appearance_with_colors(
                                             appearance=current_settings.appearance,
                                             colors_by_key=reset_colors,
+                                            tooltip_above_on_touch_device=True,
                                         ),
                                         web_chat=ModWebChatSettings(use_24_hour_time=True),
                                         timestamp=ModWebTimestampSettings(
@@ -366,8 +390,13 @@ class ModWebStatusUtilitiesMixin(ModWebStatusFeatureSupport):
                                 _apply_color_values_to_controls(self._resolved_user_appearance_colors(next_settings.appearance))
                                 _apply_country_to_control(next_settings.country)
                                 _apply_time_preferences_to_controls(next_settings)
+                                _apply_tooltip_placement_to_control(next_settings)
                                 try:
-                                    ui.run_javascript(self._user_appearance_javascript(None), timeout=0.5)
+                                    ui.run_javascript(
+                                        self._user_appearance_javascript(None)
+                                        + self._user_tooltip_placement_javascript(True),
+                                        timeout=0.5,
+                                    )
                                 except Exception:
                                     pass
                                 ui.notify(

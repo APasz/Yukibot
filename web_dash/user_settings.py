@@ -27,6 +27,7 @@ class ModWebAppearanceSettings(BaseModel):
     """Stored appearance choices for the mod-web UI."""
 
     color_scheme: ModWebColorScheme = ModWebColorScheme.CURRENT
+    tooltip_above_on_touch_device: bool = True
     primary_color_hex: str | None = None
     positive_color_hex: str | None = None
     warning_color_hex: str | None = None

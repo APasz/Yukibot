@@ -43,8 +43,6 @@ class ModWebAppPageUpdateMixin(ModWebServiceSupport):
                     tone=ModWebAppPageUpdateMixin._update_status_badge_tone(update_status),
                 )
             )
-        if update_info.app_id is not None:
-            badges.append(_ModWebBadgeSpec(text=f"App {update_info.app_id}", tone="grey"))
         return tuple(badges)
 
     @staticmethod

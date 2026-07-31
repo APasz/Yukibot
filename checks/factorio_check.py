@@ -7,6 +7,7 @@ import tarfile
 import unittest
 import zipfile
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -67,6 +68,14 @@ from apps.factorio import (
     resolve_factorio_mod_portal_candidates,
 )
 from apps.factorio.node_api import build_factorio_generation_state
+
+
+async def _run_blocking_directly(
+    func: Callable[..., object],
+    *args: object,
+    **kwargs: object,
+) -> object:
+    return func(*args, **kwargs)
 
 
 class _FakeFactorioUpdateApp:
@@ -142,6 +151,7 @@ class FactorioVersionDetectionTests(unittest.TestCase):
 
         self.assertTrue(state.space_age_enabled)
         self.assertFalse(state.map_exchange_available)
+        self.assertFalse(state.running_world_mapgen_available)
         self.assertIsNone(state.load_error)
         self.assertEqual(state.map_gen_settings, {"seed": 12345, "autoplace_controls": {"tungsten_ore": {"size": 2}}})
         self.assertEqual(
@@ -181,6 +191,46 @@ class FactorioVersionDetectionTests(unittest.TestCase):
         self.assertEqual(imported.map_settings, {"enemy_evolution": {"enabled": False}})
         app._relay.send.assert_awaited_once()
         self.assertTrue(output_removed)
+
+    def test_running_map_exchange_string_uses_yuki_bridge_mapgen_response(self) -> None:
+        app = cast(Factorio, object.__new__(Factorio))
+        app.friendly = "Factorio Alpha"
+        app.check_running = lambda: True
+        app._factorio_yuki_bridge_enabled = True
+        app._relay = SimpleNamespace(
+            send=AsyncMock(
+                return_value=json.dumps(
+                    {
+                        "kind": "command_result",
+                        "command": "mapgen",
+                        "ok": True,
+                        "result": {
+                            "kind": "mapgen",
+                            "surfaces": [
+                                {
+                                    "surface": {"name": "nauvis", "index": 1},
+                                    "map_exchange_string": ">>>eA==<<<",
+                                }
+                            ],
+                        },
+                    }
+                )
+            )
+        )
+
+        map_exchange_string = asyncio.run(app.running_map_exchange_string())
+
+        self.assertEqual(map_exchange_string, ">>>eA==<<<")
+        app._relay.send.assert_awaited_once_with("/yuki mapgen")
+
+    def test_running_map_exchange_string_requires_yuki_bridge(self) -> None:
+        app = cast(Factorio, object.__new__(Factorio))
+        app.friendly = "Factorio Alpha"
+        app.check_running = lambda: True
+        app._factorio_yuki_bridge_enabled = False
+
+        with self.assertRaisesRegex(RuntimeError, "requires yuki-bridge 1.1.0"):
+            asyncio.run(app.running_map_exchange_string())
 
     def test_selected_save_changes_the_generated_start_command(self) -> None:
         app = cast(Any, object.__new__(Factorio))
@@ -1657,6 +1707,30 @@ class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    def test_parse_factorio_bridge_evolution_from_command_result(self) -> None:
+        snapshot = _parse_factorio_bridge_evolution_snapshot(
+            json.dumps(
+                {
+                    "kind": "command_result",
+                    "command": "evolution",
+                    "ok": True,
+                    "result": {
+                        "kind": "evolution",
+                        "surfaces": [
+                            {
+                                "surface": {"name": "nauvis", "planet": "nauvis"},
+                                "evolution": {"total": 0.375},
+                            }
+                        ],
+                    },
+                }
+            )
+        )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.primary_evolution, FactorioEvolution(factor=0.375))
+
     async def test_activity_providers_read_cached_factorio_snapshot(self) -> None:
         app = cast(Any, object.__new__(Factorio))
         app.name = "factorio_demo"
@@ -2059,6 +2133,20 @@ class FactorioActivityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _research_matcher_app(*, bridge_events_tail_active: bool = False) -> Factorio:
+        app = cast(Factorio, object.__new__(Factorio))
+        app.name = "factorio_demo"
+        app.scope = "factorio"
+        app.manage_embed_color = 0xDC6B0F
+        app.cfg = SimpleNamespace(relay_notice_progress=True)
+        app._factorio_yuki_bridge_enabled = True
+        app._tail_machers = set()
+        if bridge_events_tail_active:
+            app._bridge_tail_matchers = set()
+            app._bridge_events_tail = object()
+        return app
+
     async def test_match_error_records_factorio_startup_failure(self) -> None:
         app = cast(Any, object.__new__(Factorio))
         app.name = "factorio_demo"
@@ -2114,12 +2202,7 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(app._tail)
 
     async def test_match_research_relays_finished_notice(self) -> None:
-        app = cast(Any, object.__new__(Factorio))
-        app.name = "factorio_demo"
-        app.scope = "factorio"
-        app.manage_embed_color = 0xDC6B0F
-        app._factorio_yuki_bridge_enabled = True
-        app._tail_machers = set()
+        app = self._research_matcher_app()
         matcher = Matchers(app)
 
         with patch("apps.factorio.DC_Relay.add") as add_mock:
@@ -2137,12 +2220,7 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Electronics 1")
 
     async def test_match_research_relays_yuki_bridge_finished_notice(self) -> None:
-        app = cast(Any, object.__new__(Factorio))
-        app.name = "factorio_demo"
-        app.scope = "factorio"
-        app.manage_embed_color = 0xDC6B0F
-        app._factorio_yuki_bridge_enabled = True
-        app._tail_machers = set()
+        app = self._research_matcher_app()
         matcher = Matchers(app)
 
         with patch("apps.factorio.DC_Relay.add") as add_mock:
@@ -2163,14 +2241,7 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.relay_embed.description, "Bulk Inserter")
 
     async def test_match_research_relays_raw_yuki_bridge_event(self) -> None:
-        app = cast(Any, object.__new__(Factorio))
-        app.name = "factorio_demo"
-        app.scope = "factorio"
-        app.manage_embed_color = 0xDC6B0F
-        app._factorio_yuki_bridge_enabled = True
-        app._tail_machers = set()
-        app._bridge_tail_matchers = set()
-        app._bridge_events_tail = object()
+        app = self._research_matcher_app(bridge_events_tail_active=True)
         matcher = Matchers(app)
 
         with patch("apps.factorio.DC_Relay.add") as add_mock:
@@ -2186,14 +2257,7 @@ class FactorioRelayMatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relayed_message.content, "Research: Bulk Inserter")
 
     async def test_match_research_skips_wrapped_yuki_bridge_event_when_ndjson_tail_is_active(self) -> None:
-        app = cast(Any, object.__new__(Factorio))
-        app.name = "factorio_demo"
-        app.scope = "factorio"
-        app.manage_embed_color = 0xDC6B0F
-        app._factorio_yuki_bridge_enabled = True
-        app._tail_machers = set()
-        app._bridge_tail_matchers = set()
-        app._bridge_events_tail = object()
+        app = self._research_matcher_app(bridge_events_tail_active=True)
         matcher = Matchers(app)
 
         with patch("apps.factorio.DC_Relay.add") as add_mock:
@@ -2322,7 +2386,10 @@ class FactorioStopTests(unittest.IsolatedAsyncioTestCase):
         app._drain_stderr_task = AsyncMock()
         app._lock = Path("/tmp/factorio-test.lock")
 
-        with patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        with (
+            patch("apps.factorio.run_blocking", new=AsyncMock(side_effect=_run_blocking_directly)),
+            patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+        ):
             result = await Factorio.stop(app)
 
         self.assertTrue(result)
@@ -2364,7 +2431,10 @@ class FactorioStopTests(unittest.IsolatedAsyncioTestCase):
         app._drain_stderr_task = AsyncMock()
         app._lock = Path("/tmp/factorio-test.lock")
 
-        with patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        with (
+            patch("apps.factorio.run_blocking", new=AsyncMock(side_effect=_run_blocking_directly)),
+            patch("apps.factorio.asyncio.sleep", new=AsyncMock()) as sleep_mock,
+        ):
             result = await Factorio.stop(app)
 
         self.assertTrue(result)

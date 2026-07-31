@@ -408,6 +408,7 @@ class _ModWebChatSurfaceConfig:
     app_stats: NodeAppRuntimeSummary | None
     hero_badges: tuple[_ModWebBadgeSpec, ...] = ()
     refresh_app_stats: Callable[[], Awaitable[NodeAppRuntimeSummary | None]] | None = None
+    publish_fake_event: Callable[[ChatEvent], Awaitable[ChatEvent]] | None = None
     popout_url: str | None = None
     map_url: str | None = None
 

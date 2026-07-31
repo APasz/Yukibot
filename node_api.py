@@ -404,6 +404,7 @@ _NODE_API_SCOPE_WEB_LEVELS: dict[NodeApiScope, Power_Level] = {
     NodeApiScope.MAP_WRITE: Power_Level.user,
     NodeApiScope.CHAT_READ: Power_Level.visitor,
     NodeApiScope.CHAT_WRITE: Power_Level.visitor,
+    NodeApiScope.CHAT_INJECT: Power_Level.root,
     NodeApiScope.MODS_READ: Power_Level.visitor,
     NodeApiScope.MODS_DOWNLOAD: Power_Level.user,
     NodeApiScope.MODS_WRITE: Power_Level.user,
@@ -2507,6 +2508,14 @@ class NodeApiService:
             content=chat_request.content,
             reply_to_event_id=chat_request.reply_to_event_id,
         )
+
+    async def publish_app_fake_chat(self, *, app: App, event: ChatEvent) -> ChatEvent:
+        self._require_chat_relay_app(app)
+        if event.room_id.casefold() != app.name.casefold():
+            raise _http_exception(400, "Synthetic chat event room does not match the selected app.")
+        if self._chat_relay is None:
+            raise _http_exception(503, "Chat relay is not available on this node.")
+        return await self._chat_relay.publish_chat_event(event=event)
 
     async def queue_relay_tts(self, relay_request: _NodeRelayTTSRequest) -> _NodeRelayTTSResult:
         if self._relay_tts_service is None:
@@ -5054,6 +5063,24 @@ class NodeApiService:
         except (OSError, ValueError, RuntimeError) as xcp:
             raise _http_exception(400, str(xcp)) from xcp
         traffic_log.info("Node API imported Factorio map exchange string: node=%s app=%s", self.node_name, app.name)
+        self._invalidate_state_caches(app_name=app.name)
+        return self.factorio_generation_state(app=app)
+
+    async def sync_factorio_generation_from_running_world(self, *, app: App) -> NodeFactorioGenerationState:
+        factorio_app = self._factorio_app(app)
+        try:
+            map_exchange_string = await factorio_app.running_map_exchange_string()
+            await _import_factorio_map_exchange_string(
+                app=factorio_app,
+                map_exchange_string=map_exchange_string,
+            )
+        except (OSError, ValueError, RuntimeError) as xcp:
+            raise _http_exception(400, str(xcp)) from xcp
+        traffic_log.info(
+            "Node API synchronized Factorio generation settings from running world: node=%s app=%s",
+            self.node_name,
+            app.name,
+        )
         self._invalidate_state_caches(app_name=app.name)
         return self.factorio_generation_state(app=app)
 

@@ -6,10 +6,120 @@ from __future__ import annotations
 from .status_support import *
 
 
+@dataclass(frozen=True, slots=True)
+class _FakeChatMessageModeSpec:
+    label: str
+    help_text: str
+
+
+_FAKE_CHAT_MESSAGE_MODE_SPECS: Mapping[_ModWebFakeChatMessageMode, _FakeChatMessageModeSpec] = {
+    _ModWebFakeChatMessageMode.TEXT: _FakeChatMessageModeSpec(
+        label="Text",
+        help_text="Freeform chat message with optional reply, link, and attachment preview.",
+    ),
+    _ModWebFakeChatMessageMode.JOIN: _FakeChatMessageModeSpec(
+        label="Join",
+        help_text="Player session notice. Body hides in chat and becomes a Joined badge.",
+    ),
+    _ModWebFakeChatMessageMode.LEAVE: _FakeChatMessageModeSpec(
+        label="Leave",
+        help_text="Player session notice. Body hides in chat and becomes a Left badge.",
+    ),
+    _ModWebFakeChatMessageMode.DEATH: _FakeChatMessageModeSpec(
+        label="Death",
+        help_text="Player death notice with a cause string.",
+    ),
+    _ModWebFakeChatMessageMode.PVP_KILL: _FakeChatMessageModeSpec(
+        label="PVP Kill",
+        help_text="PVP death notice with a killer name or detail string.",
+    ),
+    _ModWebFakeChatMessageMode.ADVANCEMENT: _FakeChatMessageModeSpec(
+        label="Advancement",
+        help_text="Game progress notice with badge and embed rendering.",
+    ),
+    _ModWebFakeChatMessageMode.GOAL: _FakeChatMessageModeSpec(
+        label="Goal",
+        help_text="Goal progress notice with badge and embed rendering.",
+    ),
+    _ModWebFakeChatMessageMode.CHALLENGE: _FakeChatMessageModeSpec(
+        label="Challenge",
+        help_text="Challenge progress notice with badge and embed rendering.",
+    ),
+    _ModWebFakeChatMessageMode.RESEARCH: _FakeChatMessageModeSpec(
+        label="Research",
+        help_text="Research progress notice with badge and embed rendering.",
+    ),
+    _ModWebFakeChatMessageMode.GAME_EVENT: _FakeChatMessageModeSpec(
+        label="Game Event",
+        help_text="Generic game event notice with a custom label and detail.",
+    ),
+    _ModWebFakeChatMessageMode.APP_STARTED: _FakeChatMessageModeSpec(
+        label="App Started",
+        help_text="App lifecycle started notice using detail text as join address.",
+    ),
+    _ModWebFakeChatMessageMode.APP_STOPPED: _FakeChatMessageModeSpec(
+        label="App Stopped",
+        help_text="App lifecycle stopped notice using secondary text as detail lines.",
+    ),
+    _ModWebFakeChatMessageMode.APP_CRASHED: _FakeChatMessageModeSpec(
+        label="App Crashed",
+        help_text="App lifecycle crash notice using detail text as summary.",
+    ),
+    _ModWebFakeChatMessageMode.MAINTENANCE_WARNING: _FakeChatMessageModeSpec(
+        label="Maintenance Warning",
+        help_text="Maintenance warning notice using detail text as lead minutes.",
+    ),
+    _ModWebFakeChatMessageMode.BOT_STARTED: _FakeChatMessageModeSpec(
+        label="Bot Started",
+        help_text="Bot startup notice using detail text as auto-launch app name.",
+    ),
+    _ModWebFakeChatMessageMode.BOT_ERROR: _FakeChatMessageModeSpec(
+        label="Bot Error",
+        help_text="Bot error notice using detail text as the summary.",
+    ),
+    _ModWebFakeChatMessageMode.EMBED: _FakeChatMessageModeSpec(
+        label="Embed",
+        help_text="Custom embed message with optional body text, reply, link, and attachment.",
+    ),
+}
+_FAKE_CHAT_MESSAGE_OPTIONS: Mapping[str, _ModWebFakeChatMessageMode] = {
+    spec.label: mode for mode, spec in _FAKE_CHAT_MESSAGE_MODE_SPECS.items()
+}
+
+
 class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
-    def _build_fake_chat_preview_panel(self, *, ui: ModWebUi) -> Callable[[], None]:
-        context_options: dict[str, str] = self._fake_chat_preview_app_options()
-        send_target_options: dict[str, str] = self._fake_chat_preview_send_target_options()
+    def _render_fake_chat_preview_control(
+        self,
+        *,
+        ui: ModWebUi,
+        user: ModWebUser,
+        app_name: str,
+        app_friendly: str,
+        publish_event: Callable[[ChatEvent], Awaitable[ChatEvent]],
+    ) -> None:
+        if not self._user_can_use_fake_chat_preview(user):
+            return
+        open_preview = self._build_fake_chat_preview_panel(
+            ui=ui,
+            app_name=app_name,
+            app_friendly=app_friendly,
+            publish_event=publish_event,
+        )
+        ui.button("Fake Chat", on_click=open_preview).classes(
+            f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm mod-action-border-accent"
+        )
+
+    def _build_fake_chat_preview_panel(
+        self,
+        *,
+        ui: ModWebUi,
+        app_name: str,
+        app_friendly: str,
+        publish_event: Callable[[ChatEvent], Awaitable[ChatEvent]],
+    ) -> Callable[[], None]:
+        target_app_name = app_name.strip()
+        if not target_app_name:
+            raise ValueError("Fake chat preview app name must not be empty.")
         source_options: dict[str, ChatEndpointKind] = {
             "Game": ChatEndpointKind.APP,
             "Discord": ChatEndpointKind.DISCORD_CHANNEL,
@@ -22,52 +132,20 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
             "Web User": ChatAuthorKind.WEB_USER,
             "System": ChatAuthorKind.SYSTEM,
         }
-        message_options: dict[str, _ModWebFakeChatMessageMode] = {
-            "Text": _ModWebFakeChatMessageMode.TEXT,
-            "Join": _ModWebFakeChatMessageMode.JOIN,
-            "Leave": _ModWebFakeChatMessageMode.LEAVE,
-            "Death": _ModWebFakeChatMessageMode.DEATH,
-            "PVP Kill": _ModWebFakeChatMessageMode.PVP_KILL,
-            "Advancement": _ModWebFakeChatMessageMode.ADVANCEMENT,
-            "Goal": _ModWebFakeChatMessageMode.GOAL,
-            "Challenge": _ModWebFakeChatMessageMode.CHALLENGE,
-            "Research": _ModWebFakeChatMessageMode.RESEARCH,
-            "Game Event": _ModWebFakeChatMessageMode.GAME_EVENT,
-            "App Started": _ModWebFakeChatMessageMode.APP_STARTED,
-            "App Stopped": _ModWebFakeChatMessageMode.APP_STOPPED,
-            "App Crashed": _ModWebFakeChatMessageMode.APP_CRASHED,
-            "Maintenance Warning": _ModWebFakeChatMessageMode.MAINTENANCE_WARNING,
-            "Bot Started": _ModWebFakeChatMessageMode.BOT_STARTED,
-            "Bot Error": _ModWebFakeChatMessageMode.BOT_ERROR,
-            "Embed": _ModWebFakeChatMessageMode.EMBED,
-        }
+        message_options: Mapping[str, _ModWebFakeChatMessageMode] = _FAKE_CHAT_MESSAGE_OPTIONS
         reference_options: dict[str, ChatReferenceKind] = {
             "None": ChatReferenceKind.NONE,
             "Reply": ChatReferenceKind.REPLY,
             "Forward": ChatReferenceKind.FORWARD,
         }
-        initial_app_label: str | None = next(iter(context_options), None)
-        initial_publish_target_label: str | None = next(iter(send_target_options), None)
-        initial_app_name: str | None = (
-            context_options.get(initial_app_label)
-            if initial_app_label is not None
-            else (
-                send_target_options.get(initial_publish_target_label)
-                if initial_publish_target_label is not None
-                else None
-            )
-        )
-        state: _ModWebFakeChatPreviewState = _ModWebFakeChatPreviewState(app_name=initial_app_name)
-        publish_target_label: str | None = initial_publish_target_label
+        state = _ModWebFakeChatPreviewState(app_name=target_app_name)
         initial_source_label: str = next(
             label for label, option in source_options.items() if option is state.source_kind
         )
         initial_author_label: str = next(
             label for label, option in author_options.items() if option is state.author_kind
         )
-        initial_message_label: str = next(
-            label for label, option in message_options.items() if option is state.message_mode
-        )
+        initial_message_label: str = _FAKE_CHAT_MESSAGE_MODE_SPECS[state.message_mode].label
         initial_reference_label: str = next(
             label for label, option in reference_options.items() if option is state.reference_kind
         )
@@ -101,13 +179,6 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
         def _refresh_preview() -> None:
             _preview_body.refresh()
 
-        def _update_app_name(value: object) -> None:
-            if value is None:
-                state.app_name = None
-            else:
-                state.app_name = context_options.get(str(value).strip())
-            _refresh_preview()
-
         def _update_source_kind(value: object) -> None:
             if value is not None:
                 option: ChatEndpointKind | None = source_options.get(str(value).strip())
@@ -131,13 +202,6 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
                         mode_help_label.set_text(self._fake_chat_preview_mode_help_text(option))
             _refresh_preview()
 
-        def _update_publish_target(value: object) -> None:
-            nonlocal publish_target_label
-            if value is None:
-                publish_target_label = None
-            else:
-                publish_target_label = str(value).strip() or None
-
         def _update_reference_kind(value: object) -> None:
             if value is not None:
                 option: ChatReferenceKind | None = reference_options.get(str(value).strip())
@@ -147,9 +211,6 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
 
         def _event_text(value: object) -> str:
             return str(value or "")
-
-        def _handle_app_name_change(event: ModWebValueContainer) -> None:
-            _update_app_name(_value_as_object(event))
 
         def _handle_source_kind_change(event: ModWebValueContainer) -> None:
             _update_source_kind(_value_as_object(event))
@@ -183,9 +244,6 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
         def _handle_embed_description_change(event: ModWebValueContainer) -> None:
             state.embed_description = _event_text(_value_as_object(event))
             _refresh_preview()
-
-        def _handle_publish_target_change(event: ModWebValueContainer) -> None:
-            _update_publish_target(_value_as_object(event))
 
         def _handle_reference_kind_change(event: ModWebValueContainer) -> None:
             _update_reference_kind(_value_as_object(event))
@@ -223,44 +281,25 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
             _refresh_preview()
 
         async def _publish_preview_event() -> None:
-            relay: WebChatRelayPublisher | None = self._chat_relay
-            if relay is None:
-                ui.notify("Chat relay is not available on this node.", type="negative")
-                return
-            if publish_target_label is None:
-                ui.notify("Select a target chat hub first.", type="warning")
-                return
-            target_room_id: str | None = send_target_options.get(publish_target_label)
-            if target_room_id is None:
-                ui.notify("Selected chat hub is invalid.", type="negative")
-                return
             try:
-                event: ChatEvent = self._build_fake_chat_preview_event_for_room(state, room_id=target_room_id)
-                await relay.publish_chat_event(event=event)
+                event = self._build_fake_chat_preview_event_for_room(state, room_id=target_app_name)
+                await publish_event(event)
             except Exception as xcp:
-                log.warning("Fake chat publish failed: room=%s error=%s", target_room_id, xcp)
+                log.warning("Fake chat publish failed: app=%s error=%s", target_app_name, xcp)
                 ui.notify(f"Fake chat publish failed: {xcp}", type="negative")
                 return
-            ui.notify(f"Sent fake chat event to {target_room_id}.", type="positive")
+            ui.notify(f"Sent fake chat event to {app_friendly}.", type="positive")
 
         with ui.dialog() as preview_dialog:
             with ui.card().classes("mod-card mod-dialog-card mod-fake-chat-dialog-card"):
                 with ui.column().classes("w-full gap-4 p-5"):
                     with ui.column().classes("gap-0"):
-                        ui.label("Fake Chat Preview").classes("text-xl font-black mod-title-small")
-                        ui.label("Preview a synthetic chat event without publishing it anywhere.").classes(
-                            "mod-subtitle text-sm"
-                        )
+                        ui.label(f"Fake Chat · {app_friendly}").classes("text-xl font-black mod-title-small")
+                        ui.label("Build a synthetic event for this app's chat relay.").classes("mod-subtitle text-sm")
                         mode_help_label = ui.label(self._fake_chat_preview_mode_help_text(state.message_mode)).classes(
                             "mod-subtitle text-xs"
                         )
                     with ui.grid(columns=2).classes("w-full gap-3"):
-                        ui.select(
-                            list[str](context_options),
-                            value=initial_app_label,
-                            label="App Context",
-                            on_change=_handle_app_name_change,
-                        ).props(self._fake_chat_select_props(clearable=True)).classes("w-full mod-fake-chat-field")
                         ui.select(
                             list[str](source_options),
                             value=initial_source_label,
@@ -414,128 +453,62 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
                     ui.label("Preview").classes("mod-section-label")
                     _preview_body()
                     with ui.row().classes("mod-fake-chat-footer w-full"):
-                        with ui.row().classes("items-end gap-2 flex-wrap"):
-                            ui.select(
-                                list[str](send_target_options),
-                                value=publish_target_label,
-                                label="Send To Hub",
-                                on_change=_handle_publish_target_change,
-                            ).props(self._fake_chat_select_props(clearable=True)).classes(
-                                "mod-fake-chat-field mod-fake-chat-send-target"
-                            )
-                            send_button: Button = ui.button("Send for Real", on_click=_publish_preview_event).classes(
-                                "mod-list-button"
-                            )
-                            if self._chat_relay is None or not send_target_options:
-                                send_button.disable()
+                        ui.button("Publish Event", on_click=_publish_preview_event).classes("mod-list-button")
                         ui.button("Close", on_click=preview_dialog.close).classes("mod-list-button secondary")
         return preview_dialog.open
 
-    def _render_fake_chat_preview_control(self, *, ui: ModWebUi) -> None:
-        open_panel = self._build_fake_chat_preview_panel(ui=ui)
-        ui.button("Fake Chat", on_click=open_panel).classes(f"{MOD_WEB_ACTION_BASE_CLASSES} px-4 py-2 text-sm")
-
-    def _fake_chat_preview_app_options(self) -> dict[str, str]:
-        managed_room_ids = [app.name for app in self._managed_apps()]
-        managed_room_id_set = set(managed_room_ids)
-        room_ids = managed_room_ids + [
-            room_id for room_id in ChatHub().bound_room_ids() if room_id not in managed_room_id_set
-        ]
-        return self._fake_chat_preview_room_options(room_ids)
-
-    def _fake_chat_preview_send_target_options(self) -> dict[str, str]:
-        bound_room_ids = ChatHub().bound_room_ids()
-        if bound_room_ids:
-            return self._fake_chat_preview_room_options(bound_room_ids)
-
-        relay_room_ids = [app.name for app in self._managed_apps() if app.supports_chat_relay]
-        if relay_room_ids:
-            return self._fake_chat_preview_room_options(relay_room_ids)
-
-        return self._fake_chat_preview_room_options(app.name for app in self._managed_apps())
-
-    def _fake_chat_preview_room_options(self, room_ids: Iterable[str]) -> dict[str, str]:
-        options: list[tuple[str, str]] = []
-        seen_room_ids: set[str] = set()
-        for raw_room_id in room_ids:
-            room_id = raw_room_id.strip()
-            if not room_id or room_id in seen_room_ids:
-                continue
-            seen_room_ids.add(room_id)
-            options.append((self._fake_chat_preview_room_label(room_id), room_id))
-        options.sort(key=lambda item: (item[0].casefold(), item[1].casefold()))
-        return {label: room_id for label, room_id in options}
-
-    def _fake_chat_preview_room_label(self, room_id: str) -> str:
-        app = self._chat_room_app(room_id)
-        if app is None:
-            return room_id
-        friendly = getattr(app, "friendly", None)
-        if isinstance(friendly, str) and friendly.strip():
-            return f"{friendly.strip()} ({room_id})"
-        return room_id
+    @staticmethod
+    def _fake_chat_select_props(*, clearable: bool) -> str:
+        clearable_token = " clearable" if clearable else ""
+        return (
+            f"filled square dense{clearable_token} hide-bottom-space color=accent "
+            "options-dense popup-content-class=mod-fake-chat-menu"
+        )
 
     def _build_fake_chat_preview_event(self, state: _ModWebFakeChatPreviewState) -> ChatEvent:
-        return self._build_fake_chat_preview_event_for_room(state, room_id=state.app_name or "preview_room")
+        room_id = state.app_name.strip() if state.app_name is not None else ""
+        return self._build_fake_chat_preview_event_for_room(state, room_id=room_id or "preview_room")
 
     def _build_fake_chat_preview_event_for_room(self, state: _ModWebFakeChatPreviewState, *, room_id: str) -> ChatEvent:
-        source: ChatEndpointId = self._fake_chat_preview_source_id(source_kind=state.source_kind, room_id=room_id)
+        resolved_room_id = room_id.strip()
+        if not resolved_room_id:
+            raise ValueError("Fake chat preview room id must not be empty.")
+        source: ChatEndpointId = self._fake_chat_preview_source_id(
+            source_kind=state.source_kind,
+            room_id=resolved_room_id,
+        )
         author: ChatAuthor = self._fake_chat_preview_author(state)
         notice_source = self._fake_chat_preview_notice_source(state.source_kind)
-        app_name: str = self._fake_chat_preview_app_name(room_id=room_id)
+        app_name: str = self._fake_chat_preview_app_name(room_id=resolved_room_id)
         notice: RelayNotice | None = self._fake_chat_preview_notice(state=state, notice_source=notice_source)
         if notice is not None:
-            return self._fake_chat_preview_chat_event(
-                room_id=room_id,
-                source=source,
-                author=author,
-                state=state,
-                content=render_notice_text(notice, author_name=author.display_name, app_name=app_name),
-                notice=notice,
-            )
-        if state.message_mode is _ModWebFakeChatMessageMode.EMBED:
+            content = render_notice_text(notice, author_name=author.display_name, app_name=app_name)
+            embed = None
+        elif state.message_mode is _ModWebFakeChatMessageMode.EMBED:
             embed_title: str = state.embed_title.strip() or "Preview"
             embed_description: str = state.embed_description.strip() or "Preview details"
-            embed_color: int = self._fake_chat_preview_embed_color(room_id=room_id)
-            return self._fake_chat_preview_chat_event(
-                room_id=room_id,
-                source=source,
-                author=author,
-                state=state,
-                content=state.content_text.strip() or f"{embed_title}: {embed_description}",
-                embed=ChatEmbed(title=embed_title, description=embed_description, color=embed_color),
+            content = state.content_text.strip() or f"{embed_title}: {embed_description}"
+            embed = ChatEmbed(
+                title=embed_title,
+                description=embed_description,
+                color=self._fake_chat_preview_embed_color(room_id=resolved_room_id),
             )
-        content = state.content_text.strip() or "hello from preview"
+        else:
+            content = state.content_text.strip() or "hello from preview"
+            embed = None
         return self._fake_chat_preview_chat_event(
-            room_id=room_id,
+            room_id=resolved_room_id,
             source=source,
             author=author,
             state=state,
             content=content,
+            notice=notice,
+            embed=embed,
         )
 
     @staticmethod
     def _fake_chat_preview_mode_help_text(mode: _ModWebFakeChatMessageMode) -> str:
-        descriptions: dict[_ModWebFakeChatMessageMode, str] = {
-            _ModWebFakeChatMessageMode.TEXT: "Freeform chat message with optional reply, link, and attachment preview.",
-            _ModWebFakeChatMessageMode.JOIN: "Player session notice. Body hides in chat and becomes a Joined badge.",
-            _ModWebFakeChatMessageMode.LEAVE: "Player session notice. Body hides in chat and becomes a Left badge.",
-            _ModWebFakeChatMessageMode.DEATH: "Player death notice with a cause string.",
-            _ModWebFakeChatMessageMode.PVP_KILL: "PVP death notice with a killer name or detail string.",
-            _ModWebFakeChatMessageMode.ADVANCEMENT: "Game progress notice with badge and embed rendering.",
-            _ModWebFakeChatMessageMode.GOAL: "Goal progress notice with badge and embed rendering.",
-            _ModWebFakeChatMessageMode.CHALLENGE: "Challenge progress notice with badge and embed rendering.",
-            _ModWebFakeChatMessageMode.RESEARCH: "Research progress notice with badge and embed rendering.",
-            _ModWebFakeChatMessageMode.GAME_EVENT: "Generic game event notice with a custom label and detail.",
-            _ModWebFakeChatMessageMode.APP_STARTED: "App lifecycle started notice using detail text as join address.",
-            _ModWebFakeChatMessageMode.APP_STOPPED: "App lifecycle stopped notice using secondary text as detail lines.",
-            _ModWebFakeChatMessageMode.APP_CRASHED: "App lifecycle crash notice using detail text as summary.",
-            _ModWebFakeChatMessageMode.MAINTENANCE_WARNING: "Maintenance warning notice using detail text as lead minutes.",
-            _ModWebFakeChatMessageMode.BOT_STARTED: "Bot startup notice using detail text as auto-launch app name.",
-            _ModWebFakeChatMessageMode.BOT_ERROR: "Bot error notice using detail text as the summary.",
-            _ModWebFakeChatMessageMode.EMBED: "Custom embed message with optional body text, reply, link, and attachment.",
-        }
-        return descriptions[mode]
+        return _FAKE_CHAT_MESSAGE_MODE_SPECS[mode].help_text
 
     @staticmethod
     def _fake_chat_preview_detail_lines(value: str) -> tuple[str, ...]:
@@ -658,9 +631,7 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
 
     @staticmethod
     def _fake_chat_preview_author(state: _ModWebFakeChatPreviewState) -> ChatAuthor:
-        author_name: str | LiteralString = (
-            state.author_name.strip() or state.author_kind.value.replace("_", " ").title()
-        )
+        author_name = state.author_name.strip() or state.author_kind.value.replace("_", " ").title()
         color_hex: str | None = state.author_color_hex.strip() or None
         avatar_uri: str | None = state.author_avatar_uri.strip() or None
         return ChatAuthor(
@@ -736,7 +707,7 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
             return room_id
         friendly: Any | None = getattr(app, "friendly", None)
         if isinstance(friendly, str) and friendly.strip():
-            return friendly
+            return friendly.strip()
         return room_id
 
     @staticmethod
@@ -753,12 +724,13 @@ class ModWebStatusChatPreviewMixin(ModWebStatusFeatureSupport):
         app: object | None = self._chat_room_app(room_id)
         if app is None:
             return 0x8B5CF6
-        return int(getattr(app, "manage_embed_color", 0x8B5CF6))
+        color = getattr(app, "manage_embed_color", 0x8B5CF6)
+        if isinstance(color, bool) or not isinstance(color, int) or not 0 <= color <= 0xFFFFFF:
+            raise ValueError(f"Fake chat preview app colour is invalid for room {room_id!r}.")
+        return color
 
     def _render_app_node_badge(self, *, ui: ModWebUi, node_name: str) -> None:
         with ui.element("div").classes("mod-app-node-badge-wrap"):
             badge: Label = self._badge(ui=ui, text=node_name, tone="black", extra_classes="mod-app-node-badge")
             if color_hex := self._node_role_color_hex(node_name=node_name):
                 badge.style(self._node_badge_style(color_hex))
-
-

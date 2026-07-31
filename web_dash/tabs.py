@@ -101,7 +101,6 @@ class ModWebTabsMixin(ModWebServiceSupport):
                     app_card_tone="purple",
                     icon="map",
                     render_handler_name="_render_map_section",
-                    badge_handler_name="_map_tab_badges",
                     action_handler_name="_map_tab_actions",
                 )
             )

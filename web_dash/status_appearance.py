@@ -7,7 +7,7 @@ appearance to an already-rendered NiceGUI client.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from mod_web_theme import DEFAULT_MOD_WEB_THEME
 
@@ -17,6 +17,8 @@ from .service_base import ModWebServiceSupport
 from .user_settings import ModWebAppearanceSettings
 
 _USER_ACCENT_STYLE_ELEMENT_ID = "mod-web-user-accent-style"
+_TOOLTIP_PLACEMENT_CONTROLLER_KEY = "modWebTooltipPlacement"
+_TOUCH_TOOLTIP_HIDE_DELAY_MILLISECONDS: Final[int] = 2_000
 _UserAppearanceColorKey = Literal[
     "primary_color_hex",
     "positive_color_hex",
@@ -82,6 +84,10 @@ class ModWebUserAppearanceMixin(ModWebServiceSupport):
             warning=colors["warning_color_hex"],
         )
         ui.add_head_html(self._user_appearance_style_html(settings.appearance))
+        ui.run_javascript(
+            self._user_tooltip_placement_javascript(settings.appearance.tooltip_above_on_touch_device),
+            timeout=0.1,
+        )
 
     @staticmethod
     def _default_user_accent_color_hex() -> str:
@@ -244,6 +250,131 @@ class ModWebUserAppearanceMixin(ModWebServiceSupport):
             "})()"
         )
 
+    @staticmethod
+    def _user_tooltip_placement_javascript(tooltip_above_on_touch_device: bool) -> str:
+        encoded_enabled = json.dumps(tooltip_above_on_touch_device)
+        encoded_controller_key = json.dumps(_TOOLTIP_PLACEMENT_CONTROLLER_KEY)
+        encoded_hide_delay_milliseconds = json.dumps(_TOUCH_TOOLTIP_HIDE_DELAY_MILLISECONDS)
+        return (
+            "(() => {"
+            f"const enabled = {encoded_enabled};"
+            f"const controllerKey = {encoded_controller_key};"
+            f"const tapHideDelayMilliseconds = {encoded_hide_delay_milliseconds};"
+            "const controller = window[controllerKey] || {"
+            "placementOriginalPropsById: {}, tapOriginalPropsById: {}, tapHandlersById: {}, watcherInstalled: false"
+            "};"
+            "window[controllerKey] = controller;"
+            "controller.enabled = enabled;"
+            "const isTouchClient = () => {"
+            "const maxTouchPoints = Number(navigator.maxTouchPoints) || 0;"
+            "return maxTouchPoints > 0 || window.matchMedia?.('(any-pointer: coarse)').matches === true;"
+            "};"
+            "const setProp = (props, name, value) => { if (props[name] !== value) { props[name] = value; } };"
+            "const restoreProp = (props, name, hadOriginalValue, originalValue) => {"
+            "if (hadOriginalValue) { setProp(props, name, originalValue); }"
+            "else if (Object.hasOwn(props, name)) { delete props[name]; }"
+            "};"
+            "const tooltipComponent = (id) => {"
+            "const element = mounted_app.$refs?.[`r${id}`];"
+            "return element?.$refs?.qRef || element;"
+            "};"
+            "const tooltipTarget = (id, element) => {"
+            "const target = element.props?.target;"
+            "if (typeof target === 'string') {"
+            "try { return document.querySelector(target); } catch (_error) { return null; }"
+            "}"
+            "const parentEntry = Object.entries(mounted_app.elements).find(([, candidate]) => {"
+            "if (candidate?.children?.some((childId) => String(childId) === id)) { return true; }"
+            "return Object.values(candidate?.slots || {}).some((slot) => slot?.ids?.some((childId) => String(childId) === id));"
+            "});"
+            "return parentEntry ? document.getElementById(`c${parentEntry[0]}`) : null;"
+            "};"
+            "const removeTapHandler = (id) => {"
+            "const state = controller.tapHandlersById[id];"
+            "if (!state) { return; }"
+            "state.target.removeEventListener('pointerup', state.handler);"
+            "if (state.hideTimerId !== null) { window.clearTimeout(state.hideTimerId); }"
+            "delete controller.tapHandlersById[id];"
+            "};"
+            "const addTapHandler = (id, element) => {"
+            "const target = tooltipTarget(id, element);"
+            "const existing = controller.tapHandlersById[id];"
+            "if (!target) { removeTapHandler(id); return; }"
+            "if (existing?.target === target) { return; }"
+            "removeTapHandler(id);"
+            "const state = { target, handler: null, hideTimerId: null };"
+            "state.handler = (event) => {"
+            "if (event.pointerType !== 'touch') { return; }"
+            "const tooltip = tooltipComponent(id);"
+            "if (typeof tooltip?.show !== 'function' || typeof tooltip?.hide !== 'function') { return; }"
+            "tooltip.show(event);"
+            "if (state.hideTimerId !== null) { window.clearTimeout(state.hideTimerId); }"
+            "state.hideTimerId = window.setTimeout(() => { tooltip.hide(); state.hideTimerId = null; }, tapHideDelayMilliseconds);"
+            "};"
+            "target.addEventListener('pointerup', state.handler, { passive: true });"
+            "controller.tapHandlersById[id] = state;"
+            "};"
+            "const applyPlacement = () => {"
+            "if (controller.applying || typeof mounted_app === 'undefined' || !mounted_app?.elements) { return; }"
+            "controller.applying = true;"
+            "try {"
+            "const isTouch = isTouchClient();"
+            "const placeAbove = controller.enabled && isTouch;"
+            "const activeTooltipIds = new Set();"
+            "for (const [id, element] of Object.entries(mounted_app.elements)) {"
+            "if (element?.tag !== 'q-tooltip') { continue; }"
+            "activeTooltipIds.add(id);"
+            "const props = element.props || (element.props = {});"
+            "if (isTouch) {"
+            "const tapOriginal = controller.tapOriginalPropsById[id] || {"
+            "hasHideDelay: Object.hasOwn(props, 'hide-delay'), hideDelay: props['hide-delay']"
+            "};"
+            "controller.tapOriginalPropsById[id] = tapOriginal;"
+            "setProp(props, 'hide-delay', tapHideDelayMilliseconds);"
+            "addTapHandler(id, element);"
+            "} else {"
+            "const tapOriginal = controller.tapOriginalPropsById[id];"
+            "if (tapOriginal) {"
+            "restoreProp(props, 'hide-delay', tapOriginal.hasHideDelay, tapOriginal.hideDelay);"
+            "delete controller.tapOriginalPropsById[id];"
+            "}"
+            "removeTapHandler(id);"
+            "}"
+            "if (placeAbove) {"
+            "const original = controller.placementOriginalPropsById[id] || {"
+            "hasAnchor: Object.hasOwn(props, 'anchor'), anchor: props.anchor,"
+            "hasSelf: Object.hasOwn(props, 'self'), self: props.self"
+            "};"
+            "controller.placementOriginalPropsById[id] = original;"
+            "setProp(props, 'anchor', 'top middle');"
+            "setProp(props, 'self', 'bottom middle');"
+            "} else {"
+            "const original = controller.placementOriginalPropsById[id];"
+            "if (!original) { continue; }"
+            "restoreProp(props, 'anchor', original.hasAnchor, original.anchor);"
+            "restoreProp(props, 'self', original.hasSelf, original.self);"
+            "delete controller.placementOriginalPropsById[id];"
+            "}"
+            "}"
+            "for (const id of Object.keys(controller.placementOriginalPropsById)) {"
+            "if (!activeTooltipIds.has(id)) { delete controller.placementOriginalPropsById[id]; }"
+            "}"
+            "for (const id of Object.keys(controller.tapOriginalPropsById)) {"
+            "if (!activeTooltipIds.has(id)) { delete controller.tapOriginalPropsById[id]; }"
+            "}"
+            "for (const id of Object.keys(controller.tapHandlersById)) {"
+            "if (!activeTooltipIds.has(id)) { removeTapHandler(id); }"
+            "}"
+            "} finally { controller.applying = false; }"
+            "};"
+            "applyPlacement();"
+            "if (!controller.watcherInstalled && typeof mounted_app !== 'undefined' && mounted_app?.$watch) {"
+            "controller.watcherInstalled = true;"
+            "mounted_app.$watch(() => mounted_app.elements, applyPlacement, { deep: true });"
+            "}"
+            "})()"
+        )
+
     @classmethod
     def _normalized_user_appearance_color_hex(cls, color_hex: str) -> str:
         return ModWebAppearanceSettings(primary_color_hex=color_hex).primary_color_hex or cls._default_user_accent_color_hex()
@@ -253,9 +384,11 @@ class ModWebUserAppearanceMixin(ModWebServiceSupport):
         *,
         appearance: ModWebAppearanceSettings,
         colors_by_key: Mapping[_UserAppearanceColorKey, str | None],
+        tooltip_above_on_touch_device: bool,
     ) -> ModWebAppearanceSettings:
         return ModWebAppearanceSettings(
             color_scheme=appearance.color_scheme,
+            tooltip_above_on_touch_device=tooltip_above_on_touch_device,
             primary_color_hex=colors_by_key["primary_color_hex"],
             positive_color_hex=colors_by_key["positive_color_hex"],
             warning_color_hex=colors_by_key["warning_color_hex"],

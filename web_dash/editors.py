@@ -4132,14 +4132,6 @@ class ModWebEditorsMixin(ModWebServiceSupport):
         return f"{ModWebEditorsMixin._setting_select_props()} prefix={prefix}"
 
     @staticmethod
-    def _fake_chat_select_props(*, clearable: bool) -> str:
-        clearable_token: Literal[" clearable", ""] = " clearable" if clearable else ""
-        return (
-            f"filled square dense{clearable_token} hide-bottom-space color=accent "
-            "options-dense popup-content-class=mod-fake-chat-menu"
-        )
-
-    @staticmethod
     def _config_select_props(*, clearable: bool) -> str:
         clearable_token: Literal[" clearable", ""] = " clearable" if clearable else ""
         return f"outlined{clearable_token} options-dense popup-content-class=mod-notepad-menu"

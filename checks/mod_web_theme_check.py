@@ -196,9 +196,17 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-system-operational-signals", css)
         self.assertRegex(
             css,
-            r"(?s)\.mod-section-tabs-shell \{.*?flex: 0 0 auto;.*?\.mod-section-strip > \.mod-section-tabs-shell \{.*?flex: 1 1 24rem;",
+            r"(?s)\.mod-section-tabs-shell \{.*?flex: 0 0 auto;.*?\.mod-section-strip > \.mod-section-tabs-shell \{.*?flex: 1 1 100%;",
         )
         self.assertRegex(css, r"(?s)\.mod-section-layout > \.mod-section-tabs-shell \{.*?width: 100%;")
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-section-chrome \{.*?flex: 0 0 100%;.*?width: 100%;.*?margin-left: 0;",
+        )
+        self.assertRegex(
+            css,
+            r"(?s)\.mod-section-chrome-badge-row \{.*?flex-wrap: wrap;.*?justify-content: flex-start;",
+        )
         self.assertRegex(
             css,
             r"(?s)\.mod-config-select \{.*?flex: 0 1 auto;.*?\.mod-tab-toolbar > \.mod-config-select \{.*?flex: 1 1 26rem;",
@@ -486,7 +494,6 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn(".mod-fake-chat-field", css)
         self.assertIn(".mod-fake-chat-menu", css)
         self.assertIn(".mod-fake-chat-footer", css)
-        self.assertIn(".mod-fake-chat-send-target", css)
         self.assertIn(".mod-app-details-dialog-card", css)
         self.assertIn(".mod-timestamp-picker-dialog-card", css)
         self.assertIn(".mod-timestamp-picker-workspace", css)
@@ -524,6 +531,7 @@ class ModWebThemeTests(unittest.TestCase):
         )
         self.assertIn(".mod-app-details-notes", css)
         self.assertIn(".mod-app-details-toggle", css)
+        self.assertIn(".mod-app-properties-card", css)
         self.assertIn(".mod-client-pack-dialog-card", css)
         self.assertRegex(css, r"(?s)\.mod-section-layout \{.*?gap: 0\.35rem;")
         self.assertIn("scrollbar-color:", css)
@@ -781,9 +789,11 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("min-height: 4.75rem !important;", css)
         self.assertIn("resize: vertical !important;", css)
         self.assertIn(".mod-factorio-save", css)
+        self.assertIn(".mod-factorio-running-world", css)
         self.assertNotIn(".mod-factorio-footer", css)
-        self.assertIn("color: #112a16 !important;", css)
-        self.assertIn("background: #57bd5d !important;", css)
+        self.assertNotIn(".mod-factorio-notice", css)
+        self.assertIn("color: #251604 !important;", css)
+        self.assertIn("background: #d97706 !important;", css)
         self.assertIn(".mod-factorio-generator input[type=\"number\"]", css)
         self.assertIn("::-webkit-inner-spin-button", css)
         self.assertIn("::-webkit-outer-spin-button", css)
@@ -826,8 +836,8 @@ class ModWebThemeTests(unittest.TestCase):
         self.assertIn("--mod-control-foreground: #ffffff;", stylesheet)
         self.assertRegex(
             stylesheet,
-            r"(?s)\.mod-factorio-save \{.*?--mod-control-foreground: #112a16;.*?"
-            r"background: #57bd5d !important;",
+            r"(?s)\.mod-factorio-save \{.*?--mod-control-foreground: #251604;.*?"
+            r"background: #d97706 !important;",
         )
         self.assertRegex(
             stylesheet,

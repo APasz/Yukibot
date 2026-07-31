@@ -2054,6 +2054,18 @@ class Factorio(App[App_Config]):
             finally:
                 output_path.unlink(missing_ok=True)
 
+    async def running_map_exchange_string(self) -> str:
+        if not self.check_running():
+            raise RuntimeError(f"{self.friendly} must be running to read its map generation settings.")
+        if not self.yuki_bridge_enabled:
+            raise RuntimeError(
+                f"{self.friendly} requires {_FACTORIO_YUKI_BRIDGE_MOD_ID} 1.1.0 or newer to read running map settings."
+            )
+        response = await self.send_player_gated_rcon("/yuki mapgen", check_player_gate=False)
+        if not isinstance(response, str):
+            raise RuntimeError(f"{self.friendly} did not return running map generation settings.")
+        return _parse_factorio_bridge_map_exchange_string(response)
+
     def _set_configured_save_selection(self, filename: str | None, create_fresh_world: bool) -> None:
         if (
             self.cfg.factorio_save_file == filename
@@ -3085,7 +3097,40 @@ def _parse_factorio_bridge_evolution_snapshot(text: str) -> FactorioActivitySnap
         return None
     if payload is None:
         return None
+    if payload.get("kind") == "command_result":
+        payload = _optional_mapping(payload.get("result"))
+        if payload is None:
+            return None
     return _factorio_bridge_evolution_snapshot(payload)
+
+
+def _parse_factorio_bridge_map_exchange_string(text: str) -> str:
+    try:
+        response = _optional_mapping(json.loads(text))
+    except json.JSONDecodeError as xcp:
+        if _factorio_command_failed(text):
+            raise RuntimeError("Reading running map settings requires Yuki Bridge 1.1.0 or newer.") from xcp
+        raise RuntimeError("Yuki Bridge returned invalid map generation data.") from xcp
+    if response is None or response.get("kind") != "command_result" or response.get("command") != "mapgen":
+        raise RuntimeError("Yuki Bridge returned an unexpected map generation response.")
+    if response.get("ok") is not True:
+        error = response.get("error")
+        detail = error.strip() if isinstance(error, str) else "The map generation request failed."
+        raise RuntimeError(f"Yuki Bridge could not read map generation settings: {detail}")
+    result = _optional_mapping(response.get("result"))
+    if result is None or result.get("kind") != "mapgen":
+        raise RuntimeError("Yuki Bridge returned incomplete map generation data.")
+    raw_surfaces = result.get("surfaces")
+    if not isinstance(raw_surfaces, list) or len(raw_surfaces) != 1:
+        raise RuntimeError("Yuki Bridge did not return the requested map surface.")
+    surface = _optional_mapping(raw_surfaces[0])
+    raw_map_exchange_string = None if surface is None else surface.get("map_exchange_string")
+    if not isinstance(raw_map_exchange_string, str):
+        raise RuntimeError("Yuki Bridge did not return a map exchange string.")
+    try:
+        return normalise_factorio_map_exchange_string(raw_map_exchange_string)
+    except ValueError as xcp:
+        raise RuntimeError("Yuki Bridge returned an invalid map exchange string.") from xcp
 
 
 def _normalise_factorio_surface_name(raw_name: str) -> str:

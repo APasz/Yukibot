@@ -7,10 +7,12 @@ from typing import Any, Protocol
 
 from fastapi import HTTPException, Request, WebSocket, WebSocketException
 
+from _security import Power_Level
 from apps._app import App
-from node_api_chat import NodeWebChatRequest
+from chat_hub import ChatEvent
+from node_api_chat import NodeChatInjectionRequest, NodeWebChatRequest
 from node_api_route_contracts import MappingResponse, NodeAuthenticatedRouteService
-from node_auth import NodeApiScope
+from node_auth import NodeAccessGrant, NodeApiScope
 
 
 class NodeChatRouteService(NodeAuthenticatedRouteService, Protocol):
@@ -27,6 +29,19 @@ class NodeChatRouteService(NodeAuthenticatedRouteService, Protocol):
         actor_user_id: int,
         chat_request: NodeWebChatRequest,
     ) -> MappingResponse: ...
+
+    async def publish_app_fake_chat(self, *, app: App, event: ChatEvent) -> MappingResponse: ...
+
+    async def _require_actor_level_for_request(
+        self,
+        *,
+        request: Request,
+        access_token: str | None,
+        app_name: str | None,
+        scopes: tuple[NodeApiScope, ...],
+        required_level: Power_Level,
+        verified_grant: NodeAccessGrant | None = None,
+    ) -> None: ...
 
     def _require_websocket_token_access(
         self,
@@ -97,6 +112,27 @@ def register_chat_routes(
                 chat_request=chat_request,
             )
         ).to_mapping()
+
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/chat/inject")
+    async def _inject_chat_event(
+        app_name: str,
+        payload: dict[str, object],
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        traffic_log.info("Node API fake chat injection request: node=%s app=%s", service.node_name, app_name)
+        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CHAT_INJECT,))
+        await service._require_actor_level_for_request(
+            request=request,
+            access_token=access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CHAT_INJECT,),
+            required_level=Power_Level.root,
+            verified_grant=grant,
+        )
+        chat_request = NodeChatInjectionRequest.model_validate(payload)
+        app = service._resolve_app(app_name)
+        return (await service.publish_app_fake_chat(app=app, event=chat_request.to_chat_event())).to_mapping()
 
     @nicegui_app.websocket(f"{api_prefix}/apps/{{app_name}}/chat/stream")
     async def _chat_stream(

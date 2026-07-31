@@ -330,11 +330,21 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
             ):
                 ui.notify("Copied the running world's map exchange string.", type="positive")
 
+        async def sync_running_world_generation() -> None:
+            try:
+                node = self._remote_node_link(model.node_name)
+                await self._remote_factorio_generation_running_world_sync_async(node, model.app_name, user)
+            except Exception as xcp:
+                ui.notify(f"Running-world generation sync failed: {xcp}", type="negative")
+                return
+            ui.notify("Generation controls now match the running world.", type="positive")
+            self._guarded_reload(ui=ui)
+
         with ui.card().classes(f"{self._flat_tab_card_classes()} mod-factorio-generator"):
             with ui.element("div").classes("mod-factorio-titlebar"):
                 with ui.column().classes("gap-0 min-w-0 grow"):
-                    ui.label("Map generator").classes("mod-factorio-title")
-                    ui.label("Next fresh world · existing saves are unchanged").classes("mod-factorio-kicker")
+                    ui.label("World generation").classes("mod-factorio-title")
+                    ui.label("New worlds only").classes("mod-factorio-kicker")
                 with ui.row().classes("items-center gap-2 flex-wrap mod-factorio-header-actions"):
                     with ui.row().classes("items-center gap-2 flex-wrap mod-factorio-seed"):
                         ui.label("Seed").classes("mod-factorio-seed-label")
@@ -345,24 +355,19 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
                             ),
                             label="Seed",
                             maximum=_UINT32_MAX,
-                            hint="Leave blank for a random seed.",
+                            hint=None,
                             show_label=False,
                         )
                         general_inputs["seed"] = seed_input
-                    ui.button("Save generation settings", icon="save", on_click=save_generation).classes(
+                    sync_running_world_button = ui.button(
+                        "Load running world", icon="sync", on_click=sync_running_world_generation
+                    ).classes("mod-list-button mod-factorio-running-world")
+                    if not state.running_world_mapgen_available:
+                        sync_running_world_button.disable()
+                        with sync_running_world_button:
+                            ui.tooltip("Start Factorio with Yuki Bridge 1.1.0 or newer to load its current map settings.")
+                    ui.button("Save", icon="save", on_click=save_generation).classes(
                         "mod-list-button mod-factorio-save"
-                    )
-            with ui.element("div").classes("mod-factorio-notice"):
-                with ui.row().classes("gap-2 flex-wrap"):
-                    self._badge(
-                        ui=ui,
-                        text="Space Age" if state.space_age_enabled else "Base game",
-                        tone="purple" if state.space_age_enabled else "grey",
-                    )
-                    self._badge(
-                        ui=ui,
-                        text="Map string online" if state.map_exchange_available else "Start server for map strings",
-                        tone="black" if state.map_exchange_available else "grey",
                     )
 
             with ui.element("div").classes("mod-factorio-tabs-shell"):
@@ -380,11 +385,6 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
                 "mod-factorio-panels w-full bg-transparent"
             ):
                 with ui.tab_panel(resources_tab).classes("mod-factorio-panel w-full"):
-                    self._render_factorio_panel_intro(
-                        ui=ui,
-                        title="Resources",
-                        description="Frequency controls patch count, size controls patch area, and richness controls yield.",
-                    )
                     for group_name, controls in self._factorio_controls_for_category(state=state, category="resources"):
                         self._render_factorio_control_table(
                             ui=ui,
@@ -396,11 +396,6 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
                         )
 
                 with ui.tab_panel(terrain_tab).classes("mod-factorio-panel w-full"):
-                    self._render_factorio_panel_intro(
-                        ui=ui,
-                        title="Terrain",
-                        description="Terrain keeps Factorio’s separate scale, coverage, and cliff-continuity language.",
-                    )
                     self._render_factorio_terrain_controls(
                         ui=ui,
                         map_gen_settings=map_gen_settings,
@@ -424,11 +419,6 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
                     )
 
                 with ui.tab_panel(enemy_tab).classes("mod-factorio-panel w-full"):
-                    self._render_factorio_panel_intro(
-                        ui=ui,
-                        title="Enemy",
-                        description="Enemy bases, peaceful mode, expansion, and evolution are all saved with the world recipe.",
-                    )
                     self._render_factorio_control_table(
                         ui=ui,
                         map_gen_settings=map_gen_settings,
@@ -477,11 +467,6 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
                     )
 
                 with ui.tab_panel(advanced_tab).classes("mod-factorio-panel w-full"):
-                    self._render_factorio_panel_intro(
-                        ui=ui,
-                        title="Advanced",
-                        description="Map bounds and the difficulty settings Factorio exposes beside its standard generator controls.",
-                    )
                     with ui.element("div").classes("mod-factorio-advanced-grid mod-factorio-advanced-top-grid"):
                         with ui.element("div").classes("mod-factorio-option-group"):
                             with ui.row().classes("w-full items-baseline justify-between gap-2"):
@@ -548,7 +533,6 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
             with ui.element("div").classes("mod-factorio-map-string"):
                 with ui.column().classes("gap-1 min-w-0 grow"):
                     ui.label("Map exchange string").classes("mod-factorio-group-title")
-                    ui.label("Import and export the exact recipe.").classes("mod-subtitle")
                 map_exchange_input = (
                     ui.textarea(placeholder=">>>…<<<")
                     .props('aria-label="Map exchange string" rows=3 filled square dense hide-bottom-space')
@@ -556,19 +540,14 @@ class ModWebAppPageFactorioMixin(ModWebServiceSupport):
                 )
                 with ui.row().classes("gap-2 flex-wrap"):
                     import_button = ui.button("Import", icon="input", on_click=import_map_exchange_string).classes(
-                        "mod-list-button secondary"
+                        "mod-list-button mod-factorio-map-string-action"
                     )
                     export_button = ui.button(
-                        "Copy running world", icon="content_copy", on_click=export_map_exchange_string
-                    ).classes("mod-list-button secondary")
+                        "Copy current", icon="content_copy", on_click=export_map_exchange_string
+                    ).classes("mod-list-button mod-factorio-map-string-action")
                     if not state.map_exchange_available:
                         import_button.disable()
                         export_button.disable()
-
-    def _render_factorio_panel_intro(self, *, ui: ModWebUi, title: str, description: str) -> None:
-        with ui.element("div").classes("mod-factorio-panel-intro"):
-            ui.label(title).classes("mod-factorio-panel-title")
-            ui.label(description).classes("mod-subtitle")
 
     def _render_factorio_control_table(
         self,

@@ -87,7 +87,6 @@ from .runtime_imports import (
     NodeApiScope,
     NodeAppActivityProviderEntry,
     NodeAppMutationAction,
-    NodeAppMutationResult,
     NodeAppRuntimeSummary,
     NodeAppStateStreamEvent,
     NodeAppTransitionState,
@@ -425,7 +424,7 @@ class ModWebAppPageMixin(
                 ui=ui,
                 load_warnings=getattr(model, "load_warnings", ()),
             )
-            tabs: tuple[ModWebAppTabDefinition, ...] = self._page_tabs(model)
+            tabs: tuple[ModWebAppTabDefinition, ...] = self._page_tabs_for_user(model=model, user=user)
             apply_section_runtime_model: Callable[[ModWebBasePageModel], None] | None = (
                 self._render_tabbed_page_sections(
                     ui=ui,
@@ -535,7 +534,7 @@ class ModWebAppPageMixin(
                 ui=ui,
                 load_warnings=getattr(model, "load_warnings", ()),
             )
-            tabs: tuple[ModWebAppTabDefinition, ...] = self._page_tabs(model)
+            tabs: tuple[ModWebAppTabDefinition, ...] = self._page_tabs_for_user(model=model, user=user)
             if not tabs:
                 apply_section_runtime_model = None
             else:
@@ -861,6 +860,43 @@ class ModWebAppPageMixin(
         if runtime_state_class is None:
             return classes
         return f"{classes} {runtime_state_class}"
+
+    def _page_tabs_for_user(
+        self,
+        *,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+    ) -> tuple[ModWebAppTabDefinition, ...]:
+        tabs: tuple[ModWebAppTabDefinition, ...] = self._page_tabs(model)
+        if not self._can_open_app_properties(user=user):
+            return tabs
+        if any(tab.tab_id == "properties" for tab in tabs):
+            raise ValueError("App properties tab conflicts with an existing tab.")
+        return (*tabs, self._app_properties_tab_definition())
+
+    def _can_open_app_properties(self, *, user: ModWebUser) -> bool:
+        return self._user_has_level(
+            user, required_app_mutation_level(NodeAppMutationAction.ENABLE)
+        ) or self._user_has_level(
+            user, required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS)
+        )
+
+    @staticmethod
+    def _app_properties_tab_definition() -> ModWebAppTabDefinition:
+        return ModWebAppTabDefinition.custom(
+            tab_id="properties",
+            label="Properties",
+            page_order=700,
+            app_card_order=700,
+            app_card_tone="grey",
+            icon="tune",
+            show_on_app_card=False,
+            render_handler_name="_render_app_properties_section",
+        )
+
+    @staticmethod
+    def _is_local_app_properties_tab(tab: ModWebAppTabDefinition) -> bool:
+        return tab.render_handler_name == "_render_app_properties_section"
 
     def _render_app_hero_corner_badges(
         self,
@@ -1400,10 +1436,6 @@ class ModWebAppPageMixin(
         directory_count: int = sum(1 for save in saves.saves if save.kind == "directory")
         if directory_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{directory_count} folders", tone="grey"))
-        if model.supports_save_uploads:
-            badges.append(_ModWebBadgeSpec(text="Upload", tone="purple"))
-        if model.supports_save_rename:
-            badges.append(_ModWebBadgeSpec(text="Rename", tone="grey"))
         if (model.supports_save_uploads or model.supports_save_rename) and not self._user_has_level(
             user, model.save_write_level
         ):
@@ -1426,7 +1458,6 @@ class ModWebAppPageMixin(
                 text=f"{len(blueprints.blueprints)} blueprints",
                 tone="black" if blueprints.blueprints else "grey",
             ),
-            _ModWebBadgeSpec(text="User upload", tone="purple"),
         ]
         if config_count > 0:
             badges.append(_ModWebBadgeSpec(text=f"{config_count} with config", tone="grey"))
@@ -1454,26 +1485,6 @@ class ModWebAppPageMixin(
     ) -> tuple[_ModWebBadgeSpec, ...]:
         del tab
         return self._blueprint_section_badges(model=model, user=user)
-
-    @staticmethod
-    def _map_tab_badges(
-        *,
-        model: ModWebBasePageModel,
-        user: ModWebUser,
-        tab: ModWebAppTabDefinition,
-    ) -> tuple[_ModWebBadgeSpec, ...]:
-        del tab
-        badges = [
-            _ModWebBadgeSpec(text="Shared plan", tone="purple"),
-            _ModWebBadgeSpec(text="Live tiles", tone="black"),
-        ]
-        badges.append(
-            _ModWebBadgeSpec(
-                text="User write" if model.can_write_map_annotations else "Read only",
-                tone="purple" if model.can_write_map_annotations else "grey",
-            )
-        )
-        return tuple(badges)
 
     @staticmethod
     def _map_tab_actions(
@@ -3368,23 +3379,6 @@ class ModWebAppPageMixin(
             })();
             """.replace("__CONFIG__", json.dumps(config_payload))
 
-    @staticmethod
-    def _section_badge_rows(
-        badges: tuple[_ModWebBadgeSpec, ...],
-        *,
-        row_count: int = 2,
-    ) -> tuple[tuple[_ModWebBadgeSpec, ...], ...]:
-        if row_count < 1:
-            raise ValueError("Section badge rows require at least one row.")
-        badge_rows: list[list[_ModWebBadgeSpec]] = [[] for _ in range(row_count)]
-        for badge_index, badge in enumerate(badges):
-            badge_rows[badge_index % row_count].append(badge)
-        return tuple(
-            tuple[_ModWebBadgeSpec, ...](badge_row)
-            for badge_row in badge_rows
-            if badge_row
-        )
-
     @classmethod
     def _initial_page_tab_id(
         cls,
@@ -3498,6 +3492,7 @@ class ModWebAppPageMixin(
         if not tabs:
             return None
 
+        has_local_app_properties_tab: bool = any(self._is_local_app_properties_tab(tab) for tab in tabs)
         initial_tab_id: str = self._initial_page_tab_id(current_url=current_url, tabs=tabs)
         current_section_url: str = self._page_tab_url(current_url, tab_id=initial_tab_id)
         section_model: ModWebBasePageModel = replace(
@@ -3534,25 +3529,25 @@ class ModWebAppPageMixin(
             if tab.builtin_kind is ModWebAppSectionKind.CHAT:
                 if tab_chat_surface is None:
                     raise ValueError("The Chat tab requires a chat surface configuration.")
-                with ui.column().classes("mod-section-chrome-badge-stack items-end gap-1"):
-                    with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
-                        with ui.column().classes("mod-section-chrome-badge-column items-end gap-1"):
-                            if tab_chat_surface.map_url is not None:
-                                self._badge_link(
-                                    ui=ui,
-                                    text="Map",
-                                    tone="purple",
-                                    url=tab_chat_surface.map_url,
-                                    new_tab=True,
-                                )
-                            endpoint_label, endpoint_tooltip, endpoint_tooltip_content = (
-                                self._render_chat_endpoint_badge(
-                                    ui=ui,
-                                    snapshot=tab_chat_surface.panel.initial_snapshot,
-                                )
-                            )
-                if section_actions:
-                    with ui.row().classes("mod-section-chrome-actions items-center justify-end gap-2"):
+                with ui.row().classes("mod-section-chrome-badge-row items-center justify-start gap-2 flex-wrap"):
+                    if tab_chat_surface.map_url is not None:
+                        self._badge_link(
+                            ui=ui,
+                            text="Map",
+                            tone="purple",
+                            url=tab_chat_surface.map_url,
+                            new_tab=True,
+                        )
+                    endpoint_label, endpoint_tooltip, endpoint_tooltip_content = self._render_chat_endpoint_badge(
+                        ui=ui,
+                        snapshot=tab_chat_surface.panel.initial_snapshot,
+                    )
+                show_fake_chat = (
+                    tab_chat_surface.publish_fake_event is not None
+                    and self._user_has_level(user, Power_Level.root)
+                )
+                if section_actions or show_fake_chat:
+                    with ui.row().classes("mod-section-chrome-actions items-center justify-start gap-2 flex-wrap"):
                         for action in section_actions:
                             self._action_link(
                                 ui=ui,
@@ -3561,6 +3556,15 @@ class ModWebAppPageMixin(
                                 compact=True,
                                 extra_classes=action.extra_classes,
                                 new_tab=action.new_tab,
+                            )
+                        if show_fake_chat:
+                            assert tab_chat_surface.publish_fake_event is not None
+                            self._render_fake_chat_preview_control(
+                                ui=ui,
+                                user=user,
+                                app_name=tab_chat_surface.panel.initial_snapshot.room_id,
+                                app_friendly=tab_chat_surface.app_friendly,
+                                publish_event=tab_chat_surface.publish_fake_event,
                             )
                 return _ModWebSectionChromeBindings(
                     endpoint_count_label=endpoint_label,
@@ -3574,13 +3578,11 @@ class ModWebAppPageMixin(
                 tab=tab,
             )
             if section_badges:
-                with ui.column().classes("mod-section-chrome-badge-stack items-end gap-1"):
-                    for badge_row in self._section_badge_rows(section_badges):
-                        with ui.row().classes("mod-section-chrome-badge-row items-start justify-end gap-2"):
-                            for badge in badge_row:
-                                self._badge(ui=ui, text=badge.text, tone=badge.tone)
+                with ui.row().classes("mod-section-chrome-badge-row items-center justify-start gap-2 flex-wrap"):
+                    for badge in section_badges:
+                        self._badge(ui=ui, text=badge.text, tone=badge.tone)
             if section_actions:
-                with ui.row().classes("mod-section-chrome-actions items-center justify-end gap-2"):
+                with ui.row().classes("mod-section-chrome-actions items-center justify-start gap-2 flex-wrap"):
                     for action in section_actions:
                         self._action_link(
                             ui=ui,
@@ -3634,6 +3636,15 @@ class ModWebAppPageMixin(
             set_section_chrome_visibility(next_tab_id)
             if next_tab_id in loaded_tab_ids or next_tab_id in loading_tab_ids:
                 return
+            next_tab = next(tab for tab in tabs if tab.tab_id == next_tab_id)
+            if self._is_local_app_properties_tab(next_tab):
+                render_section(
+                    tab=next_tab,
+                    tab_model=section_model,
+                    tab_chat_surface=None,
+                )
+                loaded_tab_ids.add(next_tab_id)
+                return
             if load_tab is None:
                 ui.navigate.to(current_section_url)
                 return
@@ -3649,9 +3660,8 @@ class ModWebAppPageMixin(
                 loaded = await load_tab(next_tab_id)
                 if not self._ui_client_is_alive(ui=ui):
                     return
-                tab = next(tab for tab in tabs if tab.tab_id == next_tab_id)
                 render_section(
-                    tab=tab,
+                    tab=next_tab,
                     tab_model=loaded.model,
                     tab_chat_surface=loaded.chat_surface,
                 )
@@ -3677,7 +3687,7 @@ class ModWebAppPageMixin(
                 loading_tab_ids.discard(next_tab_id)
 
         with ui.column().classes("mod-section-layout w-full"):
-            with ui.row().classes("mod-section-strip w-full items-start justify-between gap-3 flex-wrap"):
+            with ui.row().classes("mod-section-strip w-full items-start gap-3 flex-wrap"):
                 with ui.element("div").classes("mod-section-tabs-shell"):
                     with (
                         ui.tabs(value=initial_tab_id, on_change=sync_section)
@@ -3692,12 +3702,12 @@ class ModWebAppPageMixin(
                                 target=tab_element,
                                 text=f"Open {tab.label} section",
                             )
-                with ui.row().classes("mod-section-chrome items-start justify-end gap-3 flex-wrap"):
-                    for tab in tabs:
-                        chrome_classes = "mod-section-chrome-panel items-start justify-end gap-3 flex-wrap"
-                        if tab.builtin_kind is ModWebAppSectionKind.CHAT:
-                            chrome_classes += " mod-section-chrome-chat"
-                        section_chrome_by_tab_id[tab.tab_id] = ui.row().classes(chrome_classes)
+            with ui.row().classes("mod-section-chrome w-full items-start justify-start gap-3 flex-wrap"):
+                for tab in tabs:
+                    chrome_classes = "mod-section-chrome-panel items-start justify-start gap-3 flex-wrap"
+                    if tab.builtin_kind is ModWebAppSectionKind.CHAT:
+                        chrome_classes += " mod-section-chrome-chat"
+                    section_chrome_by_tab_id[tab.tab_id] = ui.row().classes(chrome_classes)
             with ui.tab_panels(
                 section_tabs,
                 value=initial_tab_id,
@@ -3716,10 +3726,12 @@ class ModWebAppPageMixin(
             set_section_chrome_visibility(initial_tab_id)
         if current_url != current_section_url:
             self._replace_browser_url(ui=ui, target_url=current_section_url)
-        if not section_runtime_appliers:
+        if not section_runtime_appliers and not has_local_app_properties_tab:
             return None
 
         def apply_section_runtime_model(runtime_model: ModWebBasePageModel) -> None:
+            nonlocal section_model
+            section_model = runtime_model
             for apply_runtime_model in section_runtime_appliers:
                 apply_runtime_model(runtime_model)
 
@@ -6654,34 +6666,29 @@ class ModWebAppPageMixin(
             """
         )
 
-    def _render_global_app_toolbar(
+    def _render_app_properties_section(
         self,
         *,
         ui: ModWebUi,
         model: ModWebBasePageModel,
         user: ModWebUser,
-        refresh_async_runtime_model: Callable[[], Awaitable[ModWebBasePageModel]] | None = None,
-        poll_runtime_model: bool = True,
-    ) -> _ModWebRuntimeToolbarBindings:
-        can_control_app_runtime: bool = self._user_has_level(
-            user, required_app_mutation_level(NodeAppMutationAction.START)
-        )
-        can_kill_app_runtime: bool = self._user_has_level(user, required_app_mutation_level(NodeAppMutationAction.KILL))
+        tab: ModWebAppTabDefinition,
+    ) -> Callable[[ModWebBasePageModel], None] | None:
+        del tab
         can_manage_app_state: bool = self._user_has_level(
             user, required_app_mutation_level(NodeAppMutationAction.ENABLE)
         )
         can_edit_app_details: bool = self._user_has_level(
             user, required_app_mutation_level(NodeAppMutationAction.UPDATE_DETAILS)
         )
-        can_open_details_dialog: bool = can_manage_app_state or can_edit_app_details
-        if not can_control_app_runtime and not can_kill_app_runtime and not can_open_details_dialog:
-            return _ModWebRuntimeToolbarBindings()
+        if not can_manage_app_state and not can_edit_app_details:
+            self._render_flat_tab_empty_state(
+                ui=ui,
+                title="Properties",
+                description="App properties are unavailable for this user.",
+            )
+            return None
 
-        start_stop_button: Button | None = None
-        kill_button: Button | None = None
-        details_dialog: Dialog | None = None
-        details_enable_disable_button: Button | None = None
-        details_save_button: Button | None = None
         friendly_name_input: Input | None = None
         title_font_select: Select | None = None
         notes_input: Input | None = None
@@ -6700,10 +6707,10 @@ class ModWebAppPageMixin(
         relay_advancements_checkbox: Checkbox | None = None
         factorio_chat_relay_use_shout_checkbox: Checkbox | None = None
         rcon_requires_online_players_checkbox: Checkbox | None = None
+        save_properties_button: Button | None = None
+        instance_state_button: Button | None = None
         activity_provider_checkboxes: list[tuple[str, Checkbox]] = []
         current_runtime_model: ModWebBasePageModel = model
-        start_stop_control_state: _ModWebStartStopControlState | None = None
-        kill_control_state: _ModWebKillControlState | None = None
         steam_update_preset = self._details_steam_update_preset(model.app_name)
         steam_update_branch_options = self._details_steam_update_branch_options(
             app_name=model.app_name,
@@ -6717,118 +6724,6 @@ class ModWebAppPageMixin(
             app_name=model.app_name,
             update_info=model.update_info,
         )
-
-        def _set_button_disabled(*, button: Button, disabled: bool) -> None:
-            if disabled:
-                button.disable()
-                return
-            button.enable()
-
-        def _apply_runtime_control_model(runtime_model: ModWebBasePageModel, *, force: bool = False) -> None:
-            nonlocal current_runtime_model, start_stop_control_state, kill_control_state
-            current_runtime_model = runtime_model
-            if can_control_app_runtime and start_stop_button is not None:
-                next_start_stop_state: _ModWebStartStopControlState = self._start_stop_control_state(runtime_model)
-                if force or next_start_stop_state != start_stop_control_state:
-                    start_stop_button.set_text(next_start_stop_state.label)
-                    start_stop_button.classes(replace=next_start_stop_state.button_classes)
-                    _set_button_disabled(button=start_stop_button, disabled=next_start_stop_state.disabled)
-                    start_stop_control_state = next_start_stop_state
-            if can_kill_app_runtime and kill_button is not None:
-                next_kill_state: _ModWebKillControlState = self._kill_control_state(runtime_model)
-                if force or next_kill_state != kill_control_state:
-                    kill_button.set_text(next_kill_state.label)
-                    kill_button.classes(replace="mod-list-button danger mod-toolbar-button")
-                    _set_button_disabled(button=kill_button, disabled=next_kill_state.disabled)
-                    kill_control_state = next_kill_state
-            if can_manage_app_state and details_enable_disable_button is not None:
-                details_enable_disable_button.set_text(self._app_enable_disable_label(runtime_model))
-                details_enable_disable_button.classes(
-                    replace=f"{self._app_enable_disable_button_classes(runtime_model)} mod-app-details-state-button"
-                )
-
-        async def run_app_action(action: NodeAppMutationAction) -> None:
-            pending_label: str | None = self._app_action_pending_label(action)
-            pending_message: str | None = self._app_action_pending_message(action, model.app_friendly)
-            if (
-                start_stop_button is not None
-                and action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP}
-                and pending_label is not None
-            ):
-                start_stop_button.set_text(pending_label)
-                start_stop_button.disable()
-            if kill_button is not None:
-                if action is NodeAppMutationAction.START:
-                    kill_button.enable()
-                elif action is NodeAppMutationAction.KILL and pending_label is not None:
-                    kill_button.set_text(pending_label)
-                    kill_button.disable()
-            if pending_message is not None:
-                ui.notify(
-                    pending_message,
-                    type="info",
-                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
-                )
-            try:
-                result: NodeAppMutationResult = await self._mutate_app(model=model, action=action, user=user)
-            except Exception as xcp:
-                log.warning(
-                    "App mutation failed: node=%s app=%s action=%s error=%s",
-                    model.node_name,
-                    model.app_name,
-                    action.value,
-                    xcp,
-                )
-                _apply_runtime_control_model(current_runtime_model, force=True)
-                ui.notify(
-                    f"App action failed: {xcp}",
-                    type="negative",
-                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
-                )
-                return
-            completion_message: str | None = self._app_action_completion_message(
-                pending_message=pending_message,
-                result_message=result.message,
-            )
-            if completion_message is not None:
-                ui.notify(
-                    completion_message,
-                    type="positive",
-                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
-                )
-            await asyncio.sleep(_DOWNLOAD_FEEDBACK_DELAY_SECONDS)
-            if (
-                action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP, NodeAppMutationAction.KILL}
-                and refresh_async_runtime_model is not None
-            ):
-                try:
-                    _apply_runtime_control_model(await refresh_async_runtime_model(), force=True)
-                except Exception as xcp:
-                    log.warning(
-                        "App runtime refresh failed after action: node=%s app=%s action=%s error=%s",
-                        model.node_name,
-                        model.app_name,
-                        action.value,
-                        xcp,
-                    )
-                return
-            self._guarded_reload(ui=ui)
-
-        def _create_app_action_handler(
-            action: NodeAppMutationAction,
-        ) -> Callable[[object | None], Awaitable[None]]:
-            async def _handle_app_action(_: object | None = None) -> None:
-                await run_app_action(action)
-
-            return _handle_app_action
-
-        async def _handle_details_enable_disable(_: object | None = None) -> None:
-            if details_enable_disable_button is None:
-                raise RuntimeError("App enable/disable button was not rendered.")
-            await self._run_with_loading_button(
-                button=details_enable_disable_button,
-                action=lambda: run_app_action(self._app_enable_disable_action(current_runtime_model)),
-            )
 
         def _parse_required_non_negative_int(*, raw_value: str, field_label: str) -> int:
             value = raw_value.strip()
@@ -6852,11 +6747,9 @@ class ModWebAppPageMixin(
                 raise ValueError(f"{field_label} must be a whole number.") from xcp
             if parsed < 0:
                 raise ValueError(f"{field_label} must not be negative.")
-            if parsed == 0:
-                return None
-            return parsed
+            return None if parsed == 0 else parsed
 
-        def _sync_details_steam_update_controls() -> None:
+        def _sync_steam_update_controls() -> None:
             if steam_update_enabled_checkbox is None or steam_update_branch_select is None:
                 return
             if bool(_value_as_object(steam_update_enabled_checkbox)):
@@ -6864,7 +6757,7 @@ class ModWebAppPageMixin(
                 return
             steam_update_branch_select.disable()
 
-        def _details_toggle_checkbox(
+        def _properties_toggle(
             *,
             label: str,
             value: bool,
@@ -6872,7 +6765,7 @@ class ModWebAppPageMixin(
         ) -> Checkbox:
             return ui.checkbox(label, value=value, on_change=on_change).props("dense").classes("mod-app-details-toggle")
 
-        async def _submit_details() -> None:
+        async def _submit_properties() -> None:
             if (
                 friendly_name_input is None
                 or title_font_select is None
@@ -6885,7 +6778,7 @@ class ModWebAppPageMixin(
                 or lifecycle_stopped_checkbox is None
                 or lifecycle_crashed_checkbox is None
             ):
-                return
+                raise RuntimeError("App property controls were not rendered.")
             next_friendly_name: str = _value_as_text(friendly_name_input).strip()
             if not next_friendly_name:
                 ui.notify("Friendly name must not be empty.", type="negative")
@@ -6898,11 +6791,6 @@ class ModWebAppPageMixin(
                 return
             try:
                 next_title_font_preset = normalise_app_title_font(_value_as_text(title_font_select))
-            except (TypeError, ValueError):
-                ui.notify("Title font is invalid.", type="negative")
-                return
-            next_notes: str = _value_as_text(notes_input)
-            try:
                 next_running_cpu_points = _parse_required_non_negative_int(
                     raw_value=_value_as_text(running_cpu_points_input),
                     field_label="Running CPU points",
@@ -6919,26 +6807,25 @@ class ModWebAppPageMixin(
                     raw_value=_value_as_text(startup_ram_points_input),
                     field_label="Startup RAM points",
                 )
-            except ValueError as xcp:
-                ui.notify(str(xcp), type="negative")
+            except (TypeError, ValueError) as xcp:
+                ui.notify(str(xcp) if str(xcp) else "Title font is invalid.", type="negative")
                 return
             next_steam_update_enabled: bool | None = None
             next_steam_update_selected_branch: str | None = None
-            disabled_activity_provider_ids = tuple(
-                provider_id
-                for provider_id, checkbox in activity_provider_checkboxes
-                if not bool(_value_as_object(checkbox))
-            )
             if steam_update_preset is not None:
                 if steam_update_enabled_checkbox is None or steam_update_branch_select is None:
-                    ui.notify("Steam update controls are unavailable.", type="negative")
-                    return
+                    raise RuntimeError("Steam update controls were not rendered.")
                 next_steam_update_enabled = bool(_value_as_object(steam_update_enabled_checkbox))
                 if next_steam_update_enabled:
                     next_steam_update_selected_branch = _value_as_text(steam_update_branch_select).strip()
                     if next_steam_update_selected_branch not in steam_update_branch_options:
                         ui.notify("Steam update branch is invalid.", type="negative")
                         return
+            disabled_activity_provider_ids = tuple(
+                provider_id
+                for provider_id, checkbox in activity_provider_checkboxes
+                if not bool(_value_as_object(checkbox))
+            )
             try:
                 result = await self._mutate_app(
                     model=current_runtime_model,
@@ -6946,7 +6833,7 @@ class ModWebAppPageMixin(
                     user=user,
                     friendly_name=next_friendly_name,
                     title_font_preset=next_title_font_preset,
-                    notes=next_notes,
+                    notes=_value_as_text(notes_input),
                     lifecycle_notice_started=bool(_value_as_object(lifecycle_started_checkbox)),
                     lifecycle_notice_stopped=bool(_value_as_object(lifecycle_stopped_checkbox)),
                     lifecycle_notice_crashed=bool(_value_as_object(lifecycle_crashed_checkbox)),
@@ -6990,244 +6877,349 @@ class ModWebAppPageMixin(
                 )
             except Exception as xcp:
                 log.warning(
-                    "App details update failed: node=%s app=%s error=%s",
+                    "App properties update failed: node=%s app=%s error=%s",
                     current_runtime_model.node_name,
                     current_runtime_model.app_name,
                     xcp,
                 )
-                ui.notify(f"App details update failed: {xcp}", type="negative")
+                ui.notify(f"App properties update failed: {xcp}", type="negative")
                 return
             ui.notify(result.message, type="positive")
             self._guarded_reload(ui=ui)
 
-        async def _handle_details_submit(_: object | None = None) -> None:
-            if details_save_button is None:
-                raise RuntimeError("App details Save button was not rendered.")
-            await self._run_with_loading_button(
-                button=details_save_button,
-                action=_submit_details,
-            )
+        async def _handle_property_save(_: object | None = None) -> None:
+            if save_properties_button is None:
+                raise RuntimeError("App properties Save button was not rendered.")
+            await self._run_with_loading_button(button=save_properties_button, action=_submit_properties)
 
-        details_dialog_rendered = False
+        async def _change_instance_state(_: object | None = None) -> None:
+            if instance_state_button is None:
+                raise RuntimeError("App properties state button was not rendered.")
+            action = self._app_enable_disable_action(current_runtime_model)
 
-        def ensure_details_dialog() -> None:
-            nonlocal details_dialog, details_dialog_rendered, details_enable_disable_button
-            nonlocal details_save_button
-            nonlocal factorio_chat_relay_use_shout_checkbox
-            nonlocal friendly_name_input, lifecycle_crashed_checkbox, lifecycle_started_checkbox
-            nonlocal lifecycle_stopped_checkbox, notes_input, relay_advancements_checkbox
-            nonlocal relay_notice_player_death_checkbox, relay_notice_player_session_checkbox
-            nonlocal relay_notice_progress_checkbox, running_cpu_points_input, running_ram_points_input
-            nonlocal rcon_requires_online_players_checkbox
-            nonlocal startup_cpu_points_input, startup_ram_points_input, steam_update_branch_select
-            nonlocal steam_update_enabled_checkbox, title_font_select
-            if details_dialog_rendered:
-                return
-            if not can_open_details_dialog:
-                raise PermissionError("App properties are unavailable for this user.")
-            details_dialog_rendered = True
-            with ui.dialog() as details_dialog:
-                with ui.card().classes("mod-card mod-dialog-card mod-app-details-dialog-card"):
-                    with ui.column().classes("w-full gap-4 mod-app-details-layout"):
-                        with ui.column().classes("gap-1"):
-                            ui.label("App Details").classes("text-xl font-black mod-title-small")
-                            ui.label("Update instance-level details shown across web and relay surfaces.").classes(
-                                "mod-subtitle text-sm"
+            async def _mutate_state() -> None:
+                try:
+                    result = await self._mutate_app(model=current_runtime_model, action=action, user=user)
+                except Exception as xcp:
+                    log.warning(
+                        "App properties state update failed: node=%s app=%s action=%s error=%s",
+                        current_runtime_model.node_name,
+                        current_runtime_model.app_name,
+                        action.value,
+                        xcp,
+                    )
+                    ui.notify(f"App state update failed: {xcp}", type="negative")
+                    return
+                ui.notify(result.message, type="positive")
+                self._guarded_reload(ui=ui)
+
+            await self._run_with_loading_button(button=instance_state_button, action=_mutate_state)
+
+        with ui.card().classes(f"{self._flat_tab_card_classes()} mod-app-properties-card"):
+            with ui.column().classes("w-full gap-4 mod-app-details-layout"):
+                with ui.column().classes("gap-1"):
+                    ui.label("Properties").classes("text-xl font-black mod-title-small")
+                    ui.label("Update instance-level details shown across web and relay surfaces.").classes(
+                        "mod-subtitle text-sm"
+                    )
+                if can_edit_app_details:
+                    resource_points = model.resource_points
+                    running_cpu_points_value = "0" if resource_points is None else str(resource_points.cpu_points_running)
+                    running_ram_points_value = "0" if resource_points is None else str(resource_points.ram_points_running)
+                    startup_cpu_points_value = (
+                        ""
+                        if (
+                            resource_points is None
+                            or not resource_points.startup_defined
+                            or resource_points.cpu_points_startup == resource_points.cpu_points_running
+                        )
+                        else str(resource_points.cpu_points_startup)
+                    )
+                    startup_ram_points_value = (
+                        ""
+                        if (
+                            resource_points is None
+                            or not resource_points.startup_defined
+                            or resource_points.ram_points_startup == resource_points.ram_points_running
+                        )
+                        else str(resource_points.ram_points_startup)
+                    )
+                    with ui.column().classes("mod-app-details-section"):
+                        friendly_name_input = (
+                            ui.input("Friendly name", value=model.app_friendly)
+                            .props(
+                                "filled square dense clearable hide-bottom-space "
+                                f"color=accent autofocus maxlength={APP_FRIENDLY_NAME_MAX_LENGTH}"
                             )
-                        if can_edit_app_details:
-                            resource_points = model.resource_points
-                            running_cpu_points_value = (
-                                "0" if resource_points is None else str(resource_points.cpu_points_running)
+                            .classes("mod-app-details-field")
+                        )
+                        title_font_select = (
+                            ui.select(
+                                self._app_title_font_options(
+                                    app_name=model.app_name,
+                                    selected_value=model.app_title_font_preset,
+                                ),
+                                value=model.app_title_font_preset,
+                                label=f"Title font [{self._app_title_font_default_label(app_name=model.app_name)}]",
                             )
-                            running_ram_points_value = (
-                                "0" if resource_points is None else str(resource_points.ram_points_running)
-                            )
-                            startup_cpu_points_value = (
-                                ""
-                                if (
-                                    resource_points is None
-                                    or not resource_points.startup_defined
-                                    or resource_points.cpu_points_startup == resource_points.cpu_points_running
+                            .props("filled square dense hide-bottom-space color=accent options-dark")
+                            .classes("mod-app-details-field")
+                        )
+                        notes_input = (
+                            ui.input("Shared instance notes", value=model.app_notes or "")
+                            .props("filled square type=textarea autogrow hide-bottom-space color=accent")
+                            .classes("mod-app-details-field mod-app-details-notes")
+                        )
+                        if steam_update_preset is not None:
+                            with ui.column().classes("mod-app-details-subsection"):
+                                ui.label("Update Configuration").classes("mod-stat-label")
+                                ui.label("Enable or repair the default Steam updater block for this instance.").classes(
+                                    "mod-subtitle text-xs"
                                 )
-                                else str(resource_points.cpu_points_startup)
-                            )
-                            startup_ram_points_value = (
-                                ""
-                                if (
-                                    resource_points is None
-                                    or not resource_points.startup_defined
-                                    or resource_points.ram_points_startup == resource_points.ram_points_running
+                                steam_update_enabled_checkbox = _properties_toggle(
+                                    label="Enable Steam updates",
+                                    value=model.update_info is not None,
+                                    on_change=lambda _: _sync_steam_update_controls(),
                                 )
-                                else str(resource_points.ram_points_startup)
-                            )
-                            with ui.column().classes("mod-app-details-section"):
-                                friendly_name_input = (
-                                    ui.input("Friendly name", value=model.app_friendly)
-                                    .props(
-                                        "filled square dense clearable hide-bottom-space "
-                                        f"color=accent autofocus maxlength={APP_FRIENDLY_NAME_MAX_LENGTH}"
-                                    )
-                                    .classes("mod-app-details-field")
-                                )
-                                title_font_select = (
+                                if steam_update_app_id is not None:
+                                    ui.label(f"Steam App ID: {steam_update_app_id}").classes("mod-subtitle text-xs")
+                                steam_update_branch_select = (
                                     ui.select(
-                                        self._app_title_font_options(
-                                            app_name=model.app_name,
-                                            selected_value=model.app_title_font_preset,
-                                        ),
-                                        value=model.app_title_font_preset,
-                                        label=f"Title font [{self._app_title_font_default_label(app_name=model.app_name)}]",
+                                        steam_update_branch_options,
+                                        value=steam_update_selected_branch,
+                                        label="Configured target branch",
                                     )
                                     .props("filled square dense hide-bottom-space color=accent options-dark")
                                     .classes("mod-app-details-field")
                                 )
-                                notes_input = (
-                                    ui.input("Shared instance notes", value=model.app_notes or "")
-                                    .props("filled square type=textarea autogrow hide-bottom-space color=accent")
-                                    .classes("mod-app-details-field mod-app-details-notes")
+                                _sync_steam_update_controls()
+                        with ui.column().classes("mod-app-details-subsection"):
+                            ui.label("Resource Points").classes("mod-stat-label")
+                            ui.label(
+                                "Leave a startup field blank, or set it to 0, to use that resource's running points."
+                            ).classes("mod-subtitle text-xs")
+                            with ui.row().classes("w-full gap-2 flex-wrap"):
+                                running_cpu_points_input = (
+                                    ui.input("Running CPU", value=running_cpu_points_value)
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        "type=number inputmode=numeric step=1 min=0"
+                                    )
+                                    .classes("mod-app-details-field mod-app-details-point-field")
                                 )
-                                if steam_update_preset is not None:
-                                    with ui.column().classes("mod-app-details-subsection"):
-                                        ui.label("Update Configuration").classes("mod-stat-label")
-                                        ui.label(
-                                            "Enable or repair the default Steam updater block for this instance."
-                                        ).classes("mod-subtitle text-xs")
-                                        steam_update_enabled_checkbox = _details_toggle_checkbox(
-                                            label="Enable Steam updates",
-                                            value=model.update_info is not None,
-                                            on_change=lambda _: _sync_details_steam_update_controls(),
-                                        )
-                                        if steam_update_app_id is not None:
-                                            ui.label(f"Steam App ID: {steam_update_app_id}").classes(
-                                                "mod-subtitle text-xs"
-                                            )
-                                        steam_update_branch_select = (
-                                            ui.select(
-                                                steam_update_branch_options,
-                                                value=steam_update_selected_branch,
-                                                label="Configured target branch",
-                                            )
-                                            .props("filled square dense hide-bottom-space color=accent options-dark")
-                                            .classes("mod-app-details-field")
-                                        )
-                                        _sync_details_steam_update_controls()
-                                with ui.column().classes("mod-app-details-subsection"):
-                                    ui.label("Resource Points").classes("mod-stat-label")
-                                    ui.label("Leave a startup field blank, or set it to 0, to use that resource's running points.").classes(
-                                        "mod-subtitle text-xs"
+                                running_ram_points_input = (
+                                    ui.input("Running RAM", value=running_ram_points_value)
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        "type=number inputmode=numeric step=1 min=0"
                                     )
-                                    with ui.row().classes("w-full gap-2 flex-wrap"):
-                                        running_cpu_points_input = (
-                                            ui.input("Running CPU", value=running_cpu_points_value)
-                                            .props(
-                                                "filled square dense hide-bottom-space color=accent "
-                                                "type=number inputmode=numeric step=1 min=0"
-                                            )
-                                            .classes("mod-app-details-field mod-app-details-point-field")
-                                        )
-                                        running_ram_points_input = (
-                                            ui.input("Running RAM", value=running_ram_points_value)
-                                            .props(
-                                                "filled square dense hide-bottom-space color=accent "
-                                                "type=number inputmode=numeric step=1 min=0"
-                                            )
-                                            .classes("mod-app-details-field mod-app-details-point-field")
-                                        )
-                                    with ui.row().classes("w-full gap-2 flex-wrap"):
-                                        startup_cpu_points_input = (
-                                            ui.input("Startup CPU", value=startup_cpu_points_value)
-                                            .props(
-                                                "filled square dense hide-bottom-space color=accent "
-                                                "type=number inputmode=numeric step=1 min=0"
-                                            )
-                                            .classes("mod-app-details-field mod-app-details-point-field")
-                                        )
-                                        startup_ram_points_input = (
-                                            ui.input("Startup RAM", value=startup_ram_points_value)
-                                            .props(
-                                                "filled square dense hide-bottom-space color=accent "
-                                                "type=number inputmode=numeric step=1 min=0"
-                                            )
-                                            .classes("mod-app-details-field mod-app-details-point-field")
-                                        )
-                                with ui.column().classes("mod-app-details-subsection"):
-                                    ui.label("Relay Notices").classes("mod-stat-label")
-                                    lifecycle_started_checkbox = _details_toggle_checkbox(
-                                        label="Started",
-                                        value=model.lifecycle_notice_started,
-                                    )
-                                    lifecycle_stopped_checkbox = _details_toggle_checkbox(
-                                        label="Stopped",
-                                        value=model.lifecycle_notice_stopped,
-                                    )
-                                    lifecycle_crashed_checkbox = _details_toggle_checkbox(
-                                        label="Crash",
-                                        value=model.lifecycle_notice_crashed,
-                                    )
-                                    if model.relay_notice_player_session is not None:
-                                        relay_notice_player_session_checkbox = _details_toggle_checkbox(
-                                            label="Player Join/Leave",
-                                            value=model.relay_notice_player_session,
-                                        )
-                                    if model.relay_notice_player_death is not None:
-                                        relay_notice_player_death_checkbox = _details_toggle_checkbox(
-                                            label="Death",
-                                            value=model.relay_notice_player_death,
-                                        )
-                                    if model.relay_notice_progress is not None:
-                                        relay_notice_progress_label = model.relay_notice_progress_label or "Progress"
-                                        relay_notice_progress_checkbox = _details_toggle_checkbox(
-                                            label=f"{relay_notice_progress_label}",
-                                            value=model.relay_notice_progress,
-                                        )
-                                    if model.relay_advancements_enabled is not None:
-                                        relay_advancement_term = model.relay_advancement_term or "Advancement"
-                                        relay_advancements_checkbox = _details_toggle_checkbox(
-                                            label=f"{relay_advancement_term}",
-                                            value=model.relay_advancements_enabled,
-                                        )
-                                    if model.factorio_chat_relay_use_shout is not None:
-                                        factorio_chat_relay_use_shout_checkbox = _details_toggle_checkbox(
-                                            label="Chat via /say or /shout",
-                                            value=model.factorio_chat_relay_use_shout,
-                                        )
-                                    if model.rcon_requires_online_players is not None:
-                                        rcon_requires_online_players_checkbox = _details_toggle_checkbox(
-                                            label="Gate RCON commands behind online players",
-                                            value=model.rcon_requires_online_players,
-                                        )
-                                if model.activity_providers:
-                                    with ui.column().classes("mod-app-details-subsection"):
-                                        ui.label("Activity Providers").classes("mod-stat-label")
-                                        for provider in model.activity_providers:
-                                            checkbox = _details_toggle_checkbox(
-                                                label=provider.label,
-                                                value=provider.enabled,
-                                            )
-                                            activity_provider_checkboxes.append((provider.provider_id, checkbox))
-                        if can_manage_app_state:
-                            with ui.column().classes("mod-app-details-section"):
-                                ui.label("Instance State").classes("mod-stat-label")
-                                details_enable_disable_button = ui.button(
-                                    self._app_enable_disable_label(model),
-                                    on_click=_handle_details_enable_disable,
-                                ).classes(
-                                    f"{self._app_enable_disable_button_classes(model)} mod-app-details-state-button"
+                                    .classes("mod-app-details-field mod-app-details-point-field")
                                 )
-                        with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
-                            ui.button("Cancel", on_click=details_dialog.close).classes("mod-list-button secondary")
-                            if can_edit_app_details:
-                                details_save_button = ui.button(
-                                    "Save",
-                                    on_click=_handle_details_submit,
-                                ).classes("mod-list-button")
+                            with ui.row().classes("w-full gap-2 flex-wrap"):
+                                startup_cpu_points_input = (
+                                    ui.input("Startup CPU", value=startup_cpu_points_value)
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        "type=number inputmode=numeric step=1 min=0"
+                                    )
+                                    .classes("mod-app-details-field mod-app-details-point-field")
+                                )
+                                startup_ram_points_input = (
+                                    ui.input("Startup RAM", value=startup_ram_points_value)
+                                    .props(
+                                        "filled square dense hide-bottom-space color=accent "
+                                        "type=number inputmode=numeric step=1 min=0"
+                                    )
+                                    .classes("mod-app-details-field mod-app-details-point-field")
+                                )
+                        with ui.column().classes("mod-app-details-subsection"):
+                            ui.label("Relay Notices").classes("mod-stat-label")
+                            lifecycle_started_checkbox = _properties_toggle(
+                                label="Started", value=model.lifecycle_notice_started
+                            )
+                            lifecycle_stopped_checkbox = _properties_toggle(
+                                label="Stopped", value=model.lifecycle_notice_stopped
+                            )
+                            lifecycle_crashed_checkbox = _properties_toggle(
+                                label="Crash", value=model.lifecycle_notice_crashed
+                            )
+                            if model.relay_notice_player_session is not None:
+                                relay_notice_player_session_checkbox = _properties_toggle(
+                                    label="Player Join/Leave", value=model.relay_notice_player_session
+                                )
+                            if model.relay_notice_player_death is not None:
+                                relay_notice_player_death_checkbox = _properties_toggle(
+                                    label="Death", value=model.relay_notice_player_death
+                                )
+                            if model.relay_notice_progress is not None:
+                                relay_notice_progress_checkbox = _properties_toggle(
+                                    label=model.relay_notice_progress_label or "Progress",
+                                    value=model.relay_notice_progress,
+                                )
+                            if model.relay_advancements_enabled is not None:
+                                relay_advancements_checkbox = _properties_toggle(
+                                    label=model.relay_advancement_term or "Advancement",
+                                    value=model.relay_advancements_enabled,
+                                )
+                            if model.factorio_chat_relay_use_shout is not None:
+                                factorio_chat_relay_use_shout_checkbox = _properties_toggle(
+                                    label="Chat via /say or /shout",
+                                    value=model.factorio_chat_relay_use_shout,
+                                )
+                            if model.rcon_requires_online_players is not None:
+                                rcon_requires_online_players_checkbox = _properties_toggle(
+                                    label="Gate RCON commands behind online players",
+                                    value=model.rcon_requires_online_players,
+                                )
+                        if model.activity_providers:
+                            with ui.column().classes("mod-app-details-subsection"):
+                                ui.label("Activity Providers").classes("mod-stat-label")
+                                for provider in model.activity_providers:
+                                    checkbox = _properties_toggle(label=provider.label, value=provider.enabled)
+                                    activity_provider_checkboxes.append((provider.provider_id, checkbox))
+                if can_manage_app_state:
+                    with ui.column().classes("mod-app-details-section"):
+                        ui.label("Instance State").classes("mod-stat-label")
+                        instance_state_button = ui.button(
+                            self._app_enable_disable_label(model),
+                            on_click=_change_instance_state,
+                        ).classes(f"{self._app_enable_disable_button_classes(model)} mod-app-details-state-button")
+                if can_edit_app_details:
+                    with ui.row().classes("w-full justify-end gap-2 mod-app-details-actions"):
+                        save_properties_button = ui.button("Save", on_click=_handle_property_save).classes(
+                            "mod-list-button"
+                        )
 
-        def open_details_dialog() -> None:
-            ensure_details_dialog()
-            if details_dialog is None:
-                raise RuntimeError("App properties dialog was not rendered.")
-            _apply_runtime_control_model(current_runtime_model, force=True)
-            details_dialog.open()
+        if instance_state_button is None:
+            return None
+
+        def apply_runtime_model(runtime_model: ModWebBasePageModel) -> None:
+            nonlocal current_runtime_model
+            current_runtime_model = runtime_model
+            instance_state_button.set_text(self._app_enable_disable_label(runtime_model))
+            instance_state_button.classes(
+                replace=f"{self._app_enable_disable_button_classes(runtime_model)} mod-app-details-state-button"
+            )
+
+        return apply_runtime_model
+
+    def _render_global_app_toolbar(
+        self,
+        *,
+        ui: ModWebUi,
+        model: ModWebBasePageModel,
+        user: ModWebUser,
+        refresh_async_runtime_model: Callable[[], Awaitable[ModWebBasePageModel]] | None = None,
+        poll_runtime_model: bool = True,
+    ) -> _ModWebRuntimeToolbarBindings:
+        can_control_app_runtime: bool = self._user_has_level(
+            user, required_app_mutation_level(NodeAppMutationAction.START)
+        )
+        can_kill_app_runtime: bool = self._user_has_level(user, required_app_mutation_level(NodeAppMutationAction.KILL))
+        if not can_control_app_runtime and not can_kill_app_runtime:
+            return _ModWebRuntimeToolbarBindings()
+
+        start_stop_button: Button | None = None
+        kill_button: Button | None = None
+        current_runtime_model: ModWebBasePageModel = model
+        start_stop_control_state: _ModWebStartStopControlState | None = None
+        kill_control_state: _ModWebKillControlState | None = None
+
+        def _set_button_disabled(*, button: Button, disabled: bool) -> None:
+            if disabled:
+                button.disable()
+                return
+            button.enable()
+
+        def _apply_runtime_control_model(runtime_model: ModWebBasePageModel, *, force: bool = False) -> None:
+            nonlocal current_runtime_model, start_stop_control_state, kill_control_state
+            current_runtime_model = runtime_model
+            if can_control_app_runtime and start_stop_button is not None:
+                next_start_stop_state = self._start_stop_control_state(runtime_model)
+                if force or next_start_stop_state != start_stop_control_state:
+                    start_stop_button.set_text(next_start_stop_state.label)
+                    start_stop_button.classes(replace=next_start_stop_state.button_classes)
+                    _set_button_disabled(button=start_stop_button, disabled=next_start_stop_state.disabled)
+                    start_stop_control_state = next_start_stop_state
+            if can_kill_app_runtime and kill_button is not None:
+                next_kill_state = self._kill_control_state(runtime_model)
+                if force or next_kill_state != kill_control_state:
+                    kill_button.set_text(next_kill_state.label)
+                    kill_button.classes(replace="mod-list-button danger mod-toolbar-button")
+                    _set_button_disabled(button=kill_button, disabled=next_kill_state.disabled)
+                    kill_control_state = next_kill_state
+
+        async def run_app_action(action: NodeAppMutationAction) -> None:
+            pending_label = self._app_action_pending_label(action)
+            pending_message = self._app_action_pending_message(action, model.app_friendly)
+            if (
+                start_stop_button is not None
+                and action in {NodeAppMutationAction.START, NodeAppMutationAction.STOP}
+                and pending_label is not None
+            ):
+                start_stop_button.set_text(pending_label)
+                start_stop_button.disable()
+            if kill_button is not None:
+                if action is NodeAppMutationAction.START:
+                    kill_button.enable()
+                elif action is NodeAppMutationAction.KILL and pending_label is not None:
+                    kill_button.set_text(pending_label)
+                    kill_button.disable()
+            if pending_message is not None:
+                ui.notify(
+                    pending_message,
+                    type="info",
+                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+                )
+            try:
+                result = await self._mutate_app(model=current_runtime_model, action=action, user=user)
+            except Exception as xcp:
+                log.warning(
+                    "App mutation failed: node=%s app=%s action=%s error=%s",
+                    current_runtime_model.node_name,
+                    current_runtime_model.app_name,
+                    action.value,
+                    xcp,
+                )
+                _apply_runtime_control_model(current_runtime_model, force=True)
+                ui.notify(
+                    f"App action failed: {xcp}",
+                    type="negative",
+                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+                )
+                return
+            completion_message = self._app_action_completion_message(
+                pending_message=pending_message,
+                result_message=result.message,
+            )
+            if completion_message is not None:
+                ui.notify(
+                    completion_message,
+                    type="positive",
+                    timeout=_APP_ACTION_NOTIFICATION_TIMEOUT_MILLISECONDS,
+                )
+            await asyncio.sleep(_DOWNLOAD_FEEDBACK_DELAY_SECONDS)
+            if refresh_async_runtime_model is not None:
+                try:
+                    _apply_runtime_control_model(await refresh_async_runtime_model(), force=True)
+                except Exception as xcp:
+                    log.warning(
+                        "App runtime refresh failed after action: node=%s app=%s action=%s error=%s",
+                        current_runtime_model.node_name,
+                        current_runtime_model.app_name,
+                        action.value,
+                        xcp,
+                    )
+                return
+            self._guarded_reload(ui=ui)
+
+        def _create_app_action_handler(
+            action: NodeAppMutationAction,
+        ) -> Callable[[object | None], Awaitable[None]]:
+            async def _handle_app_action(_: object | None = None) -> None:
+                await run_app_action(action)
+
+            return _handle_app_action
 
         with ui.column().classes("mod-hero-toolbar w-full mod-select-form"):
             with ui.row().classes("mod-list-toolbar mod-hero-toolbar-surface w-full"):
@@ -7253,22 +7245,10 @@ class ModWebAppPageMixin(
                             on_click=_create_app_action_handler(NodeAppMutationAction.KILL),
                         ).classes("mod-list-button danger mod-toolbar-button")
                         _apply_runtime_control_model(model, force=True)
-                    if can_open_details_dialog:
-                        ui.button(
-                            "Properties",
-                            on_click=open_details_dialog,
-                        ).classes("mod-list-button secondary mod-toolbar-button")
-        if (
-            poll_runtime_model
-            and (can_control_app_runtime or can_kill_app_runtime)
-            and refresh_async_runtime_model is not None
-        ):
-            def apply_runtime_control_model(runtime_model: ModWebBasePageModel) -> None:
-                _apply_runtime_control_model(runtime_model, force=False)
-
+        if poll_runtime_model and refresh_async_runtime_model is not None:
             refresh_runtime_control: AsyncRefresh = self._build_async_refreshable_updater(
                 refresh_async_value=refresh_async_runtime_model,
-                apply_value=apply_runtime_control_model,
+                apply_value=lambda runtime_model: _apply_runtime_control_model(runtime_model, force=False),
                 error_context="Mod web app runtime control",
             )
             refresh_runtime_control_timer: Timer = ui.timer(
@@ -7277,11 +7257,7 @@ class ModWebAppPageMixin(
             )
             self._register_timer_cleanup(ui=ui, timer=refresh_runtime_control_timer)
         return _ModWebRuntimeToolbarBindings(
-            apply_runtime_model=(
-                (lambda runtime_model: _apply_runtime_control_model(runtime_model, force=False))
-                if (can_control_app_runtime or can_kill_app_runtime)
-                else None
-            ),
+            apply_runtime_model=lambda runtime_model: _apply_runtime_control_model(runtime_model, force=False),
         )
 
     def _render_mod_toolbar(

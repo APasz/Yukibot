@@ -15,6 +15,7 @@ dev_apps
 opt/
 
 .env*
+rupdater.*
 
 # testing
 _bridge2.py

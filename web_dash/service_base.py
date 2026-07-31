@@ -159,6 +159,9 @@ class ModWebServiceSupport:
     def __getattr__(self, name: Literal["_remote_sync_http_client"]) -> Callable[[], requests.Session]: ...
 
     @overload
+    def __getattr__(self, name: Literal["_render_fake_chat_preview_control"]) -> Callable[..., None]: ...
+
+    @overload
     def __getattr__(self, name: Literal["_on_shutdown"]) -> Callable[[], Awaitable[None]]: ...
 
     @overload
@@ -344,9 +347,6 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_empty_config_list"]) -> Callable[..., NodeConfigList]: ...
-
-    @overload
-    def __getattr__(self, name: Literal["_fake_chat_select_props"]) -> Callable[..., str]: ...
 
     @overload
     def __getattr__(self, name: Literal["_flat_tab_card_classes"]) -> Callable[..., str]: ...
@@ -611,6 +611,11 @@ class ModWebServiceSupport:
     @overload
     def __getattr__(
         self, name: Literal["_remote_factorio_map_exchange_import_async"]
+    ) -> Callable[..., Awaitable[NodeFactorioGenerationState]]: ...
+
+    @overload
+    def __getattr__(
+        self, name: Literal["_remote_factorio_generation_running_world_sync_async"]
     ) -> Callable[..., Awaitable[NodeFactorioGenerationState]]: ...
 
     @overload
@@ -992,11 +997,6 @@ class ModWebServiceSupport:
 
     @overload
     def __getattr__(self, name: Literal["_selection_toggle_label"]) -> Callable[..., str]: ...
-
-    @overload
-    def __getattr__(
-        self, name: Literal["_section_badge_rows"]
-    ) -> Callable[..., tuple[tuple[_ModWebBadgeSpec, ...], ...]]: ...
 
     @overload
     def __getattr__(

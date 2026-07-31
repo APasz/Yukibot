@@ -1762,6 +1762,23 @@ class ModWebModelsMixin(ModWebServiceSupport):
         )
         return NodeFactorioGenerationState.from_mapping(payload)
 
+    async def _remote_factorio_generation_running_world_sync_async(
+        self,
+        node: ModWebNodeLink,
+        app_name: str,
+        user: ModWebUser,
+    ) -> NodeFactorioGenerationState:
+        payload = await self._remote_json_async(
+            node=node,
+            app_name=app_name,
+            path=f"/apps/{quote(app_name, safe='')}/factorio/generation/running-world",
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            user=user,
+            method="POST",
+            timeout=_REMOTE_NODE_LONG_MUTATION_TIMEOUT_SECONDS,
+        )
+        return NodeFactorioGenerationState.from_mapping(payload)
+
     async def _remote_factorio_map_exchange_export_async(
         self,
         node: ModWebNodeLink,

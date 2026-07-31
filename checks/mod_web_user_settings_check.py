@@ -25,6 +25,7 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
             settings = ModWebUserSettings(
                 appearance=ModWebAppearanceSettings(
                     color_scheme=ModWebColorScheme.DARK,
+                    tooltip_above_on_touch_device=False,
                     primary_color_hex="#22c55e",
                     positive_color_hex="#16a34a",
                     warning_color_hex="#facc15",
@@ -55,6 +56,7 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
         self.assertEqual(payload["users"]["42"]["appearance"]["warning_color_hex"], "#FACC15")
         self.assertEqual(payload["users"]["42"]["appearance"]["negative_color_hex"], "#EF4444")
         self.assertEqual(payload["users"]["42"]["appearance"]["info_color_hex"], "#0EA5E9")
+        self.assertFalse(payload["users"]["42"]["appearance"]["tooltip_above_on_touch_device"])
         self.assertEqual(payload["users"]["42"]["timestamp"], {
             "timezone_name": "Australia/Melbourne",
             "format_template": "<t:{}:F>",
@@ -77,6 +79,11 @@ class ModWebUserSettingsStoreTests(unittest.TestCase):
     def test_appearance_settings_reject_invalid_primary_colour(self) -> None:
         with self.assertRaisesRegex(ValueError, "six-digit"):
             ModWebAppearanceSettings(warning_color_hex="#1234")
+
+    def test_legacy_appearance_settings_enable_touch_tooltip_placement(self) -> None:
+        settings = ModWebAppearanceSettings.model_validate({"primary_color_hex": "#22c55e"})
+
+        self.assertTrue(settings.tooltip_above_on_touch_device)
 
     def test_timestamp_settings_reject_invalid_preferences(self) -> None:
         with self.assertRaisesRegex(ValueError, "timezone"):

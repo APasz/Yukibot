@@ -698,6 +698,19 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
         )
 
     @staticmethod
+    def _about_deployment_text() -> str | None:
+        metadata: config.DeploymentMetadata | None = config.MOD_WEB_DEPLOYMENT_METADATA
+        build_sha: str | None = config.MOD_WEB_BUILD_SHA
+        if metadata is None:
+            return f"Build {build_sha[:7]}" if build_sha is not None else None
+
+        deployed_at: str = metadata.deployed_at.strftime("%-d %b %Y, %H:%M UTC")
+        build_text: str = f"Build {metadata.revision[:7]}"
+        if metadata.version is None:
+            return f"{build_text} · deployed {deployed_at}"
+        return f"{metadata.version} · {build_text} · deployed {deployed_at}"
+
+    @staticmethod
     def _about_supported_app_names() -> tuple[str, ...]:
         return tuple(scope.display_name for scope in config.AppScopes)
 
@@ -705,6 +718,12 @@ class ModWebStatusPagesMixin(ModWebStatusFeatureSupport):
         self._apply_theme(ui=ui)
         with ui.column().classes("mod-page w-full gap-6 px-4 py-8 md:px-8"):
             self._render_status_page_panel(ui=ui, config=self._about_page_config())
+            deployment_text: str | None = self._about_deployment_text()
+            if deployment_text is not None:
+                with ui.card().classes("mod-card w-full"):
+                    with ui.column().classes("gap-1 p-5"):
+                        ui.label("Current deployment").classes("text-xl font-bold mod-title-small")
+                        ui.label(deployment_text).classes("text-sm mod-subtitle")
             with ui.card().classes("mod-card w-full"):
                 with ui.column().classes("gap-5 p-5"):
                     with ui.column().classes("gap-1"):

@@ -1181,7 +1181,7 @@ class ModWebTheme:
                     min-width: 0;
                 }}
                 .mod-section-strip > .mod-section-tabs-shell {{
-                    flex: 1 1 24rem;
+                    flex: 1 1 100%;
                 }}
                 .mod-section-tabs {{
                     display: inline-flex;
@@ -1268,45 +1268,32 @@ class ModWebTheme:
                     display: none !important;
                 }}
                 .mod-section-chrome {{
-                    flex: 0 1 auto;
+                    flex: 0 0 100%;
+                    width: 100%;
                     min-width: 0;
-                    margin-left: auto;
+                    margin-left: 0;
                 }}
                 .mod-section-chrome-panel {{
                     display: flex;
                     align-items: flex-start;
-                    justify-content: flex-end;
-                    gap: 0.75rem;
-                    min-width: 0;
-                }}
-                .mod-section-chrome-badge-stack {{
-                    display: flex;
-                    flex-direction: column;
-                    align-items: flex-end;
                     justify-content: flex-start;
-                    gap: 0.35rem;
+                    gap: 0.75rem;
+                    width: 100%;
                     min-width: 0;
                 }}
                 .mod-section-chrome-badge-row {{
                     display: flex;
-                    flex-direction: row-reverse;
-                    align-items: flex-start;
-                    justify-content: flex-end;
-                    gap: 0.5rem;
-                    min-width: 0;
-                }}
-                .mod-section-chrome-badge-column {{
-                    display: flex;
-                    flex-direction: column;
-                    align-items: flex-end;
+                    flex-wrap: wrap;
+                    align-items: center;
                     justify-content: flex-start;
-                    gap: 0.35rem;
+                    gap: 0.5rem;
                     min-width: 0;
                 }}
                 .mod-section-chrome-actions {{
                     display: flex;
                     align-items: flex-start;
-                    justify-content: flex-end;
+                    justify-content: flex-start;
+                    flex-wrap: wrap;
                     gap: 0.5rem;
                 }}
                 .mod-hero-toolbar {{
@@ -4965,6 +4952,9 @@ class ModWebTheme:
                 .mod-app-details-layout {{
                     gap: 1rem;
                 }}
+                .mod-app-properties-card {{
+                    max-width: min(56rem, 100%);
+                }}
                 .mod-app-details-section {{
                     width: 100%;
                     display: flex;
@@ -5572,9 +5562,6 @@ class ModWebTheme:
                     justify-content: space-between;
                     gap: 0.9rem;
                     flex-wrap: wrap;
-                }}
-                .mod-fake-chat-send-target {{
-                    min-width: min(20rem, 100%);
                 }}
                 .mod-chat-dialog-card {{
                     width: min(64rem, calc(100vw - 1.5rem)) !important;
@@ -6503,10 +6490,11 @@ class ModWebTheme:
                     .mod-section-tabs .q-tab {{ flex: 1 1 calc(50% - 0.5rem); min-width: 0; }}
                     .mod-section-chrome {{
                         width: 100%;
-                        justify-content: flex-end;
+                        justify-content: flex-start;
                     }}
                     .mod-section-chrome-panel {{
-                        margin-left: auto;
+                        margin-left: 0;
+                        width: 100%;
                         max-width: 100%;
                     }}
                     .mod-mods-toolbar-filters {{
@@ -6670,9 +6658,6 @@ class ModWebTheme:
                     .mod-fake-chat-dialog-card {{
                         width: calc(100vw - 0.75rem) !important;
                     }}
-                    .mod-fake-chat-send-target {{
-                        min-width: 100%;
-                    }}
                     .mod-chat-timeline {{ max-height: none; }}
                     .mod-chat-input {{ flex-basis: 100%; min-width: 0; }}
                     .mod-chat-send {{ width: 100%; }}
@@ -6743,108 +6728,79 @@ class ModWebTheme:
                     max-width: none !important;
                     box-sizing: border-box;
                     overflow: hidden;
-                    border-color: rgba(113, 113, 122, 0.68) !important;
-                    background:
-                        linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 7rem),
-                        #121216 !important;
+                    border-color: #3f3d43 !important;
+                    background: #18171b !important;
                     box-shadow:
                         inset 0 0 0 1px rgba(0, 0, 0, 0.9),
-                        inset 0 0 0 3px rgba(255, 255, 255, 0.018),
-                        0 20px 50px rgba(0, 0, 0, 0.34) !important;
+                        0 16px 36px rgba(0, 0, 0, 0.26) !important;
                 }}
                 .mod-factorio-titlebar {{
                     display: flex;
                     width: 100%;
                     box-sizing: border-box;
-                    gap: 1rem;
+                    gap: 0.85rem;
                     align-items: center;
-                    padding: 0.82rem 0.9rem;
-                    border-bottom: 2px solid #050506;
-                    background:
-                        repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.05) 0 2px, transparent 2px 5px),
-                        linear-gradient(180deg, #323238, #222228) !important;
+                    padding: 0.7rem 0.9rem;
+                    border-bottom: 1px solid #454148;
+                    background: linear-gradient(180deg, #27252a, #201f23) !important;
                 }}
                 .mod-factorio-title {{
-                    color: #fff0cb !important;
-                    font-size: 1.24rem !important;
-                    font-weight: 950 !important;
-                    letter-spacing: 0.015em;
+                    color: #f8d79a !important;
+                    font-size: 1.1rem !important;
+                    font-weight: 900 !important;
+                    letter-spacing: 0.01em;
                     line-height: 1.1 !important;
                     text-shadow: 0 1px 0 rgba(0, 0, 0, 0.95);
                 }}
                 .mod-factorio-kicker {{
-                    color: rgba(244, 244, 245, 0.63) !important;
-                    font-size: 0.74rem !important;
-                    font-weight: 800 !important;
-                    letter-spacing: 0.04em;
+                    color: #aaa7ae !important;
+                    font-size: 0.7rem !important;
+                    font-weight: 750 !important;
+                    letter-spacing: 0.03em;
                     text-transform: uppercase;
                 }}
                 .mod-factorio-header-actions {{ margin-left: auto; justify-content: flex-end; }}
-                .mod-factorio-seed {{ min-width: min(22rem, 100%); justify-content: flex-end; }}
+                .mod-factorio-seed {{ min-width: min(14rem, 100%); justify-content: flex-end; }}
                 .mod-factorio-seed .mod-factorio-plain-number {{ margin-top: 0; }}
-                .mod-factorio-seed-label {{ color: #fff0cb !important; font-weight: 900 !important; }}
-                .mod-factorio-notice {{
-                    display: flex;
-                    width: 100%;
-                    box-sizing: border-box;
-                    align-items: center;
-                    justify-content: space-between;
-                    gap: 0.85rem;
-                    padding: 0.78rem 0.9rem;
-                    color: var(--mod-text);
-                    font-size: 0.9rem;
-                    background: #25252a;
-                    border-bottom: 1px solid rgba(82, 82, 91, 0.75);
-                }}
+                .mod-factorio-seed .mod-factorio-plain-value {{ width: 9.5rem; }}
+                .mod-factorio-seed-label {{ color: #e7e3e8 !important; font-weight: 800 !important; }}
                 .mod-factorio-tabs-shell {{
                     width: 100%;
                     box-sizing: border-box;
-                    padding: 0.42rem 0.9rem 0;
+                    padding: 0.35rem 0.9rem 0;
                     overflow-x: auto;
-                    border-bottom: 1px solid rgba(82, 82, 91, 0.75);
-                    background: #16161a;
-                    scrollbar-color: #52525b #16161a;
+                    border-bottom: 1px solid #3f3d43;
+                    background: #1d1c20;
+                    scrollbar-color: #555159 #1d1c20;
                 }}
-                .mod-factorio-tabs {{ gap: 0.22rem; min-width: max-content; min-height: 2.7rem; }}
+                .mod-factorio-tabs {{ gap: 0.18rem; min-width: max-content; min-height: 2.5rem; }}
                 .mod-factorio-tabs .q-tab {{
                     flex: 0 0 auto !important;
-                    min-height: 2.7rem !important;
-                    padding: 0 0.95rem !important;
-                    color: #c4c4cb !important;
-                    background: linear-gradient(180deg, #4a4a50, #35353a) !important;
-                    border: 1px solid #101012;
+                    min-height: 2.5rem !important;
+                    padding: 0 0.82rem !important;
+                    color: #bbb8c0 !important;
+                    background: #29272c !important;
+                    border: 1px solid #3c3940;
                     border-bottom: 0;
-                    font-weight: 950 !important;
+                    font-weight: 850 !important;
                     text-transform: none !important;
                 }}
                 .mod-factorio-tabs .q-tab--active {{
-                    color: #ffebc1 !important;
-                    background: #29292e !important;
-                    box-shadow: inset 0 3px 0 #f59e0b !important;
+                    color: #f8d79a !important;
+                    background: #242226 !important;
+                    box-shadow: inset 0 2px 0 #d97706 !important;
                 }}
                 .mod-factorio-tabs .q-tab__indicator {{ display: none !important; }}
-                .mod-factorio-panels {{ background: #29292e !important; }}
+                .mod-factorio-panels {{ background: #242226 !important; }}
                 .mod-factorio-panel {{
                     width: 100% !important;
                     max-width: none !important;
-                    padding: 0.5rem 0.9rem 0.8rem !important;
-                }}
-                .mod-factorio-panel-intro {{
-                    display: flex;
-                    align-items: baseline;
-                    justify-content: space-between;
-                    gap: 0.8rem;
-                    margin: 0 0 0.28rem;
-                }}
-                .mod-factorio-panel-title {{
-                    color: #fff0cb !important;
-                    font-size: 1.08rem !important;
-                    font-weight: 950 !important;
+                    padding: 0.32rem 0.9rem 0.8rem !important;
                 }}
                 .mod-factorio-group-title {{
-                    color: #fff0cb !important;
+                    color: #f2d49a !important;
                     font-size: 0.92rem !important;
-                    font-weight: 950 !important;
+                    font-weight: 850 !important;
                 }}
                 .mod-factorio-group-hint {{
                     color: #c4c4cb !important;
@@ -6860,9 +6816,9 @@ class ModWebTheme:
                     box-sizing: border-box;
                     margin-top: 0.38rem;
                     padding: 0.56rem;
-                    border: 1px solid #131316;
-                    background: #38383d;
-                    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.055);
+                    border: 1px solid #3a373e;
+                    background: #2d2b30;
+                    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
                 }}
                 .mod-factorio-control-table > .mod-factorio-group-title {{
                     display: block;
@@ -6878,32 +6834,32 @@ class ModWebTheme:
                     grid-template-columns: minmax(12rem, 1.2fr) repeat(2, minmax(10rem, 1fr));
                 }}
                 .mod-factorio-control-header {{
-                    color: #e4e4e7;
-                    background: #303035;
-                    border: 1px solid #18181b;
+                    color: #d8d4dc;
+                    background: #27252a;
+                    border: 1px solid #3a373e;
                     font-size: 0.78rem;
                     font-weight: 900;
                 }}
                 .mod-factorio-control-header > * {{
                     padding: 0.48rem 0.55rem;
-                    border-left: 1px solid #18181b;
+                    border-left: 1px solid #3a373e;
                     text-align: center;
                 }}
                 .mod-factorio-control-header > :first-child {{ border-left: 0; text-align: left; }}
                 .mod-factorio-control-row {{
                     align-items: stretch;
-                    background: #3f3f44;
-                    border: 1px solid #18181b;
+                    background: #312f34;
+                    border: 1px solid #3a373e;
                     border-top: 0;
                 }}
                 .mod-factorio-control-row > * {{
                     min-width: 0;
                     padding: 0.45rem 0.55rem;
-                    border-left: 1px solid #202024;
+                    border-left: 1px solid #403d44;
                 }}
                 .mod-factorio-control-row > :first-child {{ border-left: 0; }}
-                .mod-factorio-control-row:nth-child(even) {{ background: #39393e; }}
-                .mod-factorio-control-enabled .q-checkbox__inner {{ color: #f59e0b !important; }}
+                .mod-factorio-control-row:nth-child(even) {{ background: #2d2b30; }}
+                .mod-factorio-control-enabled .q-checkbox__inner {{ color: #d97706 !important; }}
                 .mod-factorio-control-row:has(.mod-factorio-control-enabled .q-checkbox__inner:not(.q-checkbox__inner--truthy)) .mod-factorio-range-field {{
                     opacity: 0.46;
                     pointer-events: none;
@@ -6965,9 +6921,9 @@ class ModWebTheme:
                 .mod-factorio-slider {{ min-width: 2.75rem; }}
                 .mod-factorio-slider .q-slider__track-container {{ height: 0.55rem !important; }}
                 .mod-factorio-slider .q-slider__track {{ color: #141416 !important; opacity: 1 !important; }}
-                .mod-factorio-slider .q-slider__track--active {{ color: #f59e0b !important; }}
+                .mod-factorio-slider .q-slider__track--active {{ color: #d97706 !important; }}
                 .mod-factorio-slider .q-slider__thumb {{ color: #d4d4d8 !important; }}
-                .mod-factorio-slider .q-slider__focus-ring {{ color: rgba(245, 158, 11, 0.25) !important; }}
+                .mod-factorio-slider .q-slider__focus-ring {{ color: rgba(217, 119, 6, 0.25) !important; }}
                 .mod-factorio-range-hint {{ color: var(--mod-muted) !important; font-size: 0.69rem !important; line-height: 1.15 !important; }}
                 .mod-factorio-option-grid {{
                     width: 100%;
@@ -6991,7 +6947,7 @@ class ModWebTheme:
                     border: 1px solid rgba(24, 24, 27, 0.85);
                 }}
                 .mod-factorio-toggle-row .q-toggle__inner,
-                .mod-factorio-section-toggle .q-checkbox__inner {{ color: #f59e0b !important; }}
+                .mod-factorio-section-toggle .q-checkbox__inner {{ color: #d97706 !important; }}
                 .mod-factorio-advanced-grid {{
                     width: 100%;
                     max-width: none;
@@ -7010,8 +6966,8 @@ class ModWebTheme:
                     align-items: center;
                     gap: 0.7rem;
                     padding: 0.8rem 0.9rem;
-                    background: #1d1d21;
-                    border-top: 2px solid #111114;
+                    background: #1d1c20;
+                    border-top: 1px solid #3a373e;
                 }}
                 .mod-factorio-map-string-input textarea {{
                     min-height: 4.75rem !important;
@@ -7020,13 +6976,33 @@ class ModWebTheme:
                     resize: vertical !important;
                 }}
                 .mod-factorio-save {{
-                    --mod-control-foreground: #112a16;
-                    min-width: min(15rem, 100%);
+                    --mod-control-foreground: #251604;
+                    min-width: 6.5rem;
                     justify-content: center;
-                    color: #112a16 !important;
-                    background: #57bd5d !important;
-                    border-color: #82e589 !important;
-                    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.16), 0 8px 20px rgba(0, 0, 0, 0.28) !important;
+                    color: #251604 !important;
+                    background: #d97706 !important;
+                    border-color: #f8b34c !important;
+                    box-shadow: inset 0 1px 0 rgba(255, 247, 232, 0.34), 0 5px 14px rgba(0, 0, 0, 0.24) !important;
+                    text-transform: none !important;
+                }}
+                .mod-factorio-running-world,
+                .mod-factorio-map-string-action {{
+                    --mod-control-foreground: #ece8ed;
+                    color: #ece8ed !important;
+                    background: #2b2930 !important;
+                    border-color: #4b4750 !important;
+                    box-shadow: none !important;
+                    text-transform: none !important;
+                }}
+                .mod-factorio-running-world {{
+                    min-width: 10.5rem;
+                }}
+                .mod-factorio-running-world .q-icon {{ color: #f2b55b !important; }}
+                .mod-factorio-running-world.q-btn--disabled,
+                .mod-factorio-map-string-action.q-btn--disabled {{
+                    color: #8a858e !important;
+                    background: #242226 !important;
+                    border-color: #37333a !important;
                 }}
                 @media (max-width: 64rem) {{
                     .mod-factorio-control-header,
@@ -7037,9 +7013,7 @@ class ModWebTheme:
                     .mod-factorio-map-string {{ grid-template-columns: 1fr; align-items: stretch; }}
                 }}
                 @media (max-width: 48rem) {{
-                    .mod-factorio-titlebar,
-                    .mod-factorio-notice,
-                    .mod-factorio-panel-intro {{ align-items: flex-start; flex-direction: column; }}
+                    .mod-factorio-titlebar {{ align-items: flex-start; flex-direction: column; }}
                     .mod-factorio-header-actions {{ width: 100%; margin-left: 0; justify-content: flex-start; }}
                     .mod-factorio-seed {{ width: 100%; justify-content: flex-start; }}
                     .mod-factorio-control-header {{ display: none; }}

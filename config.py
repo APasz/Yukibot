@@ -36,6 +36,7 @@ from _authority import (
     response_data,
     write_json_object,
 )
+from deployment_metadata import DeploymentMetadata, load_deployment_metadata, parse_optional_deployment_revision
 from logging_support import HumanLogFormatter, MachineJsonFormatter, SessionRotatingFileHandler
 from restart_targets import RestartTarget
 
@@ -2367,12 +2368,11 @@ def resolve_mod_web_auth_redirect_url(raw: str | None, *, mod_web_public_base_ur
 
 
 def parse_mod_web_build_sha(raw: str | None) -> str | None:
-    if raw is None:
-        return None
-    value = raw.strip().lower()
-    if not re.fullmatch(r"[0-9a-f]{7,40}", value):
-        raise ValueError("MOD_WEB_BUILD_SHA must be a 7-40 character hexadecimal Git commit SHA.")
-    return value
+    """Parse the legacy environment fallback for the deployed revision."""
+    try:
+        return parse_optional_deployment_revision(raw)
+    except ValueError as xcp:
+        raise ValueError("MOD_WEB_BUILD_SHA must be a 7-40 character hexadecimal Git commit SHA.") from xcp
 
 
 def resolve_public_addr(raw: str | None, *, public_ip: str) -> str:
@@ -2513,7 +2513,12 @@ MOD_WEB_AUTH: ModWebAuthConfig = ModWebAuthConfig(
     bypass_enabled=BYPASS_WEB_AUTH,
     session_cache_directory=Path(_env_settings.mod_web_session_cache_dir or ".cache/mod_web_sessions"),
 )
-MOD_WEB_BUILD_SHA: str | None = parse_mod_web_build_sha(_env_settings.mod_web_build_sha)
+MOD_WEB_DEPLOYMENT_METADATA: DeploymentMetadata | None = load_deployment_metadata(project_root=_PROJECT_SOURCE_DIRECTORY)
+MOD_WEB_BUILD_SHA: str | None = (
+    MOD_WEB_DEPLOYMENT_METADATA.revision
+    if MOD_WEB_DEPLOYMENT_METADATA is not None
+    else parse_mod_web_build_sha(_env_settings.mod_web_build_sha)
+)
 DATA_AUTHORITY_ENDPOINT: AuthorityEndpoint | None = resolve_data_authority_endpoint(
     DATA_AUTHORITY_HOST,
     DATA_AUTHORITY_PORT,

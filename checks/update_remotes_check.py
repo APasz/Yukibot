@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 
 import rupdater
+from deployment_metadata import DeploymentMetadata
 from restart_state import RestartKind
 
 
@@ -16,6 +21,11 @@ class UpdateRemotesTests(unittest.TestCase):
     def test_parse_tracked_python_files_rejects_empty_output(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "no tracked Python files"):
             rupdater.parse_tracked_python_files("")
+
+    def test_parse_tracked_project_files_returns_paths(self) -> None:
+        files = rupdater.parse_tracked_project_files("main.py\nresources/logo.svg\n")
+
+        self.assertEqual(files, [Path("main.py"), Path("resources/logo.svg")])
 
     def test_planned_sync_files_appends_required_project_files(self) -> None:
         files = rupdater.planned_sync_files([Path("main.py")])
@@ -52,17 +62,79 @@ class UpdateRemotesTests(unittest.TestCase):
         self.assertEqual(plan.write_files, (Path("main.py"),))
         self.assertEqual(plan.delete_files, (Path("old_name.py"),))
 
-    def test_validate_rejects_placeholder_values(self) -> None:
+    def test_validate_rejects_unsafe_remote_root(self) -> None:
         target = rupdater.RemoteTarget(
             name=rupdater.TargetName.WAKUSEI,
             host="wakusei.apasz.com",
-            user=rupdater.PLACEHOLDER_USER,
-            password=rupdater.PLACEHOLDER_PASSWORD,
-            remote_root=rupdater.PLACEHOLDER_REMOTE_ROOT,
+            user="bot",
+            password=None,
+            remote_root=PurePosixPath("/"),
         )
 
-        with self.assertRaisesRegex(ValueError, "placeholder value"):
+        with self.assertRaisesRegex(ValueError, "non-root absolute path"):
             target.validate()
+
+    def test_remote_targets_from_json_reads_all_target_settings(self) -> None:
+        target_settings: dict[str, dict[str, object]] = {}
+        for target_name in rupdater.TargetName:
+            target_settings[target_name.value] = {
+                "host": f"{target_name.value}.example.com",
+                "user": "bot",
+                "password": None,
+                "remote_root": f"/srv/{target_name.value}",
+                "restart_command": f"systemctl --user restart {target_name.value}",
+            }
+        target_settings["portal"]["password"] = "password"
+
+        targets = rupdater.remote_targets_from_json(raw={"targets": target_settings})
+
+        self.assertEqual(targets[rupdater.TargetName.PORTAL].user, "bot")
+        self.assertEqual(targets[rupdater.TargetName.PORTAL].password, "password")
+        self.assertIsNone(targets[rupdater.TargetName.WAKUSEI].password)
+        self.assertEqual(targets[rupdater.TargetName.KOUSEI].remote_root, PurePosixPath("/srv/kousei"))
+
+    def test_load_remote_targets_reads_json_file(self) -> None:
+        target_settings = {
+            target_name.value: {
+                "host": f"{target_name.value}.example.com",
+                "user": "bot",
+                "password": None,
+                "remote_root": f"/srv/{target_name.value}",
+                "restart_command": f"systemctl --user restart {target_name.value}",
+            }
+            for target_name in rupdater.TargetName
+        }
+        with TemporaryDirectory() as temporary_directory:
+            target_file = Path(temporary_directory) / "targets.json"
+            target_file.write_text(json.dumps({"targets": target_settings}), encoding="utf-8")
+            target_file.chmod(0o600)
+
+            targets = rupdater.load_remote_targets(target_file=target_file)
+
+        self.assertEqual(targets[rupdater.TargetName.PORTAL].host, "portal.example.com")
+
+    @unittest.skipIf(os.name == "nt", "Unix permissions are not available on Windows.")
+    def test_load_remote_targets_rejects_group_or_world_readable_configuration(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            target_file = Path(temporary_directory) / "targets.json"
+            target_file.write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(PermissionError, "chmod 600"):
+                rupdater.load_remote_targets(target_file=target_file)
+
+    def test_remote_targets_from_json_rejects_missing_target(self) -> None:
+        target_settings = {
+            target_name.value: {
+                "host": f"{target_name.value}.example.com",
+                "user": "bot",
+                "password": None,
+                "remote_root": f"/srv/{target_name.value}",
+                "restart_command": f"systemctl --user restart {target_name.value}",
+            }
+            for target_name in (rupdater.TargetName.WAKUSEI, rupdater.TargetName.KOUSEI)
+        }
+        with self.assertRaisesRegex(ValueError, "missing: portal"):
+            rupdater.remote_targets_from_json(raw={"targets": target_settings})
 
     def test_validate_accepts_configured_values(self) -> None:
         target = rupdater.RemoteTarget(
@@ -160,6 +232,48 @@ class UpdateRemotesTests(unittest.TestCase):
             """cd /srv/yukibot && printf '%s\\n' '{"kind": "update_bot"}' > """
             "pending_restart_type_sentinel.json && systemctl --user restart yukibot",
         )
+
+    def test_build_deployment_metadata_write_command_writes_ignored_project_file(self) -> None:
+        metadata = DeploymentMetadata(
+            revision="abcdef123456",
+            deployed_at=datetime(2026, 7, 31, 4, 30, tzinfo=timezone.utc),
+            target_name="portal",
+            version="v2026.07.31.1",
+        )
+
+        command = rupdater.build_deployment_metadata_write_command(metadata)
+
+        self.assertIn("/bin/mkdir -p -- .yukibot", command)
+        self.assertIn(
+            "deployment.json",
+            command,
+        )
+        self.assertIn('"revision": "abcdef123456"', command)
+
+    def test_stale_deployment_files_only_returns_paths_from_the_previous_manifest(self) -> None:
+        deployed_at = datetime(2026, 7, 31, 4, 30, tzinfo=timezone.utc)
+        previous = DeploymentMetadata(
+            revision="abcdef123456",
+            deployed_at=deployed_at,
+            target_name="portal",
+            source_paths=(PurePosixPath("old_module.py"), PurePosixPath("shared.py")),
+        )
+        current = DeploymentMetadata(
+            revision="123456abcdef",
+            deployed_at=deployed_at,
+            target_name="portal",
+            source_paths=(PurePosixPath("new_module.py"), PurePosixPath("shared.py")),
+        )
+
+        stale_files = rupdater.stale_deployment_files(previous=previous, current=current)
+
+        self.assertEqual(stale_files, [Path("old_module.py")])
+
+    def test_ssh_connection_options_support_ssh_agent_authentication(self) -> None:
+        options = rupdater.ssh_connection_options(control_path=Path("/tmp/yukibot.ssh"), use_password=False)
+
+        self.assertNotIn("PreferredAuthentications=password", options)
+        self.assertNotIn("PubkeyAuthentication=no", options)
 
     def test_build_remote_command_path_check_command_fails_loudly_when_missing(self) -> None:
         command = rupdater.build_remote_command_path_check_command(rupdater.REMOTE_TAR_PATH)

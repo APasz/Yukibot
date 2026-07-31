@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import tempfile
 from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -32,14 +32,14 @@ from apps.factorio import (
     FactorioModPortalDownload,
     FactorioVanillaMod,
     download_factorio_mods_from_portal,
-    factorio_mod_portal_credentials_from_server_settings,
     factorio_config_path,
+    factorio_mod_portal_credentials_from_server_settings,
     factorio_mod_settings_path,
     factorio_server_settings_path,
     factorio_vanilla_mods,
     list_factorio_mod_portal_release_options,
-    parse_factorio_mod_portal_url,
     normalise_factorio_map_exchange_string,
+    parse_factorio_mod_portal_url,
     resolve_factorio_mod_portal_candidates,
 )
 
@@ -540,6 +540,7 @@ class NodeFactorioGenerationState:
     map_settings: dict[str, JsonValue] | None
     space_age_enabled: bool
     map_exchange_available: bool
+    running_world_mapgen_available: bool = False
     load_error: str | None = None
 
     @classmethod
@@ -550,6 +551,9 @@ class NodeFactorioGenerationState:
             raise ValueError("Factorio map generation settings are invalid.")
         if raw_map_settings is not None and not isinstance(raw_map_settings, Mapping):
             raise ValueError("Factorio map settings are invalid.")
+        raw_running_world_mapgen_available: object | None = payload.get("running_world_mapgen_available")
+        if raw_running_world_mapgen_available is not None and not isinstance(raw_running_world_mapgen_available, bool):
+            raise ValueError("Factorio running-world map generation availability is invalid.")
         return cls(
             app_name=required_string(payload, "app_name"),
             app_friendly=required_string(payload, "app_friendly"),
@@ -566,6 +570,7 @@ class NodeFactorioGenerationState:
             ),
             space_age_enabled=required_bool(payload, "space_age_enabled"),
             map_exchange_available=required_bool(payload, "map_exchange_available"),
+            running_world_mapgen_available=raw_running_world_mapgen_available is True,
             load_error=optional_string(payload, "load_error"),
         )
 
@@ -578,6 +583,7 @@ class NodeFactorioGenerationState:
             "map_settings": self.map_settings,
             "space_age_enabled": self.space_age_enabled,
             "map_exchange_available": self.map_exchange_available,
+            "running_world_mapgen_available": self.running_world_mapgen_available,
             "load_error": self.load_error,
         }
 
@@ -644,6 +650,7 @@ def build_factorio_generation_state(*, app: Factorio, node_name: str) -> NodeFac
             map_settings=None,
             space_age_enabled=space_age_enabled,
             map_exchange_available=app.check_running(),
+            running_world_mapgen_available=app.check_running() and app.yuki_bridge_enabled,
             load_error=str(xcp) or type(xcp).__name__,
         )
     return NodeFactorioGenerationState(
@@ -654,6 +661,7 @@ def build_factorio_generation_state(*, app: Factorio, node_name: str) -> NodeFac
         map_settings=map_settings,
         space_age_enabled=space_age_enabled,
         map_exchange_available=app.check_running(),
+        running_world_mapgen_available=app.check_running() and app.yuki_bridge_enabled,
     )
 
 
@@ -675,8 +683,10 @@ def write_factorio_generation_settings(
 ) -> None:
     generation_settings = _json_mapping(map_gen_settings, label="Factorio map generation settings")
     world_settings = _json_mapping(map_settings, label="Factorio map settings")
-    generation_content = json.dumps(generation_settings, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
-    world_content = json.dumps(world_settings, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+    generation_content = (
+        json.dumps(generation_settings, indent=4, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+    )
+    world_content = json.dumps(world_settings, indent=4, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
     app.write_config_file("map-settings/map-settings.json", world_content)
     app.write_config_file("map-gen-settings/map-gen-settings.json", generation_content)
 

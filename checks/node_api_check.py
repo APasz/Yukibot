@@ -87,6 +87,7 @@ from apps._updater import (
     Update_Manager,
 )
 from apps.factorio import (
+    Factorio,
     FactorioModPortalCandidate,
     FactorioModPortalDownload,
     FactorioModPortalReleaseOption,
@@ -188,6 +189,7 @@ from node_api import (
 )
 from node_api_relay import NodeRelayTTSRequest, RemoteRelayTTSForwarder
 from node_auth import NodeAccessGrant, NodeApiScope, verify_node_token
+from node_api_chat import NodeChatInjectionRequest
 from restart_state import RestartKind, RestartRecord
 from restart_targets import RestartTarget
 
@@ -1427,6 +1429,7 @@ class NodeApiTests(unittest.TestCase):
         self.assertIn("/api/node/node-font-sources", handlers)
         self.assertIn("/api/node/discord-settings", handlers)
         self.assertIn("/api/node/apps/{app_name}/chat/stream", handlers)
+        self.assertIn("/api/node/apps/{app_name}/factorio/generation/running-world", handlers)
 
     def test_node_api_allows_authorized_cross_origin_uploads(self) -> None:
         app = FastAPI()
@@ -4358,6 +4361,66 @@ class NodeApiTests(unittest.TestCase):
                     "reply_to_event_id": "   ",
                 }
             )
+
+    def test_node_chat_injection_request_accepts_a_chat_event(self) -> None:
+        event = ChatEvent(
+            room_id="minecraft_alpha",
+            source=ChatEndpointId.app("minecraft_alpha"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="hello",
+        )
+
+        request = NodeChatInjectionRequest.model_validate({"event": event.to_mapping()})
+
+        self.assertEqual(request.to_chat_event(), event)
+
+    def test_node_chat_injection_request_rejects_invalid_event(self) -> None:
+        with self.assertRaises(ValueError):
+            NodeChatInjectionRequest.model_validate({"event": {"room_id": "minecraft_alpha"}})
+
+    def test_chat_injection_scope_requires_root(self) -> None:
+        service = NodeApiService()
+
+        self.assertEqual(
+            service._required_web_level(app_name="minecraft_alpha", scopes=(NodeApiScope.CHAT_INJECT,)),
+            Power_Level.root,
+        )
+
+    def test_publish_app_fake_chat_targets_the_selected_app_relay(self) -> None:
+        app = _build_app(Mock())
+        app.am_receiver = _DummyReceiver()
+        app.chat_relay_outbound = True
+        event = ChatEvent(
+            room_id=app.name,
+            source=ChatEndpointId.app(app.name),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="hello",
+        )
+        relay = SimpleNamespace(publish_chat_event=AsyncMock(return_value=event))
+        service = NodeApiService()
+        service.set_chat_relay_service(cast(Any, relay))
+
+        result = asyncio.run(service.publish_app_fake_chat(app=app, event=event))
+
+        self.assertEqual(result, event)
+        relay.publish_chat_event.assert_awaited_once_with(event=event)
+
+    def test_publish_app_fake_chat_rejects_another_apps_room(self) -> None:
+        app = _build_app(Mock())
+        app.am_receiver = _DummyReceiver()
+        app.chat_relay_outbound = True
+        event = ChatEvent(
+            room_id="other_app",
+            source=ChatEndpointId.app("other_app"),
+            author=ChatAuthor(ChatAuthorKind.GAME_PLAYER, "Yoko"),
+            content="hello",
+        )
+        service = NodeApiService()
+
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(service.publish_app_fake_chat(app=app, event=event))
+
+        self.assertEqual(raised.exception.status_code, 400)
 
     def test_serve_chat_stream_ignores_disconnect_while_closing_websocket(self) -> None:
         class _DisconnectingWebSocket:
@@ -7675,6 +7738,26 @@ class NodeApiTests(unittest.TestCase):
         self.assertIsInstance(state, NodeFactorioModSettings)
         self.assertFalse(state.file_exists)
         self.assertIsNone(state.size_bytes)
+
+    def test_sync_factorio_generation_from_running_world_uses_bridge_map_exchange_string(self) -> None:
+        app = cast(Any, object.__new__(Factorio))
+        app.name = "factorio_lab"
+        app.friendly = "Factorio Lab"
+        app.running_map_exchange_string = AsyncMock(return_value=">>>eA==<<<")
+        expected_state = object()
+        service = NodeApiService()
+
+        with (
+            patch("node_api._import_factorio_map_exchange_string", new=AsyncMock()) as import_map_exchange_string,
+            patch.object(service, "_invalidate_state_caches") as invalidate_state_caches,
+            patch.object(service, "factorio_generation_state", return_value=expected_state),
+        ):
+            result = asyncio.run(service.sync_factorio_generation_from_running_world(app=app))
+
+        self.assertIs(result, expected_state)
+        app.running_map_exchange_string.assert_awaited_once_with()
+        import_map_exchange_string.assert_awaited_once_with(app=app, map_exchange_string=">>>eA==<<<")
+        invalidate_state_caches.assert_called_once_with(app_name="factorio_lab")
 
     def test_factorio_mod_settings_state_reports_existing_file(self) -> None:
         with TemporaryDirectory() as temp_dir:

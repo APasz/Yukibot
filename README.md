@@ -58,7 +58,9 @@ Sister bots also push a typed bot-metadata snapshot to Yuki through the same aut
 - `MOD_WEB_DISCORD_CLIENT_ID` and `MOD_WEB_DISCORD_CLIENT_SECRET` enable Discord login for the mod web UI.
 - The Discord OAuth redirect defaults to `{MOD_WEB_PUBLIC_BASE_URL}/auth/discord/callback`; override it with `MOD_WEB_AUTH_REDIRECT_URL` only when Discord is configured with a different public callback.
 - `MOD_WEB_SESSION_CACHE_DIR` defaults to `.cache/mod_web_sessions`; Portal persists browser sessions and pending OAuth state there so Portal restarts do not force users to sign in again.
-- `MOD_WEB_BUILD_SHA` optionally exposes the deployed Git commit on the login page and links it to GitHub.
+- `rupdater.py --release --restart` commits non-ignored local changes after prompting for a required release message, deploys the resulting local commit, and writes its SHA, optional local Git tag, target, and deployment time to `.yukibot/deployment.json` on each remote. After smoke-testing, push that exact commit and any tag to GitHub.
+- `rupdater.py` reads remote targets from ignored `rupdater.targets.json`; copy `rupdater.targets.example.json` to create it. Use `--targets-file path/to/targets.json` for another profile. Set `password` to `null` to authenticate through your SSH agent or configured SSH key.
+- The About page shows deployment metadata written by release deployments. `MOD_WEB_BUILD_SHA` remains an optional fallback when that metadata has not yet been created.
 - Normal sign-ins use a browser-session cookie with a 16-hour server expiry. “Remember me” uses a persistent cookie with a 30-day absolute expiry.
 - Mod web browser sessions authenticate as Discord user IDs and authorise through `users.json` / `Access_Control`; `visitor` access can use chat-only web relay routes, while `user` and above can use the broader mod web tools.
 - `BYPASS_WEB_AUTH=true` skips Discord web auth only when `INDEV` is also set. It is intended for local development and is ignored outside `INDEV`.

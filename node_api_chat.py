@@ -14,7 +14,7 @@ from apps._node_api import (
     required_string as _required_string,
 )
 from chat_hub import ChatEvent
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from pydantic.config import ConfigDict
 
 class _RuntimeSummary(Protocol):
@@ -85,6 +85,25 @@ class NodeChatRoomSnapshot:
             "events": [event.to_mapping() for event in self.events],
             "revision": self.revision,
         }
+
+
+class NodeChatInjectionRequest(BaseModel):
+    """A root-only synthetic chat event requested by the web dashboard."""
+
+    event: dict[str, object]
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _validate_event(self) -> "NodeChatInjectionRequest":
+        try:
+            ChatEvent.from_mapping(self.event)
+        except ValueError as xcp:
+            raise ValueError("event is invalid.") from xcp
+        return self
+
+    def to_chat_event(self) -> ChatEvent:
+        return ChatEvent.from_mapping(self.event)
 
 
 class NodeChatStreamEventKind(StrEnum):

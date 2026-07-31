@@ -26,10 +26,7 @@ class ModWebAppPageSevenDaysMixin(ModWebServiceSupport):
             return ()
         if summary.load_error is not None:
             return (_ModWebBadgeSpec(text="Load error", tone="warn"),)
-        return (
-            _ModWebBadgeSpec(text=f"{len(summary.options)} options", tone="black" if summary.options else "grey"),
-            _ModWebBadgeSpec(text="3.0 b259+", tone="grey"),
-        )
+        return ()
 
     def _render_sevendays_sandbox_options_section(
         self,

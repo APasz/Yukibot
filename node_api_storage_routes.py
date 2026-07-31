@@ -183,6 +183,44 @@ def register_storage_routes(
         )
         return (await service.export_factorio_map_exchange_string(app=app)).to_mapping()
 
+    @nicegui_app.post(f"{api_prefix}/apps/{{app_name}}/factorio/generation/running-world")
+    async def _sync_factorio_generation_from_running_world(
+        app_name: str,
+        request: Request,
+        access_token: str | None = None,
+    ) -> dict[str, object]:
+        traffic_log.info(
+            "Node API Factorio running-world generation sync request: node=%s app=%s",
+            service.node_name,
+            app_name,
+        )
+        grant = service._require_access(request, access_token, app_name=app_name, scopes=(NodeApiScope.CONFIGS_WRITE,))
+        app = service._resolve_app(app_name)
+        await service._require_actor_level_for_request(
+            request=request,
+            access_token=access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            required_level=FACTORIO_GENERATION_ACCESS_LEVEL,
+            verified_grant=grant,
+        )
+        actor_user_id = service._request_actor_user_id(
+            request=request,
+            access_token=access_token,
+            app_name=app_name,
+            scopes=(NodeApiScope.CONFIGS_WRITE,),
+            verified_grant=grant,
+        )
+        result = await service.sync_factorio_generation_from_running_world(app=app)
+        audit_log(
+            "factorio.running_world_generation_synced",
+            actor_user_id=actor_user_id,
+            node_name=service.node_name,
+            app_name=app.name,
+            required_level=FACTORIO_GENERATION_ACCESS_LEVEL.name,
+        )
+        return result.to_mapping()
+
     @nicegui_app.get(f"{api_prefix}/apps/{{app_name}}/factorio/mod-settings/download")
     async def _download_factorio_mod_settings(
         app_name: str,
